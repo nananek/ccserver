@@ -23,13 +23,15 @@ export async function terminalWs(fastify, opts) {
             ptyProcess.kill();
           }
 
+          const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
+
           ptyProcess = pty.spawn('/usr/bin/claude', [], {
             name: 'xterm-256color',
             cols,
             rows,
             cwd,
             env: {
-              ...process.env,
+              ...cleanEnv,
               TERM: 'xterm-256color',
               COLORTERM: 'truecolor',
               FORCE_COLOR: '1',
