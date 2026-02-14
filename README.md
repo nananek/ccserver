@@ -206,7 +206,7 @@ systemctl --user status ccserver
 
 ```bash
 # ポート 3001 を HTTPS で公開
-tailscale serve --bg https+insecure://localhost:3001
+sudo tailscale serve --bg 3001
 ```
 
 これにより `https://<hostname>.<tailnet>.ts.net/` でアクセス可能になります。
