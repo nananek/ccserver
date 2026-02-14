@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -133,6 +133,28 @@ export default function TerminalView({ cwd, onBack }) {
     };
   }, [cwd]);
 
+  const [inputText, setInputText] = useState('');
+  const composingRef = useRef(false);
+
+  const handleInputSend = useCallback(() => {
+    if (composingRef.current) return;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN && inputText) {
+      ws.send(JSON.stringify({ type: 'input', data: inputText + '\n' }));
+      setInputText('');
+    }
+  }, [inputText]);
+
+  const handleInputKeyDown = useCallback(
+    (e) => {
+      if (e.key === 'Enter' && !composingRef.current) {
+        e.preventDefault();
+        handleInputSend();
+      }
+    },
+    [handleInputSend]
+  );
+
   return (
     <div className="terminal-view">
       <div className="terminal-header">
@@ -142,6 +164,29 @@ export default function TerminalView({ cwd, onBack }) {
         <span className="terminal-title">Claude Code &mdash; {cwd}</span>
       </div>
       <div className="terminal-container" ref={terminalRef} />
+      <div className="terminal-input-bar">
+        <input
+          type="text"
+          className="terminal-input"
+          value={inputText}
+          onChange={(e) => setInputText(e.target.value)}
+          onKeyDown={handleInputKeyDown}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+          }}
+          placeholder="Input text here..."
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+        />
+        <button className="btn btn-primary terminal-send-btn" onClick={handleInputSend}>
+          Send
+        </button>
+      </div>
     </div>
   );
 }

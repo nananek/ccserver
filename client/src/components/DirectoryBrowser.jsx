@@ -9,6 +9,8 @@ export default function DirectoryBrowser({ onOpen }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [showHidden, setShowHidden] = useState(false);
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
 
   const fetchDirs = useCallback(async (path) => {
     setLoading(true);
@@ -44,6 +46,27 @@ export default function DirectoryBrowser({ onOpen }) {
     if (parentPath) setCurrentPath(parentPath);
   }, [parentPath]);
 
+  const handleCreateFolder = useCallback(async () => {
+    if (!newFolderName.trim()) return;
+    try {
+      const res = await fetch('/api/dirs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent: currentPath, name: newFolderName.trim() }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setCreatingFolder(false);
+      setNewFolderName('');
+      setCurrentPath(data.path);
+    } catch (err) {
+      setError(err.message);
+    }
+  }, [currentPath, newFolderName]);
+
   const breadcrumbs = currentPath.split('/').filter(Boolean);
 
   return (
@@ -77,6 +100,15 @@ export default function DirectoryBrowser({ onOpen }) {
         <button className="btn btn-secondary" onClick={() => navigateTo(HOME_DIR)}>
           Home
         </button>
+        <button
+          className="btn btn-secondary"
+          onClick={() => {
+            setCreatingFolder(true);
+            setNewFolderName('');
+          }}
+        >
+          New Folder
+        </button>
         <label className="toggle-hidden">
           <input
             type="checkbox"
@@ -89,6 +121,29 @@ export default function DirectoryBrowser({ onOpen }) {
           Open with Claude Code
         </button>
       </div>
+
+      {creatingFolder && (
+        <div className="new-folder-bar">
+          <input
+            type="text"
+            className="new-folder-input"
+            placeholder="Folder name"
+            value={newFolderName}
+            onChange={(e) => setNewFolderName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleCreateFolder();
+              if (e.key === 'Escape') setCreatingFolder(false);
+            }}
+            autoFocus
+          />
+          <button className="btn btn-primary" onClick={handleCreateFolder}>
+            Create
+          </button>
+          <button className="btn btn-secondary" onClick={() => setCreatingFolder(false)}>
+            Cancel
+          </button>
+        </div>
+      )}
 
       <div className="dir-list">
         {loading && <div className="loading">Loading...</div>}
