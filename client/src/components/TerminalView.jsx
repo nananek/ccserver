@@ -5,18 +5,19 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 
 const SPECIAL_KEYS = [
-  { label: 'Tab', data: '\t' },
   { label: 'Esc', data: '\x1b' },
+  { label: 'Enter', data: '\r' },
+  { label: 'Tab', data: '\t' },
+  { label: 'C-c', data: '\x03' },
   { label: 'Ctrl', modifier: 'ctrl' },
-  { label: 'Shift', modifier: 'shift' },
-  { label: 'Alt', modifier: 'alt' },
-  { label: '\u2190', data: '\x1b[D' },
   { label: '\u2191', data: '\x1b[A' },
   { label: '\u2193', data: '\x1b[B' },
-  { label: '\u2192', data: '\x1b[C' },
-  { label: 'C-c', data: '\x03' },
   { label: 'C-d', data: '\x04' },
+  { label: '\u2190', data: '\x1b[D' },
+  { label: '\u2192', data: '\x1b[C' },
   { label: 'C-z', data: '\x1a' },
+  { label: 'Shift', modifier: 'shift' },
+  { label: 'Alt', modifier: 'alt' },
 ];
 
 const MAX_RECONNECT_ATTEMPTS = 5;
