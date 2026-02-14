@@ -134,6 +134,11 @@ export async function terminalWs(fastify, opts) {
           break;
         }
 
+        case 'ping': {
+          socket.send(JSON.stringify({ type: 'pong' }));
+          break;
+        }
+
         case 'resize': {
           if (currentSessionId && msg.cols && msg.rows) {
             const session = getSession(currentSessionId);

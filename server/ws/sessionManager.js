@@ -1,7 +1,13 @@
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
+import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const SESSION_TIMEOUT_MS = 5 * 60 * 1000;
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SAVED_SESSIONS_PATH = join(__dirname, '..', '..', '.saved-sessions.json');
+
+const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours for active sessions
 const SESSION_EXITED_TIMEOUT_MS = 30 * 1000;
 const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 const IDLE_TIMEOUT_MS = 3000;
@@ -114,11 +120,10 @@ export function getSession(id) {
 export function listSessions() {
   const result = [];
   for (const [id, session] of sessions) {
+    if (session.exited) continue;
     result.push({
       id,
       cwd: session.cwd,
-      exited: session.exited,
-      exitCode: session.exitCode,
       connected: session.socket !== null,
     });
   }
@@ -191,6 +196,87 @@ export function destroySession(id) {
 export function destroyAllSessions() {
   for (const [id] of sessions) {
     destroySession(id);
+  }
+}
+
+export function gracefulShutdown() {
+  return new Promise((resolve) => {
+    const pendingSessions = [];
+
+    for (const [, session] of sessions) {
+      if (!session.exited) {
+        pendingSessions.push(session);
+        try {
+          session.ptyProcess.kill();
+        } catch {
+          // already dead
+        }
+      }
+    }
+
+    const finish = () => {
+      const savedSessions = [];
+      for (const [, session] of sessions) {
+        const claudeId = session.claudeSessionId
+          || extractClaudeSessionId(session.outputBuffer);
+        if (claudeId) {
+          savedSessions.push({
+            cwd: session.cwd,
+            claudeSessionId: claudeId,
+          });
+        }
+      }
+
+      if (savedSessions.length > 0) {
+        try {
+          writeFileSync(SAVED_SESSIONS_PATH, JSON.stringify(savedSessions));
+        } catch {
+          // best effort
+        }
+      }
+
+      destroyAllSessions();
+      resolve();
+    };
+
+    if (pendingSessions.length === 0) {
+      finish();
+      return;
+    }
+
+    // Wait up to 3 seconds for processes to exit
+    let done = false;
+    const interval = setInterval(() => {
+      if (done) return;
+      if (pendingSessions.every((s) => s.exited)) {
+        done = true;
+        clearInterval(interval);
+        finish();
+      }
+    }, 100);
+
+    setTimeout(() => {
+      if (!done) {
+        done = true;
+        clearInterval(interval);
+        finish();
+      }
+    }, 3000);
+  });
+}
+
+let savedSessionsCache = null;
+
+export function loadSavedSessions() {
+  if (savedSessionsCache !== null) return savedSessionsCache;
+  try {
+    const data = readFileSync(SAVED_SESSIONS_PATH, 'utf-8');
+    unlinkSync(SAVED_SESSIONS_PATH);
+    savedSessionsCache = JSON.parse(data);
+    return savedSessionsCache;
+  } catch {
+    savedSessionsCache = [];
+    return [];
   }
 }
 

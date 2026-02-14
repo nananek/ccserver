@@ -5,7 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 
 const SPECIAL_KEYS = [
-  { label: 'Esc', data: '\x1b' },
+  { label: 'BS', data: '\x7f' },
   { label: 'Enter', data: '\r' },
   { label: 'Tab', data: '\t' },
   { label: 'C-c', data: '\x03' },
@@ -18,9 +18,11 @@ const SPECIAL_KEYS = [
   { label: 'C-z', data: '\x1a' },
   { label: 'Shift', modifier: 'shift' },
   { label: 'Alt', modifier: 'alt' },
+  { label: 'Esc', data: '\x1b' },
 ];
 
-const MAX_RECONNECT_ATTEMPTS = 5;
+const MAX_RECONNECT_ATTEMPTS = 20;
+const PING_INTERVAL_MS = 30000;
 
 export default function TerminalView({ cwd, onBack, claudeSessionId, notify, notifyEnabled, notifyPermission, onToggleNotify }) {
   const terminalRef = useRef(null);
@@ -222,6 +224,28 @@ export default function TerminalView({ cwd, onBack, claudeSessionId, notify, not
 
     connect();
 
+    // Reconnect when page becomes visible (iPhone background recovery)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        const ws = wsRef.current;
+        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          if (intentionalCloseRef.current) return;
+          reconnectAttemptsRef.current = 0;
+          clearTimeout(reconnectTimerRef.current);
+          connect();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // Periodic ping to keep WebSocket alive
+    const pingInterval = setInterval(() => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, PING_INTERVAL_MS);
+
     const handleResize = () => {
       fitAddon.fit();
       const dims = fitAddon.proposeDimensions();
@@ -247,6 +271,8 @@ export default function TerminalView({ cwd, onBack, claudeSessionId, notify, not
     return () => {
       intentionalCloseRef.current = true;
       clearTimeout(reconnectTimerRef.current);
+      clearInterval(pingInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
       inputDisposable.dispose();

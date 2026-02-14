@@ -12,6 +12,7 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [sessions, setSessions] = useState([]);
+  const [savedSessions, setSavedSessions] = useState([]);
 
   const fetchDirs = useCallback(async (path) => {
     setLoading(true);
@@ -74,6 +75,9 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions);
+        if (data.savedSessions) {
+          setSavedSessions(data.savedSessions);
+        }
       }
     } catch {
       // ignore — sessions panel is supplementary
@@ -88,6 +92,12 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
     const storageKey = `ccserver-session:${session.cwd}`;
     sessionStorage.setItem(storageKey, session.id);
     onOpen(session.cwd, true);
+  }, [onOpen]);
+
+  const handleSavedSessionClick = useCallback((saved) => {
+    const claudeResumeKey = `ccserver-claude-resume:${saved.cwd}`;
+    localStorage.setItem(claudeResumeKey, saved.claudeSessionId);
+    onOpen(saved.cwd);
   }, [onOpen]);
 
   const breadcrumbs = currentPath.split('/').filter(Boolean);
@@ -168,7 +178,7 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
         </div>
       )}
 
-      {sessions.length > 0 && (
+      {(sessions.length > 0 || savedSessions.length > 0) && (
         <div className="session-list">
           <div className="session-list-header">Active Sessions</div>
           {sessions.map((session) => (
@@ -183,16 +193,28 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
               }}
             >
               <span className="session-icon">
-                {session.exited ? '\u23F9' : session.connected ? '\u25B6' : '\u23F8'}
+                {session.connected ? '\u25B6' : '\u23F8'}
               </span>
               <span className="session-cwd">{session.cwd}</span>
-              <span className={`session-status ${session.exited ? 'exited' : 'active'}`}>
-                {session.exited
-                  ? `exited (${session.exitCode})`
-                  : session.connected
-                    ? 'connected'
-                    : 'idle'}
+              <span className="session-status active">
+                {session.connected ? 'connected' : 'idle'}
               </span>
+            </div>
+          ))}
+          {savedSessions.map((saved, i) => (
+            <div
+              key={`saved-${i}`}
+              className="session-item"
+              onClick={() => handleSavedSessionClick(saved)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSavedSessionClick(saved);
+              }}
+            >
+              <span className="session-icon">{'\u21BB'}</span>
+              <span className="session-cwd">{saved.cwd}</span>
+              <span className="session-status resumable">resumable</span>
             </div>
           ))}
         </div>

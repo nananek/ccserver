@@ -226,6 +226,11 @@ body {
   background: rgba(108, 112, 134, 0.1);
 }
 
+.session-status.resumable {
+  color: var(--accent);
+  background: rgba(137, 180, 250, 0.1);
+}
+
 /* Directory list */
 .dir-list {
   flex: 1;
