@@ -300,6 +300,52 @@ body {
   color: var(--text-muted);
 }
 
+/* Special Keys Toolbar */
+.terminal-special-keys {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.terminal-special-keys::-webkit-scrollbar {
+  display: none;
+}
+
+.special-key-btn {
+  min-width: 44px;
+  height: 36px;
+  padding: 0 10px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.special-key-btn:active {
+  background: var(--border);
+}
+
+.special-key-btn.active {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
 /* Mobile-friendly adjustments */
 @media (max-width: 600px) {
   .directory-browser {

@@ -4,6 +4,21 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 
+const SPECIAL_KEYS = [
+  { label: 'Tab', data: '\t' },
+  { label: 'Esc', data: '\x1b' },
+  { label: 'Ctrl', modifier: 'ctrl' },
+  { label: 'Shift', modifier: 'shift' },
+  { label: 'Alt', modifier: 'alt' },
+  { label: '\u2190', data: '\x1b[D' },
+  { label: '\u2191', data: '\x1b[A' },
+  { label: '\u2193', data: '\x1b[B' },
+  { label: '\u2192', data: '\x1b[C' },
+  { label: 'C-c', data: '\x03' },
+  { label: 'C-d', data: '\x04' },
+  { label: 'C-z', data: '\x1a' },
+];
+
 export default function TerminalView({ cwd, onBack }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
@@ -135,15 +150,22 @@ export default function TerminalView({ cwd, onBack }) {
 
   const [inputText, setInputText] = useState('');
   const composingRef = useRef(false);
+  const [modifiers, setModifiers] = useState({ ctrl: false, shift: false, alt: false });
+
+  const sendInput = useCallback((data) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', data }));
+    }
+  }, []);
 
   const handleInputSend = useCallback(() => {
     if (composingRef.current) return;
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN && inputText) {
-      ws.send(JSON.stringify({ type: 'input', data: inputText + '\n' }));
-      setInputText('');
-    }
-  }, [inputText]);
+    if (!inputText) return;
+    sendInput(inputText + '\n');
+    setInputText('');
+    setModifiers({ ctrl: false, shift: false, alt: false });
+  }, [inputText, sendInput]);
 
   const handleInputKeyDown = useCallback(
     (e) => {
@@ -155,6 +177,14 @@ export default function TerminalView({ cwd, onBack }) {
     [handleInputSend]
   );
 
+  const handleSpecialKey = useCallback((key) => {
+    if (key.modifier) {
+      setModifiers((prev) => ({ ...prev, [key.modifier]: !prev[key.modifier] }));
+      return;
+    }
+    sendInput(key.data);
+  }, [sendInput]);
+
   return (
     <div className="terminal-view">
       <div className="terminal-header">
@@ -164,6 +194,20 @@ export default function TerminalView({ cwd, onBack }) {
         <span className="terminal-title">Claude Code &mdash; {cwd}</span>
       </div>
       <div className="terminal-container" ref={terminalRef} />
+      <div className="terminal-special-keys">
+        {SPECIAL_KEYS.map((key) => (
+          <button
+            key={key.label}
+            className={
+              'special-key-btn' +
+              (key.modifier && modifiers[key.modifier] ? ' active' : '')
+            }
+            onClick={() => handleSpecialKey(key)}
+          >
+            {key.label}
+          </button>
+        ))}
+      </div>
       <div className="terminal-input-bar">
         <input
           type="text"
