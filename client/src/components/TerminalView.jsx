@@ -22,7 +22,7 @@ const SPECIAL_KEYS = [
 
 const MAX_RECONNECT_ATTEMPTS = 5;
 
-export default function TerminalView({ cwd, onBack }) {
+export default function TerminalView({ cwd, onBack, claudeSessionId }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -31,6 +31,7 @@ export default function TerminalView({ cwd, onBack }) {
   const reconnectTimerRef = useRef(null);
   const reconnectAttemptsRef = useRef(0);
   const intentionalCloseRef = useRef(false);
+  const claudeResumeIdRef = useRef(claudeSessionId);
 
   useEffect(() => {
     const term = new Terminal({
@@ -105,14 +106,17 @@ export default function TerminalView({ cwd, onBack }) {
             })
           );
         } else {
-          ws.send(
-            JSON.stringify({
-              type: 'init',
-              cwd,
-              cols: dims?.cols || 80,
-              rows: dims?.rows || 24,
-            })
-          );
+          const initMsg = {
+            type: 'init',
+            cwd,
+            cols: dims?.cols || 80,
+            rows: dims?.rows || 24,
+          };
+          if (claudeResumeIdRef.current) {
+            initMsg.claudeSessionId = claudeResumeIdRef.current;
+            claudeResumeIdRef.current = null;
+          }
+          ws.send(JSON.stringify(initMsg));
         }
       };
 
@@ -139,27 +143,40 @@ export default function TerminalView({ cwd, onBack }) {
           case 'replay':
             term.write(msg.data);
             break;
-          case 'exit':
+          case 'exit': {
             term.writeln('');
             term.writeln(`\r\n[Process exited with code ${msg.exitCode}]`);
             sessionStorage.removeItem(storageKey);
             sessionIdRef.current = null;
+            const claudeResumeKey = `ccserver-claude-resume:${cwd}`;
+            if (msg.claudeSessionId) {
+              localStorage.setItem(claudeResumeKey, msg.claudeSessionId);
+            } else {
+              localStorage.removeItem(claudeResumeKey);
+            }
             break;
-          case 'error':
+          }
+          case 'error': {
             if (msg.code === 'SESSION_NOT_FOUND') {
               sessionIdRef.current = null;
               sessionStorage.removeItem(storageKey);
               const dims = fitAddon.proposeDimensions();
-              ws.send(
-                JSON.stringify({
-                  type: 'init',
-                  cwd,
-                  cols: dims?.cols || 80,
-                  rows: dims?.rows || 24,
-                })
-              );
+              const initMsg = {
+                type: 'init',
+                cwd,
+                cols: dims?.cols || 80,
+                rows: dims?.rows || 24,
+              };
+              const savedClaudeId = claudeResumeIdRef.current
+                || localStorage.getItem(`ccserver-claude-resume:${cwd}`);
+              if (savedClaudeId) {
+                initMsg.claudeSessionId = savedClaudeId;
+                claudeResumeIdRef.current = null;
+              }
+              ws.send(JSON.stringify(initMsg));
             }
             break;
+          }
           case 'detached':
             term.writeln('\r\n[Session taken over by another client]');
             intentionalCloseRef.current = true;

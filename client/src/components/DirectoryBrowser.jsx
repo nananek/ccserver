@@ -87,7 +87,7 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
   const handleSessionClick = useCallback((session) => {
     const storageKey = `ccserver-session:${session.cwd}`;
     sessionStorage.setItem(storageKey, session.id);
-    onOpen(session.cwd);
+    onOpen(session.cwd, true);
   }, [onOpen]);
 
   const breadcrumbs = currentPath.split('/').filter(Boolean);

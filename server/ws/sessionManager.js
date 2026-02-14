@@ -7,12 +7,29 @@ const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 
 const sessions = new Map();
 
-export function createSession({ cwd, cols, rows }) {
+function stripAnsi(str) {
+  // eslint-disable-next-line no-control-regex
+  return str.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+}
+
+function extractClaudeSessionId(outputBuffer) {
+  const recentOutput = outputBuffer.slice(-50).join('');
+  const clean = stripAnsi(recentOutput);
+
+  const matches = [...clean.matchAll(/claude\s+(?:--resume|-r)\s+([a-zA-Z0-9_-]+)/gi)];
+  if (matches.length > 0) return matches[matches.length - 1][1];
+
+  return null;
+}
+
+export function createSession({ cwd, cols, rows, claudeSessionId }) {
   const id = randomUUID();
 
   const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
 
-  const ptyProcess = pty.spawn('/usr/bin/claude', [], {
+  const args = claudeSessionId ? ['--resume', claudeSessionId] : [];
+
+  const ptyProcess = pty.spawn('/usr/bin/claude', args, {
     name: 'xterm-256color',
     cols,
     rows,
@@ -38,6 +55,7 @@ export function createSession({ cwd, cols, rows }) {
     exitCode: null,
     exitSignal: null,
     timeoutTimer: null,
+    claudeSessionId: null,
   };
 
   ptyProcess.onData((data) => {
@@ -52,9 +70,15 @@ export function createSession({ cwd, cols, rows }) {
     session.exited = true;
     session.exitCode = exitCode;
     session.exitSignal = signal;
+    session.claudeSessionId = extractClaudeSessionId(session.outputBuffer);
 
     if (session.socket && session.socket.readyState === 1) {
-      session.socket.send(JSON.stringify({ type: 'exit', exitCode, signal }));
+      session.socket.send(JSON.stringify({
+        type: 'exit',
+        exitCode,
+        signal,
+        claudeSessionId: session.claudeSessionId,
+      }));
     }
 
     if (!session.socket) {

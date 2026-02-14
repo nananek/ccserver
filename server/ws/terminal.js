@@ -33,6 +33,7 @@ export async function terminalWs(fastify, opts) {
             cwd: msg.cwd || '/home/kts_sz',
             cols: msg.cols || 80,
             rows: msg.rows || 24,
+            claudeSessionId: msg.claudeSessionId || null,
           });
 
           currentSessionId = sessionId;
@@ -105,6 +106,7 @@ export async function terminalWs(fastify, opts) {
                 type: 'exit',
                 exitCode: session.exitCode,
                 signal: session.exitSignal,
+                claudeSessionId: session.claudeSessionId,
               })
             );
           }
