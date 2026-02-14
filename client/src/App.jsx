@@ -4,9 +4,11 @@ import TerminalView from './components/TerminalView.jsx';
 
 export default function App() {
   const [selectedDir, setSelectedDir] = useState(null);
+  const [lastDir, setLastDir] = useState(null);
 
   const handleOpen = useCallback((dirPath) => {
     setSelectedDir(dirPath);
+    setLastDir(dirPath);
   }, []);
 
   const handleBack = useCallback(() => {
@@ -16,7 +18,7 @@ export default function App() {
   return (
     <div className="app">
       {selectedDir === null ? (
-        <DirectoryBrowser onOpen={handleOpen} />
+        <DirectoryBrowser onOpen={handleOpen} initialPath={lastDir} />
       ) : (
         <TerminalView cwd={selectedDir} onBack={handleBack} />
       )}

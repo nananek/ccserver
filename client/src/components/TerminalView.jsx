@@ -241,7 +241,7 @@ export default function TerminalView({ cwd, onBack }) {
   const handleInputSend = useCallback(() => {
     if (composingRef.current) return;
     if (!inputText) return;
-    sendInput(inputText + '\n');
+    sendInput(inputText + '\r');
     setInputText('');
     setModifiers({ ctrl: false, shift: false, alt: false });
   }, [inputText, sendInput]);

@@ -70,6 +70,20 @@ export function getSession(id) {
   return sessions.get(id);
 }
 
+export function listSessions() {
+  const result = [];
+  for (const [id, session] of sessions) {
+    result.push({
+      id,
+      cwd: session.cwd,
+      exited: session.exited,
+      exitCode: session.exitCode,
+      connected: session.socket !== null,
+    });
+  }
+  return result;
+}
+
 export function attachSocket(id, socket) {
   const session = sessions.get(id);
   if (!session) return false;

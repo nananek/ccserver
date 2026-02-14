@@ -4,6 +4,7 @@ import fastifyStatic from '@fastify/static';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { dirsRoute } from './routes/dirs.js';
+import { sessionsRoute } from './routes/sessions.js';
 import { terminalWs } from './ws/terminal.js';
 import { destroyAllSessions } from './ws/sessionManager.js';
 
@@ -12,6 +13,7 @@ const fastify = Fastify({ logger: true });
 
 await fastify.register(websocket);
 await fastify.register(dirsRoute, { prefix: '/api' });
+await fastify.register(sessionsRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
 
 if (process.env.NODE_ENV === 'production') {

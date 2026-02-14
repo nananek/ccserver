@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 
 const HOME_DIR = '/home/kts_sz';
 
-export default function DirectoryBrowser({ onOpen }) {
-  const [currentPath, setCurrentPath] = useState(HOME_DIR);
+export default function DirectoryBrowser({ onOpen, initialPath }) {
+  const [currentPath, setCurrentPath] = useState(initialPath || HOME_DIR);
   const [dirs, setDirs] = useState([]);
   const [parentPath, setParentPath] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -11,6 +11,7 @@ export default function DirectoryBrowser({ onOpen }) {
   const [showHidden, setShowHidden] = useState(false);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const [sessions, setSessions] = useState([]);
 
   const fetchDirs = useCallback(async (path) => {
     setLoading(true);
@@ -66,6 +67,28 @@ export default function DirectoryBrowser({ onOpen }) {
       setError(err.message);
     }
   }, [currentPath, newFolderName]);
+
+  const fetchSessions = useCallback(async () => {
+    try {
+      const res = await fetch('/api/sessions');
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data.sessions);
+      }
+    } catch {
+      // ignore — sessions panel is supplementary
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSessions();
+  }, [fetchSessions]);
+
+  const handleSessionClick = useCallback((session) => {
+    const storageKey = `ccserver-session:${session.cwd}`;
+    sessionStorage.setItem(storageKey, session.id);
+    onOpen(session.cwd);
+  }, [onOpen]);
 
   const breadcrumbs = currentPath.split('/').filter(Boolean);
 
@@ -142,6 +165,36 @@ export default function DirectoryBrowser({ onOpen }) {
           <button className="btn btn-secondary" onClick={() => setCreatingFolder(false)}>
             Cancel
           </button>
+        </div>
+      )}
+
+      {sessions.length > 0 && (
+        <div className="session-list">
+          <div className="session-list-header">Active Sessions</div>
+          {sessions.map((session) => (
+            <div
+              key={session.id}
+              className="session-item"
+              onClick={() => handleSessionClick(session)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSessionClick(session);
+              }}
+            >
+              <span className="session-icon">
+                {session.exited ? '\u23F9' : session.connected ? '\u25B6' : '\u23F8'}
+              </span>
+              <span className="session-cwd">{session.cwd}</span>
+              <span className={`session-status ${session.exited ? 'exited' : 'active'}`}>
+                {session.exited
+                  ? `exited (${session.exitCode})`
+                  : session.connected
+                    ? 'connected'
+                    : 'idle'}
+              </span>
+            </div>
+          ))}
         </div>
       )}
 
