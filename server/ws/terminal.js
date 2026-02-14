@@ -1,69 +1,140 @@
-import * as pty from 'node-pty';
+import {
+  createSession,
+  getSession,
+  attachSocket,
+  detachSocket,
+} from './sessionManager.js';
 
 export async function terminalWs(fastify, opts) {
   fastify.get('/ws/terminal', { websocket: true }, (socket, req) => {
-    let ptyProcess = null;
+    let currentSessionId = null;
 
     socket.on('message', (rawMessage) => {
       let msg;
       try {
         msg = JSON.parse(rawMessage.toString());
       } catch {
-        if (ptyProcess) ptyProcess.write(rawMessage.toString());
+        if (currentSessionId) {
+          const session = getSession(currentSessionId);
+          if (session?.ptyProcess && !session.exited) {
+            session.ptyProcess.write(rawMessage.toString());
+          }
+        }
         return;
       }
 
       switch (msg.type) {
         case 'init': {
-          const cwd = msg.cwd || '/home/kts_sz';
-          const cols = msg.cols || 80;
-          const rows = msg.rows || 24;
-
-          if (ptyProcess) {
-            ptyProcess.kill();
+          if (currentSessionId) {
+            detachSocket(currentSessionId, socket);
           }
 
-          const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
-
-          ptyProcess = pty.spawn('/usr/bin/claude', [], {
-            name: 'xterm-256color',
-            cols,
-            rows,
-            cwd,
-            env: {
-              ...cleanEnv,
-              TERM: 'xterm-256color',
-              COLORTERM: 'truecolor',
-              FORCE_COLOR: '1',
-            },
+          const { sessionId, session } = createSession({
+            cwd: msg.cwd || '/home/kts_sz',
+            cols: msg.cols || 80,
+            rows: msg.rows || 24,
           });
 
-          ptyProcess.onData((data) => {
+          currentSessionId = sessionId;
+          attachSocket(sessionId, socket);
+
+          socket.send(
+            JSON.stringify({
+              type: 'session',
+              sessionId,
+              cwd: session.cwd,
+              cols: session.cols,
+              rows: session.rows,
+              isReconnect: false,
+            })
+          );
+          break;
+        }
+
+        case 'attach': {
+          if (!msg.sessionId) {
+            socket.send(
+              JSON.stringify({
+                type: 'error',
+                message: 'sessionId required',
+                code: 'INVALID_REQUEST',
+              })
+            );
+            break;
+          }
+
+          const session = getSession(msg.sessionId);
+          if (!session) {
+            socket.send(
+              JSON.stringify({
+                type: 'error',
+                message: 'Session not found',
+                code: 'SESSION_NOT_FOUND',
+              })
+            );
+            break;
+          }
+
+          if (currentSessionId && currentSessionId !== msg.sessionId) {
+            detachSocket(currentSessionId, socket);
+          }
+
+          currentSessionId = msg.sessionId;
+          attachSocket(msg.sessionId, socket);
+
+          socket.send(
+            JSON.stringify({
+              type: 'session',
+              sessionId: msg.sessionId,
+              cwd: session.cwd,
+              cols: session.cols,
+              rows: session.rows,
+              isReconnect: true,
+            })
+          );
+
+          for (const chunk of session.outputBuffer) {
             if (socket.readyState === 1) {
-              socket.send(JSON.stringify({ type: 'output', data }));
+              socket.send(JSON.stringify({ type: 'replay', data: chunk }));
             }
-          });
+          }
 
-          ptyProcess.onExit(({ exitCode, signal }) => {
-            if (socket.readyState === 1) {
-              socket.send(JSON.stringify({ type: 'exit', exitCode, signal }));
-            }
-          });
+          if (session.exited) {
+            socket.send(
+              JSON.stringify({
+                type: 'exit',
+                exitCode: session.exitCode,
+                signal: session.exitSignal,
+              })
+            );
+          }
 
-          socket.send(JSON.stringify({ type: 'ready', cwd, cols, rows }));
+          if (msg.cols && msg.rows && !session.exited) {
+            session.ptyProcess.resize(msg.cols, msg.rows);
+            session.cols = msg.cols;
+            session.rows = msg.rows;
+          }
           break;
         }
 
         case 'input': {
-          if (ptyProcess) {
-            ptyProcess.write(msg.data);
+          if (currentSessionId) {
+            const session = getSession(currentSessionId);
+            if (session?.ptyProcess && !session.exited) {
+              session.ptyProcess.write(msg.data);
+            }
           }
           break;
         }
 
         case 'resize': {
-          if (ptyProcess && msg.cols && msg.rows) {
-            ptyProcess.resize(msg.cols, msg.rows);
+          if (currentSessionId && msg.cols && msg.rows) {
+            const session = getSession(currentSessionId);
+            if (session?.ptyProcess && !session.exited) {
+              session.ptyProcess.resize(msg.cols, msg.rows);
+              session.cols = msg.cols;
+              session.rows = msg.rows;
+            }
           }
           break;
         }
@@ -71,17 +142,17 @@ export async function terminalWs(fastify, opts) {
     });
 
     socket.on('close', () => {
-      if (ptyProcess) {
-        ptyProcess.kill();
-        ptyProcess = null;
+      if (currentSessionId) {
+        detachSocket(currentSessionId, socket);
+        currentSessionId = null;
       }
     });
 
     socket.on('error', (err) => {
       fastify.log.error('WebSocket error:', err);
-      if (ptyProcess) {
-        ptyProcess.kill();
-        ptyProcess = null;
+      if (currentSessionId) {
+        detachSocket(currentSessionId, socket);
+        currentSessionId = null;
       }
     });
   });

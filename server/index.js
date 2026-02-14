@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { dirsRoute } from './routes/dirs.js';
 import { terminalWs } from './ws/terminal.js';
+import { destroyAllSessions } from './ws/sessionManager.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
@@ -26,6 +27,13 @@ if (process.env.NODE_ENV === 'production') {
     }
   });
 }
+
+const cleanup = () => {
+  destroyAllSessions();
+  process.exit(0);
+};
+process.on('SIGTERM', cleanup);
+process.on('SIGINT', cleanup);
 
 const PORT = process.env.PORT || 3001;
 await fastify.listen({ port: PORT, host: '0.0.0.0' });

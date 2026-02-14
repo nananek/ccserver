@@ -19,11 +19,17 @@ const SPECIAL_KEYS = [
   { label: 'C-z', data: '\x1a' },
 ];
 
+const MAX_RECONNECT_ATTEMPTS = 5;
+
 export default function TerminalView({ cwd, onBack }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
   const fitAddonRef = useRef(null);
+  const sessionIdRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const reconnectAttemptsRef = useRef(0);
+  const intentionalCloseRef = useRef(false);
 
   useEffect(() => {
     const term = new Terminal({
@@ -65,63 +71,133 @@ export default function TerminalView({ cwd, onBack }) {
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      const dims = fitAddon.proposeDimensions();
-      ws.send(
-        JSON.stringify({
-          type: 'init',
-          cwd,
-          cols: dims?.cols || 80,
-          rows: dims?.rows || 24,
-        })
-      );
-    };
-
-    ws.onmessage = (event) => {
-      let msg;
-      try {
-        msg = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-
-      switch (msg.type) {
-        case 'ready':
-          term.focus();
-          break;
-        case 'output':
-          term.write(msg.data);
-          break;
-        case 'exit':
-          term.writeln('');
-          term.writeln(`\r\n[Process exited with code ${msg.exitCode}]`);
-          break;
-      }
-    };
-
-    ws.onclose = () => {
-      term.writeln('\r\n[Connection closed]');
-    };
-
-    ws.onerror = () => {
-      term.writeln('\r\n[Connection error]');
-    };
+    const storageKey = `ccserver-session:${cwd}`;
+    const existingSessionId = sessionStorage.getItem(storageKey);
+    if (existingSessionId) {
+      sessionIdRef.current = existingSessionId;
+    }
 
     const inputDisposable = term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'input', data }));
       }
     });
 
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        reconnectAttemptsRef.current = 0;
+        const dims = fitAddon.proposeDimensions();
+
+        if (sessionIdRef.current) {
+          ws.send(
+            JSON.stringify({
+              type: 'attach',
+              sessionId: sessionIdRef.current,
+              cols: dims?.cols || 80,
+              rows: dims?.rows || 24,
+            })
+          );
+        } else {
+          ws.send(
+            JSON.stringify({
+              type: 'init',
+              cwd,
+              cols: dims?.cols || 80,
+              rows: dims?.rows || 24,
+            })
+          );
+        }
+      };
+
+      ws.onmessage = (event) => {
+        let msg;
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        switch (msg.type) {
+          case 'session':
+            sessionIdRef.current = msg.sessionId;
+            sessionStorage.setItem(storageKey, msg.sessionId);
+            if (msg.isReconnect) {
+              term.clear();
+            }
+            term.focus();
+            break;
+          case 'output':
+            term.write(msg.data);
+            break;
+          case 'replay':
+            term.write(msg.data);
+            break;
+          case 'exit':
+            term.writeln('');
+            term.writeln(`\r\n[Process exited with code ${msg.exitCode}]`);
+            sessionStorage.removeItem(storageKey);
+            sessionIdRef.current = null;
+            break;
+          case 'error':
+            if (msg.code === 'SESSION_NOT_FOUND') {
+              sessionIdRef.current = null;
+              sessionStorage.removeItem(storageKey);
+              const dims = fitAddon.proposeDimensions();
+              ws.send(
+                JSON.stringify({
+                  type: 'init',
+                  cwd,
+                  cols: dims?.cols || 80,
+                  rows: dims?.rows || 24,
+                })
+              );
+            }
+            break;
+          case 'detached':
+            term.writeln('\r\n[Session taken over by another client]');
+            intentionalCloseRef.current = true;
+            break;
+        }
+      };
+
+      ws.onclose = () => {
+        if (intentionalCloseRef.current) return;
+
+        if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+          const delay = Math.min(
+            1000 * Math.pow(2, reconnectAttemptsRef.current),
+            10000
+          );
+          reconnectAttemptsRef.current++;
+          term.writeln(
+            `\r\n[Connection lost. Reconnecting in ${delay / 1000}s... (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})]`
+          );
+          reconnectTimerRef.current = setTimeout(() => connect(), delay);
+        } else {
+          term.writeln(
+            '\r\n[Connection lost. Max reconnection attempts reached.]'
+          );
+        }
+      };
+
+      ws.onerror = () => {
+        // onclose will fire after this
+      };
+    }
+
+    connect();
+
     const handleResize = () => {
       fitAddon.fit();
       const dims = fitAddon.proposeDimensions();
-      if (dims && ws.readyState === WebSocket.OPEN) {
+      const ws = wsRef.current;
+      if (dims && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(
           JSON.stringify({
             type: 'resize',
@@ -140,10 +216,12 @@ export default function TerminalView({ cwd, onBack }) {
     window.addEventListener('resize', handleResize);
 
     return () => {
+      intentionalCloseRef.current = true;
+      clearTimeout(reconnectTimerRef.current);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
       inputDisposable.dispose();
-      ws.close();
+      wsRef.current?.close();
       term.dispose();
     };
   }, [cwd]);
