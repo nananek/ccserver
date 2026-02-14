@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 const SESSION_TIMEOUT_MS = 5 * 60 * 1000;
 const SESSION_EXITED_TIMEOUT_MS = 30 * 1000;
 const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
+const IDLE_TIMEOUT_MS = 3000;
 
 const sessions = new Map();
 
@@ -56,6 +57,8 @@ export function createSession({ cwd, cols, rows, claudeSessionId }) {
     exitSignal: null,
     timeoutTimer: null,
     claudeSessionId: null,
+    idleTimer: null,
+    idleNotified: false,
   };
 
   ptyProcess.onData((data) => {
@@ -64,6 +67,20 @@ export function createSession({ cwd, cols, rows, claudeSessionId }) {
     if (session.socket && session.socket.readyState === 1) {
       session.socket.send(JSON.stringify({ type: 'output', data }));
     }
+
+    // Idle detection: reset timer on every output chunk
+    session.idleNotified = false;
+    if (session.idleTimer) {
+      clearTimeout(session.idleTimer);
+    }
+    session.idleTimer = setTimeout(() => {
+      if (!session.exited && !session.idleNotified) {
+        session.idleNotified = true;
+        if (session.socket && session.socket.readyState === 1) {
+          session.socket.send(JSON.stringify({ type: 'input_needed' }));
+        }
+      }
+    }, IDLE_TIMEOUT_MS);
   });
 
   ptyProcess.onExit(({ exitCode, signal }) => {
@@ -153,6 +170,11 @@ export function destroySession(id) {
   if (session.timeoutTimer) {
     clearTimeout(session.timeoutTimer);
     session.timeoutTimer = null;
+  }
+
+  if (session.idleTimer) {
+    clearTimeout(session.idleTimer);
+    session.idleTimer = null;
   }
 
   if (!session.exited) {

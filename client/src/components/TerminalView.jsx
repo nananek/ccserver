@@ -22,7 +22,7 @@ const SPECIAL_KEYS = [
 
 const MAX_RECONNECT_ATTEMPTS = 5;
 
-export default function TerminalView({ cwd, onBack, claudeSessionId }) {
+export default function TerminalView({ cwd, onBack, claudeSessionId, notify, notifyEnabled, notifyPermission, onToggleNotify }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -32,6 +32,8 @@ export default function TerminalView({ cwd, onBack, claudeSessionId }) {
   const reconnectAttemptsRef = useRef(0);
   const intentionalCloseRef = useRef(false);
   const claudeResumeIdRef = useRef(claudeSessionId);
+  const notifyRef = useRef(notify);
+  useEffect(() => { notifyRef.current = notify; }, [notify]);
 
   useEffect(() => {
     const term = new Terminal({
@@ -177,6 +179,15 @@ export default function TerminalView({ cwd, onBack, claudeSessionId }) {
             }
             break;
           }
+          case 'input_needed':
+            if (notifyRef.current) {
+              notifyRef.current('Claude Code', {
+                body: `Input needed in ${cwd}`,
+                icon: '/icon-192.png',
+                tag: `input-needed-${cwd}`,
+              });
+            }
+            break;
           case 'detached':
             term.writeln('\r\n[Session taken over by another client]');
             intentionalCloseRef.current = true;
@@ -288,6 +299,22 @@ export default function TerminalView({ cwd, onBack, claudeSessionId }) {
           Back
         </button>
         <span className="terminal-title">Claude Code &mdash; {cwd}</span>
+        <button
+          className={`btn notify-toggle${notifyEnabled ? ' active' : ''}`}
+          onClick={onToggleNotify}
+          title={
+            notifyPermission === 'denied'
+              ? 'Notifications blocked in browser settings'
+              : notifyPermission === 'unsupported'
+                ? 'Notifications not supported'
+                : notifyEnabled
+                  ? 'Disable notifications'
+                  : 'Enable notifications'
+          }
+          disabled={notifyPermission === 'denied' || notifyPermission === 'unsupported'}
+        >
+          {notifyEnabled ? '\uD83D\uDD14' : '\uD83D\uDD15'}
+        </button>
       </div>
       <div className="terminal-container" ref={terminalRef} />
       <div className="terminal-special-keys">

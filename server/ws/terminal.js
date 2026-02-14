@@ -124,6 +124,11 @@ export async function terminalWs(fastify, opts) {
             const session = getSession(currentSessionId);
             if (session?.ptyProcess && !session.exited) {
               session.ptyProcess.write(msg.data);
+              session.idleNotified = false;
+              if (session.idleTimer) {
+                clearTimeout(session.idleTimer);
+                session.idleTimer = null;
+              }
             }
           }
           break;

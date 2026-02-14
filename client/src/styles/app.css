@@ -462,6 +462,27 @@ body {
   justify-content: flex-end;
 }
 
+/* Notification toggle */
+.notify-toggle {
+  margin-left: auto;
+  font-size: 18px;
+  padding: 4px 8px;
+  min-width: 36px;
+  text-align: center;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.notify-toggle:hover:not(:disabled) {
+  background: var(--bg-surface);
+  border-color: var(--border);
+}
+
+.notify-toggle.active {
+  color: var(--accent);
+}
+
 /* Mobile-friendly adjustments */
 @media (max-width: 600px) {
   .directory-browser {

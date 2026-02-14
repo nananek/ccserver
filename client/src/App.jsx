@@ -1,12 +1,14 @@
 import { useState, useCallback } from 'react';
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import TerminalView from './components/TerminalView.jsx';
+import { useNotifications } from './hooks/useNotifications.js';
 
 export default function App() {
   const [selectedDir, setSelectedDir] = useState(null);
   const [lastDir, setLastDir] = useState(null);
   const [resumePrompt, setResumePrompt] = useState(null);
   const [claudeSessionId, setClaudeSessionId] = useState(null);
+  const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
 
   const handleOpen = useCallback((dirPath, skipResumePrompt = false) => {
     if (!skipResumePrompt) {
@@ -54,6 +56,10 @@ export default function App() {
           cwd={selectedDir}
           onBack={handleBack}
           claudeSessionId={claudeSessionId}
+          notify={notify}
+          notifyEnabled={notifyEnabled}
+          notifyPermission={notifyPermission}
+          onToggleNotify={toggleNotify}
         />
       )}
       {resumePrompt && (
