@@ -125,6 +125,105 @@ JSON メッセージでターミナル I/O を中継。
 | ← | `output` | `data` | ターミナル出力 |
 | ← | `exit` | `exitCode`, `signal` | プロセス終了 |
 
+## systemd でバックグラウンド実行
+
+### 1. クライアントをビルド
+
+```bash
+cd /home/kts_sz/ccserver
+npm run build --workspace=client
+```
+
+### 2. サービスファイルを配置
+
+```bash
+cp docs/ccserver.service ~/.config/systemd/user/ccserver.service
+```
+
+または手動で `~/.config/systemd/user/ccserver.service` を作成:
+
+```ini
+[Unit]
+Description=Claude Code Web Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/kts_sz/ccserver
+Environment=NODE_ENV=production
+Environment=PORT=3001
+ExecStart=/usr/bin/node server/index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+### 3. サービスを有効化・起動
+
+```bash
+# ユーザーサービスのデーモンをリロード
+systemctl --user daemon-reload
+
+# 起動
+systemctl --user start ccserver
+
+# 自動起動を有効化
+systemctl --user enable ccserver
+
+# ログイン中でなくてもサービスを維持（必要に応じて）
+sudo loginctl enable-linger kts_sz
+```
+
+### 4. 動作確認
+
+```bash
+# ステータス確認
+systemctl --user status ccserver
+
+# ログ表示
+journalctl --user -u ccserver -f
+
+# 再起動
+systemctl --user restart ccserver
+
+# 停止
+systemctl --user stop ccserver
+```
+
+## Tailscale Serve で HTTPS 公開
+
+Tailscale Serve を使うと、Tailnet 内のデバイスから HTTPS でアクセスできます。
+
+### 1. ccserver が起動していることを確認
+
+```bash
+systemctl --user status ccserver
+```
+
+### 2. Tailscale Serve を設定
+
+```bash
+# ポート 3001 を HTTPS で公開
+tailscale serve --bg https+insecure://localhost:3001
+```
+
+これにより `https://<hostname>.<tailnet>.ts.net/` でアクセス可能になります。
+
+### 3. 確認
+
+```bash
+# 現在の serve 設定を表示
+tailscale serve status
+```
+
+### 4. 停止
+
+```bash
+tailscale serve --https=443 off
+```
+
 ## ライセンス
 
 MIT
