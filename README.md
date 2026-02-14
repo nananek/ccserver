@@ -1,5 +1,7 @@
 # ccserver
 
+> **Note:** このプロジェクトは Anthropic 非公式のサードパーティツールです。Anthropic による公式サポートの対象外です。
+
 ディレクトリを指定して Claude Code を起動する Web フロントエンド。
 VS Code のようにフォルダを選択し、ブラウザ内のターミナルで Claude Code を操作できます。
 
