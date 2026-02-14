@@ -1,0 +1,12 @@
+{
+  "name": "ccserver",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["server", "client"],
+  "scripts": {
+    "dev": "npm run dev:server & npm run dev:client",
+    "dev:server": "node --watch server/index.js",
+    "dev:client": "npm run dev --workspace=client"
+  }
+}
