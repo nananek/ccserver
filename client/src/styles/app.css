@@ -250,7 +250,8 @@ body {
   transition: background 0.1s;
 }
 
-.dir-item:last-child {
+.dir-item:last-child,
+.file-item:last-child {
   border-bottom: none;
 }
 
@@ -266,6 +267,76 @@ body {
 .dir-name {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 14px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
+}
+
+.file-item:hover {
+  background: var(--bg-surface);
+}
+
+.file-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.file-name {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 14px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-size {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.dir-list.drag-over {
+  border-color: var(--accent);
+  background: rgba(137, 180, 250, 0.05);
+}
+
+.drag-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(30, 30, 46, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  pointer-events: none;
+}
+
+.drag-overlay-text {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--accent);
+  border: 2px dashed var(--accent);
+  border-radius: 12px;
+  padding: 32px 48px;
+}
+
+.upload-progress {
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--accent);
+  background: rgba(137, 180, 250, 0.1);
+  border-radius: 6px;
 }
 
 .loading,

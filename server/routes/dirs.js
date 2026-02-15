@@ -1,4 +1,4 @@
-import { readdir, mkdir } from 'node:fs/promises';
+import { readdir, mkdir, stat } from 'node:fs/promises';
 import { join, resolve, basename } from 'node:path';
 
 export async function dirsRoute(fastify, opts) {
@@ -8,11 +8,12 @@ export async function dirsRoute(fastify, opts) {
 
     try {
       const entries = await readdir(absPath, { withFileTypes: true });
+      const showHidden = !!request.query.showHidden;
 
       const dirs = entries
         .filter((entry) => {
           if (!entry.isDirectory()) return false;
-          if (!request.query.showHidden && entry.name.startsWith('.')) return false;
+          if (!showHidden && entry.name.startsWith('.')) return false;
           return true;
         })
         .map((entry) => ({
@@ -21,10 +22,30 @@ export async function dirsRoute(fastify, opts) {
         }))
         .sort((a, b) => a.name.localeCompare(b.name));
 
+      const fileEntries = entries.filter((entry) => {
+        if (!entry.isFile()) return false;
+        if (!showHidden && entry.name.startsWith('.')) return false;
+        return true;
+      });
+
+      const files = await Promise.all(
+        fileEntries.map(async (entry) => {
+          const filePath = join(absPath, entry.name);
+          try {
+            const st = await stat(filePath);
+            return { name: entry.name, path: filePath, size: st.size, mtime: st.mtimeMs };
+          } catch {
+            return { name: entry.name, path: filePath, size: 0, mtime: 0 };
+          }
+        })
+      );
+      files.sort((a, b) => a.name.localeCompare(b.name));
+
       return {
         current: absPath,
         parent: absPath === '/' ? null : resolve(absPath, '..'),
         dirs,
+        files,
       };
     } catch (err) {
       if (err.code === 'ENOENT') {

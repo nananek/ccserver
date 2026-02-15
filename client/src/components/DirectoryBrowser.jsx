@@ -1,10 +1,19 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 const HOME_DIR = '/home/kts_sz';
+
+function formatSize(bytes) {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const val = bytes / Math.pow(1024, i);
+  return `${i === 0 ? val : val.toFixed(1)} ${units[i]}`;
+}
 
 export default function DirectoryBrowser({ onOpen, initialPath }) {
   const [currentPath, setCurrentPath] = useState(initialPath || HOME_DIR);
   const [dirs, setDirs] = useState([]);
+  const [files, setFiles] = useState([]);
   const [parentPath, setParentPath] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -13,6 +22,11 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
   const [newFolderName, setNewFolderName] = useState('');
   const [sessions, setSessions] = useState([]);
   const [savedSessions, setSavedSessions] = useState([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState('');
+  const fileInputRef = useRef(null);
+  const dragCountRef = useRef(0);
 
   const fetchDirs = useCallback(async (path) => {
     setLoading(true);
@@ -29,6 +43,7 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
       setCurrentPath(data.current);
       setParentPath(data.parent);
       setDirs(data.dirs);
+      setFiles(data.files || []);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -100,10 +115,82 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
     onOpen(saved.cwd);
   }, [onOpen]);
 
+  const handleDownload = useCallback((file) => {
+    const a = document.createElement('a');
+    a.href = `/api/files?path=${encodeURIComponent(file.path)}`;
+    a.download = file.name;
+    a.click();
+  }, []);
+
+  const uploadFiles = useCallback(async (fileList) => {
+    if (!fileList || fileList.length === 0) return;
+    setUploading(true);
+    setUploadProgress(`Uploading ${fileList.length} file(s)...`);
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.append('destination', currentPath);
+      for (const file of fileList) {
+        formData.append('files', file);
+      }
+      const res = await fetch('/api/files', { method: 'POST', body: formData });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setUploadProgress(`Uploaded ${data.uploaded.length} file(s)`);
+      fetchDirs(currentPath);
+      setTimeout(() => setUploadProgress(''), 3000);
+    } catch (err) {
+      setError(err.message);
+      setUploadProgress('');
+    } finally {
+      setUploading(false);
+    }
+  }, [currentPath, fetchDirs]);
+
+  const handleFileInputChange = useCallback((e) => {
+    uploadFiles(e.target.files);
+    e.target.value = '';
+  }, [uploadFiles]);
+
+  const handleDragEnter = useCallback((e) => {
+    e.preventDefault();
+    dragCountRef.current++;
+    setDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e) => {
+    e.preventDefault();
+    dragCountRef.current--;
+    if (dragCountRef.current <= 0) {
+      dragCountRef.current = 0;
+      setDragOver(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault();
+  }, []);
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    dragCountRef.current = 0;
+    setDragOver(false);
+    uploadFiles(e.dataTransfer.files);
+  }, [uploadFiles]);
+
   const breadcrumbs = currentPath.split('/').filter(Boolean);
 
   return (
-    <div className="directory-browser">
+    <div
+      className="directory-browser"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
       <div className="browser-header">
         <h1>Select a Directory</h1>
         <p className="subtitle">Choose a working directory for Claude Code</p>
@@ -142,6 +229,20 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
         >
           New Folder
         </button>
+        <button
+          className="btn btn-secondary"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+        >
+          Upload
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          onChange={handleFileInputChange}
+          style={{ display: 'none' }}
+        />
         <label className="toggle-hidden">
           <input
             type="checkbox"
@@ -154,6 +255,10 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
           Open with Claude Code
         </button>
       </div>
+
+      {uploadProgress && (
+        <div className="upload-progress">{uploadProgress}</div>
+      )}
 
       {creatingFolder && (
         <div className="new-folder-bar">
@@ -220,11 +325,11 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
         </div>
       )}
 
-      <div className="dir-list">
+      <div className={`dir-list${dragOver ? ' drag-over' : ''}`}>
         {loading && <div className="loading">Loading...</div>}
         {error && <div className="error">Error: {error}</div>}
-        {!loading && !error && dirs.length === 0 && (
-          <div className="empty">No subdirectories</div>
+        {!loading && !error && dirs.length === 0 && files.length === 0 && (
+          <div className="empty">No entries</div>
         )}
         {!loading &&
           !error &&
@@ -244,7 +349,31 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
               <span className="dir-name">{dir.name}</span>
             </div>
           ))}
+        {!loading &&
+          !error &&
+          files.map((file) => (
+            <div
+              key={file.path}
+              className="file-item"
+              onClick={() => handleDownload(file)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleDownload(file);
+              }}
+            >
+              <span className="file-icon">&#128196;</span>
+              <span className="file-name">{file.name}</span>
+              <span className="file-size">{formatSize(file.size)}</span>
+            </div>
+          ))}
       </div>
+
+      {dragOver && (
+        <div className="drag-overlay">
+          <div className="drag-overlay-text">Drop files to upload</div>
+        </div>
+      )}
     </div>
   );
 }

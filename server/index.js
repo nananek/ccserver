@@ -1,10 +1,12 @@
 import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
+import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { dirsRoute } from './routes/dirs.js';
 import { sessionsRoute } from './routes/sessions.js';
+import { filesRoute } from './routes/files.js';
 import { terminalWs } from './ws/terminal.js';
 import { gracefulShutdown } from './ws/sessionManager.js';
 
@@ -12,8 +14,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
 
 await fastify.register(websocket);
+await fastify.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } });
 await fastify.register(dirsRoute, { prefix: '/api' });
 await fastify.register(sessionsRoute, { prefix: '/api' });
+await fastify.register(filesRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
 
 if (process.env.NODE_ENV === 'production') {
