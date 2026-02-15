@@ -231,6 +231,14 @@ body {
   background: rgba(137, 180, 250, 0.1);
 }
 
+.session-delete-btn {
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
 /* Directory list */
 .dir-list {
   flex: 1;

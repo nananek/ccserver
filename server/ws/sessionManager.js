@@ -267,6 +267,13 @@ export function gracefulShutdown() {
 
 let savedSessionsCache = null;
 
+export function removeSavedSession(index) {
+  const list = loadSavedSessions();
+  if (index < 0 || index >= list.length) return false;
+  list.splice(index, 1);
+  return true;
+}
+
 export function loadSavedSessions() {
   if (savedSessionsCache !== null) return savedSessionsCache;
   try {

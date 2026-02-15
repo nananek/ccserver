@@ -115,6 +115,34 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
     onOpen(saved.cwd);
   }, [onOpen]);
 
+  const handleDeleteSession = useCallback(async (session) => {
+    if (!window.confirm(`セッションを終了しますか?\n${session.cwd}`)) return;
+    try {
+      const res = await fetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      setError(err.message);
+    }
+    fetchSessions();
+  }, [fetchSessions]);
+
+  const handleDeleteSavedSession = useCallback(async (index) => {
+    if (!window.confirm('保存済みセッションを削除しますか?')) return;
+    try {
+      const res = await fetch(`/api/sessions/saved/${index}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      setError(err.message);
+    }
+    fetchSessions();
+  }, [fetchSessions]);
+
   const handleDownload = useCallback((file) => {
     const a = document.createElement('a');
     a.href = `/api/files?path=${encodeURIComponent(file.path)}`;
@@ -304,6 +332,13 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
               <span className="session-status active">
                 {session.connected ? 'connected' : 'idle'}
               </span>
+              <button
+                className="btn btn-secondary session-delete-btn"
+                onClick={(e) => { e.stopPropagation(); handleDeleteSession(session); }}
+                title="Terminate session"
+              >
+                &#10005;
+              </button>
             </div>
           ))}
           {savedSessions.map((saved, i) => (
@@ -320,6 +355,13 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
               <span className="session-icon">{'\u21BB'}</span>
               <span className="session-cwd">{saved.cwd}</span>
               <span className="session-status resumable">resumable</span>
+              <button
+                className="btn btn-secondary session-delete-btn"
+                onClick={(e) => { e.stopPropagation(); handleDeleteSavedSession(i); }}
+                title="Remove saved session"
+              >
+                &#10005;
+              </button>
             </div>
           ))}
         </div>
