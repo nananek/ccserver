@@ -352,19 +352,17 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
         {!loading &&
           !error &&
           files.map((file) => (
-            <div
-              key={file.path}
-              className="file-item"
-              onClick={() => handleDownload(file)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleDownload(file);
-              }}
-            >
+            <div key={file.path} className="file-item">
               <span className="file-icon">&#128196;</span>
               <span className="file-name">{file.name}</span>
               <span className="file-size">{formatSize(file.size)}</span>
+              <button
+                className="btn btn-secondary file-download-btn"
+                onClick={() => handleDownload(file)}
+                title="Download"
+              >
+                &#8595;
+              </button>
             </div>
           ))}
       </div>
