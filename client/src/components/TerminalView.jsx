@@ -24,7 +24,7 @@ const SPECIAL_KEYS = [
 const MAX_RECONNECT_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 30000;
 
-export default function TerminalView({ cwd, onBack, claudeSessionId, notify, notifyEnabled, notifyPermission, onToggleNotify }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, notify, notifyEnabled, notifyPermission, onToggleNotify, visible }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -281,6 +281,22 @@ export default function TerminalView({ cwd, onBack, claudeSessionId, notify, not
     };
   }, [cwd]);
 
+  // Re-fit terminal when tab becomes visible
+  useEffect(() => {
+    if (visible && fitAddonRef.current && xtermRef.current) {
+      // Small delay to let layout settle after display:none → flex
+      const timer = setTimeout(() => {
+        fitAddonRef.current.fit();
+        const dims = fitAddonRef.current.proposeDimensions();
+        const ws = wsRef.current;
+        if (dims && ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+        }
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [visible]);
+
   const [inputText, setInputText] = useState('');
   const composingRef = useRef(false);
   const [modifiers, setModifiers] = useState({ ctrl: false, shift: false, alt: false });
@@ -321,9 +337,6 @@ export default function TerminalView({ cwd, onBack, claudeSessionId, notify, not
   return (
     <div className="terminal-view">
       <div className="terminal-header">
-        <button className="btn btn-secondary" onClick={onBack}>
-          Back
-        </button>
         <span className="terminal-title">Claude Code &mdash; {cwd}</span>
         <button
           className={`btn notify-toggle${notifyEnabled ? ' active' : ''}`}

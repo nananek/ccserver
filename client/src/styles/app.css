@@ -77,6 +77,82 @@ body {
   cursor: not-allowed;
 }
 
+/* Tab Bar */
+.tab-bar {
+  display: flex;
+  align-items: stretch;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.tab-bar::-webkit-scrollbar {
+  height: 0;
+}
+
+.tab-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  cursor: pointer;
+  border-right: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 13px;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background 0.1s, color 0.1s;
+  flex-shrink: 0;
+}
+
+.tab-item:hover {
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+
+.tab-item.active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border-bottom: 2px solid var(--accent);
+  margin-bottom: -1px;
+}
+
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.tab-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.tab-close:hover {
+  background: var(--error);
+  color: var(--bg-primary);
+}
+
+.tab-content {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
 /* Directory Browser */
 .directory-browser {
   height: 100%;
@@ -614,5 +690,14 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+  }
+
+  .tab-item {
+    padding: 6px 12px;
+    font-size: 12px;
+  }
+
+  .tab-label {
+    max-width: 120px;
   }
 }
