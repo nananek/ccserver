@@ -87,7 +87,7 @@ function loadKeyConfig(keyMap) {
 const MAX_RECONNECT_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 30000;
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -100,6 +100,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const shellRef = useRef(shell);
   const notifyRef = useRef(notify);
   useEffect(() => { notifyRef.current = notify; }, [notify]);
+  const onSessionIdRef = useRef(onSessionId);
+  useEffect(() => { onSessionIdRef.current = onSessionId; }, [onSessionId]);
 
   useEffect(() => {
     const term = new Terminal({
@@ -201,6 +203,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
           case 'session':
             sessionIdRef.current = msg.sessionId;
             sessionStorage.setItem(storageKey, msg.sessionId);
+            if (onSessionIdRef.current) onSessionIdRef.current(msg.sessionId);
             if (msg.isReconnect) {
               term.clear();
             }

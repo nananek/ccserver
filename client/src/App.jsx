@@ -89,6 +89,12 @@ export default function App() {
     setActiveTabId(tabId);
   }, []);
 
+  const handleTabSessionId = useCallback((tabId, sessionId) => {
+    setTabs((prev) => prev.map((t) =>
+      t.id === tabId ? { ...t, sessionId } : t
+    ));
+  }, []);
+
   return (
     <div className="app">
       <div className="tab-bar">
@@ -137,6 +143,7 @@ export default function App() {
                 notifyPermission={notifyPermission}
                 onToggleNotify={toggleNotify}
                 visible={activeTabId === tab.id}
+                onSessionId={(sid) => handleTabSessionId(tab.id, sid)}
               />
             </div>
           ))}
