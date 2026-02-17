@@ -15,13 +15,13 @@ export default function App() {
   const pendingOpenRef = useRef(null);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
 
-  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false } = {}) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split('/').filter(Boolean).pop() || '/';
     const label = shell ? `$ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId },
     ]);
     setActiveTabId(id);
     setLastDir(dirPath);
@@ -42,6 +42,18 @@ export default function App() {
   const handleOpenShell = useCallback((dirPath) => {
     openTerminalTab(dirPath, { shell: true });
   }, [openTerminalTab]);
+
+  const handleSessionClick = useCallback((session) => {
+    // Check if a tab is already open for this session
+    const existingTab = tabs.find((t) => t.sessionId === session.id);
+    if (existingTab) {
+      setActiveTabId(existingTab.id);
+      return;
+    }
+    const storageKey = `ccserver-session:${session.cwd}`;
+    sessionStorage.setItem(storageKey, session.id);
+    openTerminalTab(session.cwd, { shell: !!session.shell, sessionId: session.id });
+  }, [tabs, openTerminalTab]);
 
   const handleResume = useCallback(() => {
     if (resumePrompt) {
@@ -106,7 +118,7 @@ export default function App() {
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} initialPath={lastDir} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onSessionClick={handleSessionClick} initialPath={lastDir} />
         </div>
         {tabs
           .filter((t) => t.type === 'terminal')

@@ -10,7 +10,7 @@ function formatSize(bytes) {
   return `${i === 0 ? val : val.toFixed(1)} ${units[i]}`;
 }
 
-export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath }) {
+export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, initialPath }) {
   const [currentPath, setCurrentPath] = useState(initialPath || HOME_DIR);
   const [dirs, setDirs] = useState([]);
   const [files, setFiles] = useState([]);
@@ -104,14 +104,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath }) {
   }, [fetchSessions]);
 
   const handleSessionClick = useCallback((session) => {
-    const storageKey = `ccserver-session:${session.cwd}`;
-    sessionStorage.setItem(storageKey, session.id);
-    if (session.shell) {
-      onOpenShell(session.cwd);
-    } else {
-      onOpen(session.cwd, true);
-    }
-  }, [onOpen, onOpenShell]);
+    onSessionClick(session);
+  }, [onSessionClick]);
 
   const handleSavedSessionClick = useCallback((saved) => {
     const claudeResumeKey = `ccserver-claude-resume:${saved.cwd}`;
