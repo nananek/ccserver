@@ -676,6 +676,44 @@ body {
   opacity: 1;
 }
 
+.key-config-custom {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.key-config-custom-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.key-config-input {
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  outline: none;
+  width: 80px;
+}
+
+.key-config-input-data {
+  flex: 1;
+  min-width: 120px;
+}
+
+.key-config-input:focus {
+  border-color: var(--accent);
+}
+
+.key-config-input::placeholder {
+  color: var(--text-muted);
+}
+
 /* Resume Dialog */
 .resume-overlay {
   position: fixed;

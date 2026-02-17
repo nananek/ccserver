@@ -31,7 +31,7 @@ const ALL_SPECIAL_KEYS = [
   { id: 'end', label: 'End', data: '\x1b[F' },
 ];
 
-const KEY_MAP = Object.fromEntries(ALL_SPECIAL_KEYS.map((k) => [k.id, k]));
+const BUILTIN_KEY_MAP = Object.fromEntries(ALL_SPECIAL_KEYS.map((k) => [k.id, k]));
 
 const DEFAULT_KEY_IDS = [
   'bs', 'enter', 'tab', 'c-c', 'ctrl',
@@ -40,13 +40,43 @@ const DEFAULT_KEY_IDS = [
 ];
 
 const STORAGE_KEY = 'ccserver-special-keys';
+const CUSTOM_KEYS_STORAGE = 'ccserver-custom-keys';
 
-function loadKeyConfig() {
+function loadCustomKeys() {
+  try {
+    const saved = localStorage.getItem(CUSTOM_KEYS_STORAGE);
+    if (saved) {
+      const keys = JSON.parse(saved);
+      if (Array.isArray(keys)) return keys;
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+function buildKeyMap(customKeys) {
+  const map = { ...BUILTIN_KEY_MAP };
+  for (const k of customKeys) {
+    map[k.id] = k;
+  }
+  return map;
+}
+
+function parseEscapeSequence(str) {
+  return str
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\e/g, '\x1b')
+    .replace(/\\r/g, '\r')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\\\/g, '\\');
+}
+
+function loadKeyConfig(keyMap) {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       const ids = JSON.parse(saved);
-      if (Array.isArray(ids) && ids.length > 0 && ids.every((id) => KEY_MAP[id])) {
+      if (Array.isArray(ids) && ids.length > 0 && ids.every((id) => keyMap[id])) {
         return ids;
       }
     }
@@ -338,10 +368,16 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const [inputText, setInputText] = useState('');
   const composingRef = useRef(false);
   const [modifiers, setModifiers] = useState({ ctrl: false, shift: false, alt: false });
-  const [keyConfig, setKeyConfig] = useState(loadKeyConfig);
+  const [customKeys, setCustomKeys] = useState(loadCustomKeys);
+  const [newKeyLabel, setNewKeyLabel] = useState('');
+  const [newKeyData, setNewKeyData] = useState('');
+
+  const keyMap = buildKeyMap(customKeys);
+  const [keyConfig, setKeyConfig] = useState(() => loadKeyConfig(keyMap));
   const [showKeyConfig, setShowKeyConfig] = useState(false);
 
-  const activeKeys = keyConfig.map((id) => KEY_MAP[id]).filter(Boolean);
+  const activeKeys = keyConfig.map((id) => keyMap[id]).filter(Boolean);
+  const allKeys = [...ALL_SPECIAL_KEYS, ...customKeys];
 
   const saveKeyConfig = useCallback((ids) => {
     setKeyConfig(ids);
@@ -370,8 +406,40 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   }, []);
 
   const resetKeyConfig = useCallback(() => {
+    setCustomKeys([]);
+    localStorage.removeItem(CUSTOM_KEYS_STORAGE);
     saveKeyConfig([...DEFAULT_KEY_IDS]);
   }, [saveKeyConfig]);
+
+  const addCustomKey = useCallback(() => {
+    const label = newKeyLabel.trim();
+    const rawData = newKeyData.trim();
+    if (!label || !rawData) return;
+    const id = `custom:${label.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
+    const data = parseEscapeSequence(rawData);
+    const newKey = { id, label, data };
+    const nextCustom = [...customKeys, newKey];
+    setCustomKeys(nextCustom);
+    localStorage.setItem(CUSTOM_KEYS_STORAGE, JSON.stringify(nextCustom));
+    setKeyConfig((prev) => {
+      const next = [...prev, id];
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+    setNewKeyLabel('');
+    setNewKeyData('');
+  }, [newKeyLabel, newKeyData, customKeys]);
+
+  const deleteCustomKey = useCallback((id) => {
+    const nextCustom = customKeys.filter((k) => k.id !== id);
+    setCustomKeys(nextCustom);
+    localStorage.setItem(CUSTOM_KEYS_STORAGE, JSON.stringify(nextCustom));
+    setKeyConfig((prev) => {
+      const next = prev.filter((k) => k !== id);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, [customKeys]);
 
   const sendInput = useCallback((data) => {
     const ws = wsRef.current;
@@ -460,23 +528,27 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
           </div>
           <div className="key-config-list">
             {keyConfig.map((id, idx) => {
-              const key = KEY_MAP[id];
+              const key = keyMap[id];
               if (!key) return null;
+              const isCustom = id.startsWith('custom:');
               return (
                 <div key={id} className="key-config-item">
                   <button className="btn btn-secondary btn-sm" onClick={() => moveKeyInConfig(id, -1)} disabled={idx === 0}>&#9650;</button>
                   <button className="btn btn-secondary btn-sm" onClick={() => moveKeyInConfig(id, 1)} disabled={idx === keyConfig.length - 1}>&#9660;</button>
-                  <span className="key-config-label">{key.label}</span>
+                  <span className="key-config-label">{key.label}{isCustom ? ' *' : ''}</span>
+                  {isCustom ? (
+                    <button className="btn btn-secondary btn-sm key-config-remove" onClick={() => deleteCustomKey(id)} title="削除">&#128465;</button>
+                  ) : null}
                   <button className="btn btn-secondary btn-sm key-config-remove" onClick={() => toggleKeyInConfig(id)}>&#10005;</button>
                 </div>
               );
             })}
           </div>
-          {ALL_SPECIAL_KEYS.filter((k) => !keyConfig.includes(k.id)).length > 0 && (
+          {allKeys.filter((k) => !keyConfig.includes(k.id)).length > 0 && (
             <div className="key-config-available">
               <div className="key-config-subheader">追加可能なキー</div>
               <div className="key-config-add-list">
-                {ALL_SPECIAL_KEYS.filter((k) => !keyConfig.includes(k.id)).map((key) => (
+                {allKeys.filter((k) => !keyConfig.includes(k.id)).map((key) => (
                   <button
                     key={key.id}
                     className="special-key-btn"
@@ -488,6 +560,28 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
               </div>
             </div>
           )}
+          <div className="key-config-custom">
+            <div className="key-config-subheader">カスタムキーを追加</div>
+            <div className="key-config-custom-form">
+              <input
+                type="text"
+                className="key-config-input"
+                placeholder="ラベル"
+                value={newKeyLabel}
+                onChange={(e) => setNewKeyLabel(e.target.value)}
+                maxLength={20}
+              />
+              <input
+                type="text"
+                className="key-config-input key-config-input-data"
+                placeholder="データ (例: \x03, \e[A, hello\r)"
+                value={newKeyData}
+                onChange={(e) => setNewKeyData(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') addCustomKey(); }}
+              />
+              <button className="btn btn-primary btn-sm" onClick={addCustomKey} disabled={!newKeyLabel.trim() || !newKeyData.trim()}>追加</button>
+            </div>
+          </div>
         </div>
       )}
       <div className="terminal-input-bar">
