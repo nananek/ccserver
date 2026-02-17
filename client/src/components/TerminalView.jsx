@@ -155,6 +155,20 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
       }
     });
 
+    const binaryDisposable = term.onBinary((data) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'input', data }));
+      }
+    });
+
+    // Click on terminal container to restore focus
+    const containerEl = terminalRef.current;
+    const handleContainerClick = () => {
+      term.focus();
+    };
+    containerEl.addEventListener('click', handleContainerClick);
+
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
@@ -345,18 +359,21 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
+      containerEl.removeEventListener('click', handleContainerClick);
       inputDisposable.dispose();
+      binaryDisposable.dispose();
       wsRef.current?.close();
       term.dispose();
     };
   }, [cwd]);
 
-  // Re-fit terminal when tab becomes visible
+  // Re-fit terminal and restore focus when tab becomes visible
   useEffect(() => {
     if (visible && fitAddonRef.current && xtermRef.current) {
       // Small delay to let layout settle after display:none → flex
       const timer = setTimeout(() => {
         fitAddonRef.current.fit();
+        xtermRef.current.focus();
         const dims = fitAddonRef.current.proposeDimensions();
         const ws = wsRef.current;
         if (dims && ws && ws.readyState === WebSocket.OPEN) {

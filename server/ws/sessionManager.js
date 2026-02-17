@@ -79,7 +79,11 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
     appendToBuffer(session, data);
 
     if (session.socket && session.socket.readyState === 1) {
-      session.socket.send(JSON.stringify({ type: 'output', data }));
+      try {
+        session.socket.send(JSON.stringify({ type: 'output', data }));
+      } catch {
+        // Prevent output serialization errors from crashing the PTY handler
+      }
     }
 
     // Idle detection: reset timer on every output chunk (Claude sessions only)
