@@ -87,7 +87,7 @@ function loadKeyConfig(keyMap) {
 const MAX_RECONNECT_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 30000;
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, attachSessionId }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -144,9 +144,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
     fitAddonRef.current = fitAddon;
 
     const storageKey = `ccserver-session:${cwd}`;
-    const existingSessionId = sessionStorage.getItem(storageKey);
-    if (existingSessionId) {
-      sessionIdRef.current = existingSessionId;
+    if (attachSessionId) {
+      sessionIdRef.current = attachSessionId;
     }
 
     const inputDisposable = term.onData((data) => {

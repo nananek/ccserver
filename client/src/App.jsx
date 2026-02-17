@@ -15,13 +15,13 @@ export default function App() {
   const pendingOpenRef = useRef(null);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
 
-  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null } = {}) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split('/').filter(Boolean).pop() || '/';
     const label = shell ? `$ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId },
     ]);
     setActiveTabId(id);
     setLastDir(dirPath);
@@ -50,9 +50,7 @@ export default function App() {
       setActiveTabId(existingTab.id);
       return;
     }
-    const storageKey = `ccserver-session:${session.cwd}`;
-    sessionStorage.setItem(storageKey, session.id);
-    openTerminalTab(session.cwd, { shell: !!session.shell, sessionId: session.id });
+    openTerminalTab(session.cwd, { shell: !!session.shell, sessionId: session.id, attachSessionId: session.id });
   }, [tabs, openTerminalTab]);
 
   const handleResume = useCallback(() => {
@@ -144,6 +142,7 @@ export default function App() {
                 onToggleNotify={toggleNotify}
                 visible={activeTabId === tab.id}
                 onSessionId={(sid) => handleTabSessionId(tab.id, sid)}
+                attachSessionId={tab.attachSessionId}
               />
             </div>
           ))}
