@@ -584,6 +584,98 @@ body {
   font-weight: 600;
 }
 
+.key-config-btn {
+  min-width: 36px;
+  font-size: 16px;
+  margin-left: auto;
+}
+
+/* Key Config Panel */
+.key-config-panel {
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  padding: 10px 12px;
+  flex-shrink: 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.key-config-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.key-config-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-sm {
+  padding: 2px 8px;
+  font-size: 12px;
+  height: 28px;
+  min-width: unset;
+}
+
+.key-config-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.key-config-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+
+.key-config-label {
+  font-size: 13px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--text-primary);
+  min-width: 60px;
+}
+
+.key-config-remove {
+  margin-left: auto;
+  color: var(--text-muted);
+}
+
+.key-config-available {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.key-config-subheader {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.key-config-add-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.key-config-add-list .special-key-btn {
+  min-width: unset;
+  height: 30px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.key-config-add-list .special-key-btn:hover {
+  opacity: 1;
+}
+
 /* Resume Dialog */
 .resume-overlay {
   position: fixed;

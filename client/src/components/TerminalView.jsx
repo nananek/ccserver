@@ -4,22 +4,55 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 
-const SPECIAL_KEYS = [
-  { label: 'BS', data: '\x7f' },
-  { label: 'Enter', data: '\r' },
-  { label: 'Tab', data: '\t' },
-  { label: 'C-c', data: '\x03' },
-  { label: 'Ctrl', modifier: 'ctrl' },
-  { label: '\u2191', data: '\x1b[A' },
-  { label: '\u2193', data: '\x1b[B' },
-  { label: 'C-d', data: '\x04' },
-  { label: '\u2190', data: '\x1b[D' },
-  { label: '\u2192', data: '\x1b[C' },
-  { label: 'C-z', data: '\x1a' },
-  { label: 'Shift', modifier: 'shift' },
-  { label: 'Alt', modifier: 'alt' },
-  { label: 'Esc', data: '\x1b' },
+const ALL_SPECIAL_KEYS = [
+  { id: 'bs', label: 'BS', data: '\x7f' },
+  { id: 'enter', label: 'Enter', data: '\r' },
+  { id: 'tab', label: 'Tab', data: '\t' },
+  { id: 'c-c', label: 'C-c', data: '\x03' },
+  { id: 'ctrl', label: 'Ctrl', modifier: 'ctrl' },
+  { id: 'up', label: '\u2191', data: '\x1b[A' },
+  { id: 'down', label: '\u2193', data: '\x1b[B' },
+  { id: 'c-d', label: 'C-d', data: '\x04' },
+  { id: 'left', label: '\u2190', data: '\x1b[D' },
+  { id: 'right', label: '\u2192', data: '\x1b[C' },
+  { id: 'c-z', label: 'C-z', data: '\x1a' },
+  { id: 'shift', label: 'Shift', modifier: 'shift' },
+  { id: 'alt', label: 'Alt', modifier: 'alt' },
+  { id: 'esc', label: 'Esc', data: '\x1b' },
+  { id: 'c-a', label: 'C-a', data: '\x01' },
+  { id: 'c-e', label: 'C-e', data: '\x05' },
+  { id: 'c-l', label: 'C-l', data: '\x0c' },
+  { id: 'c-r', label: 'C-r', data: '\x12' },
+  { id: 'c-w', label: 'C-w', data: '\x17' },
+  { id: 'c-u', label: 'C-u', data: '\x15' },
+  { id: 'c-k', label: 'C-k', data: '\x0b' },
+  { id: 'del', label: 'Del', data: '\x1b[3~' },
+  { id: 'home', label: 'Home', data: '\x1b[H' },
+  { id: 'end', label: 'End', data: '\x1b[F' },
 ];
+
+const KEY_MAP = Object.fromEntries(ALL_SPECIAL_KEYS.map((k) => [k.id, k]));
+
+const DEFAULT_KEY_IDS = [
+  'bs', 'enter', 'tab', 'c-c', 'ctrl',
+  'up', 'down', 'c-d', 'left', 'right',
+  'c-z', 'shift', 'alt', 'esc',
+];
+
+const STORAGE_KEY = 'ccserver-special-keys';
+
+function loadKeyConfig() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const ids = JSON.parse(saved);
+      if (Array.isArray(ids) && ids.length > 0 && ids.every((id) => KEY_MAP[id])) {
+        return ids;
+      }
+    }
+  } catch { /* ignore */ }
+  return DEFAULT_KEY_IDS;
+}
 
 const MAX_RECONNECT_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 30000;
@@ -305,6 +338,40 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const [inputText, setInputText] = useState('');
   const composingRef = useRef(false);
   const [modifiers, setModifiers] = useState({ ctrl: false, shift: false, alt: false });
+  const [keyConfig, setKeyConfig] = useState(loadKeyConfig);
+  const [showKeyConfig, setShowKeyConfig] = useState(false);
+
+  const activeKeys = keyConfig.map((id) => KEY_MAP[id]).filter(Boolean);
+
+  const saveKeyConfig = useCallback((ids) => {
+    setKeyConfig(ids);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
+  }, []);
+
+  const toggleKeyInConfig = useCallback((id) => {
+    setKeyConfig((prev) => {
+      const next = prev.includes(id) ? prev.filter((k) => k !== id) : [...prev, id];
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const moveKeyInConfig = useCallback((id, direction) => {
+    setKeyConfig((prev) => {
+      const idx = prev.indexOf(id);
+      if (idx < 0) return prev;
+      const swapIdx = idx + direction;
+      if (swapIdx < 0 || swapIdx >= prev.length) return prev;
+      const next = [...prev];
+      [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const resetKeyConfig = useCallback(() => {
+    saveKeyConfig([...DEFAULT_KEY_IDS]);
+  }, [saveKeyConfig]);
 
   const sendInput = useCallback((data) => {
     const ws = wsRef.current;
@@ -362,9 +429,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
       </div>
       <div className="terminal-container" ref={terminalRef} />
       <div className="terminal-special-keys">
-        {SPECIAL_KEYS.map((key) => (
+        {activeKeys.map((key) => (
           <button
-            key={key.label}
+            key={key.id}
             className={
               'special-key-btn' +
               (key.modifier && modifiers[key.modifier] ? ' active' : '')
@@ -374,7 +441,55 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
             {key.label}
           </button>
         ))}
+        <button
+          className={'special-key-btn key-config-btn' + (showKeyConfig ? ' active' : '')}
+          onClick={() => setShowKeyConfig((v) => !v)}
+          title="Customize keys"
+        >
+          &#9881;
+        </button>
       </div>
+      {showKeyConfig && (
+        <div className="key-config-panel">
+          <div className="key-config-header">
+            <span>キーのカスタマイズ</span>
+            <div className="key-config-actions">
+              <button className="btn btn-secondary btn-sm" onClick={resetKeyConfig}>リセット</button>
+              <button className="btn btn-secondary btn-sm" onClick={() => setShowKeyConfig(false)}>&#10005;</button>
+            </div>
+          </div>
+          <div className="key-config-list">
+            {keyConfig.map((id, idx) => {
+              const key = KEY_MAP[id];
+              if (!key) return null;
+              return (
+                <div key={id} className="key-config-item">
+                  <button className="btn btn-secondary btn-sm" onClick={() => moveKeyInConfig(id, -1)} disabled={idx === 0}>&#9650;</button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => moveKeyInConfig(id, 1)} disabled={idx === keyConfig.length - 1}>&#9660;</button>
+                  <span className="key-config-label">{key.label}</span>
+                  <button className="btn btn-secondary btn-sm key-config-remove" onClick={() => toggleKeyInConfig(id)}>&#10005;</button>
+                </div>
+              );
+            })}
+          </div>
+          {ALL_SPECIAL_KEYS.filter((k) => !keyConfig.includes(k.id)).length > 0 && (
+            <div className="key-config-available">
+              <div className="key-config-subheader">追加可能なキー</div>
+              <div className="key-config-add-list">
+                {ALL_SPECIAL_KEYS.filter((k) => !keyConfig.includes(k.id)).map((key) => (
+                  <button
+                    key={key.id}
+                    className="special-key-btn"
+                    onClick={() => toggleKeyInConfig(key.id)}
+                  >
+                    + {key.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       <div className="terminal-input-bar">
         <input
           type="text"
