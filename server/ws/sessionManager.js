@@ -29,14 +29,21 @@ function extractClaudeSessionId(outputBuffer) {
   return null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
   const id = randomUUID();
 
   const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
 
-  const args = claudeSessionId ? ['--resume', claudeSessionId] : [];
+  let command, args;
+  if (shell) {
+    command = process.env.SHELL || '/bin/bash';
+    args = [];
+  } else {
+    command = '/usr/bin/claude';
+    args = claudeSessionId ? ['--resume', claudeSessionId] : [];
+  }
 
-  const ptyProcess = pty.spawn('/usr/bin/claude', args, {
+  const ptyProcess = pty.spawn(command, args, {
     name: 'xterm-256color',
     cols,
     rows,
@@ -52,6 +59,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId }) {
   const session = {
     id,
     cwd,
+    shell: !!shell,
     ptyProcess,
     socket: null,
     outputBuffer: [],
@@ -74,26 +82,30 @@ export function createSession({ cwd, cols, rows, claudeSessionId }) {
       session.socket.send(JSON.stringify({ type: 'output', data }));
     }
 
-    // Idle detection: reset timer on every output chunk
-    session.idleNotified = false;
-    if (session.idleTimer) {
-      clearTimeout(session.idleTimer);
-    }
-    session.idleTimer = setTimeout(() => {
-      if (!session.exited && !session.idleNotified) {
-        session.idleNotified = true;
-        if (session.socket && session.socket.readyState === 1) {
-          session.socket.send(JSON.stringify({ type: 'input_needed' }));
-        }
+    // Idle detection: reset timer on every output chunk (Claude sessions only)
+    if (!session.shell) {
+      session.idleNotified = false;
+      if (session.idleTimer) {
+        clearTimeout(session.idleTimer);
       }
-    }, IDLE_TIMEOUT_MS);
+      session.idleTimer = setTimeout(() => {
+        if (!session.exited && !session.idleNotified) {
+          session.idleNotified = true;
+          if (session.socket && session.socket.readyState === 1) {
+            session.socket.send(JSON.stringify({ type: 'input_needed' }));
+          }
+        }
+      }, IDLE_TIMEOUT_MS);
+    }
   });
 
   ptyProcess.onExit(({ exitCode, signal }) => {
     session.exited = true;
     session.exitCode = exitCode;
     session.exitSignal = signal;
-    session.claudeSessionId = extractClaudeSessionId(session.outputBuffer);
+    if (!session.shell) {
+      session.claudeSessionId = extractClaudeSessionId(session.outputBuffer);
+    }
 
     if (session.socket && session.socket.readyState === 1) {
       session.socket.send(JSON.stringify({
@@ -125,6 +137,7 @@ export function listSessions() {
       id,
       cwd: session.cwd,
       connected: session.socket !== null,
+      shell: session.shell,
     });
   }
   return result;

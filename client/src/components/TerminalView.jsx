@@ -24,7 +24,7 @@ const SPECIAL_KEYS = [
 const MAX_RECONNECT_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 30000;
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, notify, notifyEnabled, notifyPermission, onToggleNotify, visible }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -34,6 +34,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, notify, no
   const reconnectAttemptsRef = useRef(0);
   const intentionalCloseRef = useRef(false);
   const claudeResumeIdRef = useRef(claudeSessionId);
+  const shellRef = useRef(shell);
   const notifyRef = useRef(notify);
   useEffect(() => { notifyRef.current = notify; }, [notify]);
 
@@ -115,8 +116,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, notify, no
             cwd,
             cols: dims?.cols || 80,
             rows: dims?.rows || 24,
+            shell: !!shellRef.current,
           };
-          if (claudeResumeIdRef.current) {
+          if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;
             claudeResumeIdRef.current = null;
           }
@@ -170,12 +172,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, notify, no
                 cwd,
                 cols: dims?.cols || 80,
                 rows: dims?.rows || 24,
+                shell: !!shellRef.current,
               };
-              const savedClaudeId = claudeResumeIdRef.current
-                || localStorage.getItem(`ccserver-claude-resume:${cwd}`);
-              if (savedClaudeId) {
-                initMsg.claudeSessionId = savedClaudeId;
-                claudeResumeIdRef.current = null;
+              if (!shellRef.current) {
+                const savedClaudeId = claudeResumeIdRef.current
+                  || localStorage.getItem(`ccserver-claude-resume:${cwd}`);
+                if (savedClaudeId) {
+                  initMsg.claudeSessionId = savedClaudeId;
+                  claudeResumeIdRef.current = null;
+                }
               }
               ws.send(JSON.stringify(initMsg));
             }
@@ -337,7 +342,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, notify, no
   return (
     <div className="terminal-view">
       <div className="terminal-header">
-        <span className="terminal-title">Claude Code &mdash; {cwd}</span>
+        <span className="terminal-title">{shell ? 'Terminal' : 'Claude Code'} &mdash; {cwd}</span>
         <button
           className={`btn notify-toggle${notifyEnabled ? ' active' : ''}`}
           onClick={onToggleNotify}

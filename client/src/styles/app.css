@@ -227,7 +227,7 @@ body {
   margin-left: 8px;
 }
 
-.open-btn {
+.open-btn:first-of-type {
   margin-left: auto;
 }
 

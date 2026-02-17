@@ -10,7 +10,7 @@ function formatSize(bytes) {
   return `${i === 0 ? val : val.toFixed(1)} ${units[i]}`;
 }
 
-export default function DirectoryBrowser({ onOpen, initialPath }) {
+export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath }) {
   const [currentPath, setCurrentPath] = useState(initialPath || HOME_DIR);
   const [dirs, setDirs] = useState([]);
   const [files, setFiles] = useState([]);
@@ -106,8 +106,12 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
   const handleSessionClick = useCallback((session) => {
     const storageKey = `ccserver-session:${session.cwd}`;
     sessionStorage.setItem(storageKey, session.id);
-    onOpen(session.cwd, true);
-  }, [onOpen]);
+    if (session.shell) {
+      onOpenShell(session.cwd);
+    } else {
+      onOpen(session.cwd, true);
+    }
+  }, [onOpen, onOpenShell]);
 
   const handleSavedSessionClick = useCallback((saved) => {
     const claudeResumeKey = `ccserver-claude-resume:${saved.cwd}`;
@@ -279,8 +283,11 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
           />
           Show hidden
         </label>
+        <button className="btn btn-secondary open-btn" onClick={() => onOpenShell(currentPath)}>
+          Terminal
+        </button>
         <button className="btn btn-primary open-btn" onClick={() => onOpen(currentPath)}>
-          Open with Claude Code
+          Claude Code
         </button>
       </div>
 
@@ -330,7 +337,7 @@ export default function DirectoryBrowser({ onOpen, initialPath }) {
               </span>
               <span className="session-cwd">{session.cwd}</span>
               <span className="session-status active">
-                {session.connected ? 'connected' : 'idle'}
+                {session.shell ? 'shell' : session.connected ? 'connected' : 'idle'}
               </span>
               <button
                 className="btn btn-secondary session-delete-btn"

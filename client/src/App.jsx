@@ -15,12 +15,13 @@ export default function App() {
   const pendingOpenRef = useRef(null);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
 
-  const openTerminalTab = useCallback((dirPath, claudeSessionId = null) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
-    const label = dirPath.split('/').filter(Boolean).pop() || '/';
+    const dirName = dirPath.split('/').filter(Boolean).pop() || '/';
+    const label = shell ? `$ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell },
     ]);
     setActiveTabId(id);
     setLastDir(dirPath);
@@ -38,9 +39,13 @@ export default function App() {
     openTerminalTab(dirPath);
   }, [openTerminalTab]);
 
+  const handleOpenShell = useCallback((dirPath) => {
+    openTerminalTab(dirPath, { shell: true });
+  }, [openTerminalTab]);
+
   const handleResume = useCallback(() => {
     if (resumePrompt) {
-      openTerminalTab(resumePrompt.cwd, resumePrompt.sessionId);
+      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -101,7 +106,7 @@ export default function App() {
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} initialPath={lastDir} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} initialPath={lastDir} />
         </div>
         {tabs
           .filter((t) => t.type === 'terminal')
@@ -114,6 +119,7 @@ export default function App() {
                 cwd={tab.cwd}
                 onClose={() => handleCloseTab(tab.id)}
                 claudeSessionId={tab.claudeSessionId}
+                shell={tab.shell}
                 notify={notify}
                 notifyEnabled={notifyEnabled}
                 notifyPermission={notifyPermission}

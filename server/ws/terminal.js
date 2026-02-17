@@ -34,6 +34,7 @@ export async function terminalWs(fastify, opts) {
             cols: msg.cols || 80,
             rows: msg.rows || 24,
             claudeSessionId: msg.claudeSessionId || null,
+            shell: !!msg.shell,
           });
 
           currentSessionId = sessionId;
