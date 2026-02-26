@@ -1,7 +1,8 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import TerminalView from './components/TerminalView.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
+import { getThemeIds, getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
 
 let tabIdCounter = 0;
 
@@ -12,8 +13,14 @@ export default function App() {
   const [activeTabId, setActiveTabId] = useState('browser');
   const [lastDir, setLastDir] = useState(null);
   const [resumePrompt, setResumePrompt] = useState(null);
+  const [themeId, setThemeId] = useState(loadThemeId);
   const pendingOpenRef = useRef(null);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
+
+  useEffect(() => {
+    applyThemeCss(themeId);
+    saveThemeId(themeId);
+  }, [themeId]);
 
   const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
@@ -119,6 +126,16 @@ export default function App() {
             )}
           </div>
         ))}
+        <select
+          className="theme-select"
+          value={themeId}
+          onChange={(e) => setThemeId(e.target.value)}
+          title="Theme"
+        >
+          {getThemeIds().map((id) => (
+            <option key={id} value={id}>{getTheme(id).name}</option>
+          ))}
+        </select>
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
@@ -143,6 +160,7 @@ export default function App() {
                 visible={activeTabId === tab.id}
                 onSessionId={(sid) => handleTabSessionId(tab.id, sid)}
                 attachSessionId={tab.attachSessionId}
+                xtermTheme={getTheme(themeId).xterm}
               />
             </div>
           ))}

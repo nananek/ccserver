@@ -147,6 +147,30 @@ body {
   color: var(--bg-primary);
 }
 
+.theme-select {
+  margin-left: auto;
+  padding: 4px 8px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+  flex-shrink: 0;
+  align-self: center;
+  margin-right: 8px;
+}
+
+.theme-select:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.theme-select:focus {
+  border-color: var(--accent);
+}
+
 .tab-content {
   flex: 1;
   overflow: hidden;

@@ -1,0 +1,261 @@
+const THEMES = {
+  'catppuccin-mocha': {
+    name: 'Catppuccin Mocha',
+    css: {
+      '--bg-primary': '#1e1e2e',
+      '--bg-secondary': '#181825',
+      '--bg-surface': '#313244',
+      '--text-primary': '#cdd6f4',
+      '--text-secondary': '#a6adc8',
+      '--text-muted': '#6c7086',
+      '--accent': '#89b4fa',
+      '--accent-hover': '#74c7ec',
+      '--border': '#45475a',
+      '--error': '#f38ba8',
+      '--success': '#a6e3a1',
+    },
+    xterm: {
+      background: '#1e1e2e',
+      foreground: '#cdd6f4',
+      cursor: '#f5e0dc',
+      selectionBackground: '#585b70',
+      black: '#45475a',
+      red: '#f38ba8',
+      green: '#a6e3a1',
+      yellow: '#f9e2af',
+      blue: '#89b4fa',
+      magenta: '#f5c2e7',
+      cyan: '#94e2d5',
+      white: '#bac2de',
+      brightBlack: '#585b70',
+      brightRed: '#f38ba8',
+      brightGreen: '#a6e3a1',
+      brightYellow: '#f9e2af',
+      brightBlue: '#89b4fa',
+      brightMagenta: '#f5c2e7',
+      brightCyan: '#94e2d5',
+      brightWhite: '#a6adc8',
+    },
+  },
+  'catppuccin-latte': {
+    name: 'Catppuccin Latte',
+    css: {
+      '--bg-primary': '#eff1f5',
+      '--bg-secondary': '#e6e9ef',
+      '--bg-surface': '#ccd0da',
+      '--text-primary': '#4c4f69',
+      '--text-secondary': '#5c5f77',
+      '--text-muted': '#9ca0b0',
+      '--accent': '#1e66f5',
+      '--accent-hover': '#209fb5',
+      '--border': '#bcc0cc',
+      '--error': '#d20f39',
+      '--success': '#40a02b',
+    },
+    xterm: {
+      background: '#eff1f5',
+      foreground: '#4c4f69',
+      cursor: '#dc8a78',
+      selectionBackground: '#acb0be',
+      black: '#5c5f77',
+      red: '#d20f39',
+      green: '#40a02b',
+      yellow: '#df8e1d',
+      blue: '#1e66f5',
+      magenta: '#ea76cb',
+      cyan: '#179299',
+      white: '#acb0be',
+      brightBlack: '#6c6f85',
+      brightRed: '#d20f39',
+      brightGreen: '#40a02b',
+      brightYellow: '#df8e1d',
+      brightBlue: '#1e66f5',
+      brightMagenta: '#ea76cb',
+      brightCyan: '#179299',
+      brightWhite: '#bcc0cc',
+    },
+  },
+  dracula: {
+    name: 'Dracula',
+    css: {
+      '--bg-primary': '#282a36',
+      '--bg-secondary': '#21222c',
+      '--bg-surface': '#44475a',
+      '--text-primary': '#f8f8f2',
+      '--text-secondary': '#bfbfbf',
+      '--text-muted': '#6272a4',
+      '--accent': '#bd93f9',
+      '--accent-hover': '#ff79c6',
+      '--border': '#44475a',
+      '--error': '#ff5555',
+      '--success': '#50fa7b',
+    },
+    xterm: {
+      background: '#282a36',
+      foreground: '#f8f8f2',
+      cursor: '#f8f8f2',
+      selectionBackground: '#44475a',
+      black: '#21222c',
+      red: '#ff5555',
+      green: '#50fa7b',
+      yellow: '#f1fa8c',
+      blue: '#bd93f9',
+      magenta: '#ff79c6',
+      cyan: '#8be9fd',
+      white: '#f8f8f2',
+      brightBlack: '#6272a4',
+      brightRed: '#ff6e6e',
+      brightGreen: '#69ff94',
+      brightYellow: '#ffffa5',
+      brightBlue: '#d6acff',
+      brightMagenta: '#ff92df',
+      brightCyan: '#a4ffff',
+      brightWhite: '#ffffff',
+    },
+  },
+  'tokyo-night': {
+    name: 'Tokyo Night',
+    css: {
+      '--bg-primary': '#1a1b26',
+      '--bg-secondary': '#16161e',
+      '--bg-surface': '#292e42',
+      '--text-primary': '#c0caf5',
+      '--text-secondary': '#a9b1d6',
+      '--text-muted': '#565f89',
+      '--accent': '#7aa2f7',
+      '--accent-hover': '#7dcfff',
+      '--border': '#3b4261',
+      '--error': '#f7768e',
+      '--success': '#9ece6a',
+    },
+    xterm: {
+      background: '#1a1b26',
+      foreground: '#c0caf5',
+      cursor: '#c0caf5',
+      selectionBackground: '#33467c',
+      black: '#414868',
+      red: '#f7768e',
+      green: '#9ece6a',
+      yellow: '#e0af68',
+      blue: '#7aa2f7',
+      magenta: '#bb9af7',
+      cyan: '#7dcfff',
+      white: '#c0caf5',
+      brightBlack: '#565f89',
+      brightRed: '#f7768e',
+      brightGreen: '#9ece6a',
+      brightYellow: '#e0af68',
+      brightBlue: '#7aa2f7',
+      brightMagenta: '#bb9af7',
+      brightCyan: '#7dcfff',
+      brightWhite: '#c0caf5',
+    },
+  },
+  'solarized-dark': {
+    name: 'Solarized Dark',
+    css: {
+      '--bg-primary': '#002b36',
+      '--bg-secondary': '#073642',
+      '--bg-surface': '#0a4050',
+      '--text-primary': '#839496',
+      '--text-secondary': '#93a1a1',
+      '--text-muted': '#586e75',
+      '--accent': '#268bd2',
+      '--accent-hover': '#2aa198',
+      '--border': '#2e5460',
+      '--error': '#dc322f',
+      '--success': '#859900',
+    },
+    xterm: {
+      background: '#002b36',
+      foreground: '#839496',
+      cursor: '#839496',
+      selectionBackground: '#073642',
+      black: '#073642',
+      red: '#dc322f',
+      green: '#859900',
+      yellow: '#b58900',
+      blue: '#268bd2',
+      magenta: '#d33682',
+      cyan: '#2aa198',
+      white: '#eee8d5',
+      brightBlack: '#586e75',
+      brightRed: '#cb4b16',
+      brightGreen: '#586e75',
+      brightYellow: '#657b83',
+      brightBlue: '#839496',
+      brightMagenta: '#6c71c4',
+      brightCyan: '#93a1a1',
+      brightWhite: '#fdf6e3',
+    },
+  },
+  nord: {
+    name: 'Nord',
+    css: {
+      '--bg-primary': '#2e3440',
+      '--bg-secondary': '#272c36',
+      '--bg-surface': '#3b4252',
+      '--text-primary': '#d8dee9',
+      '--text-secondary': '#e5e9f0',
+      '--text-muted': '#676e7d',
+      '--accent': '#88c0d0',
+      '--accent-hover': '#81a1c1',
+      '--border': '#4c566a',
+      '--error': '#bf616a',
+      '--success': '#a3be8c',
+    },
+    xterm: {
+      background: '#2e3440',
+      foreground: '#d8dee9',
+      cursor: '#d8dee9',
+      selectionBackground: '#434c5e',
+      black: '#3b4252',
+      red: '#bf616a',
+      green: '#a3be8c',
+      yellow: '#ebcb8b',
+      blue: '#81a1c1',
+      magenta: '#b48ead',
+      cyan: '#88c0d0',
+      white: '#e5e9f0',
+      brightBlack: '#4c566a',
+      brightRed: '#bf616a',
+      brightGreen: '#a3be8c',
+      brightYellow: '#ebcb8b',
+      brightBlue: '#81a1c1',
+      brightMagenta: '#b48ead',
+      brightCyan: '#8fbcbb',
+      brightWhite: '#eceff4',
+    },
+  },
+};
+
+const DEFAULT_THEME_ID = 'catppuccin-mocha';
+const STORAGE_KEY = 'ccserver-theme';
+
+export function getThemeIds() {
+  return Object.keys(THEMES);
+}
+
+export function getTheme(id) {
+  return THEMES[id] || THEMES[DEFAULT_THEME_ID];
+}
+
+export function loadThemeId() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved && THEMES[saved]) return saved;
+  } catch { /* ignore */ }
+  return DEFAULT_THEME_ID;
+}
+
+export function saveThemeId(id) {
+  localStorage.setItem(STORAGE_KEY, id);
+}
+
+export function applyThemeCss(id) {
+  const theme = getTheme(id);
+  const root = document.documentElement;
+  for (const [prop, value] of Object.entries(theme.css)) {
+    root.style.setProperty(prop, value);
+  }
+}

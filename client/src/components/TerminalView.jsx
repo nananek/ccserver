@@ -87,7 +87,7 @@ function loadKeyConfig(keyMap) {
 const MAX_RECONNECT_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 30000;
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, attachSessionId }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, attachSessionId, xtermTheme }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -103,33 +103,21 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const onSessionIdRef = useRef(onSessionId);
   useEffect(() => { onSessionIdRef.current = onSessionId; }, [onSessionId]);
 
+  const xtermThemeRef = useRef(xtermTheme);
+  useEffect(() => { xtermThemeRef.current = xtermTheme; }, [xtermTheme]);
+
+  useEffect(() => {
+    if (xtermRef.current) {
+      xtermRef.current.options.theme = xtermTheme;
+    }
+  }, [xtermTheme]);
+
   useEffect(() => {
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 14,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
-      theme: {
-        background: '#1e1e2e',
-        foreground: '#cdd6f4',
-        cursor: '#f5e0dc',
-        selectionBackground: '#585b70',
-        black: '#45475a',
-        red: '#f38ba8',
-        green: '#a6e3a1',
-        yellow: '#f9e2af',
-        blue: '#89b4fa',
-        magenta: '#f5c2e7',
-        cyan: '#94e2d5',
-        white: '#bac2de',
-        brightBlack: '#585b70',
-        brightRed: '#f38ba8',
-        brightGreen: '#a6e3a1',
-        brightYellow: '#f9e2af',
-        brightBlue: '#89b4fa',
-        brightMagenta: '#f5c2e7',
-        brightCyan: '#94e2d5',
-        brightWhite: '#a6adc8',
-      },
+      theme: xtermThemeRef.current,
     });
 
     const fitAddon = new FitAddon();
