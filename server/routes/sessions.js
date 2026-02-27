@@ -2,10 +2,10 @@ import { listSessions, loadSavedSessions, getSession, destroySession, removeSave
 
 export async function sessionsRoute(fastify, opts) {
   fastify.get('/sessions', async (request, reply) => {
-    return {
-      sessions: listSessions(),
-      savedSessions: loadSavedSessions(),
-    };
+    const activeSessions = listSessions();
+    const activeCwds = new Set(activeSessions.map((s) => s.cwd));
+    const savedSessions = loadSavedSessions().filter((s) => !activeCwds.has(s.cwd));
+    return { sessions: activeSessions, savedSessions };
   });
 
   fastify.delete('/sessions/:id', async (request, reply) => {

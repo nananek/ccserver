@@ -3,10 +3,19 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "workspaces": ["server", "client"],
+  "workspaces": [
+    "server",
+    "client"
+  ],
   "scripts": {
     "dev": "npm run dev:server & npm run dev:client",
     "dev:server": "node --watch server/index.js",
     "dev:client": "npm run dev --workspace=client"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
+  },
+  "dependencies": {
+    "terser": "^5.46.0"
   }
 }
