@@ -39,7 +39,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
     command = process.env.SHELL || '/bin/bash';
     args = [];
   } else {
-    command = '/usr/bin/claude';
+    command = 'claude';
     args = claudeSessionId ? ['--resume', claudeSessionId] : [];
   }
 
