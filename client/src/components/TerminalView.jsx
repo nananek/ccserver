@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
+import { getThemeIds, getTheme } from '../themes.js';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -87,7 +88,9 @@ function loadKeyConfig(keyMap) {
 const MAX_RECONNECT_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 30000;
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, attachSessionId, xtermTheme }) {
+const themeIds = getThemeIds();
+
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, attachSessionId, xtermTheme, themeId, onThemeChange }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -100,11 +103,24 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const shellRef = useRef(shell);
   const notifyRef = useRef(notify);
   useEffect(() => { notifyRef.current = notify; }, [notify]);
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const themeMenuRef = useRef(null);
   const onSessionIdRef = useRef(onSessionId);
   useEffect(() => { onSessionIdRef.current = onSessionId; }, [onSessionId]);
 
   const xtermThemeRef = useRef(xtermTheme);
   useEffect(() => { xtermThemeRef.current = xtermTheme; }, [xtermTheme]);
+
+  useEffect(() => {
+    if (!themeMenuOpen) return;
+    const handleClick = (e) => {
+      if (themeMenuRef.current && !themeMenuRef.current.contains(e.target)) {
+        setThemeMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [themeMenuOpen]);
 
   useEffect(() => {
     if (xtermRef.current) {
@@ -113,11 +129,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   }, [xtermTheme]);
 
   useEffect(() => {
+    const isMobile = 'ontouchstart' in window;
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 14,
+      fontSize: isMobile ? 12 : 14,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
       theme: xtermThemeRef.current,
+      scrollSensitivity: isMobile ? 3 : 1,
+      fastScrollSensitivity: isMobile ? 10 : 5,
     });
 
     const fitAddon = new FitAddon();
@@ -156,6 +175,36 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
       term.focus();
     };
     containerEl.addEventListener('click', handleContainerClick);
+
+    // Mobile touch scroll - override xterm's broken iOS touch handling
+    let touchStartY = 0;
+    let touchScrolling = false;
+    const handleTouchStart = (e) => {
+      if (e.touches.length === 1) {
+        touchStartY = e.touches[0].clientY;
+        touchScrolling = false;
+      }
+    };
+    const handleTouchMove = (e) => {
+      if (e.touches.length !== 1) return;
+      const dy = touchStartY - e.touches[0].clientY;
+      const lines = Math.trunc(dy / 20);
+      if (lines !== 0) {
+        term.scrollLines(lines);
+        touchStartY = e.touches[0].clientY;
+        touchScrolling = true;
+      }
+    };
+    const handleTouchEnd = (e) => {
+      if (touchScrolling) {
+        e.preventDefault();
+      }
+    };
+    if (isMobile) {
+      containerEl.addEventListener('touchstart', handleTouchStart, { passive: true });
+      containerEl.addEventListener('touchmove', handleTouchMove, { passive: true });
+      containerEl.addEventListener('touchend', handleTouchEnd);
+    }
 
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -348,6 +397,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
       containerEl.removeEventListener('click', handleContainerClick);
+      if (isMobile) {
+        containerEl.removeEventListener('touchstart', handleTouchStart);
+        containerEl.removeEventListener('touchmove', handleTouchMove);
+        containerEl.removeEventListener('touchend', handleTouchEnd);
+      }
       inputDisposable.dispose();
       binaryDisposable.dispose();
       wsRef.current?.close();
@@ -485,24 +539,61 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
     <div className="terminal-view">
       <div className="terminal-header">
         <span className="terminal-title">{shell ? 'Terminal' : 'Claude Code'} &mdash; {cwd}</span>
-        <button
-          className={`btn notify-toggle${notifyEnabled ? ' active' : ''}`}
-          onClick={onToggleNotify}
-          title={
-            notifyPermission === 'denied'
-              ? 'Notifications blocked in browser settings'
-              : notifyPermission === 'unsupported'
-                ? 'Notifications not supported'
-                : notifyEnabled
-                  ? 'Disable notifications'
-                  : 'Enable notifications'
-          }
-          disabled={notifyPermission === 'denied' || notifyPermission === 'unsupported'}
-        >
-          {notifyEnabled ? '\uD83D\uDD14' : '\uD83D\uDD15'}
-        </button>
+        <div className="header-actions">
+          <div className="theme-picker" ref={themeMenuRef}>
+            <button
+              className="btn theme-btn"
+              onClick={() => setThemeMenuOpen((v) => !v)}
+              title="Theme"
+            >
+              <svg className="header-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="4.5" r="1" fill="currentColor" stroke="none"/><circle cx="5" cy="6.5" r="1" fill="currentColor" stroke="none"/><circle cx="11" cy="6.5" r="1" fill="currentColor" stroke="none"/><circle cx="6" cy="10" r="1" fill="currentColor" stroke="none"/></svg>
+            </button>
+            {themeMenuOpen && (
+              <div className="theme-menu">
+                {themeIds.map((id) => (
+                  <div
+                    key={id}
+                    className={`theme-menu-item${id === themeId ? ' active' : ''}`}
+                    onClick={() => {
+                      onThemeChange(id);
+                      setThemeMenuOpen(false);
+                    }}
+                  >
+                    {getTheme(id).name}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            className={`btn notify-toggle${notifyEnabled ? ' active' : ''}`}
+            onClick={onToggleNotify}
+            title={
+              notifyPermission === 'denied'
+                ? 'Notifications blocked in browser settings'
+                : notifyPermission === 'unsupported'
+                  ? 'Notifications not supported'
+                  : notifyEnabled
+                    ? 'Disable notifications'
+                    : 'Enable notifications'
+            }
+            disabled={notifyPermission === 'denied' || notifyPermission === 'unsupported'}
+          >
+            <svg className="header-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 12.5a2 2 0 004 0"/><path d="M4.5 6.5a3.5 3.5 0 017 0c0 2 .5 3 1.5 4.5H3C4 9.5 4.5 8.5 4.5 6.5z"/>{!notifyEnabled && <line x1="2" y1="2" x2="14" y2="14" strokeWidth="2"/>}</svg>
+          </button>
+        </div>
       </div>
       <div className="terminal-container" ref={terminalRef} />
+      <div className="terminal-scroll-controls">
+        <button className="scroll-btn" onClick={() => xtermRef.current?.scrollLines(-10)} title="Scroll up">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 10l4-4 4 4"/></svg>
+        </button>
+        <button className="scroll-btn" onClick={() => xtermRef.current?.scrollToTop()} title="Top">Top</button>
+        <button className="scroll-btn" onClick={() => xtermRef.current?.scrollToBottom()} title="Bottom">Btm</button>
+        <button className="scroll-btn" onClick={() => xtermRef.current?.scrollLines(10)} title="Scroll down">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6l4 4 4-4"/></svg>
+        </button>
+      </div>
       <div className="terminal-special-keys">
         {activeKeys.map((key) => (
           <button

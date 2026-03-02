@@ -1,9 +1,9 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import TerminalView from './components/TerminalView.jsx';
 import SystemMonitor from './components/SystemMonitor.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
-import { getThemeIds, getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
+import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
 
 let tabIdCounter = 0;
 
@@ -16,8 +16,6 @@ export default function App() {
   const [lastDir, setLastDir] = useState(null);
   const [resumePrompt, setResumePrompt] = useState(null);
   const [themeId, setThemeId] = useState(loadThemeId);
-  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
-  const themeMenuRef = useRef(null);
   const pendingOpenRef = useRef(null);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
 
@@ -25,19 +23,6 @@ export default function App() {
     applyThemeCss(themeId);
     saveThemeId(themeId);
   }, [themeId]);
-
-  useEffect(() => {
-    if (!themeMenuOpen) return;
-    const handleClick = (e) => {
-      if (themeMenuRef.current && !themeMenuRef.current.contains(e.target)) {
-        setThemeMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [themeMenuOpen]);
-
-  const themeIds = useMemo(() => getThemeIds(), []);
 
   const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
@@ -127,7 +112,9 @@ export default function App() {
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
-              {tab.type === 'browser' ? '\u{1F4C1} ' : tab.type === 'monitor' ? '\u{1F4CA} ' : ''}{tab.label}
+              {tab.type === 'browser' && <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3.5A1.5 1.5 0 013.5 2h3l1.5 2h4.5A1.5 1.5 0 0114 5.5v7a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12.5z"/></svg>}
+              {tab.type === 'monitor' && <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="2" width="12" height="10" rx="1.5"/><path d="M5 14h6M8 12v2M4.5 8.5V9M6.5 6.5V9M8.5 5V9M10.5 7V9"/></svg>}
+              {tab.label}
             </span>
             {tab.type !== 'browser' && tab.type !== 'monitor' && (
               <button
@@ -143,31 +130,6 @@ export default function App() {
             )}
           </div>
         ))}
-        <div className="theme-picker" ref={themeMenuRef}>
-          <button
-            className="btn theme-btn"
-            onClick={() => setThemeMenuOpen((v) => !v)}
-            title="Theme"
-          >
-            &#x1F3A8;
-          </button>
-          {themeMenuOpen && (
-            <div className="theme-menu">
-              {themeIds.map((id) => (
-                <div
-                  key={id}
-                  className={`theme-menu-item${id === themeId ? ' active' : ''}`}
-                  onClick={() => {
-                    setThemeId(id);
-                    setThemeMenuOpen(false);
-                  }}
-                >
-                  {getTheme(id).name}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
@@ -196,6 +158,8 @@ export default function App() {
                 onSessionId={(sid) => handleTabSessionId(tab.id, sid)}
                 attachSessionId={tab.attachSessionId}
                 xtermTheme={getTheme(themeId).xterm}
+                themeId={themeId}
+                onThemeChange={setThemeId}
               />
             </div>
           ))}
