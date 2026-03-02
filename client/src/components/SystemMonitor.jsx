@@ -57,7 +57,14 @@ function TempItem({ label, value }) {
 export default function SystemMonitor({ visible }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
-  const [interval, setIntervalMs] = useState(2000);
+  const [interval, setIntervalMs] = useState(() => {
+    const saved = localStorage.getItem('monitor-interval');
+    return saved ? Number(saved) : 2000;
+  });
+  const [showIpmi, setShowIpmi] = useState(() => {
+    const saved = localStorage.getItem('monitor-show-ipmi');
+    return saved !== null ? saved === 'true' : true;
+  });
   const timerRef = useRef(null);
 
   const fetchStats = useCallback(async () => {
@@ -114,13 +121,28 @@ export default function SystemMonitor({ visible }) {
           <select
             className="monitor-interval-select"
             value={interval}
-            onChange={(e) => setIntervalMs(Number(e.target.value))}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setIntervalMs(v);
+              localStorage.setItem('monitor-interval', v);
+            }}
           >
             <option value={1000}>1s</option>
             <option value={2000}>2s</option>
             <option value={5000}>5s</option>
             <option value={10000}>10s</option>
           </select>
+          <label className="monitor-toggle">
+            <input
+              type="checkbox"
+              checked={showIpmi}
+              onChange={(e) => {
+                setShowIpmi(e.target.checked);
+                localStorage.setItem('monitor-show-ipmi', e.target.checked);
+              }}
+            />
+            IPMI
+          </label>
         </div>
       </div>
 
@@ -229,7 +251,7 @@ export default function SystemMonitor({ visible }) {
         )}
 
         {/* IPMI Power Section */}
-        {data.ipmi && data.ipmi.power.length > 0 && (
+        {showIpmi && data.ipmi && data.ipmi.power.length > 0 && (
           <div className="monitor-card">
             <div className="monitor-card-title">Power (IPMI)</div>
             {data.ipmi.power.map((p) => (
@@ -242,7 +264,7 @@ export default function SystemMonitor({ visible }) {
         )}
 
         {/* IPMI Voltage Section */}
-        {data.ipmi && data.ipmi.voltage.length > 0 && (
+        {showIpmi && data.ipmi && data.ipmi.voltage.length > 0 && (
           <div className="monitor-card">
             <div className="monitor-card-title">Voltage (IPMI)</div>
             <div className="monitor-voltage-grid">
@@ -257,7 +279,7 @@ export default function SystemMonitor({ visible }) {
         )}
 
         {/* IPMI Fan Section */}
-        {data.ipmi && data.ipmi.fans.length > 0 && (
+        {showIpmi && data.ipmi && data.ipmi.fans.length > 0 && (
           <div className="monitor-card">
             <div className="monitor-card-title">Fans (IPMI)</div>
             {data.ipmi.fans.map((f) => (
@@ -270,7 +292,7 @@ export default function SystemMonitor({ visible }) {
         )}
 
         {/* IPMI Temperature Section */}
-        {data.ipmi && data.ipmi.temps.length > 0 && (
+        {showIpmi && data.ipmi && data.ipmi.temps.length > 0 && (
           <div className="monitor-card">
             <div className="monitor-card-title">Temperatures (IPMI)</div>
             {data.ipmi.temps.map((t) => (
