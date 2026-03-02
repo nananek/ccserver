@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import TerminalView from './components/TerminalView.jsx';
+import SystemMonitor from './components/SystemMonitor.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
 import { getThemeIds, getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
 
@@ -9,6 +10,7 @@ let tabIdCounter = 0;
 export default function App() {
   const [tabs, setTabs] = useState([
     { id: 'browser', type: 'browser', label: 'Files' },
+    { id: 'monitor', type: 'monitor', label: 'Monitor' },
   ]);
   const [activeTabId, setActiveTabId] = useState('browser');
   const [lastDir, setLastDir] = useState(null);
@@ -110,9 +112,9 @@ export default function App() {
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
-              {tab.type === 'browser' ? '\u{1F4C1} ' : ''}{tab.label}
+              {tab.type === 'browser' ? '\u{1F4C1} ' : tab.type === 'monitor' ? '\u{1F4CA} ' : ''}{tab.label}
             </span>
-            {tab.type !== 'browser' && (
+            {tab.type !== 'browser' && tab.type !== 'monitor' && (
               <button
                 className="tab-close"
                 onClick={(e) => {
@@ -140,6 +142,9 @@ export default function App() {
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onSessionClick={handleSessionClick} initialPath={lastDir} />
+        </div>
+        <div style={{ display: activeTabId === 'monitor' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
+          <SystemMonitor visible={activeTabId === 'monitor'} />
         </div>
         {tabs
           .filter((t) => t.type === 'terminal')

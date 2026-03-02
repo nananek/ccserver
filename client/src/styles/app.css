@@ -804,6 +804,216 @@ body {
   color: var(--accent);
 }
 
+/* System Monitor */
+.system-monitor {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.monitor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.monitor-header h2 {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.monitor-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.monitor-interval-select {
+  padding: 2px 6px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+}
+
+.monitor-interval-select:hover {
+  border-color: var(--accent);
+}
+
+.monitor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 12px;
+  flex: 1;
+  align-content: start;
+}
+
+.monitor-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.monitor-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.monitor-card-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  margin-top: -4px;
+}
+
+/* Bar chart */
+.monitor-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.monitor-bar-label {
+  min-width: 80px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  display: flex;
+  flex-direction: column;
+}
+
+.monitor-bar-sublabel {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.monitor-bar-track {
+  flex: 1;
+  height: 14px;
+  background: var(--bg-surface);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.monitor-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.monitor-bar-value {
+  min-width: 70px;
+  text-align: right;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--text-primary);
+}
+
+.monitor-core-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+/* Memory detail */
+.monitor-mem-detail,
+.monitor-gpu-detail {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* Temperature */
+.monitor-temp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.monitor-temp-group-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.monitor-temp-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 8px;
+  background: var(--bg-surface);
+  border-radius: 4px;
+}
+
+.monitor-temp-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.monitor-temp-value {
+  font-size: 14px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* IPMI Sensors */
+.monitor-ipmi-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 8px;
+  background: var(--bg-surface);
+  border-radius: 4px;
+}
+
+.monitor-ipmi-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.monitor-ipmi-value {
+  font-size: 13px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--text-primary);
+}
+
+.monitor-power-value {
+  font-size: 16px;
+  color: var(--accent);
+}
+
+.monitor-voltage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 4px;
+}
+
 /* Mobile-friendly adjustments */
 @media (max-width: 600px) {
   .directory-browser {
@@ -853,5 +1063,22 @@ body {
 
   .tab-label {
     max-width: 120px;
+  }
+
+  .system-monitor {
+    padding: 10px;
+  }
+
+  .monitor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .monitor-bar-label {
+    min-width: 60px;
+  }
+
+  .monitor-bar-value {
+    min-width: 50px;
+    font-size: 11px;
   }
 }

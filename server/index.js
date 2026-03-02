@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { dirsRoute } from './routes/dirs.js';
 import { sessionsRoute } from './routes/sessions.js';
 import { filesRoute } from './routes/files.js';
+import { systemRoute } from './routes/system.js';
 import { terminalWs } from './ws/terminal.js';
 import { gracefulShutdown } from './ws/sessionManager.js';
 
@@ -18,6 +19,7 @@ await fastify.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } });
 await fastify.register(dirsRoute, { prefix: '/api' });
 await fastify.register(sessionsRoute, { prefix: '/api' });
 await fastify.register(filesRoute, { prefix: '/api' });
+await fastify.register(systemRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
 
 if (process.env.NODE_ENV === 'production') {
