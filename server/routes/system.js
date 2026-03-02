@@ -144,40 +144,60 @@ async function getGpuInfo() {
 
 const enableIpmi = process.env.ENABLE_IPMI === '1' || process.env.ENABLE_IPMI === 'true';
 
-async function getIpmiSensors() {
-  if (!enableIpmi) return null;
-  try {
-    const { stdout } = await execFileAsync('ipmitool', ['sensor', 'list'], { timeout: 5000 });
-    const lines = stdout.trim().split('\n');
-    const power = [];
-    const voltage = [];
-    const fans = [];
-    const temps = [];
+let ipmiCache = null;
+let ipmiFetching = false;
 
-    for (const line of lines) {
-      const cols = line.split('|').map((s) => s.trim());
-      if (cols.length < 3) continue;
-      const name = cols[0];
-      const reading = parseFloat(cols[1]);
-      if (isNaN(reading)) continue;
-      const unit = cols[2].toLowerCase();
-      const status = cols[3]?.trim();
-      if (status !== 'ok') continue;
+function parseIpmiOutput(stdout) {
+  const lines = stdout.trim().split('\n');
+  const power = [];
+  const voltage = [];
+  const fans = [];
+  const temps = [];
 
-      if (unit === 'watts') {
-        power.push({ label: name, value: reading });
-      } else if (unit === 'volts') {
-        voltage.push({ label: name, value: reading });
-      } else if (unit === 'rpm') {
-        fans.push({ label: name, value: reading });
-      } else if (unit === 'degrees c') {
-        temps.push({ label: name, value: reading });
-      }
+  for (const line of lines) {
+    const cols = line.split('|').map((s) => s.trim());
+    if (cols.length < 3) continue;
+    const name = cols[0];
+    const reading = parseFloat(cols[1]);
+    if (isNaN(reading)) continue;
+    const unit = cols[2].toLowerCase();
+    const status = cols[3]?.trim();
+    if (status !== 'ok') continue;
+
+    if (unit === 'watts') {
+      power.push({ label: name, value: reading });
+    } else if (unit === 'volts') {
+      voltage.push({ label: name, value: reading });
+    } else if (unit === 'rpm') {
+      fans.push({ label: name, value: reading });
+    } else if (unit === 'degrees c') {
+      temps.push({ label: name, value: reading });
     }
-    return { power, voltage, fans, temps };
-  } catch {
-    return null;
   }
+  return { power, voltage, fans, temps };
+}
+
+async function refreshIpmiCache() {
+  if (ipmiFetching) return;
+  ipmiFetching = true;
+  try {
+    const { stdout } = await execFileAsync('ipmitool', ['sensor', 'list'], { timeout: 10000 });
+    ipmiCache = parseIpmiOutput(stdout);
+  } catch {
+    // keep previous cache on failure
+  } finally {
+    ipmiFetching = false;
+  }
+}
+
+if (enableIpmi) {
+  refreshIpmiCache();
+  setInterval(refreshIpmiCache, 10000);
+}
+
+function getIpmiSensors() {
+  if (!enableIpmi) return null;
+  return ipmiCache;
 }
 
 async function getLoadAndUptime() {
@@ -205,13 +225,13 @@ const cpuModel = getCpuModel();
 
 export async function systemRoute(fastify, opts) {
   fastify.get('/system-stats', async () => {
-    const [cpuUsage, memory, gpu, loadUptime, ipmi] = await Promise.all([
+    const [cpuUsage, memory, gpu, loadUptime] = await Promise.all([
       getCpuUsage(),
       getMemory(),
       getGpuInfo(),
       getLoadAndUptime(),
-      getIpmiSensors(),
     ]);
+    const ipmi = getIpmiSensors();
     const temperatures = getTemperatures();
 
     return {
