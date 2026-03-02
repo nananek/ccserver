@@ -146,6 +146,10 @@ const enableIpmi = process.env.ENABLE_IPMI === '1' || process.env.ENABLE_IPMI ==
 
 let ipmiCache = null;
 let ipmiFetching = false;
+let ipmiTimer = null;
+let lastIpmiRequest = 0;
+const IPMI_POLL_INTERVAL = 60000;
+const IPMI_IDLE_TIMEOUT = 120000;
 
 function parseIpmiOutput(stdout) {
   const lines = stdout.trim().split('\n');
@@ -179,6 +183,11 @@ function parseIpmiOutput(stdout) {
 
 async function refreshIpmiCache() {
   if (ipmiFetching) return;
+  if (Date.now() - lastIpmiRequest > IPMI_IDLE_TIMEOUT) {
+    clearInterval(ipmiTimer);
+    ipmiTimer = null;
+    return;
+  }
   ipmiFetching = true;
   try {
     const { stdout } = await execFileAsync('ipmitool', ['sensor', 'list'], { timeout: 10000 });
@@ -190,13 +199,16 @@ async function refreshIpmiCache() {
   }
 }
 
-if (enableIpmi) {
+function startIpmiPolling() {
+  if (ipmiTimer) return;
   refreshIpmiCache();
-  setInterval(refreshIpmiCache, 10000);
+  ipmiTimer = setInterval(refreshIpmiCache, IPMI_POLL_INTERVAL);
 }
 
-function getIpmiSensors() {
+function requestIpmi() {
   if (!enableIpmi) return null;
+  lastIpmiRequest = Date.now();
+  startIpmiPolling();
   return ipmiCache;
 }
 
@@ -224,14 +236,15 @@ function getCpuModel() {
 const cpuModel = getCpuModel();
 
 export async function systemRoute(fastify, opts) {
-  fastify.get('/system-stats', async () => {
+  fastify.get('/system-stats', async (request) => {
     const [cpuUsage, memory, gpu, loadUptime] = await Promise.all([
       getCpuUsage(),
       getMemory(),
       getGpuInfo(),
       getLoadAndUptime(),
     ]);
-    const ipmi = getIpmiSensors();
+    const wantIpmi = request.query.ipmi === '1';
+    const ipmi = wantIpmi ? requestIpmi() : null;
     const temperatures = getTemperatures();
 
     return {

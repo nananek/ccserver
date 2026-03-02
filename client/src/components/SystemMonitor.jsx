@@ -66,10 +66,13 @@ export default function SystemMonitor({ visible }) {
     return saved !== null ? saved === 'true' : true;
   });
   const timerRef = useRef(null);
+  const showIpmiRef = useRef(showIpmi);
+  useEffect(() => { showIpmiRef.current = showIpmi; }, [showIpmi]);
 
   const fetchStats = useCallback(async () => {
     try {
-      const res = await fetch('/api/system-stats');
+      const params = showIpmiRef.current ? '?ipmi=1' : '';
+      const res = await fetch(`/api/system-stats${params}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       setData(json);
