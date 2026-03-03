@@ -552,6 +552,19 @@ body {
   overflow: hidden;
 }
 
+/* Keyboard open - hide chrome to maximize terminal space */
+.terminal-view.keyboard-open .terminal-header {
+  display: none;
+}
+
+.terminal-view.keyboard-open .terminal-special-keys {
+  display: none;
+}
+
+.terminal-view.keyboard-open .key-config-panel {
+  display: none;
+}
+
 /* Mobile Input Bar */
 .terminal-input-bar {
   display: flex;
@@ -561,6 +574,20 @@ body {
   background: var(--bg-secondary);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.terminal-view.keyboard-open .terminal-input-bar {
+  padding: 4px 8px;
+  gap: 6px;
+}
+
+.terminal-view.keyboard-open .terminal-input {
+  padding: 6px 10px;
+  font-size: 16px;
+}
+
+.terminal-view.keyboard-open .terminal-send-btn {
+  padding: 6px 14px;
 }
 
 .terminal-input {

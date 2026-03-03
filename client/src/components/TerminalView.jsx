@@ -105,6 +105,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   useEffect(() => { notifyRef.current = notify; }, [notify]);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themeMenuRef = useRef(null);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const onSessionIdRef = useRef(onSessionId);
   useEffect(() => { onSessionIdRef.current = onSessionId; }, [onSessionId]);
 
@@ -127,6 +128,19 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
       xtermRef.current.options.theme = xtermTheme;
     }
   }, [xtermTheme]);
+
+  // Detect iOS keyboard open/close via visualViewport
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const threshold = 100;
+    const handleResize = () => {
+      const isKb = window.innerHeight - vv.height > threshold;
+      setKeyboardOpen(isKb);
+    };
+    vv.addEventListener('resize', handleResize);
+    return () => vv.removeEventListener('resize', handleResize);
+  }, []);
 
   useEffect(() => {
     const isMobile = 'ontouchstart' in window;
@@ -536,7 +550,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   }, [sendInput]);
 
   return (
-    <div className="terminal-view">
+    <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}`}>
       <div className="terminal-header">
         <span className="terminal-title">{shell ? 'Terminal' : 'Claude Code'} &mdash; {cwd}</span>
         <div className="header-actions">
@@ -584,16 +598,18 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
         </div>
       </div>
       <div className="terminal-container" ref={terminalRef} />
-      <div className="terminal-scroll-controls">
-        <button className="scroll-btn" onClick={() => xtermRef.current?.scrollLines(-10)} title="Scroll up">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 10l4-4 4 4"/></svg>
-        </button>
-        <button className="scroll-btn" onClick={() => xtermRef.current?.scrollToTop()} title="Top">Top</button>
-        <button className="scroll-btn" onClick={() => xtermRef.current?.scrollToBottom()} title="Bottom">Btm</button>
-        <button className="scroll-btn" onClick={() => xtermRef.current?.scrollLines(10)} title="Scroll down">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6l4 4 4-4"/></svg>
-        </button>
-      </div>
+      {!keyboardOpen && (
+        <div className="terminal-scroll-controls">
+          <button className="scroll-btn" onClick={() => xtermRef.current?.scrollLines(-10)} title="Scroll up">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 10l4-4 4 4"/></svg>
+          </button>
+          <button className="scroll-btn" onClick={() => xtermRef.current?.scrollToTop()} title="Top">Top</button>
+          <button className="scroll-btn" onClick={() => xtermRef.current?.scrollToBottom()} title="Bottom">Btm</button>
+          <button className="scroll-btn" onClick={() => xtermRef.current?.scrollLines(10)} title="Scroll down">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6l4 4 4-4"/></svg>
+          </button>
+        </div>
+      )}
       <div className="terminal-special-keys">
         {activeKeys.map((key) => (
           <button
