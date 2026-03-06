@@ -526,7 +526,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const handleInputSend = useCallback(() => {
     if (composingRef.current) return;
     if (!inputText) return;
-    sendInput(inputText + '\r');
+    sendInput(inputText);
     setInputText('');
     setModifiers({ ctrl: false, shift: false, alt: false });
   }, [inputText, sendInput]);
@@ -535,10 +535,17 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
     (e) => {
       if (e.key === 'Enter' && !composingRef.current) {
         e.preventDefault();
-        handleInputSend();
+        if (inputText.endsWith('\\')) {
+          setInputText((prev) => prev.slice(0, -1) + '\n');
+        } else {
+          if (!inputText) return;
+          sendInput(inputText + '\r');
+          setInputText('');
+          setModifiers({ ctrl: false, shift: false, alt: false });
+        }
       }
     },
-    [handleInputSend]
+    [inputText, sendInput]
   );
 
   const handleSpecialKey = useCallback((key) => {
@@ -699,8 +706,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
         </div>
       )}
       <div className="terminal-input-bar">
-        <input
-          type="text"
+        <textarea
           className="terminal-input"
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
@@ -711,11 +717,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
           onCompositionEnd={() => {
             composingRef.current = false;
           }}
-          placeholder="Input text here..."
+          placeholder="Input text here... (\ + Enter for newline)"
           autoComplete="off"
           autoCorrect="off"
           autoCapitalize="off"
           spellCheck={false}
+          rows={inputText.includes('\n') ? Math.min(inputText.split('\n').length, 5) : 1}
         />
         <button className="btn btn-primary terminal-send-btn" onClick={handleInputSend}>
           Send

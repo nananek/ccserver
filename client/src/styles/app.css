@@ -598,8 +598,10 @@ body {
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 16px;
-  font-family: inherit;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
   outline: none;
+  resize: none;
+  line-height: 1.4;
 }
 
 .terminal-input:focus {
