@@ -117,6 +117,15 @@ export async function terminalWs(fastify, opts) {
             session.cols = msg.cols;
             session.rows = msg.rows;
           }
+
+          // Send auto-yes state on attach
+          if (!session.shell) {
+            socket.send(JSON.stringify({
+              type: 'auto_yes_state',
+              enabled: session.autoYes,
+              log: session.autoYesLog,
+            }));
+          }
           break;
         }
 
@@ -147,6 +156,35 @@ export async function terminalWs(fastify, opts) {
               session.ptyProcess.resize(msg.cols, msg.rows);
               session.cols = msg.cols;
               session.rows = msg.rows;
+            }
+          }
+          break;
+        }
+
+        case 'set_auto_yes': {
+          if (currentSessionId) {
+            const session = getSession(currentSessionId);
+            if (session && !session.shell) {
+              session.autoYes = !!msg.enabled;
+              socket.send(JSON.stringify({
+                type: 'auto_yes_state',
+                enabled: session.autoYes,
+                log: session.autoYesLog,
+              }));
+            }
+          }
+          break;
+        }
+
+        case 'get_auto_yes': {
+          if (currentSessionId) {
+            const session = getSession(currentSessionId);
+            if (session) {
+              socket.send(JSON.stringify({
+                type: 'auto_yes_state',
+                enabled: session.autoYes,
+                log: session.autoYesLog,
+              }));
             }
           }
           break;

@@ -911,6 +911,51 @@ body {
   background: rgba(243, 139, 168, 0.1);
 }
 
+/* Auto-yes log */
+.auto-yes-log {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  max-height: 150px;
+  display: flex;
+  flex-direction: column;
+}
+
+.auto-yes-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--error);
+}
+
+.auto-yes-log-list {
+  overflow-y: auto;
+  padding: 0 12px 6px;
+}
+
+.auto-yes-log-entry {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.auto-yes-log-time {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.auto-yes-log-prompt {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Resume Dialog */
 .resume-overlay {
   position: fixed;

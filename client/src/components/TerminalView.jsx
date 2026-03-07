@@ -102,8 +102,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const claudeResumeIdRef = useRef(claudeSessionId);
   const shellRef = useRef(shell);
   const [autoYes, setAutoYes] = useState(false);
-  const autoYesRef = useRef(false);
-  useEffect(() => { autoYesRef.current = autoYes; }, [autoYes]);
+  const [autoYesLog, setAutoYesLog] = useState([]);
+  const [showAutoYesLog, setShowAutoYesLog] = useState(false);
   const notifyRef = useRef(notify);
   useEffect(() => { notifyRef.current = notify; }, [notify]);
   const onAttentionRef = useRef(onAttention);
@@ -282,14 +282,13 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
             break;
           case 'output':
             term.write(msg.data);
-            if (autoYesRef.current && !shellRef.current) {
-              const stripped = msg.data.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
-              if (/\(y(?:es)?\/n(?:o)?\)\s*$/i.test(stripped) || /\(Y\/n\)\s*$/.test(stripped)) {
-                setTimeout(() => {
-                  ws.send(JSON.stringify({ type: 'input', data: 'y\r' }));
-                }, 300);
-              }
-            }
+            break;
+          case 'auto_yes':
+            setAutoYesLog((prev) => [...prev, msg.entry]);
+            break;
+          case 'auto_yes_state':
+            setAutoYes(msg.enabled);
+            setAutoYesLog(msg.log || []);
             break;
           case 'replay':
             term.write(msg.data);
@@ -613,13 +612,29 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
             )}
           </div>
           {!shell && (
-            <button
-              className={`btn auto-yes-toggle${autoYes ? ' active' : ''}`}
-              onClick={() => setAutoYes((v) => !v)}
-              title={autoYes ? 'Auto-yes enabled (click to disable)' : 'Auto-yes disabled (click to enable)'}
-            >
-              Auto-Y
-            </button>
+            <>
+              <button
+                className={`btn auto-yes-toggle${autoYes ? ' active' : ''}`}
+                onClick={() => {
+                  const ws = wsRef.current;
+                  if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'set_auto_yes', enabled: !autoYes }));
+                  }
+                }}
+                title={autoYes ? 'Auto-yes enabled (click to disable)' : 'Auto-yes disabled (click to enable)'}
+              >
+                Auto-Y
+              </button>
+              {autoYesLog.length > 0 && (
+                <button
+                  className={`btn auto-yes-toggle${showAutoYesLog ? ' active' : ''}`}
+                  onClick={() => setShowAutoYesLog((v) => !v)}
+                  title="Auto-yes log"
+                >
+                  {autoYesLog.length}
+                </button>
+              )}
+            </>
           )}
           <button
             className={`btn notify-toggle${notifyEnabled ? ' active' : ''}`}
@@ -639,6 +654,22 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
           </button>
         </div>
       </div>
+      {showAutoYesLog && autoYesLog.length > 0 && (
+        <div className="auto-yes-log">
+          <div className="auto-yes-log-header">
+            <span>Auto-Yes Log ({autoYesLog.length})</span>
+            <button className="btn btn-secondary btn-sm" onClick={() => setShowAutoYesLog(false)}>&#10005;</button>
+          </div>
+          <div className="auto-yes-log-list">
+            {autoYesLog.map((entry, i) => (
+              <div key={i} className="auto-yes-log-entry">
+                <span className="auto-yes-log-time">{new Date(entry.time).toLocaleTimeString()}</span>
+                <span className="auto-yes-log-prompt">{entry.prompt}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="terminal-container" ref={terminalRef} />
       {!keyboardOpen && (
         <div className="terminal-scroll-controls">

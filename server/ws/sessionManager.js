@@ -73,6 +73,9 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
     claudeSessionId: null,
     idleTimer: null,
     idleNotified: false,
+    autoYes: false,
+    autoYesLog: [],
+    autoYesPending: null,
   };
 
   ptyProcess.onData((data) => {
@@ -108,6 +111,26 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
           }
         }
       }, IDLE_TIMEOUT_MS);
+
+      // Auto-yes detection
+      if (session.autoYes) {
+        const stripped = data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+        if (/\(y(?:es)?\/n(?:o)?\)\s*$/i.test(stripped) || /\(Y\/n\)\s*$/.test(stripped)) {
+          if (session.autoYesPending) clearTimeout(session.autoYesPending);
+          session.autoYesPending = setTimeout(() => {
+            session.autoYesPending = null;
+            if (session.exited || !session.autoYes) return;
+            const promptLine = stripped.trim().split('\n').pop().trim();
+            const entry = { time: Date.now(), prompt: promptLine };
+            session.autoYesLog.push(entry);
+            if (session.autoYesLog.length > 100) session.autoYesLog.shift();
+            session.ptyProcess.write('y\r');
+            if (session.socket && session.socket.readyState === 1) {
+              session.socket.send(JSON.stringify({ type: 'auto_yes', entry }));
+            }
+          }, 300);
+        }
+      }
     }
   });
 
