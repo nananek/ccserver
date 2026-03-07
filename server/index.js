@@ -14,6 +14,22 @@ import { gracefulShutdown } from './ws/sessionManager.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
 
+// Optional token auth (Jupyter-style): set CCSERVER_TOKEN to enable
+const AUTH_TOKEN = process.env.CCSERVER_TOKEN;
+if (AUTH_TOKEN) {
+  fastify.addHook('onRequest', async (request, reply) => {
+    // Allow static assets through
+    if (!request.url.startsWith('/api') && !request.url.startsWith('/ws')) return;
+    const token =
+      request.query.token ||
+      request.headers.authorization?.replace(/^Bearer\s+/i, '');
+    if (token !== AUTH_TOKEN) {
+      reply.code(401).send({ error: 'Invalid or missing token' });
+    }
+  });
+  fastify.log.info('Token authentication enabled');
+}
+
 await fastify.register(websocket);
 await fastify.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } });
 await fastify.register(dirsRoute, { prefix: '/api' });

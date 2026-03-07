@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { authFetch } from '../auth.js';
 
 function formatUptime(seconds) {
   const d = Math.floor(seconds / 86400);
@@ -72,7 +73,7 @@ export default function SystemMonitor({ visible }) {
   const fetchStats = useCallback(async () => {
     try {
       const params = showIpmiRef.current ? '?ipmi=1' : '';
-      const res = await fetch(`/api/system-stats${params}`);
+      const res = await authFetch(`/api/system-stats${params}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       setData(json);

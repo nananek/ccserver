@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { getThemeIds, getTheme } from '../themes.js';
+import { authWsUrl } from '../auth.js';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -230,7 +231,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(authWsUrl(wsUrl));
       wsRef.current = ws;
 
       ws.onopen = () => {

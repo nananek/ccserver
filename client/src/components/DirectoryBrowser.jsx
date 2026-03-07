@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { authFetch, getToken } from '../auth.js';
 
 const HOME_DIR = '/home/kts_sz';
 
@@ -34,7 +35,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
     try {
       const params = new URLSearchParams({ path });
       if (showHidden) params.set('showHidden', '1');
-      const res = await fetch(`/api/dirs?${params}`);
+      const res = await authFetch(`/api/dirs?${params}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${res.status}`);
@@ -66,7 +67,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   const handleCreateFolder = useCallback(async () => {
     if (!newFolderName.trim()) return;
     try {
-      const res = await fetch('/api/dirs', {
+      const res = await authFetch('/api/dirs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ parent: currentPath, name: newFolderName.trim() }),
@@ -86,7 +87,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
 
   const fetchSessions = useCallback(async () => {
     try {
-      const res = await fetch('/api/sessions');
+      const res = await authFetch('/api/sessions');
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions);
@@ -116,7 +117,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   const handleDeleteSession = useCallback(async (session) => {
     if (!window.confirm(`セッションを終了しますか?\n${session.cwd}`)) return;
     try {
-      const res = await fetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
+      const res = await authFetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${res.status}`);
@@ -130,7 +131,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   const handleDeleteSavedSession = useCallback(async (index) => {
     if (!window.confirm('保存済みセッションを削除しますか?')) return;
     try {
-      const res = await fetch(`/api/sessions/saved/${index}`, { method: 'DELETE' });
+      const res = await authFetch(`/api/sessions/saved/${index}`, { method: 'DELETE' });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${res.status}`);
@@ -143,7 +144,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
 
   const handleDownload = useCallback((file) => {
     const a = document.createElement('a');
-    a.href = `/api/files?path=${encodeURIComponent(file.path)}`;
+    const token = getToken();
+    const tokenParam = token ? `&token=${encodeURIComponent(token)}` : '';
+    a.href = `/api/files?path=${encodeURIComponent(file.path)}${tokenParam}`;
     a.download = file.name;
     a.click();
   }, []);
@@ -159,7 +162,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
       for (const file of fileList) {
         formData.append('files', file);
       }
-      const res = await fetch('/api/files', { method: 'POST', body: formData });
+      const res = await authFetch('/api/files', { method: 'POST', body: formData });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${res.status}`);
