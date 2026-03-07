@@ -88,15 +88,23 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
 
     // Idle detection: reset timer on every output chunk (Claude sessions only)
     if (!session.shell) {
-      session.idleNotified = false;
+      // Only reset notification state on substantial output (not cursor/control sequences)
+      const stripped = data.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trim();
+      if (stripped.length > 2) {
+        session.idleNotified = false;
+      }
       if (session.idleTimer) {
         clearTimeout(session.idleTimer);
       }
       session.idleTimer = setTimeout(() => {
         if (!session.exited && !session.idleNotified) {
-          session.idleNotified = true;
-          if (session.socket && session.socket.readyState === 1) {
-            session.socket.send(JSON.stringify({ type: 'input_needed' }));
+          const now = Date.now();
+          if (!session.lastNotifyTime || now - session.lastNotifyTime > 30000) {
+            session.idleNotified = true;
+            session.lastNotifyTime = now;
+            if (session.socket && session.socket.readyState === 1) {
+              session.socket.send(JSON.stringify({ type: 'input_needed' }));
+            }
           }
         }
       }, IDLE_TIMEOUT_MS);
