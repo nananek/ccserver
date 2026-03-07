@@ -249,6 +249,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
         <button className="btn btn-secondary" onClick={() => navigateTo(HOME_DIR)}>
           Home
         </button>
+        <button className="btn btn-secondary" onClick={() => { fetchDirs(currentPath); fetchSessions(); }} disabled={loading}>
+          Refresh
+        </button>
         <button
           className="btn btn-secondary"
           onClick={() => {
