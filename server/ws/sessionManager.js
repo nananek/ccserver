@@ -112,23 +112,39 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
         }
       }, IDLE_TIMEOUT_MS);
 
-      // Auto-yes detection
+      // Auto-yes detection for Claude Code CLI permission prompts
+      // Claude Code uses Ink select UI with keybindings: y=Yes, n=No, Enter=Yes, Escape=No
+      // Prompts contain text like "Do you want to proceed?" or "Yes, allow..."
       if (session.autoYes) {
         const stripped = data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
-        if (/\(y(?:es)?\/n(?:o)?\)\s*$/i.test(stripped) || /\(Y\/n\)\s*$/.test(stripped)) {
+        const recentBuf = session.outputBuffer.slice(-10).join('').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+        const combined = recentBuf + stripped;
+        const hasPermissionPrompt =
+          /Do you want to (proceed|make this edit|use)/i.test(combined) ||
+          /Yes, allow/i.test(combined) ||
+          /Claude wants to (fetch|search|call)/i.test(combined);
+        const now = Date.now();
+        const cooldown = session.lastAutoYesTime ? now - session.lastAutoYesTime > 2000 : true;
+        if (hasPermissionPrompt && cooldown) {
           if (session.autoYesPending) clearTimeout(session.autoYesPending);
           session.autoYesPending = setTimeout(() => {
             session.autoYesPending = null;
             if (session.exited || !session.autoYes) return;
-            const promptLine = stripped.trim().split('\n').pop().trim();
+            const lines = combined.trim().split('\n').filter(l => l.trim());
+            const promptLine = lines.find(l =>
+              /Do you want to|Claude wants to|Yes, allow/.test(l)
+            )?.trim() || lines[lines.length - 1]?.trim() || 'permission prompt';
             const entry = { time: Date.now(), prompt: promptLine };
             session.autoYesLog.push(entry);
             if (session.autoYesLog.length > 100) session.autoYesLog.shift();
-            session.ptyProcess.write('y\r');
+            session.lastAutoYesTime = Date.now();
+            // Send Enter key — Claude Code uses Ink Select UI (enter = select:accept)
+            // The first option ("Yes") is focused by default
+            session.ptyProcess.write('\r');
             if (session.socket && session.socket.readyState === 1) {
               session.socket.send(JSON.stringify({ type: 'auto_yes', entry }));
             }
-          }, 300);
+          }, 500);
         }
       }
     }
