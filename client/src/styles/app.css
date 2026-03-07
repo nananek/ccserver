@@ -120,6 +120,25 @@ body {
   margin-bottom: -1px;
 }
 
+.tab-item.attention {
+  color: var(--accent);
+  animation: tab-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes tab-pulse {
+  0%, 100% { background: var(--bg-secondary); }
+  50% { background: rgba(137, 180, 250, 0.15); }
+}
+
+.tab-item.attention .tab-label::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  background: var(--accent);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 .tab-label {
   display: flex;
   align-items: center;

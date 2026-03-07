@@ -90,7 +90,7 @@ const PING_INTERVAL_MS = 30000;
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, attachSessionId, xtermTheme, themeId, onThemeChange }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -103,6 +103,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const shellRef = useRef(shell);
   const notifyRef = useRef(notify);
   useEffect(() => { notifyRef.current = notify; }, [notify]);
+  const onAttentionRef = useRef(onAttention);
+  useEffect(() => { onAttentionRef.current = onAttention; }, [onAttention]);
+  const onFocusTabRef = useRef(onFocusTab);
+  useEffect(() => { onFocusTabRef.current = onFocusTab; }, [onFocusTab]);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themeMenuRef = useRef(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
@@ -316,15 +320,26 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
             }
             break;
           }
-          case 'input_needed':
+          case 'input_needed': {
+            if (onAttentionRef.current) {
+              onAttentionRef.current();
+            }
             if (notifyRef.current) {
-              notifyRef.current('Claude Code', {
+              const n = notifyRef.current('Claude Code', {
                 body: `Input needed in ${cwd}`,
                 icon: '/icon-192.png',
                 tag: `input-needed-${cwd}`,
               });
+              if (n) {
+                n.onclick = () => {
+                  window.focus();
+                  if (onFocusTabRef.current) onFocusTabRef.current();
+                  n.close();
+                };
+              }
             }
             break;
+          }
           case 'detached':
             term.writeln('\r\n[Session taken over by another client]');
             intentionalCloseRef.current = true;

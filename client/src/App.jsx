@@ -16,6 +16,7 @@ export default function App() {
   const [lastDir, setLastDir] = useState(null);
   const [resumePrompt, setResumePrompt] = useState(null);
   const [themeId, setThemeId] = useState(loadThemeId);
+  const [attentionTabs, setAttentionTabs] = useState(new Set());
   const pendingOpenRef = useRef(null);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
 
@@ -94,6 +95,12 @@ export default function App() {
 
   const handleTabClick = useCallback((tabId) => {
     setActiveTabId(tabId);
+    setAttentionTabs((prev) => {
+      if (!prev.has(tabId)) return prev;
+      const next = new Set(prev);
+      next.delete(tabId);
+      return next;
+    });
   }, []);
 
   const handleTabSessionId = useCallback((tabId, sessionId) => {
@@ -108,7 +115,7 @@ export default function App() {
         {tabs.map((tab) => (
           <div
             key={tab.id}
-            className={`tab-item${tab.id === activeTabId ? ' active' : ''}`}
+            className={`tab-item${tab.id === activeTabId ? ' active' : ''}${attentionTabs.has(tab.id) ? ' attention' : ''}`}
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
@@ -160,6 +167,13 @@ export default function App() {
                 xtermTheme={getTheme(themeId).xterm}
                 themeId={themeId}
                 onThemeChange={setThemeId}
+                tabId={tab.id}
+                onAttention={() => {
+                  if (activeTabId !== tab.id) {
+                    setAttentionTabs((prev) => new Set(prev).add(tab.id));
+                  }
+                }}
+                onFocusTab={() => handleTabClick(tab.id)}
               />
             </div>
           ))}
