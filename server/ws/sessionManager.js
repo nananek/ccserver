@@ -136,11 +136,29 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
           session.autoYesPending = setTimeout(() => {
             session.autoYesPending = null;
             if (session.exited || !session.autoYes) return;
-            const lines = buf.trim().split('\n').filter(l => l.trim());
-            const promptLine = lines.find(l => {
-              const ns = l.replace(/\s+/g, '');
-              return /Doyouwantto|Claudewantsto|Yes,allow/i.test(ns);
-            })?.trim() || lines[lines.length - 1]?.trim() || 'permission prompt';
+            // Clean up prompt text for display: re-insert spaces around known words
+            const cleanBuf = buf
+              .replace(/[^\x20-\x7E\n]/g, ' ')  // remove non-printable chars
+              .replace(/\s+/g, ' ').trim();
+            // Extract a meaningful description from the buffer
+            const noSpace = cleanBuf.replace(/\s/g, '');
+            let promptLine = 'permission prompt';
+            const editMatch = noSpace.match(/makethiseditto\s*(\S+)/i);
+            const fetchMatch = noSpace.match(/Claudewantstofetchcontentfrom\s*(\S+)/i);
+            const searchMatch = noSpace.match(/Claudewantstosearchthewebfor:\s*(.+?)(?:\}|$)/i);
+            if (editMatch) {
+              promptLine = `Edit: ${editMatch[1]}`;
+            } else if (fetchMatch) {
+              promptLine = `Fetch: ${fetchMatch[1]}`;
+            } else if (searchMatch) {
+              promptLine = `Web Search: ${searchMatch[1]}`;
+            } else if (/Doyouwanttoproceed/i.test(noSpace)) {
+              // Try to find tool name from nearby text like "Bash(...)" or "Read(...)"
+              const toolMatch = noSpace.match(/(Bash|Read|Write|Edit|Glob|Grep|WebFetch|WebSearch|NotebookEdit)\(/i);
+              promptLine = toolMatch ? `${toolMatch[1]} (auto-approved)` : 'Tool use (auto-approved)';
+            } else {
+              promptLine = cleanBuf.slice(0, 80) || 'permission prompt';
+            }
             const entry = { time: Date.now(), prompt: promptLine };
             session.autoYesLog.push(entry);
             if (session.autoYesLog.length > 100) session.autoYesLog.shift();

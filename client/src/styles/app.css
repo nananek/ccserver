@@ -939,21 +939,25 @@ body {
 .auto-yes-log-entry {
   display: flex;
   gap: 8px;
-  padding: 2px 0;
+  padding: 4px 0;
   font-size: 12px;
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  border-bottom: 1px solid var(--border);
+}
+
+.auto-yes-log-entry:last-child {
+  border-bottom: none;
 }
 
 .auto-yes-log-time {
   color: var(--text-muted);
   flex-shrink: 0;
+  font-size: 11px;
 }
 
 .auto-yes-log-prompt {
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--warning, #f9e2af);
+  word-break: break-all;
 }
 
 /* Resume Dialog */

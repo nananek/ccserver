@@ -662,8 +662,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
             <button className="btn btn-secondary btn-sm" onClick={() => setShowAutoYesLog(false)}>&#10005;</button>
           </div>
           <div className="auto-yes-log-list">
-            {autoYesLog.map((entry, i) => (
-              <div key={i} className="auto-yes-log-entry">
+            {[...autoYesLog].reverse().map((entry, i) => (
+              <div key={autoYesLog.length - 1 - i} className="auto-yes-log-entry">
                 <span className="auto-yes-log-time">{new Date(entry.time).toLocaleTimeString()}</span>
                 <span className="auto-yes-log-prompt">{entry.prompt}</span>
               </div>
