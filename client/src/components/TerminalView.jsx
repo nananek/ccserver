@@ -101,6 +101,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const intentionalCloseRef = useRef(false);
   const claudeResumeIdRef = useRef(claudeSessionId);
   const shellRef = useRef(shell);
+  const [autoYes, setAutoYes] = useState(false);
+  const autoYesRef = useRef(false);
+  useEffect(() => { autoYesRef.current = autoYes; }, [autoYes]);
   const notifyRef = useRef(notify);
   useEffect(() => { notifyRef.current = notify; }, [notify]);
   const onAttentionRef = useRef(onAttention);
@@ -279,6 +282,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
             break;
           case 'output':
             term.write(msg.data);
+            if (autoYesRef.current && !shellRef.current) {
+              const stripped = msg.data.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+              if (/\(y(?:es)?\/n(?:o)?\)\s*$/i.test(stripped) || /\(Y\/n\)\s*$/.test(stripped)) {
+                setTimeout(() => {
+                  ws.send(JSON.stringify({ type: 'input', data: 'y\r' }));
+                }, 300);
+              }
+            }
             break;
           case 'replay':
             term.write(msg.data);
@@ -601,6 +612,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
               </div>
             )}
           </div>
+          {!shell && (
+            <button
+              className={`btn auto-yes-toggle${autoYes ? ' active' : ''}`}
+              onClick={() => setAutoYes((v) => !v)}
+              title={autoYes ? 'Auto-yes enabled (click to disable)' : 'Auto-yes disabled (click to enable)'}
+            >
+              Auto-Y
+            </button>
+          )}
           <button
             className={`btn notify-toggle${notifyEnabled ? ' active' : ''}`}
             onClick={onToggleNotify}

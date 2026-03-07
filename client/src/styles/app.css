@@ -884,6 +884,33 @@ body {
   color: var(--text-muted);
 }
 
+/* Auto-yes toggle */
+.auto-yes-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-weight: 600;
+  padding: 4px 8px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  border-radius: 4px;
+}
+
+.auto-yes-toggle:hover:not(:disabled) {
+  background: var(--bg-surface);
+  border-color: var(--border);
+}
+
+.auto-yes-toggle.active {
+  color: var(--error);
+  border-color: var(--error);
+  background: rgba(243, 139, 168, 0.1);
+}
+
 /* Resume Dialog */
 .resume-overlay {
   position: fixed;
