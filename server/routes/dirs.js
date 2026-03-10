@@ -1,7 +1,12 @@
 import { readdir, mkdir, stat } from 'node:fs/promises';
 import { join, resolve, basename } from 'node:path';
+import { homedir } from 'node:os';
 
 export async function dirsRoute(fastify, opts) {
+  fastify.get('/dirs/home', async () => {
+    return { home: homedir() };
+  });
+
   fastify.get('/dirs', async (request, reply) => {
     const requestedPath = request.query.path || '/';
     const absPath = resolve('/', requestedPath);

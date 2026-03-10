@@ -13,7 +13,7 @@ export default function App() {
     { id: 'monitor', type: 'monitor', label: 'Monitor' },
   ]);
   const [activeTabId, setActiveTabId] = useState('browser');
-  const [lastDir, setLastDir] = useState(null);
+  const [lastDir, setLastDir] = useState(() => localStorage.getItem('ccserver-last-dir'));
   const [resumePrompt, setResumePrompt] = useState(null);
   const [themeId, setThemeId] = useState(loadThemeId);
   const [attentionTabs, setAttentionTabs] = useState(new Set());

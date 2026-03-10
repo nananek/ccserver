@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch, getToken } from '../auth.js';
 
-const HOME_DIR = '/home/kts_sz';
+const LAST_DIR_KEY = 'ccserver-last-dir';
 
 function formatSize(bytes) {
   if (bytes === 0) return '0 B';
@@ -12,7 +12,8 @@ function formatSize(bytes) {
 }
 
 export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, initialPath }) {
-  const [currentPath, setCurrentPath] = useState(initialPath || HOME_DIR);
+  const [currentPath, setCurrentPath] = useState(initialPath || localStorage.getItem(LAST_DIR_KEY) || '/');
+  const [homeDir, setHomeDir] = useState(null);
   const [dirs, setDirs] = useState([]);
   const [files, setFiles] = useState([]);
   const [parentPath, setParentPath] = useState(null);
@@ -53,7 +54,17 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   }, [showHidden]);
 
   useEffect(() => {
+    authFetch('/api/dirs/home').then(r => r.json()).then(data => {
+      setHomeDir(data.home);
+      if (!initialPath && !localStorage.getItem(LAST_DIR_KEY)) {
+        setCurrentPath(data.home);
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     fetchDirs(currentPath);
+    localStorage.setItem(LAST_DIR_KEY, currentPath);
   }, [currentPath, fetchDirs]);
 
   const navigateTo = useCallback((path) => {
@@ -246,7 +257,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
         <button className="btn btn-secondary" onClick={navigateUp} disabled={!parentPath}>
           Up
         </button>
-        <button className="btn btn-secondary" onClick={() => navigateTo(HOME_DIR)}>
+        <button className="btn btn-secondary" onClick={() => homeDir && navigateTo(homeDir)} disabled={!homeDir}>
           Home
         </button>
         <button className="btn btn-secondary" onClick={() => { fetchDirs(currentPath); fetchSessions(); }} disabled={loading}>

@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import {
   createSession,
   getSession,
@@ -30,7 +31,7 @@ export async function terminalWs(fastify, opts) {
           }
 
           const { sessionId, session } = createSession({
-            cwd: msg.cwd || '/home/kts_sz',
+            cwd: msg.cwd || homedir(),
             cols: msg.cols || 80,
             rows: msg.rows || 24,
             claudeSessionId: msg.claudeSessionId || null,
