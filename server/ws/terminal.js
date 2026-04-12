@@ -30,7 +30,7 @@ export async function terminalWs(fastify, opts) {
             detachSocket(currentSessionId, socket);
           }
 
-          const { sessionId, session } = createSession({
+          const result = createSession({
             cwd: msg.cwd || homedir(),
             cols: msg.cols || 80,
             rows: msg.rows || 24,
@@ -38,6 +38,16 @@ export async function terminalWs(fastify, opts) {
             shell: !!msg.shell,
           });
 
+          if (result.error) {
+            socket.send(JSON.stringify({
+              type: 'error',
+              message: result.error,
+              code: 'SPAWN_FAILED',
+            }));
+            break;
+          }
+
+          const { sessionId, session } = result;
           currentSessionId = sessionId;
           attachSocket(sessionId, socket);
 

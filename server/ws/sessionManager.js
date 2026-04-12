@@ -1,5 +1,6 @@
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +14,15 @@ const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 const IDLE_TIMEOUT_MS = 3000;
 
 const sessions = new Map();
+
+function resolveCommand(cmd) {
+  if (process.platform !== 'win32') return cmd;
+  try {
+    return execFileSync('where.exe', [cmd], { encoding: 'utf-8' }).split('\r\n')[0].trim();
+  } catch {
+    return cmd;
+  }
+}
 
 function stripAnsi(str) {
   // eslint-disable-next-line no-control-regex
@@ -42,8 +52,11 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
     command = process.platform === 'win32' ? 'claude.exe' : 'claude';
     args = claudeSessionId ? ['--resume', claudeSessionId] : [];
   }
+  command = resolveCommand(command);
 
-  const ptyProcess = pty.spawn(command, args, {
+  let ptyProcess;
+  try {
+    ptyProcess = pty.spawn(command, args, {
     name: 'xterm-256color',
     cols,
     rows,
@@ -55,6 +68,9 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
       FORCE_COLOR: '1',
     },
   });
+  } catch (err) {
+    return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
+  }
 
   const session = {
     id,
