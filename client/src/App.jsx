@@ -27,7 +27,7 @@ export default function App() {
 
   const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
-    const dirName = dirPath.split('/').filter(Boolean).pop() || '/';
+    const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
     const label = shell ? `$ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,

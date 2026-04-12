@@ -221,7 +221,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
     uploadFiles(e.dataTransfer.files);
   }, [uploadFiles]);
 
-  const breadcrumbs = currentPath.split('/').filter(Boolean);
+  const pathRoot = currentPath.match(/^([a-zA-Z]:\\|\/)/)?.[0] || '/';
+  const breadcrumbs = currentPath.slice(pathRoot.length).split(/[/\\]/).filter(Boolean);
 
   return (
     <div
@@ -237,11 +238,12 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
       </div>
 
       <nav className="breadcrumbs">
-        <button className="breadcrumb-item" onClick={() => navigateTo('/')}>
-          /
+        <button className="breadcrumb-item" onClick={() => navigateTo(pathRoot)}>
+          {pathRoot}
         </button>
         {breadcrumbs.map((segment, i) => {
-          const path = '/' + breadcrumbs.slice(0, i + 1).join('/');
+          const sep = pathRoot.includes('\\') ? '\\' : '/';
+          const path = pathRoot + breadcrumbs.slice(0, i + 1).join(sep);
           return (
             <span key={path}>
               <span className="breadcrumb-sep">/</span>

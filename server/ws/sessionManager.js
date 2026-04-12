@@ -36,10 +36,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
 
   let command, args;
   if (shell) {
-    command = process.env.SHELL || '/bin/bash';
+    command = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/bash');
     args = [];
   } else {
-    command = 'claude';
+    command = process.platform === 'win32' ? 'claude.exe' : 'claude';
     args = claudeSessionId ? ['--resume', claudeSessionId] : [];
   }
 
