@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/kts_sz/ccserver
+WorkingDirectory=/path/to/ccserver
 Environment=NODE_ENV=production
 Environment=PORT=3001
 ExecStart=/usr/bin/node server/index.js

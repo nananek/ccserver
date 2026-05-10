@@ -132,7 +132,7 @@ JSON メッセージでターミナル I/O を中継。
 ### 1. クライアントをビルド
 
 ```bash
-cd /home/kts_sz/ccserver
+cd /path/to/ccserver
 npm run build --workspace=client
 ```
 
@@ -151,7 +151,7 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/kts_sz/ccserver
+WorkingDirectory=/path/to/ccserver
 Environment=NODE_ENV=production
 Environment=PORT=3001
 ExecStart=/usr/bin/node server/index.js
@@ -175,7 +175,7 @@ systemctl --user start ccserver
 systemctl --user enable ccserver
 
 # ログイン中でなくてもサービスを維持（必要に応じて）
-sudo loginctl enable-linger kts_sz
+sudo loginctl enable-linger "$USER"
 ```
 
 ### 4. 動作確認
