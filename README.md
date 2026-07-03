@@ -96,29 +96,42 @@ sudo apt install uidmap slirp4netns
 
 `uidmap`/`slirp4netns` が無い場合は docker 無効のサンドボックス (bwrap のみ) として起動します。
 
-### 追加で公開するパスの設定
+### 認証情報の受け渡し (ssh / gpg / gh)
 
-gpg/ssh や gh 認証など個別に渡したいものは設定ファイルで追加できます:
+- **ssh-agent**: 自動転送されます。ccserver が起動時にユーザーの agent ソケット (`/tmp/ssh-*/agent.*` 等、鍵がロードされている物を優先) を探して `SSH_AUTH_SOCK` を設定します。設定不要。
+- **gpg**: 設定で `"gpg": true` にすると、`~/.gnupg` と**ホストの生 gpg-agent / keyboxd ソケット**をサンドボックス内へ転送します。ホストの agent (鍵/トークンを保持) で署名するので、**docker 有効のままコミット署名が使えます**。
+- **gh**: `~/.config/gh` を binds に足せば認証を引き継げます。
+
+### 設定ファイル
 
 ```bash
 cp server/sandbox.config.example.json server/sandbox.config.json
-# 環境変数で場所を変える場合: CCSERVER_SANDBOX_CONFIG=/path/to/config.json
+# 場所を変える場合: CCSERVER_SANDBOX_CONFIG=/path/to/config.json
 ```
 
 ```json
 {
   "docker": true,
+  "gpg": true,
   "binds": [
-    { "src": "~/.gitconfig", "mode": "ro" },
-    { "src": "~/.ssh", "mode": "ro" },
-    { "src": "~/.config/gh", "mode": "ro" }
-  ]
+    { "src": "~/.config/gh", "mode": "ro" },
+    { "src": "~/.ssh", "mode": "ro" }
+  ],
+  "env": {}
 }
 ```
 
-- `mode` は `ro` (既定) か `rw`。存在しないパスはスキップされます。
-- docker 有効時は `/run/user/*` 配下 (gpg-agent ソケット等) はコピーアップの都合で見えないことがあります。ホーム配下の鍵 (`~/.ssh`, `~/.gnupg`, `~/.config/gh`) は問題なく使えます。
+- `binds` の `mode` は `ro` (既定) か `rw`。存在しないパスはスキップされます。`~` はホームに展開。
+- `env` でサンドボックス内の環境変数を追加できます (例: `SSH_AUTH_SOCK` を明示指定して自動検出を上書き)。
 - サンドボックスは Linux 限定です。同じプロジェクトを 2 つのサンドボックスで同時に開いた場合、docker の data-root 競合を避けるため 2 つ目は docker 無しで起動します。
+
+### 仕組み (docker と gpg の両立)
+
+```
+ccserver → rootlesskit (subuid userns + slirp4netns) → bwrap (FS制限) → dockerd + claude
+```
+
+rootless docker には subuid マッピング付き userns が要るため、外側を `rootlesskit`、内側で `bwrap` が FS を制限します (この順序でないと `newuidmap` が使えずマルチ uid が壊れます)。`/run` は **bwrap が専用 tmpfs で用意**し (rootlesskit の `--copy-up=/run` は使わない)、ホストの生ソケットを bind ソースとして活かします。gpg は userns 内で uid 0 のため socketdir が `~/.gnupg` になる点を利用し、生ソケットをそこへ転送しています。`docker run -v ...` でもサンドボックス外へは到達できません (daemon 自身が制限 FS 内)。
 
 ## プロジェクト構成
 

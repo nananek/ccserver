@@ -1,13 +1,20 @@
 {
   "//": "Copy to server/sandbox.config.json (or set CCSERVER_SANDBOX_CONFIG) to customize the sandbox.",
+
   "//docker": "true (default): start an isolated rootless dockerd inside the sandbox. false: no docker (lighter, no rootlesskit).",
   "docker": true,
 
-  "//binds": "Extra host paths exposed inside the sandbox, on top of the project dir + ~/.claude + ~/.claude.json. mode: 'ro' (default) or 'rw'. Missing sources are skipped. ~ expands to your home. NOTE: sources under /run/user/* may be unavailable when docker is on (rootlesskit copies-up /run); keys under your home (~/.ssh, ~/.gnupg, ~/.config/gh) work fine.",
+  "//gpg": "true: forward the host gpg-agent (bind ~/.gnupg + the live agent/keyboxd sockets) so commit signing works inside the sandbox using the host's key/token. Coexists with docker. Default false.",
+  "gpg": true,
+
+  "//ssh": "The SSH agent is auto-forwarded: ccserver finds the user's agent socket (preferring one with keys loaded) at launch and sets SSH_AUTH_SOCK. No config needed. Set env.SSH_AUTH_SOCK to override.",
+
+  "//binds": "Extra host paths exposed inside the sandbox, on top of the project dir + ~/.claude + ~/.claude.json (and, with gpg:true, ~/.gnupg). mode: 'ro' (default) or 'rw'. Missing sources are skipped. ~ expands to your home.",
   "binds": [
-    { "src": "~/.gitconfig", "mode": "ro" },
-    { "src": "~/.ssh", "mode": "ro" },
     { "src": "~/.config/gh", "mode": "ro" },
-    { "src": "~/.gnupg", "mode": "rw" }
-  ]
+    { "src": "~/.ssh", "mode": "ro" }
+  ],
+
+  "//env": "Extra environment variables set inside the sandbox (applied last, so they override defaults). e.g. force a specific SSH_AUTH_SOCK.",
+  "env": {}
 }
