@@ -2,4 +2,5 @@ node_modules/
 client/dist/
 *.log
 .saved-sessions.json
+.scheduled-prompts.json
 server/sandbox.config.json

@@ -14,7 +14,8 @@ export async function sessionsRoute(fastify, opts) {
     if (!session) {
       return reply.code(404).send({ error: 'Session not found' });
     }
-    destroySession(id);
+    // Explicit teardown: also cancel any scheduled prompt for this session.
+    destroySession(id, { keepSchedule: false });
     return { success: true, id };
   });
 

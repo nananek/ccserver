@@ -8,6 +8,7 @@ import { buildSandboxSpawn, sandboxAvailable } from './sandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = join(__dirname, '..', '..', '.saved-sessions.json');
+const SCHEDULES_PATH = join(__dirname, '..', '..', '.scheduled-prompts.json');
 
 const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours for active sessions
 const SESSION_EXITED_TIMEOUT_MS = 30 * 1000;
@@ -110,7 +111,9 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     autoYesLog: [],
     autoYesPending: null,
     autoYesBuf: '',
-    scheduledPrompt: null, // { at: epochMs, text, timer }
+    startedClaudeSessionId: claudeSessionId || null,
+    scheduleId: null, // key into the module-level `schedules` map, if any
+    pendingInjection: null, // { text, at } — scheduled prompt awaiting a freshly-resumed session
   };
 
   ptyProcess.onData((data) => {
@@ -135,7 +138,17 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         clearTimeout(session.idleTimer);
       }
       session.idleTimer = setTimeout(() => {
-        if (!session.exited && !session.idleNotified) {
+        if (session.exited) return;
+        // A scheduled prompt may be waiting for this (freshly auto-resumed)
+        // session to settle before typing its text. Deliver it once quiet.
+        if (session.pendingInjection) {
+          const inj = session.pendingInjection;
+          session.pendingInjection = null;
+          const delivered = injectIntoLiveSession(session, inj.text);
+          notifyFired(session, { at: inj.at, text: inj.text }, delivered);
+          return;
+        }
+        if (!session.idleNotified) {
           const now = Date.now();
           if (!session.lastNotifyTime || now - session.lastNotifyTime > 30000) {
             session.idleNotified = true;
@@ -217,6 +230,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       session.claudeSessionId = extractClaudeSessionId(session.outputBuffer);
     }
 
+    // Keep any pending scheduled prompt alive across this exit: refresh its
+    // resume id and detach it so it auto-resumes the conversation at fire time.
+    refreshScheduleOnExit(session);
+
     if (session.socket && session.socket.readyState === 1) {
       session.socket.send(JSON.stringify({
         type: 'exit',
@@ -268,54 +285,166 @@ export function computeNextLocalTime(hhmm) {
   return target.getTime();
 }
 
+// Fire missed prompts up to this late after a restart; older ones are dropped.
+const SCHEDULE_STALE_GRACE_MS = 12 * 60 * 60 * 1000; // 12h
+// Safety net for delivering into a freshly-resumed session that never goes idle.
+const RESUME_INJECT_FALLBACK_MS = 15 * 1000;
+
+// scheduleId -> { at, text, cwd, sandbox, shell, claudeSessionId, sessionId, timer }
+// The source of truth for scheduled prompts. Mirrored to disk so schedules
+// survive a server restart/crash (see persistSchedules/restoreSchedules).
+const schedules = new Map();
+
+function persistSchedules() {
+  try {
+    const arr = [];
+    for (const s of schedules.values()) {
+      arr.push({
+        at: s.at,
+        text: s.text,
+        cwd: s.cwd,
+        sandbox: !!s.sandbox,
+        shell: !!s.shell,
+        claudeSessionId: s.claudeSessionId || null,
+      });
+    }
+    if (arr.length > 0) {
+      writeFileSync(SCHEDULES_PATH, JSON.stringify(arr));
+    } else {
+      try { unlinkSync(SCHEDULES_PATH); } catch { /* nothing to remove */ }
+    }
+  } catch {
+    // best effort — persistence must never crash the session manager
+  }
+}
+
+// Best-known Claude conversation id for resuming this session later.
+function resumeIdForSession(session) {
+  if (!session) return null;
+  if (session.claudeSessionId) return session.claudeSessionId;
+  const extracted = extractClaudeSessionId(session.outputBuffer);
+  if (extracted) return extracted;
+  return session.startedClaudeSessionId || null;
+}
+
+function scheduleForSession(sessionId) {
+  for (const [sid, s] of schedules) {
+    if (s.sessionId === sessionId) return sid;
+  }
+  return null;
+}
+
 // Public (serializable) view of a session's scheduled prompt
 export function scheduledPromptPublic(session) {
-  const sp = session?.scheduledPrompt;
-  return sp ? { at: sp.at, text: sp.text } : null;
+  if (!session?.scheduleId) return null;
+  const s = schedules.get(session.scheduleId);
+  return s ? { at: s.at, text: s.text } : null;
 }
 
-function clearScheduledTimer(session) {
-  if (session.scheduledPrompt?.timer) {
-    clearTimeout(session.scheduledPrompt.timer);
-  }
-  session.scheduledPrompt = null;
+// Detach the schedule from a session that's going away, but keep it armed so it
+// auto-resumes the conversation at fire time.
+function detachScheduleFromSession(sessionId) {
+  const sid = scheduleForSession(sessionId);
+  if (sid == null) return;
+  const s = schedules.get(sid);
+  if (s) s.sessionId = null;
+  const session = sessions.get(sessionId);
+  if (session) session.scheduleId = null;
 }
 
-function firePrompt(session) {
-  const sp = session.scheduledPrompt;
-  if (!sp) return;
-  session.scheduledPrompt = null;
+function refreshScheduleOnExit(session) {
+  const sid = scheduleForSession(session.id);
+  if (sid == null) return;
+  const s = schedules.get(sid);
+  if (!s) return;
+  const freshId = resumeIdForSession(session);
+  if (freshId) s.claudeSessionId = freshId;
+  s.sessionId = null; // the pty is gone; force the resume path at fire time
+  session.scheduleId = null;
+  persistSchedules();
+}
 
-  let delivered = false;
-  if (!session.exited && session.ptyProcess) {
-    try {
-      // Type the prompt text, then submit with Enter after a short delay so
-      // the TUI registers the input before the newline is sent.
-      session.ptyProcess.write(sp.text);
-      setTimeout(() => {
-        if (!session.exited && session.ptyProcess) {
-          try {
-            session.ptyProcess.write('\r');
-          } catch {
-            // pty may have died between writes
-          }
+function injectIntoLiveSession(session, text) {
+  try {
+    // Type the prompt text, then submit with Enter after a short delay so the
+    // TUI registers the input before the newline is sent.
+    session.ptyProcess.write(text);
+    setTimeout(() => {
+      if (!session.exited && session.ptyProcess) {
+        try {
+          session.ptyProcess.write('\r');
+        } catch {
+          // pty may have died between writes
         }
-      }, 200);
-      delivered = true;
-    } catch {
-      // pty write failed
-    }
+      }
+    }, 200);
+    return true;
+  } catch {
+    return false;
   }
+}
 
-  if (session.socket && session.socket.readyState === 1) {
+function notifyFired(session, info, delivered) {
+  if (session?.socket && session.socket.readyState === 1) {
     session.socket.send(JSON.stringify({
       type: 'schedule_fired',
-      at: sp.at,
-      text: sp.text,
+      at: info.at,
+      text: info.text,
       delivered,
     }));
     session.socket.send(JSON.stringify({ type: 'schedule_state', scheduled: null }));
   }
+}
+
+function fireSchedule(scheduleId) {
+  const entry = schedules.get(scheduleId);
+  if (!entry) return;
+  if (entry.timer) clearTimeout(entry.timer);
+  schedules.delete(scheduleId);
+  persistSchedules();
+
+  // 1) The originating session, if still alive.
+  let target = entry.sessionId ? sessions.get(entry.sessionId) : null;
+  if (target && (target.exited || !target.ptyProcess)) target = null;
+
+  // 2) Otherwise any live session for the same project (user reopened it).
+  if (!target) {
+    for (const s of sessions.values()) {
+      if (!s.exited && s.ptyProcess && s.cwd === entry.cwd && s.shell === entry.shell) {
+        target = s;
+        break;
+      }
+    }
+  }
+
+  if (target) {
+    if (target.scheduleId === scheduleId) target.scheduleId = null;
+    const delivered = injectIntoLiveSession(target, entry.text);
+    notifyFired(target, entry, delivered);
+    return;
+  }
+
+  // 3) No live session — auto-resume the conversation, then inject once ready.
+  const res = createSession({
+    cwd: entry.cwd,
+    cols: 80,
+    rows: 24,
+    claudeSessionId: entry.claudeSessionId,
+    shell: entry.shell,
+    sandbox: entry.sandbox,
+  });
+  if (!res?.session) return;
+  const session = res.session;
+  session.pendingInjection = { text: entry.text, at: entry.at };
+  // Safety net: deliver even if the session never emits an idle gap (e.g. a
+  // plain shell). The idle path normally fires first for Claude sessions.
+  setTimeout(() => {
+    if (session.exited || !session.pendingInjection) return;
+    const inj = session.pendingInjection;
+    session.pendingInjection = null;
+    const delivered = injectIntoLiveSession(session, inj.text);
+    notifyFired(session, inj, delivered);
+  }, RESUME_INJECT_FALLBACK_MS);
 }
 
 // Schedule a prompt to be injected at absolute epoch `at`. Returns the public
@@ -323,7 +452,6 @@ function firePrompt(session) {
 export function setScheduledPrompt(id, at, text) {
   const session = sessions.get(id);
   if (!session) return null;
-  clearScheduledTimer(session);
 
   const delay = at - Date.now();
   if (!Number.isFinite(at) || delay <= 0 || delay > MAX_SCHEDULE_AHEAD_MS) {
@@ -331,15 +459,80 @@ export function setScheduledPrompt(id, at, text) {
   }
   if (typeof text !== 'string' || text.length === 0) return null;
 
-  const timer = setTimeout(() => firePrompt(session), delay);
-  session.scheduledPrompt = { at, text, timer };
-  return scheduledPromptPublic(session);
+  // Replace any existing schedule for this session.
+  cancelScheduledPrompt(id);
+
+  const scheduleId = randomUUID();
+  const entry = {
+    at,
+    text,
+    cwd: session.cwd,
+    sandbox: !!session.sandbox,
+    shell: !!session.shell,
+    claudeSessionId: resumeIdForSession(session),
+    sessionId: id,
+    timer: setTimeout(() => fireSchedule(scheduleId), delay),
+  };
+  schedules.set(scheduleId, entry);
+  session.scheduleId = scheduleId;
+  persistSchedules();
+  return { at, text };
 }
 
 export function cancelScheduledPrompt(id) {
+  const sid = scheduleForSession(id);
+  if (sid == null) return;
+  const s = schedules.get(sid);
+  if (s?.timer) clearTimeout(s.timer);
+  schedules.delete(sid);
   const session = sessions.get(id);
-  if (!session) return;
-  clearScheduledTimer(session);
+  if (session) session.scheduleId = null;
+  persistSchedules();
+}
+
+// Re-arm persisted schedules on server startup. Future ones get a fresh timer;
+// ones missed while the server was down fire shortly after startup (unless too
+// stale). No session is spawned now — that happens lazily at fire time.
+export function restoreSchedules() {
+  let arr;
+  try {
+    arr = JSON.parse(readFileSync(SCHEDULES_PATH, 'utf-8'));
+  } catch {
+    return; // no file / unreadable
+  }
+  if (!Array.isArray(arr)) return;
+
+  const now = Date.now();
+  let restored = 0;
+  let missed = 0;
+  for (const e of arr) {
+    if (!e || typeof e.text !== 'string' || !Number.isFinite(e.at)) continue;
+    if (e.at > now + MAX_SCHEDULE_AHEAD_MS) continue; // implausibly far ahead
+
+    const delay = e.at - now;
+    if (delay <= 0 && now - e.at > SCHEDULE_STALE_GRACE_MS) continue; // too old, drop
+
+    const scheduleId = randomUUID();
+    const entry = {
+      at: e.at,
+      text: e.text,
+      cwd: e.cwd,
+      sandbox: !!e.sandbox,
+      shell: !!e.shell,
+      claudeSessionId: e.claudeSessionId || null,
+      sessionId: null,
+      timer: null,
+    };
+    // Missed schedules fire a few seconds after startup so the server can finish
+    // booting; future ones fire at their time.
+    const fireIn = delay <= 0 ? 3000 : delay;
+    entry.timer = setTimeout(() => fireSchedule(scheduleId), fireIn);
+    schedules.set(scheduleId, entry);
+    restored++;
+    if (delay <= 0) missed++;
+  }
+  persistSchedules(); // rewrite the pruned set
+  return { restored, missed };
 }
 
 export function listSessions() {
@@ -395,7 +588,7 @@ export function detachSocket(id, socketToDetach) {
   startTimeout(session, timeout);
 }
 
-export function destroySession(id) {
+export function destroySession(id, { keepSchedule = true } = {}) {
   const session = sessions.get(id);
   if (!session) return;
 
@@ -409,7 +602,14 @@ export function destroySession(id) {
     session.idleTimer = null;
   }
 
-  clearScheduledTimer(session);
+  // By default the scheduled prompt outlives the session (disconnect / idle
+  // timeout / shutdown) and auto-resumes at fire time. Only an explicit
+  // user-initiated teardown cancels it.
+  if (keepSchedule) {
+    detachScheduleFromSession(id);
+  } else {
+    cancelScheduledPrompt(id);
+  }
 
   if (!session.exited) {
     try {

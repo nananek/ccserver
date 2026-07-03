@@ -9,7 +9,7 @@ import { sessionsRoute } from './routes/sessions.js';
 import { filesRoute } from './routes/files.js';
 import { systemRoute } from './routes/system.js';
 import { terminalWs } from './ws/terminal.js';
-import { gracefulShutdown } from './ws/sessionManager.js';
+import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
@@ -60,3 +60,18 @@ process.on('SIGINT', cleanup);
 
 const PORT = process.env.PORT || 3001;
 await fastify.listen({ port: PORT, host: '0.0.0.0' });
+
+// Re-arm scheduled prompts persisted before the last shutdown/restart. Missed
+// ones (server was down at their time) fire shortly after startup; live ones
+// wait for their time. Sessions are auto-resumed lazily at fire time.
+try {
+  const info = restoreSchedules();
+  if (info?.restored) {
+    fastify.log.info(
+      `Restored ${info.restored} scheduled prompt(s)` +
+      (info.missed ? ` (${info.missed} missed while down, firing now)` : '')
+    );
+  }
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to restore scheduled prompts');
+}
