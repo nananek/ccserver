@@ -72,6 +72,54 @@ PORT=8080 NODE_ENV=production node server/index.js
 2. ブラウザ内ターミナルで Claude Code を操作
 3. **Back** ボタンでディレクトリ選択に戻る
 
+### 予約プロンプト (タイマー)
+
+ターミナルヘッダの時計 (⏰) ボタンから、指定時刻に任意のプロンプトを自動投入できます。
+5 時間の利用制限で停止したとき、解除時刻に「続けて」などを予約しておくと自動再開します。
+
+- 時刻は **サーバーのタイムゾーン**で解釈されます (Claude Code が表示する制限解除時刻と一致)。パネルに現在のサーバー時刻とタイムゾーンを常時表示します。
+- 過ぎている時刻は翌日として扱います。予約はサーバー側で保持され、ブラウザを閉じても発火します。
+
+## サンドボックス起動 (bwrap + rootless docker)
+
+「Claude Code」ボタン右の **▼** から「🔒 サンドボックスで起動」を選ぶと、`bwrap` でファイルシステムを制限した状態で起動します。選択したプロジェクトと最小限の設定 (`~/.claude`, `~/.claude.json`) だけが見え、**隣接する他プロジェクトは見えません**。一度選ぶと既定として記憶されます。
+
+docker も安全に使えるよう、サンドボックス**内部**に rootless dockerd を起動します。`rootlesskit` (subuid マッピング) の内側で `bwrap` を動かす構成のため、`docker run -v ...` でもサンドボックス外へは到達できません (daemon 自身が制限された FS の中にいるため)。
+
+### 必要なもの (docker を使う場合)
+
+```bash
+# Debian/Ubuntu
+sudo apt install uidmap slirp4netns
+# rootlesskit / docker (rootless) が入っていること。/etc/subuid, /etc/subgid にエントリが必要。
+```
+
+`uidmap`/`slirp4netns` が無い場合は docker 無効のサンドボックス (bwrap のみ) として起動します。
+
+### 追加で公開するパスの設定
+
+gpg/ssh や gh 認証など個別に渡したいものは設定ファイルで追加できます:
+
+```bash
+cp server/sandbox.config.example.json server/sandbox.config.json
+# 環境変数で場所を変える場合: CCSERVER_SANDBOX_CONFIG=/path/to/config.json
+```
+
+```json
+{
+  "docker": true,
+  "binds": [
+    { "src": "~/.gitconfig", "mode": "ro" },
+    { "src": "~/.ssh", "mode": "ro" },
+    { "src": "~/.config/gh", "mode": "ro" }
+  ]
+}
+```
+
+- `mode` は `ro` (既定) か `rw`。存在しないパスはスキップされます。
+- docker 有効時は `/run/user/*` 配下 (gpg-agent ソケット等) はコピーアップの都合で見えないことがあります。ホーム配下の鍵 (`~/.ssh`, `~/.gnupg`, `~/.config/gh`) は問題なく使えます。
+- サンドボックスは Linux 限定です。同じプロジェクトを 2 つのサンドボックスで同時に開いた場合、docker の data-root 競合を避けるため 2 つ目は docker 無しで起動します。
+
 ## プロジェクト構成
 
 ```

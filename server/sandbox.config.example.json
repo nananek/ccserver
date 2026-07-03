@@ -1,0 +1,13 @@
+{
+  "//": "Copy to server/sandbox.config.json (or set CCSERVER_SANDBOX_CONFIG) to customize the sandbox.",
+  "//docker": "true (default): start an isolated rootless dockerd inside the sandbox. false: no docker (lighter, no rootlesskit).",
+  "docker": true,
+
+  "//binds": "Extra host paths exposed inside the sandbox, on top of the project dir + ~/.claude + ~/.claude.json. mode: 'ro' (default) or 'rw'. Missing sources are skipped. ~ expands to your home. NOTE: sources under /run/user/* may be unavailable when docker is on (rootlesskit copies-up /run); keys under your home (~/.ssh, ~/.gnupg, ~/.config/gh) work fine.",
+  "binds": [
+    { "src": "~/.gitconfig", "mode": "ro" },
+    { "src": "~/.ssh", "mode": "ro" },
+    { "src": "~/.config/gh", "mode": "ro" },
+    { "src": "~/.gnupg", "mode": "rw" }
+  ]
+}

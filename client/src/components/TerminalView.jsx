@@ -91,7 +91,7 @@ const PING_INTERVAL_MS = 30000;
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -102,6 +102,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const intentionalCloseRef = useRef(false);
   const claudeResumeIdRef = useRef(claudeSessionId);
   const shellRef = useRef(shell);
+  const sandboxRef = useRef(sandbox);
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
   const [showAutoYesLog, setShowAutoYesLog] = useState(false);
@@ -262,6 +263,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
             cols: dims?.cols || 80,
             rows: dims?.rows || 24,
             shell: !!shellRef.current,
+            sandbox: !!sandboxRef.current,
           };
           if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;
@@ -352,6 +354,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
                 cols: dims?.cols || 80,
                 rows: dims?.rows || 24,
                 shell: !!shellRef.current,
+                sandbox: !!sandboxRef.current,
               };
               if (!shellRef.current) {
                 const savedClaudeId = claudeResumeIdRef.current
@@ -661,7 +664,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}`}>
       <div className="terminal-header">
-        <span className="terminal-title">{shell ? 'Terminal' : 'Claude Code'} &mdash; {cwd}</span>
+        <span className="terminal-title">{sandbox ? '🔒 ' : ''}{shell ? 'Terminal' : 'Claude Code'} &mdash; {cwd}</span>
         <div className="header-actions">
           <div className="theme-picker" ref={themeMenuRef}>
             <button

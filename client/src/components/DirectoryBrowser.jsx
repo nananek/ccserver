@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch, getToken } from '../auth.js';
 
 const LAST_DIR_KEY = 'ccserver-last-dir';
+const SANDBOX_KEY = 'ccserver-sandbox-default';
 
 function formatSize(bytes) {
   if (bytes === 0) return '0 B';
@@ -29,6 +30,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   const [uploadProgress, setUploadProgress] = useState('');
   const fileInputRef = useRef(null);
   const dragCountRef = useRef(0);
+  const [sandboxDefault, setSandboxDefault] = useState(() => localStorage.getItem(SANDBOX_KEY) === '1');
+  const [openMenuOpen, setOpenMenuOpen] = useState(false);
+  const openMenuRef = useRef(null);
+
+  const chooseSandbox = useCallback((val) => {
+    setSandboxDefault(val);
+    localStorage.setItem(SANDBOX_KEY, val ? '1' : '0');
+  }, []);
 
   const fetchDirs = useCallback(async (path) => {
     setLoading(true);
@@ -115,6 +124,17 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
     fetchSessions();
   }, [fetchSessions]);
 
+  useEffect(() => {
+    if (!openMenuOpen) return;
+    const handleClick = (e) => {
+      if (openMenuRef.current && !openMenuRef.current.contains(e.target)) {
+        setOpenMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [openMenuOpen]);
+
   const handleSessionClick = useCallback((session) => {
     onSessionClick(session);
   }, [onSessionClick]);
@@ -122,8 +142,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   const handleSavedSessionClick = useCallback((saved) => {
     const claudeResumeKey = `ccserver-claude-resume:${saved.cwd}`;
     localStorage.setItem(claudeResumeKey, saved.claudeSessionId);
-    onOpen(saved.cwd);
-  }, [onOpen]);
+    onOpen(saved.cwd, { sandbox: sandboxDefault });
+  }, [onOpen, sandboxDefault]);
 
   const handleDeleteSession = useCallback(async (session) => {
     if (!window.confirm(`セッションを終了しますか?\n${session.cwd}`)) return;
@@ -299,9 +319,44 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
         <button className="btn btn-secondary open-btn" onClick={() => onOpenShell(currentPath)}>
           Terminal
         </button>
-        <button className="btn btn-primary open-btn" onClick={() => onOpen(currentPath)}>
-          Claude Code
-        </button>
+        <div className="open-split" ref={openMenuRef}>
+          <button
+            className="btn btn-primary open-btn open-split-main"
+            onClick={() => onOpen(currentPath, { sandbox: sandboxDefault })}
+            title={sandboxDefault ? 'サンドボックスで起動' : '通常起動'}
+          >
+            {sandboxDefault ? '🔒 Claude Code' : 'Claude Code'}
+          </button>
+          <button
+            className="btn btn-primary open-btn open-split-caret"
+            onClick={() => setOpenMenuOpen((v) => !v)}
+            title="起動方法を選択"
+            aria-label="起動方法を選択"
+          >
+            &#9662;
+          </button>
+          {openMenuOpen && (
+            <div className="open-menu">
+              <div
+                className="open-menu-item"
+                onClick={() => { chooseSandbox(false); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: false }); }}
+              >
+                <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
+                通常起動
+              </div>
+              <div
+                className="open-menu-item"
+                onClick={() => { chooseSandbox(true); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: true }); }}
+              >
+                <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
+                🔒 サンドボックスで起動
+              </div>
+              <div className="open-menu-note">
+                サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {uploadProgress && (
@@ -400,7 +455,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
               key={dir.path}
               className="dir-item"
               onClick={() => navigateTo(dir.path)}
-              onDoubleClick={() => onOpen(dir.path)}
+              onDoubleClick={() => onOpen(dir.path, { sandbox: sandboxDefault })}
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {

@@ -1,3 +1,5 @@
 node_modules/
 client/dist/
 *.log
+.saved-sessions.json
+server/sandbox.config.json

@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildSandboxSpawn, sandboxAvailable } from './sandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = join(__dirname, '..', '..', '.saved-sessions.json');
@@ -39,7 +40,7 @@ function extractClaudeSessionId(outputBuffer) {
   return null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox }) {
   const id = randomUUID();
 
   const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
@@ -53,6 +54,21 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
     args = claudeSessionId ? ['--resume', claudeSessionId] : [];
   }
   command = resolveCommand(command);
+
+  // Optionally wrap the target in a filesystem sandbox (Linux only) so it can
+  // only see the project directory plus configured paths, with an isolated
+  // rootless docker inside. See sandbox.js.
+  let useSandbox = false;
+  if (sandbox && process.platform !== 'win32' && sandboxAvailable()) {
+    try {
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args] });
+      command = spawn.command;
+      args = spawn.args;
+      useSandbox = true;
+    } catch (err) {
+      return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
+    }
+  }
 
   let ptyProcess;
   try {
@@ -76,6 +92,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
     id,
     cwd,
     shell: !!shell,
+    sandbox: useSandbox,
     ptyProcess,
     socket: null,
     outputBuffer: [],
@@ -334,6 +351,7 @@ export function listSessions() {
       cwd: session.cwd,
       connected: session.socket !== null,
       shell: session.shell,
+      sandbox: session.sandbox,
     });
   }
   return result;

@@ -54,6 +54,7 @@ export async function terminalWs(fastify, opts) {
             rows: msg.rows || 24,
             claudeSessionId: msg.claudeSessionId || null,
             shell: !!msg.shell,
+            sandbox: !!msg.sandbox,
           });
 
           if (result.error) {
