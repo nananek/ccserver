@@ -93,6 +93,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell }) {
     autoYesLog: [],
     autoYesPending: null,
     autoYesBuf: '',
+    scheduledPrompt: null, // { at: epochMs, text, timer }
   };
 
   ptyProcess.onData((data) => {
@@ -221,6 +222,109 @@ export function getSession(id) {
   return sessions.get(id);
 }
 
+const MAX_SCHEDULE_AHEAD_MS = 48 * 60 * 60 * 1000; // 48h
+
+// The server's IANA timezone (e.g. "Asia/Tokyo"). Claude Code prints its
+// rate-limit reset times in this zone, so scheduling is interpreted here too.
+let SERVER_TZ = 'UTC';
+try {
+  SERVER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+} catch {
+  // keep UTC fallback
+}
+
+export function getServerTimeInfo() {
+  return { tz: SERVER_TZ, now: Date.now() };
+}
+
+// Convert an "HH:MM" wall-clock time in the SERVER's local timezone into the
+// next matching absolute epoch (today if still ahead, otherwise tomorrow).
+export function computeNextLocalTime(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm).trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  const now = new Date();
+  const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, min, 0, 0);
+  if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+  return target.getTime();
+}
+
+// Public (serializable) view of a session's scheduled prompt
+export function scheduledPromptPublic(session) {
+  const sp = session?.scheduledPrompt;
+  return sp ? { at: sp.at, text: sp.text } : null;
+}
+
+function clearScheduledTimer(session) {
+  if (session.scheduledPrompt?.timer) {
+    clearTimeout(session.scheduledPrompt.timer);
+  }
+  session.scheduledPrompt = null;
+}
+
+function firePrompt(session) {
+  const sp = session.scheduledPrompt;
+  if (!sp) return;
+  session.scheduledPrompt = null;
+
+  let delivered = false;
+  if (!session.exited && session.ptyProcess) {
+    try {
+      // Type the prompt text, then submit with Enter after a short delay so
+      // the TUI registers the input before the newline is sent.
+      session.ptyProcess.write(sp.text);
+      setTimeout(() => {
+        if (!session.exited && session.ptyProcess) {
+          try {
+            session.ptyProcess.write('\r');
+          } catch {
+            // pty may have died between writes
+          }
+        }
+      }, 200);
+      delivered = true;
+    } catch {
+      // pty write failed
+    }
+  }
+
+  if (session.socket && session.socket.readyState === 1) {
+    session.socket.send(JSON.stringify({
+      type: 'schedule_fired',
+      at: sp.at,
+      text: sp.text,
+      delivered,
+    }));
+    session.socket.send(JSON.stringify({ type: 'schedule_state', scheduled: null }));
+  }
+}
+
+// Schedule a prompt to be injected at absolute epoch `at`. Returns the public
+// view on success, or null if the time is invalid (past / too far ahead).
+export function setScheduledPrompt(id, at, text) {
+  const session = sessions.get(id);
+  if (!session) return null;
+  clearScheduledTimer(session);
+
+  const delay = at - Date.now();
+  if (!Number.isFinite(at) || delay <= 0 || delay > MAX_SCHEDULE_AHEAD_MS) {
+    return null;
+  }
+  if (typeof text !== 'string' || text.length === 0) return null;
+
+  const timer = setTimeout(() => firePrompt(session), delay);
+  session.scheduledPrompt = { at, text, timer };
+  return scheduledPromptPublic(session);
+}
+
+export function cancelScheduledPrompt(id) {
+  const session = sessions.get(id);
+  if (!session) return;
+  clearScheduledTimer(session);
+}
+
 export function listSessions() {
   const result = [];
   for (const [id, session] of sessions) {
@@ -286,6 +390,8 @@ export function destroySession(id) {
     clearTimeout(session.idleTimer);
     session.idleTimer = null;
   }
+
+  clearScheduledTimer(session);
 
   if (!session.exited) {
     try {

@@ -105,6 +105,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
   const [showAutoYesLog, setShowAutoYesLog] = useState(false);
+  const [schedule, setSchedule] = useState(null); // { at, text } | null
+  const [showScheduler, setShowScheduler] = useState(false);
+  const [scheduleTime, setScheduleTime] = useState('');
+  const [schedulePromptText, setSchedulePromptText] = useState('');
+  const [scheduleError, setScheduleError] = useState('');
+  const [serverTz, setServerTz] = useState(null);
+  const serverOffsetRef = useRef(0); // serverNow - clientNow (ms)
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const notifyRef = useRef(notify);
   useEffect(() => { notifyRef.current = notify; }, [notify]);
   const onAttentionRef = useRef(onAttention);
@@ -291,6 +299,32 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
             setAutoYes(msg.enabled);
             setAutoYesLog(msg.log || []);
             break;
+          case 'schedule_state':
+            setSchedule(msg.scheduled || null);
+            setScheduleError(msg.error || '');
+            if (msg.serverTz) setServerTz(msg.serverTz);
+            if (typeof msg.serverNow === 'number') {
+              serverOffsetRef.current = msg.serverNow - Date.now();
+            }
+            break;
+          case 'schedule_fired': {
+            setSchedule(null);
+            if (notifyRef.current) {
+              const n = notifyRef.current('Claude Code', {
+                body: `Scheduled prompt sent in ${cwd}`,
+                icon: '/icon-192.png',
+                tag: `schedule-fired-${cwd}`,
+              });
+              if (n) {
+                n.onclick = () => {
+                  window.focus();
+                  if (onFocusTabRef.current) onFocusTabRef.current();
+                  n.close();
+                };
+              }
+            }
+            break;
+          }
           case 'replay':
             term.write(msg.data);
             break;
@@ -582,6 +616,48 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
     sendInput(key.data);
   }, [sendInput]);
 
+  // Format an absolute epoch in the SERVER's timezone (matching Claude Code's
+  // rate-limit reset times), falling back to the browser locale if unknown.
+  const fmtServer = useCallback((epoch, opts) => {
+    try {
+      return new Date(epoch).toLocaleString([], { timeZone: serverTz || undefined, ...opts });
+    } catch {
+      return new Date(epoch).toLocaleString([], opts);
+    }
+  }, [serverTz]);
+
+  const submitSchedule = useCallback(() => {
+    if (!/^(\d{1,2}):(\d{2})$/.test(scheduleTime.trim())) {
+      setScheduleError('時刻を HH:MM 形式で入力してください');
+      return;
+    }
+    if (!schedulePromptText.trim()) {
+      setScheduleError('プロンプト文面を入力してください');
+      return;
+    }
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      // Send the HH:MM string; the server interprets it in its own timezone.
+      ws.send(JSON.stringify({ type: 'schedule_prompt', time: scheduleTime, text: schedulePromptText }));
+      setScheduleError('');
+    }
+  }, [scheduleTime, schedulePromptText]);
+
+  const cancelSchedule = useCallback(() => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'cancel_schedule' }));
+    }
+  }, []);
+
+  // Tick a live clock while the scheduler panel is open so the displayed
+  // server time stays current.
+  useEffect(() => {
+    if (!showScheduler) return;
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [showScheduler]);
+
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}`}>
       <div className="terminal-header">
@@ -638,6 +714,16 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
             </>
           )}
           <button
+            className={`btn schedule-toggle${schedule ? ' active' : ''}`}
+            onClick={() => setShowScheduler((v) => !v)}
+            title={schedule
+              ? `Scheduled prompt at ${fmtServer(schedule.at)} (click to view)`
+              : 'Schedule a prompt'}
+          >
+            <svg className="header-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg>
+            {schedule && <span className="schedule-badge" />}
+          </button>
+          <button
             className={`btn notify-toggle${notifyEnabled ? ' active' : ''}`}
             onClick={onToggleNotify}
             title={
@@ -669,6 +755,61 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, not
               </div>
             ))}
           </div>
+        </div>
+      )}
+      {showScheduler && (
+        <div className="scheduler-panel">
+          <div className="scheduler-header">
+            <span>予約プロンプト</span>
+            <button className="btn btn-secondary btn-sm" onClick={() => setShowScheduler(false)}>&#10005;</button>
+          </div>
+          <div className="scheduler-servertime">
+            サーバー現在時刻: {fmtServer(nowTick + serverOffsetRef.current)}
+            {serverTz ? ` (${serverTz})` : ' (タイムゾーン取得中…)'}
+          </div>
+          {schedule ? (
+            <div className="scheduler-active">
+              <div className="scheduler-active-info">
+                <span className="scheduler-active-time">
+                  {fmtServer(schedule.at)} に送信予定
+                </span>
+                <span className="scheduler-active-text">{schedule.text}</span>
+              </div>
+              <button className="btn btn-secondary btn-sm" onClick={cancelSchedule}>キャンセル</button>
+            </div>
+          ) : (
+            <div className="scheduler-form">
+              <div className="scheduler-form-row">
+                <input
+                  type="time"
+                  className="key-config-input scheduler-time"
+                  value={scheduleTime}
+                  onChange={(e) => setScheduleTime(e.target.value)}
+                />
+                <span className="scheduler-hint">サーバー時刻で送信(過ぎていれば翌日)</span>
+              </div>
+              <textarea
+                className="terminal-input scheduler-text"
+                value={schedulePromptText}
+                onChange={(e) => setSchedulePromptText(e.target.value)}
+                placeholder="送信するプロンプト文面..."
+                rows={2}
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+              <div className="scheduler-form-actions">
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={submitSchedule}
+                  disabled={!scheduleTime || !schedulePromptText.trim()}
+                >
+                  予約する
+                </button>
+              </div>
+            </div>
+          )}
+          {scheduleError && <div className="scheduler-error">{scheduleError}</div>}
         </div>
       )}
       <div className="terminal-container" ref={terminalRef} />

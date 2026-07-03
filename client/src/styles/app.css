@@ -960,6 +960,134 @@ body {
   word-break: break-all;
 }
 
+/* Scheduled prompt (timer) */
+.schedule-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  border-radius: 4px;
+}
+
+.schedule-toggle:hover:not(:disabled) {
+  background: var(--bg-surface);
+  border-color: var(--border);
+}
+
+.schedule-toggle.active {
+  color: var(--accent, #89b4fa);
+  border-color: var(--accent, #89b4fa);
+  background: rgba(137, 180, 250, 0.1);
+}
+
+.schedule-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent, #89b4fa);
+}
+
+.scheduler-panel {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  padding: 6px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scheduler-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent, #89b4fa);
+}
+
+.scheduler-servertime {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.scheduler-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scheduler-form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.scheduler-time {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.scheduler-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.scheduler-text {
+  width: 100%;
+  resize: vertical;
+  min-height: 2.4em;
+}
+
+.scheduler-form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.scheduler-active {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.scheduler-active-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.scheduler-active-time {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent, #89b4fa);
+}
+
+.scheduler-active-text {
+  font-size: 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--text-muted);
+  word-break: break-all;
+  white-space: pre-wrap;
+  max-height: 60px;
+  overflow-y: auto;
+}
+
+.scheduler-error {
+  font-size: 11px;
+  color: var(--error, #f38ba8);
+}
+
 /* Resume Dialog */
 .resume-overlay {
   position: fixed;

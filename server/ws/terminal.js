@@ -4,7 +4,25 @@ import {
   getSession,
   attachSocket,
   detachSocket,
+  setScheduledPrompt,
+  cancelScheduledPrompt,
+  scheduledPromptPublic,
+  computeNextLocalTime,
+  getServerTimeInfo,
 } from './sessionManager.js';
+
+// Build a schedule_state payload including server timezone info so the client
+// can display/interpret times in the server's zone (matching Claude Code).
+function scheduleStateMsg(scheduled, error) {
+  const { tz, now } = getServerTimeInfo();
+  return JSON.stringify({
+    type: 'schedule_state',
+    scheduled,
+    serverTz: tz,
+    serverNow: now,
+    ...(error ? { error } : {}),
+  });
+}
 
 export async function terminalWs(fastify, opts) {
   fastify.get('/ws/terminal', { websocket: true }, (socket, req) => {
@@ -61,6 +79,7 @@ export async function terminalWs(fastify, opts) {
               isReconnect: false,
             })
           );
+          socket.send(scheduleStateMsg(scheduledPromptPublic(session)));
           break;
         }
 
@@ -137,6 +156,9 @@ export async function terminalWs(fastify, opts) {
               log: session.autoYesLog,
             }));
           }
+
+          // Send scheduled-prompt state on attach (available for all sessions)
+          socket.send(scheduleStateMsg(scheduledPromptPublic(session)));
           break;
         }
 
@@ -196,6 +218,41 @@ export async function terminalWs(fastify, opts) {
                 enabled: session.autoYes,
                 log: session.autoYesLog,
               }));
+            }
+          }
+          break;
+        }
+
+        case 'schedule_prompt': {
+          if (currentSessionId) {
+            // Prefer an "HH:MM" wall-clock time interpreted in the server's
+            // timezone; fall back to an explicit absolute epoch (`at`).
+            const at = msg.time != null
+              ? computeNextLocalTime(msg.time)
+              : Number(msg.at);
+            const text = typeof msg.text === 'string' ? msg.text : '';
+            const scheduled = at != null ? setScheduledPrompt(currentSessionId, at, text) : null;
+            socket.send(scheduleStateMsg(
+              scheduled,
+              scheduled ? undefined : 'Invalid schedule (time must be HH:MM in the future within 48h, with non-empty text)'
+            ));
+          }
+          break;
+        }
+
+        case 'cancel_schedule': {
+          if (currentSessionId) {
+            cancelScheduledPrompt(currentSessionId);
+            socket.send(scheduleStateMsg(null));
+          }
+          break;
+        }
+
+        case 'get_schedule': {
+          if (currentSessionId) {
+            const session = getSession(currentSessionId);
+            if (session) {
+              socket.send(scheduleStateMsg(scheduledPromptPublic(session)));
             }
           }
           break;
