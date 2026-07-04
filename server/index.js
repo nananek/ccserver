@@ -8,8 +8,10 @@ import { dirsRoute } from './routes/dirs.js';
 import { sessionsRoute } from './routes/sessions.js';
 import { filesRoute } from './routes/files.js';
 import { systemRoute } from './routes/system.js';
+import { usageRoute } from './routes/usage.js';
 import { terminalWs } from './ws/terminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
+import { warmUsage } from './usage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
@@ -36,6 +38,7 @@ await fastify.register(dirsRoute, { prefix: '/api' });
 await fastify.register(sessionsRoute, { prefix: '/api' });
 await fastify.register(filesRoute, { prefix: '/api' });
 await fastify.register(systemRoute, { prefix: '/api' });
+await fastify.register(usageRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
 
 if (process.env.NODE_ENV === 'production') {
@@ -75,3 +78,7 @@ try {
 } catch (err) {
   fastify.log.error({ err }, 'Failed to restore scheduled prompts');
 }
+
+// Warm the Claude usage cache so the first click on the top-bar Usage button is
+// instant (best effort — a failed capture just leaves the cache empty).
+warmUsage();

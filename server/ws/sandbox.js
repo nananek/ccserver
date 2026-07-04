@@ -302,6 +302,30 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   return args;
 }
 
+// Minimal sandbox: just enough to launch claude in an isolated filesystem, with
+// NO docker, gpg, ssh, or extra binds. bwrap creates its own user namespace
+// (--unshare-user) and network stays shared with the host (so claude can still
+// reach the API). Used for the lightweight background `/usage` capture, which
+// only needs Claude's own config bound in — see server/usage.js.
+export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
+  const bwrapArgs = buildBwrapArgs({
+    cwd,
+    docker: false,
+    gpg: false,
+    extraBinds: [],
+    extraEnv: {},
+    authSock: null,
+    stateDir: null,
+  });
+  const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...targetCommand];
+  return {
+    command: BWRAP,
+    args: [...bwrapArgs, '--', ...innerCmd],
+    docker: false,
+    stateDir: null,
+  };
+}
+
 // Returns { command, args } for pty.spawn, wrapping the given target command
 // (e.g. ['claude', '--resume', id] or ['/bin/bash']) in the sandbox.
 export function buildSandboxSpawn({ cwd, targetCommand }) {

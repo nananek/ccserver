@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import TerminalView from './components/TerminalView.jsx';
 import SystemMonitor from './components/SystemMonitor.jsx';
+import UsageButton from './components/UsageButton.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
 
@@ -137,6 +138,8 @@ export default function App() {
             )}
           </div>
         ))}
+        <div className="tab-bar-spacer" />
+        <UsageButton />
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
