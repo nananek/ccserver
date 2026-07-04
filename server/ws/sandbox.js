@@ -16,7 +16,7 @@
 // outer layer. See memory: sandbox-dind-recipe.
 
 import { homedir } from 'node:os';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
@@ -75,7 +75,86 @@ export function loadSandboxConfig() {
   const gpg = raw.gpg === true;        // forward gpg-agent + ~/.gnupg (opt-in)
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
-  return { docker, gpg, binds, env, configPath };
+  // How to launch claude. Overridable because the install location is
+  // environment-specific (see resolveClaude). Env var wins over the config file.
+  const claudeBin = process.env.CCSERVER_CLAUDE_BIN || (typeof raw.claudeBin === 'string' ? raw.claudeBin : null);
+  return { docker, gpg, binds, env, claudeBin, configPath };
+}
+
+// Locate an executable named `cmd` on PATH (or return it as-is if it already
+// looks like a path). Mirrors `command -v` without spawning a shell.
+function which(cmd) {
+  if (!cmd) return null;
+  if (cmd.includes('/')) return cmd;
+  for (const dir of (process.env.PATH || '').split(':')) {
+    if (!dir) continue;
+    const p = join(dir, cmd);
+    try {
+      const st = statSync(p);
+      if (st.isFile() && (st.mode & 0o111)) return p;
+    } catch { /* not here */ }
+  }
+  return null;
+}
+
+// Given the host path of the claude launcher, return the directory that must be
+// exposed read-only inside the sandbox for it to actually run — or null if it
+// already lives under an always-exposed tree.
+//
+// Distro/system installs often put a tiny shell wrapper on PATH (e.g.
+// /usr/bin/claude) that execs the real, self-contained binary from elsewhere
+// (e.g. /opt/claude-code/bin/claude). The sandbox binds /usr but not /opt, so
+// the wrapper runs while its target is missing -> exit 127 ("No such file or
+// directory"). We follow the wrapper to the real binary and bind its tree.
+function claudeInstallDir(onHost) {
+  let real = onHost;
+  try { real = realpathSync(onHost); } catch { /* keep as given */ }
+
+  // A small text file on PATH is almost certainly a shell wrapper; follow the
+  // absolute path it execs to reach the real binary.
+  try {
+    const st = statSync(real);
+    if (st.isFile() && st.size < 64 * 1024) {
+      const text = readFileSync(real, 'utf-8');
+      if (text.startsWith('#!')) {
+        const m = text.match(/\bexec\s+"?(\/[^\s"']+)"?/);
+        if (m) { try { real = realpathSync(m[1]); } catch { real = m[1]; } }
+      }
+    }
+  } catch { /* binary / unreadable: not a wrapper */ }
+
+  // Already reachable inside the sandbox? Nothing extra to bind.
+  const exposed = ['/usr/', '/bin/', '/lib/', '/lib64/', '/etc/'];
+  if (exposed.some((p) => real.startsWith(p))) return null;
+  if (real.startsWith(`${join(HOME, '.local')}/`)) return null; // ~/.local/bin is bound
+
+  // Bind the install root: the parent of a trailing bin/ (so sibling assets
+  // come along), else the directory holding the binary.
+  let dir = dirname(real);
+  if (dir.endsWith('/bin')) dir = dirname(dir);
+  return dir;
+}
+
+// Resolve how launches should invoke claude, plus the host path (if any) that
+// must be exposed read-only in the sandbox for that invocation to work.
+//   command    - argv[0] to run (the configured override, else "claude" so the
+//                sandbox's PATH resolves it)
+//   installDir - extra ro-bind so the resolved binary is present, or null
+// Override with CCSERVER_CLAUDE_BIN or "claudeBin" in the sandbox config when
+// claude lives somewhere non-standard.
+export function resolveClaude(configuredBin = loadSandboxConfig().claudeBin) {
+  const command = configuredBin || (process.platform === 'win32' ? 'claude.exe' : 'claude');
+  const onHost = which(command);
+  return { command, installDir: onHost ? claudeInstallDir(onHost) : null };
+}
+
+// Swap a leading bare `claude` in a target command for the resolved launcher,
+// leaving non-claude targets (e.g. a shell) untouched.
+function withClaude(targetCommand, command) {
+  if (targetCommand[0] === 'claude' || targetCommand[0] === 'claude.exe') {
+    return [command, ...targetCommand.slice(1)];
+  }
+  return targetCommand;
 }
 
 // The host's gpg socket directory (e.g. /run/user/UID/gnupg), where the live
@@ -174,7 +253,7 @@ export function sandboxAvailable() {
 
 // Build the bwrap arguments (everything after the `bwrap` executable, up to
 // but not including the trailing `-- <cmd...>`).
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -228,6 +307,12 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     if (existsSync(src)) {
       args.push(mode === 'ro' ? '--ro-bind' : '--bind', src, src);
     }
+  }
+
+  // The claude install itself, when it lives outside the exposed trees (e.g.
+  // /opt/claude-code reached via a /usr/bin/claude wrapper). See claudeInstallDir.
+  if (claudeDir && existsSync(claudeDir)) {
+    args.push('--ro-bind', claudeDir, claudeDir);
   }
 
   // Persistent per-project docker data-root, mounted at the default location.
@@ -308,6 +393,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 // reach the API). Used for the lightweight background `/usage` capture, which
 // only needs Claude's own config bound in — see server/usage.js.
 export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
+  const { command, installDir } = resolveClaude();
   const bwrapArgs = buildBwrapArgs({
     cwd,
     docker: false,
@@ -316,8 +402,9 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
     extraEnv: {},
     authSock: null,
     stateDir: null,
+    claudeDir: installDir,
   });
-  const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...targetCommand];
+  const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
   return {
     command: BWRAP,
     args: [...bwrapArgs, '--', ...innerCmd],
@@ -329,7 +416,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 // Returns { command, args } for pty.spawn, wrapping the given target command
 // (e.g. ['claude', '--resume', id] or ['/bin/bash']) in the sandbox.
 export function buildSandboxSpawn({ cwd, targetCommand }) {
-  const { docker: cfgDocker, gpg, binds, env } = loadSandboxConfig();
+  const { docker: cfgDocker, gpg, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
 
   // An explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
@@ -339,8 +426,9 @@ export function buildSandboxSpawn({ cwd, targetCommand }) {
   // teardown. See newStateDir().
   const stateDir = docker ? newStateDir() : null;
 
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir });
-  const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...targetCommand];
+  const { command, installDir } = resolveClaude(claudeBin);
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir });
+  const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   if (docker) {
     return {

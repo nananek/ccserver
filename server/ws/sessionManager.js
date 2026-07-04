@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, sandboxAvailable } from './sandbox.js';
+import { buildSandboxSpawn, resolveClaude, sandboxAvailable } from './sandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = join(__dirname, '..', '..', '.saved-sessions.json');
@@ -51,7 +51,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     command = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/bash');
     args = [];
   } else {
-    command = process.platform === 'win32' ? 'claude.exe' : 'claude';
+    command = resolveClaude().command;
     args = claudeSessionId ? ['--resume', claudeSessionId] : [];
   }
   command = resolveCommand(command);

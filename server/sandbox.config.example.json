@@ -16,5 +16,7 @@
   ],
 
   "//env": "Extra environment variables set inside the sandbox (applied last, so they override defaults). e.g. force a specific SSH_AUTH_SOCK.",
-  "env": {}
+  "env": {},
+
+  "//claudeBin": "How to launch claude. Default: auto — resolve 'claude' on PATH and, if it's a wrapper to the real binary (e.g. /usr/bin/claude -> /opt/claude-code/bin/claude), expose that install dir in the sandbox automatically. Set this only if claude lives somewhere the auto-detect misses, or to pin a specific build. Absolute path recommended. Env var CCSERVER_CLAUDE_BIN overrides this."
 }

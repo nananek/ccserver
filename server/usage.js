@@ -13,12 +13,17 @@ import * as pty from 'node-pty';
 import { homedir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildMinimalSandboxSpawn, sandboxAvailable } from './ws/sandbox.js';
+import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable } from './ws/sandbox.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
 const CAPTURE_TIMEOUT_MS = 15 * 1000; // hard cap on a single capture
 const BOOT_DELAY_MS = 3000;           // wait for claude's TUI to come up before typing
 const SETTLE_MS = 900;                // quiet period after the dashboard looks ready
+const TRUST_SETTLE_MS = 1500;         // let the UI replace the trust dialog before typing
+
+// A cwd claude hasn't seen before shows a "trust this folder" gate that would
+// otherwise swallow the /usage command. Detected in the rendered text.
+const TRUST_RE = /trust this folder|Enter y\/n/i;
 
 // A throwaway working directory for the sandboxed capture (kept empty; only
 // exists so bwrap has a cwd to bind/chdir into without exposing a real project).
@@ -150,7 +155,7 @@ function looksReady(parsed) {
 
 function capture() {
   return new Promise((resolve) => {
-    let command = process.platform === 'win32' ? 'claude.exe' : 'claude';
+    let command = resolveClaude().command;
     let args = ['--ax-screen-reader'];
     let spawnCwd = homedir();
     let sandboxed = false;
@@ -191,6 +196,7 @@ function capture() {
     let buf = '';
     let done = false;
     let sentUsage = false;
+    let trustHandled = false;
     let bootTimer = null;
     let settleTimer = null;
     let hardTimer = null;
@@ -205,19 +211,45 @@ function capture() {
       resolve({ ...res, sandboxed });
     };
 
-    bootTimer = setTimeout(() => {
+    // Type `/usage` (once). The Enter is sent slightly later so it lands as a
+    // submit after the command text is in the input box.
+    const sendUsage = () => {
+      if (sentUsage || done) return;
+      sentUsage = true;
       try {
         ptyProc.write('/usage');
         setTimeout(() => { try { ptyProc.write('\r'); } catch { /* dead */ } }, 500);
-        sentUsage = true;
       } catch {
         finish({ error: 'claude exited before /usage could be sent' });
       }
+    };
+
+    // Clear the trust gate, then ask for usage once the dialog is gone. The
+    // sandbox exposes only an empty throwaway cwd, so trusting it is harmless.
+    const answerTrustThenUsage = () => {
+      if (trustHandled || done) return;
+      trustHandled = true;
+      try {
+        ptyProc.write('y');
+        setTimeout(() => { try { ptyProc.write('\r'); } catch { /* dead */ } }, 200);
+      } catch { /* dead */ }
+      setTimeout(sendUsage, TRUST_SETTLE_MS);
+    };
+
+    bootTimer = setTimeout(() => {
+      if (TRUST_RE.test(stripRender(buf))) answerTrustThenUsage();
+      else sendUsage();
     }, BOOT_DELAY_MS);
 
     ptyProc.onData((d) => {
       buf += d;
       if (buf.length > 512 * 1024) buf = buf.slice(-256 * 1024);
+      // The trust gate can appear before the boot delay; clear it as soon as
+      // it shows so it never eats the /usage command.
+      if (!sentUsage && !trustHandled && TRUST_RE.test(stripRender(buf))) {
+        answerTrustThenUsage();
+        return;
+      }
       if (!sentUsage) return;
       if (looksReady(parseUsage(buf))) {
         clearTimeout(settleTimer);
