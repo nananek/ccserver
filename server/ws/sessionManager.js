@@ -83,6 +83,16 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       FORCE_COLOR: '1',
+      // For claude sessions, keep it drawing to the main buffer instead of the
+      // alternate screen (DECSET 1049). The alt-screen has no scrollback, so
+      // xterm.js's scrollLines()/scroll buttons do nothing while it's active;
+      // disabling it lets scrollback accumulate again. DISABLE_MOUSE_CLICKS
+      // additionally hands the scroll wheel back to xterm.js. Only affects
+      // ccserver-launched claude; shells are left untouched.
+      ...(shell ? {} : {
+        CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1',
+        CLAUDE_CODE_DISABLE_MOUSE_CLICKS: '1',
+      }),
     },
   });
   } catch (err) {
