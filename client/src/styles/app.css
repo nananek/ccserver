@@ -84,11 +84,21 @@ body {
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  /* No overflow clipping here: dropdowns anchored to the right-hand controls
+     (e.g. the Usage popover) must be able to spill below the bar. Horizontal
+     tab scrolling is confined to .tab-list instead. */
+}
+
+.tab-list {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }
 
-.tab-bar::-webkit-scrollbar {
+.tab-list::-webkit-scrollbar {
   height: 0;
 }
 

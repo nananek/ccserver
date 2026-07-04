@@ -15,7 +15,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildMinimalSandboxSpawn, sandboxAvailable } from './ws/sandbox.js';
 
-const CACHE_TTL_MS = 2 * 60 * 1000;   // serve cache without re-capturing
+const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
 const CAPTURE_TIMEOUT_MS = 15 * 1000; // hard cap on a single capture
 const BOOT_DELAY_MS = 3000;           // wait for claude's TUI to come up before typing
 const SETTLE_MS = 900;                // quiet period after the dashboard looks ready

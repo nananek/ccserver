@@ -677,6 +677,7 @@ export function gracefulShutdown() {
           savedSessions.push({
             cwd: session.cwd,
             claudeSessionId: claudeId,
+            sandbox: !!session.sandbox,
           });
         }
       }

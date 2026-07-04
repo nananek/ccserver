@@ -142,7 +142,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   const handleSavedSessionClick = useCallback((saved) => {
     const claudeResumeKey = `ccserver-claude-resume:${saved.cwd}`;
     localStorage.setItem(claudeResumeKey, saved.claudeSessionId);
-    onOpen(saved.cwd, { sandbox: sandboxDefault });
+    // Preserve the session's original sandbox setting; fall back to the current
+    // default only for legacy saved entries that predate the persisted flag.
+    const sandbox = saved.sandbox ?? sandboxDefault;
+    onOpen(saved.cwd, { sandbox });
   }, [onOpen, sandboxDefault]);
 
   const handleDeleteSession = useCallback(async (session) => {

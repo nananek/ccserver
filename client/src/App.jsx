@@ -113,6 +113,7 @@ export default function App() {
   return (
     <div className="app">
       <div className="tab-bar">
+        <div className="tab-list">
         {tabs.map((tab) => (
           <div
             key={tab.id}
@@ -139,6 +140,7 @@ export default function App() {
           </div>
         ))}
         <div className="tab-bar-spacer" />
+        </div>
         <UsageButton />
       </div>
       <div className="tab-content">
