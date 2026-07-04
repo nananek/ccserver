@@ -1,7 +1,7 @@
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, sandboxAvailable } from './sandbox.js';
@@ -60,11 +60,13 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // only see the project directory plus configured paths, with an isolated
   // rootless docker inside. See sandbox.js.
   let useSandbox = false;
+  let sandboxStateDir = null;
   if (sandbox && process.platform !== 'win32' && sandboxAvailable()) {
     try {
       const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args] });
       command = spawn.command;
       args = spawn.args;
+      sandboxStateDir = spawn.stateDir || null;
       useSandbox = true;
     } catch (err) {
       return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
@@ -104,6 +106,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     cwd,
     shell: !!shell,
     sandbox: useSandbox,
+    sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
     ptyProcess,
     socket: null,
     outputBuffer: [],
@@ -626,6 +629,18 @@ export function destroySession(id, { keepSchedule = true } = {}) {
       session.ptyProcess.kill();
     } catch {
       // already dead
+    }
+  }
+
+  // Remove the sandbox's unique rootlesskit state dir. The --unshare-pid tree is
+  // torn down by the kill above (kernel reaps dockerd with the namespace); this
+  // just clears the leftover socket dir under /run. Best effort — the dir is
+  // unique per launch, so a stale one never blocks a future sandbox anyway.
+  if (session.sandboxStateDir) {
+    try {
+      rmSync(session.sandboxStateDir, { recursive: true, force: true });
+    } catch {
+      // nothing to remove / still held — harmless
     }
   }
 

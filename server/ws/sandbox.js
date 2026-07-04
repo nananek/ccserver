@@ -18,6 +18,7 @@
 import { homedir } from 'node:os';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -34,9 +35,15 @@ const HOME = homedir();
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
 const XDG_RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
 
-// RootlessKit's state dir (holds the API socket dockerd connects to). It lives
+// RootlessKit's state dir (holds the API socket dockerd connects to) lives
 // under the runtime dir on the host; bwrap binds it in so dockerd can reach it.
-const ROOTLESSKIT_STATE_DIR = join(XDG_RUNTIME_DIR, 'dockerd-rootless');
+// It MUST be unique per launch: rootlesskit flocks <state-dir>/lock, so a shared
+// path lets a still-running (or slowly-torn-down) sandbox block the next one
+// with "another RootlessKit is running with the same state directory". A fresh
+// dir per session also means a leaked sandbox never blocks a new launch.
+function newStateDir() {
+  return join(XDG_RUNTIME_DIR, `dockerd-rootless-${randomUUID()}`);
+}
 
 // Where per-project docker data-roots (images/layers) live, so they persist
 // across sessions of the same project.
@@ -167,9 +174,16 @@ export function sandboxAvailable() {
 
 // Build the bwrap arguments (everything after the `bwrap` executable, up to
 // but not including the trailing `-- <cmd...>`).
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir }) {
   const args = [
     '--die-with-parent',
+    // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
+    // it, the background dockerd is NOT a tracked --die-with-parent child: when
+    // bwrap dies its descendants merely reparent (to systemd) and dockerd leaks,
+    // keeping data-root/socket locks and blocking the next launch. With a pidns,
+    // bwrap installs a reaper as pid 1 (reaps zombies from docker/containerd),
+    // and the kernel SIGKILLs everything in the namespace once it exits.
+    '--unshare-pid',
     // Read-only system
     '--ro-bind', '/usr', '/usr',
     '--symlink', 'usr/bin', '/bin',
@@ -194,7 +208,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock }) {
   if (docker) {
     // rootlesskit (outer) provides the user namespace and its state dir holds
     // the API socket dockerd needs; expose just that dir.
-    args.push('--bind', ROOTLESSKIT_STATE_DIR, ROOTLESSKIT_STATE_DIR);
+    args.push('--bind', stateDir, stateDir);
   } else {
     // No outer rootlesskit: bwrap creates the user namespace itself.
     args.push('--unshare-user');
@@ -297,14 +311,18 @@ export function buildSandboxSpawn({ cwd, targetCommand }) {
   // An explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
   const authSock = env.SSH_AUTH_SOCK || discoverSshAuthSock();
 
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock });
+  // Unique per launch (docker only); returned so the caller can remove it on
+  // teardown. See newStateDir().
+  const stateDir = docker ? newStateDir() : null;
+
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...targetCommand];
 
   if (docker) {
     return {
       command: ROOTLESSKIT,
       args: [
-        `--state-dir=${ROOTLESSKIT_STATE_DIR}`,
+        `--state-dir=${stateDir}`,
         '--net=slirp4netns',
         '--mtu=65520',
         '--slirp4netns-sandbox=auto',
@@ -322,6 +340,7 @@ export function buildSandboxSpawn({ cwd, targetCommand }) {
         ...innerCmd,
       ],
       docker,
+      stateDir,
     };
   }
 
@@ -329,5 +348,6 @@ export function buildSandboxSpawn({ cwd, targetCommand }) {
     command: BWRAP,
     args: [...bwrapArgs, '--', ...innerCmd],
     docker,
+    stateDir,
   };
 }
