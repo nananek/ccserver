@@ -1631,12 +1631,61 @@ body {
   font-weight: 600;
 }
 
+.usage-bar-wrap {
+  position: relative;
+  padding: 5px 0;   /* room for the ▼/▲ pace markers above & below the bar */
+}
+
 .usage-bar {
   height: 6px;
   border-radius: 4px;
   background: var(--bg-surface);
   overflow: hidden;
 }
+
+/* "On-pace" indicator: a thin tick with a ▼ above and ▲ below, placed at the
+   point matching how far through the session/week window we are. When the fill
+   sits left of it usage is under an even pace; if the fill passes it (.over),
+   usage is running ahead of schedule. */
+.usage-pace {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--text-secondary, #9aa0a6);
+  opacity: 0.75;
+  pointer-events: auto;
+}
+
+.usage-pace::before,
+.usage-pace::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+}
+
+.usage-pace::before {   /* ▼ above the bar, pointing down */
+  top: -2px;
+  border-top: 5px solid var(--text-secondary, #9aa0a6);
+}
+
+.usage-pace::after {    /* ▲ below the bar, pointing up */
+  bottom: -2px;
+  border-bottom: 5px solid var(--text-secondary, #9aa0a6);
+}
+
+.usage-pace.over {
+  background: var(--error, #e05555);
+  opacity: 0.95;
+}
+.usage-pace.over::before { border-top-color: var(--error, #e05555); }
+.usage-pace.over::after { border-bottom-color: var(--error, #e05555); }
 
 .usage-bar-fill {
   height: 100%;

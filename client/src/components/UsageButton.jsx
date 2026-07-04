@@ -7,6 +7,14 @@ function pctClass(pct) {
   return 'usage-bar-fill low';
 }
 
+// Where an "even" pace would put you right now: the fraction of the current
+// session/week window that has already elapsed, as a 0–100 position on the bar.
+function paceMark(l, now) {
+  if (!l.resetAt || !l.windowMs) return null;
+  const frac = 1 - (l.resetAt - now) / l.windowMs;
+  return Math.max(0, Math.min(100, frac * 100));
+}
+
 function fmtAge(updatedAt) {
   if (!updatedAt) return '';
   const s = Math.max(0, Math.round((Date.now() - updatedAt) / 1000));
@@ -20,6 +28,7 @@ export default function UsageButton() {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null);   // { usage, updatedAt, error, ... }
   const [loading, setLoading] = useState(false);
+  const [, setTick] = useState(0);   // re-render so pace/age stay live while open
   const wrapRef = useRef(null);
 
   const load = useCallback(async (force = false) => {
@@ -52,8 +61,15 @@ export default function UsageButton() {
     return () => document.removeEventListener('mousedown', onClick);
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+    const id = setInterval(() => setTick((t) => t + 1), 30000);
+    return () => clearInterval(id);
+  }, [open]);
+
   const limits = data?.usage?.limits || [];
   const session = limits.find((l) => /session/i.test(l.label)) || limits[0];
+  const now = Date.now();
 
   return (
     <div className="usage-picker" ref={wrapRef}>
@@ -88,18 +104,36 @@ export default function UsageButton() {
 
           {limits.length > 0 ? (
             <div className="usage-limits">
-              {limits.map((l, i) => (
-                <div className="usage-limit" key={i}>
-                  <div className="usage-limit-top">
-                    <span className="usage-limit-label">{l.label}</span>
-                    <span className="usage-limit-pct">{l.pct}%</span>
+              {limits.map((l, i) => {
+                const pace = paceMark(l, now);
+                const over = pace != null && l.pct > pace + 1;
+                return (
+                  <div className="usage-limit" key={i}>
+                    <div className="usage-limit-top">
+                      <span className="usage-limit-label">{l.label}</span>
+                      <span className="usage-limit-pct">{l.pct}%</span>
+                    </div>
+                    <div className="usage-bar-wrap">
+                      <div className="usage-bar">
+                        <div className={pctClass(l.pct)} style={{ width: `${Math.min(100, l.pct)}%` }} />
+                      </div>
+                      {pace != null && (
+                        <div
+                          className={`usage-pace${over ? ' over' : ''}`}
+                          style={{ left: `${pace}%` }}
+                          title={`妥当なペースの目安 ${Math.round(pace)}%（経過時間ぶん）${over ? ' · ペース超過' : ''}`}
+                        />
+                      )}
+                    </div>
+                    {(l.resets || pace != null) && (
+                      <div className="usage-limit-reset">
+                        {l.resets && `リセット: ${l.resets}`}
+                        {pace != null && `${l.resets ? ' · ' : ''}目安 ${Math.round(pace)}%`}
+                      </div>
+                    )}
                   </div>
-                  <div className="usage-bar">
-                    <div className={pctClass(l.pct)} style={{ width: `${Math.min(100, l.pct)}%` }} />
-                  </div>
-                  {l.resets && <div className="usage-limit-reset">リセット: {l.resets}</div>}
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className="usage-empty">

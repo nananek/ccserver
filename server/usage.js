@@ -39,6 +39,61 @@ function stripRender(raw) {
     .replace(/\r/g, '\n');
 }
 
+const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+
+// Turn a reset string into an absolute epoch (ms) so the client can plot how far
+// through the current window we are. Handles the two shapes claude emits:
+//   "5:40pm (Asia/Tokyo)"       -> time only (session): next occurrence
+//   "Jul 10, 2am (Asia/Tokyo)"  -> date + time (week)
+// The timezone label is dropped; times are read as the server's local time,
+// which matches the user's zone in practice. Returns null if unparseable.
+function parseResetTime(resets, now) {
+  if (!resets) return null;
+  const s = resets.replace(/\s*\([^)]*\)\s*$/, '').trim(); // strip "(Asia/Tokyo)"
+
+  let month = null;
+  let day = null;
+  let rest = s;
+  const md = s.match(/^([A-Za-z]{3,})\s+(\d{1,2}),?\s+(.*)$/);
+  if (md && MONTHS[md[1].slice(0, 3).toLowerCase()] !== undefined) {
+    month = MONTHS[md[1].slice(0, 3).toLowerCase()];
+    day = parseInt(md[2], 10);
+    rest = md[3];
+  }
+
+  const tm = rest.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i);
+  if (!tm) return null;
+  let hour = parseInt(tm[1], 10);
+  const min = tm[2] ? parseInt(tm[2], 10) : 0;
+  const ap = tm[3].toLowerCase();
+  if (ap === 'pm' && hour !== 12) hour += 12;
+  if (ap === 'am' && hour === 12) hour = 0;
+
+  const base = new Date(now);
+  const d = new Date(
+    base.getFullYear(),
+    month != null ? month : base.getMonth(),
+    day != null ? day : base.getDate(),
+    hour, min, 0, 0,
+  );
+  if (month != null) {
+    // Dated reset: bump a year on wrap (e.g. a Jan reset seen in December).
+    if (d.getTime() < now - 24 * 3600 * 1000) d.setFullYear(d.getFullYear() + 1);
+  } else if (d.getTime() <= now) {
+    // Time-only reset already past today -> it's tomorrow.
+    d.setDate(d.getDate() + 1);
+  }
+  return d.getTime();
+}
+
+// Length of each usage window, so the client can place an "on-pace" marker.
+// Claude's session limit is a rolling 5h window; weekly limits reset every 7d.
+function windowFor(label) {
+  if (/week/i.test(label)) return 7 * 24 * 3600 * 1000;
+  if (/session/i.test(label)) return 5 * 3600 * 1000;
+  return null;
+}
+
 // Parse the flat screen-reader dashboard. The limit blocks look like:
 //   Current session
 //   87% 87% used
@@ -73,7 +128,7 @@ export function parseUsage(raw) {
       if (/used$/.test(lines[k])) break;
     }
 
-    limits.push({ label, pct, resets });
+    limits.push({ label, pct, resets, resetAt: parseResetTime(resets, Date.now()), windowMs: windowFor(label) });
   }
 
   // The screen re-renders as data streams in; keep the last block per label.
