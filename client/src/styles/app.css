@@ -95,6 +95,9 @@ body {
   flex: 1 1 auto;
   min-width: 0;
   overflow-x: auto;
+  /* overflow-x: auto だけだと縦方向も auto 扱いになり、1px のはみ出しでも
+     縦スクロールしてしまうため、縦は明示的に固定する。 */
+  overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -109,6 +112,9 @@ body {
   padding: 8px 16px;
   cursor: pointer;
   border-right: 1px solid var(--border);
+  /* アクティブ時のアクセント線と同じ幅を透明で確保し、
+     タブ切り替えで高さやラベル位置がずれないようにする。 */
+  border-bottom: 2px solid transparent;
   color: var(--text-muted);
   font-size: 13px;
   white-space: nowrap;
@@ -126,8 +132,10 @@ body {
 .tab-item.active {
   background: var(--bg-primary);
   color: var(--text-primary);
-  border-bottom: 2px solid var(--accent);
-  margin-bottom: -1px;
+  /* 負のマージンでバーの境界線に重ねる方式は .tab-list がスクロール
+     コンテナになったことで効果がなく、縦1pxのスクロールを生むだけ
+     だったため、色の切り替えのみにする。 */
+  border-bottom-color: var(--accent);
 }
 
 .tab-item.attention {
