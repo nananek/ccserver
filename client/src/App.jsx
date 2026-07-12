@@ -18,6 +18,11 @@ export default function App() {
   const [resumePrompt, setResumePrompt] = useState(null);
   const [themeId, setThemeId] = useState(loadThemeId);
   const [attentionTabs, setAttentionTabs] = useState(new Set());
+  const [closeConfirm, setCloseConfirm] = useState(null);
+  const [dontAskAgain, setDontAskAgain] = useState(false);
+  const [skipCloseConfirm, setSkipCloseConfirm] = useState(
+    () => localStorage.getItem('ccserver-skip-close-confirm') === '1'
+  );
   const pendingOpenRef = useRef(null);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
 
@@ -81,17 +86,7 @@ export default function App() {
     }
   }, [resumePrompt, openTerminalTab]);
 
-  const handleCloseTab = useCallback((tabId) => {
-    // タブを閉じてもセッション自体はサーバー側で動き続けるが、
-    // 再アタッチの手間があるため、稼働中のタブは閉じる前に確認する。
-    // プロセスが終了済みのタブは確認なしで閉じる。
-    const tab = tabs.find((t) => t.id === tabId);
-    if (tab && tab.type === 'terminal' && !tab.exited) {
-      const ok = window.confirm(
-        'タブを閉じますか?\nセッションは背後で動き続け、セッション一覧から再接続できます。'
-      );
-      if (!ok) return;
-    }
+  const doCloseTab = useCallback((tabId) => {
     setTabs((prev) => {
       const idx = prev.findIndex((t) => t.id === tabId);
       const next = prev.filter((t) => t.id !== tabId);
@@ -102,7 +97,30 @@ export default function App() {
       }
       return next;
     });
-  }, [activeTabId, tabs]);
+  }, [activeTabId]);
+
+  const handleCloseTab = useCallback((tabId) => {
+    // タブを閉じてもセッション自体はサーバー側で動き続けるが、
+    // 再アタッチの手間があるため、稼働中のタブは閉じる前に確認する。
+    // プロセスが終了済みのタブや「次回以降確認しない」設定時は確認なしで閉じる。
+    const tab = tabs.find((t) => t.id === tabId);
+    if (tab && tab.type === 'terminal' && !tab.exited && !skipCloseConfirm) {
+      setDontAskAgain(false);
+      setCloseConfirm({ tabId });
+      return;
+    }
+    doCloseTab(tabId);
+  }, [tabs, skipCloseConfirm, doCloseTab]);
+
+  const confirmCloseTab = useCallback(() => {
+    if (!closeConfirm) return;
+    if (dontAskAgain) {
+      localStorage.setItem('ccserver-skip-close-confirm', '1');
+      setSkipCloseConfirm(true);
+    }
+    doCloseTab(closeConfirm.tabId);
+    setCloseConfirm(null);
+  }, [closeConfirm, dontAskAgain, doCloseTab]);
 
   const handleTabClick = useCallback((tabId) => {
     setActiveTabId(tabId);
@@ -212,6 +230,30 @@ export default function App() {
               </button>
               <button className="btn btn-secondary" onClick={handleNewSession}>
                 New Session
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {closeConfirm && (
+        <div className="resume-overlay" onClick={() => setCloseConfirm(null)}>
+          <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>タブを閉じますか?</h3>
+            <p>セッションは背後で動き続け、セッション一覧から再接続できます。</p>
+            <label className="close-confirm-checkbox">
+              <input
+                type="checkbox"
+                checked={dontAskAgain}
+                onChange={(e) => setDontAskAgain(e.target.checked)}
+              />
+              次回以降確認しない
+            </label>
+            <div className="resume-actions">
+              <button className="btn btn-secondary" onClick={() => setCloseConfirm(null)}>
+                キャンセル
+              </button>
+              <button className="btn btn-primary" onClick={confirmCloseTab}>
+                閉じる
               </button>
             </div>
           </div>
