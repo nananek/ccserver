@@ -91,7 +91,7 @@ const PING_INTERVAL_MS = 30000;
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -125,6 +125,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const onSessionIdRef = useRef(onSessionId);
   useEffect(() => { onSessionIdRef.current = onSessionId; }, [onSessionId]);
+  const onExitedRef = useRef(onExited);
+  useEffect(() => { onExitedRef.current = onExited; }, [onExited]);
 
   const xtermThemeRef = useRef(xtermTheme);
   useEffect(() => { xtermThemeRef.current = xtermTheme; }, [xtermTheme]);
@@ -286,6 +288,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             sessionIdRef.current = msg.sessionId;
             sessionStorage.setItem(storageKey, msg.sessionId);
             if (onSessionIdRef.current) onSessionIdRef.current(msg.sessionId);
+            // 再接続などで同一タブに新しいセッションが始まるケースがあるため、
+            // セッション確立のたびにexitedフラグを戻す。
+            if (onExitedRef.current) onExitedRef.current(false);
             if (msg.isReconnect) {
               term.clear();
             }
@@ -335,6 +340,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             term.writeln(`\r\n[Process exited with code ${msg.exitCode}]`);
             sessionStorage.removeItem(storageKey);
             sessionIdRef.current = null;
+            if (onExitedRef.current) onExitedRef.current(true);
             const claudeResumeKey = `ccserver-claude-resume:${cwd}`;
             if (msg.claudeSessionId) {
               localStorage.setItem(claudeResumeKey, msg.claudeSessionId);
