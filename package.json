@@ -10,7 +10,8 @@
   "scripts": {
     "dev": "npm run dev:server & npm run dev:client",
     "dev:server": "node --watch server/index.js",
-    "dev:client": "npm run dev --workspace=client"
+    "dev:client": "npm run dev --workspace=client",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2"

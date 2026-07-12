@@ -1214,6 +1214,20 @@ body {
   justify-content: flex-end;
 }
 
+.close-confirm-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.close-confirm-checkbox input {
+  cursor: pointer;
+}
+
 /* Notification toggle */
 .notify-toggle {
   display: flex;
