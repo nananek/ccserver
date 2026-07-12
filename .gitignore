@@ -1,6 +1,8 @@
 node_modules/
 client/dist/
 *.log
+test-results/
+playwright-report/
 .saved-sessions.json
 .scheduled-prompts.json
 server/sandbox.config.json
