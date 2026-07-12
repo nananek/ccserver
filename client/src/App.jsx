@@ -32,7 +32,7 @@ export default function App() {
     const label = shell ? `$ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, exited: false },
     ]);
     setActiveTabId(id);
     setLastDir(dirPath);
@@ -82,6 +82,16 @@ export default function App() {
   }, [resumePrompt, openTerminalTab]);
 
   const handleCloseTab = useCallback((tabId) => {
+    // タブを閉じてもセッション自体はサーバー側で動き続けるが、
+    // 再アタッチの手間があるため、稼働中のタブは閉じる前に確認する。
+    // プロセスが終了済みのタブは確認なしで閉じる。
+    const tab = tabs.find((t) => t.id === tabId);
+    if (tab && tab.type === 'terminal' && !tab.exited) {
+      const ok = window.confirm(
+        'タブを閉じますか?\nセッションは背後で動き続け、セッション一覧から再接続できます。'
+      );
+      if (!ok) return;
+    }
     setTabs((prev) => {
       const idx = prev.findIndex((t) => t.id === tabId);
       const next = prev.filter((t) => t.id !== tabId);
@@ -92,7 +102,7 @@ export default function App() {
       }
       return next;
     });
-  }, [activeTabId]);
+  }, [activeTabId, tabs]);
 
   const handleTabClick = useCallback((tabId) => {
     setActiveTabId(tabId);
@@ -102,6 +112,12 @@ export default function App() {
       next.delete(tabId);
       return next;
     });
+  }, []);
+
+  const handleTabExited = useCallback((tabId, exited) => {
+    setTabs((prev) => prev.map((t) =>
+      t.id === tabId ? { ...t, exited } : t
+    ));
   }, []);
 
   const handleTabSessionId = useCallback((tabId, sessionId) => {
@@ -169,6 +185,7 @@ export default function App() {
                 onToggleNotify={toggleNotify}
                 visible={activeTabId === tab.id}
                 onSessionId={(sid) => handleTabSessionId(tab.id, sid)}
+                onExited={(exited) => handleTabExited(tab.id, exited)}
                 attachSessionId={tab.attachSessionId}
                 xtermTheme={getTheme(themeId).xterm}
                 themeId={themeId}
