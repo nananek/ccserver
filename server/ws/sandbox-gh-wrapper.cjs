@@ -21,12 +21,34 @@
 
 const net = require('net');
 
+// The isTTY check below skips this for a literal interactive terminal, but
+// that alone isn't a hard guarantee: whatever invokes `gh` inside the
+// sandbox may hand this process a non-TTY stdin (a pipe, or an fd shared
+// with a longer-lived shell/pty) that was never going to send EOF on its
+// own, and the overwhelming majority of gh invocations don't read stdin at
+// all (title/body etc. come in as flags). Rather than wait for an EOF that
+// may never arrive, give up quickly if nothing shows up at all, and once
+// real data starts flowing, give it a generous-but-bounded inactivity
+// window to finish rather than hanging forever on a source that stalls
+// partway through.
 function readStdin() {
   return new Promise((resolve) => {
     const chunks = [];
-    process.stdin.on('data', (c) => chunks.push(c));
-    process.stdin.on('end', () => resolve(Buffer.concat(chunks)));
-    process.stdin.on('error', () => resolve(Buffer.concat(chunks)));
+    let settled = false;
+    let timer;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(Buffer.concat(chunks));
+    };
+    const arm = (ms) => { clearTimeout(timer); timer = setTimeout(finish, ms); };
+
+    arm(200); // nothing at all within this window -> assume no stdin was intended
+    process.stdin.on('data', (c) => { chunks.push(c); arm(2000); });
+    process.stdin.on('end', finish);
+    process.stdin.on('error', finish);
     process.stdin.resume();
   });
 }
@@ -72,8 +94,10 @@ async function main() {
   const argv = process.argv.slice(2);
   const sockPath = process.env.CCSANDBOX_GIT_BROKER_SOCK;
 
-  // Reading stdin blocks until EOF; on an interactive TTY that never comes
-  // (no piped input), so skip it there rather than hang.
+  // On a literal interactive TTY there's definitely no piped input coming,
+  // so skip straight to empty rather than even starting readStdin()'s grace
+  // period (readStdin() itself is also bounded -- see its comment -- as a
+  // safety net for non-TTY stdin that isn't actually piped input either).
   const stdinBuf = process.stdin.isTTY ? Buffer.alloc(0) : await readStdin();
 
   if (!sockPath) {
