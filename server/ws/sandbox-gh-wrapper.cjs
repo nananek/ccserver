@@ -60,6 +60,7 @@ function requestExec(req, sockPath) {
 
 const DENY_MESSAGES = {
   'subcommand-not-allowed': (argv) => `sandbox: 'gh ${argv.slice(0, 2).join(' ')}' is not on the allowed gh-broker command list (see README "gh broker")`,
+  'ambiguous-flags': () => 'sandbox: this gh command uses a short-flag combination the broker can\'t safely parse (e.g. bundled short flags like "-wR"); use long-form flags (--repo=owner/repo, --web) or separate them (-w -R owner/repo) instead',
   'repo-unresolved': () => 'sandbox: could not resolve a target repo for this gh command (pass --repo owner/repo, or run inside a repo with an origin remote)',
   'not-allowlisted': () => 'sandbox: gh access to this repo is not allow-listed for this session',
   'bad-request': () => 'sandbox: malformed gh-broker request',

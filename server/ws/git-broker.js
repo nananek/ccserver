@@ -27,7 +27,7 @@
 //   executed, and only for repos already in the git allow-list.
 //     -> {"op":"gh-exec","argv":["pr","view","123"],"stdin":"<base64>"}
 //     <- {"ok":true,"exitCode":0,"stdout":"<base64>","stderr":"<base64>"}
-//     <- {"ok":false,"reason":"subcommand-not-allowed"|"repo-unresolved"|"not-allowlisted"|"bad-request"|"exec-failed"|"timeout"}
+//     <- {"ok":false,"reason":"subcommand-not-allowed"|"ambiguous-flags"|"repo-unresolved"|"not-allowlisted"|"bad-request"|"exec-failed"|"timeout"}
 //
 // SSH allow/deny does NOT go through this socket — the allow-list isn't
 // secret, so it's ro-bound into the sandbox as a plain file and checked
@@ -139,7 +139,7 @@ async function handleGhExec(req, conn, ctx) {
   // cwd is always the session's own cwd (fixed at broker startup), never
   // taken from the request -- the sandboxed caller doesn't get to point gh
   // at an arbitrary host path.
-  const { allowed: subOk, repo, reason: subReason } = classifyGhInvocation(
+  const { allowed: subOk, repos, reason: subReason } = classifyGhInvocation(
     req.argv,
     () => resolveOriginUrl(ctx.cwd),
   );
@@ -148,13 +148,16 @@ async function handleGhExec(req, conn, ctx) {
     conn.end(`${JSON.stringify({ ok: false, reason: subReason })}\n`);
     return;
   }
-  if (!ctx.allowSet.has(repo)) {
-    process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (repo ${repo} not-allowlisted)\n`);
+  // ALL repo references found in argv (usually one; can be more -- see
+  // ghAllowlist.js) must be allow-listed, not just the first/primary one.
+  const denied = repos.find((r) => !ctx.allowSet.has(r));
+  if (denied) {
+    process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (repo ${denied} not-allowlisted)\n`);
     conn.end(`${JSON.stringify({ ok: false, reason: 'not-allowlisted' })}\n`);
     return;
   }
 
-  process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> allow (repo ${repo})\n`);
+  process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> allow (repo(s) ${repos.join(', ')})\n`);
   const stdinBuf = req.stdin ? Buffer.from(req.stdin, 'base64') : null;
   const result = await execGh(req.argv, ctx.cwd, stdinBuf);
   conn.end(`${JSON.stringify(result)}\n`);
