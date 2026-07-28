@@ -25,7 +25,7 @@ import { startGitBroker } from './git-broker.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENTRYPOINT = join(__dirname, 'sandbox-entrypoint.sh');
-const GH_DISABLED_SCRIPT = join(__dirname, 'sandbox-gh-disabled.sh');
+const GH_WRAPPER_SCRIPT = join(__dirname, 'sandbox-gh-wrapper.cjs');
 const CRED_HELPER_SCRIPT = join(__dirname, 'sandbox-git-credential-helper.cjs');
 const SSH_WRAPPER_SCRIPT = join(__dirname, 'sandbox-ssh-wrapper.cjs');
 const GENERATED_GITCONFIG = join(__dirname, 'sandbox-gitconfig');
@@ -372,22 +372,26 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     }
   }
 
-  // gh: neutralize wherever it resolves (host PATH or common install
-  // paths). gh's API calls go straight to api.github.com over TLS, so
-  // repo-scoping them the way HTTPS/SSH git access is scoped below would
-  // require terminating TLS inside the broker -- out of scope. Rather than
-  // leave gh working with unrestricted host credentials, disable it.
+  // gh: replace wherever it resolves (host PATH or common install paths)
+  // with a wrapper that relays to the git-broker instead of running for
+  // real inside the sandbox (see sandbox-gh-wrapper.cjs / ghAllowlist.js).
+  // gh's own API calls go straight to api.github.com over TLS, so they
+  // can't be scoped by inspecting network traffic the way HTTPS/SSH git
+  // access is below; instead the broker executes a safelisted subset of gh
+  // subcommands itself, on the host, after checking the target repo against
+  // the same allow-list.
   //
-  // git broker: repo-scoped HTTPS credential helper + SSH gate. Computed
-  // once at session start from the cwd's own remotes + submodules (see
-  // gitAllowlist.js); gitBroker is the {sockPath, allowlistPath} bag
-  // returned by startGitBroker(), or null when disabled/unavailable.
+  // git broker: repo-scoped HTTPS credential helper + SSH gate + gh
+  // passthrough, all over one socket. Computed once at session start from
+  // the cwd's own remotes + checked-out submodules (see gitAllowlist.js);
+  // gitBroker is the {sockPath, allowlistPath} bag returned by
+  // startGitBroker(), or null when disabled/unavailable.
   if (gitBroker) {
     const ghCandidates = new Set(
       [which('gh'), '/usr/bin/gh', '/usr/local/bin/gh', join(HOME, '.local', 'bin', 'gh')].filter(Boolean),
     );
     for (const ghPath of ghCandidates) {
-      if (existsSync(ghPath)) args.push('--ro-bind', GH_DISABLED_SCRIPT, ghPath);
+      if (existsSync(ghPath)) args.push('--ro-bind', GH_WRAPPER_SCRIPT, ghPath);
     }
 
     // The helper/wrapper scripts are Node scripts (shebang points at this
@@ -548,13 +552,13 @@ export function buildSandboxSpawn({ cwd, targetCommand }) {
   // The git broker only gates /usr/bin/ssh and gh as seen by bwrap's own
   // filesystem. When docker is also on, code inside the sandbox can run its
   // own containers via the nested dockerd (see sandbox-entrypoint.sh); those
-  // containers get their own image filesystem and do NOT inherit the ssh
-  // wrapper / disabled-gh binds, and can mount the forwarded SSH_AUTH_SOCK
-  // (bound at a fixed, discoverable path) directly, reaching the real ssh
-  // binary with the real forwarded agent, unscoped. This is a materially
-  // easier bypass than the ssh-agent-protocol one documented in the README,
-  // so surface it loudly rather than let the docker+gitBroker combination
-  // look like a hard boundary it isn't. See README "Known limitations".
+  // containers get their own image filesystem and do NOT inherit the ssh/gh
+  // wrapper binds, and can mount the forwarded SSH_AUTH_SOCK (bound at a
+  // fixed, discoverable path) directly, reaching the real ssh binary with
+  // the real forwarded agent, unscoped. This is a materially easier bypass
+  // than the ssh-agent-protocol one documented in the README, so surface it
+  // loudly rather than let the docker+gitBroker combination look like a
+  // hard boundary it isn't. See README "Known limitations".
   if (docker && gitBroker) {
     console.warn(
       '[sandbox] docker + gitBroker are both enabled: a process inside the sandbox can '

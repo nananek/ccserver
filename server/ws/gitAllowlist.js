@@ -199,6 +199,19 @@ function walk(dir, depth, entries, visited) {
   }
 }
 
+// The raw (un-normalized) origin remote URL for dir's repo, or null. Used to
+// resolve which repo a gh invocation targets when it doesn't pass an
+// explicit -R/--repo (see ghAllowlist.js) -- same remote lookup `walk()`
+// already does for the top-level repo, exposed standalone since gh-exec
+// requests need it independent of allow-list computation.
+export function resolveOriginUrl(dir) {
+  const gitDir = resolveGitDir(dir);
+  if (!gitDir) return null;
+  const remotes = gitConfigGetAll(join(gitDir, 'config'), '^remote\\..*\\.url$');
+  const origin = remotes.find(([key]) => key === 'remote.origin.url');
+  return origin ? origin[1] : (remotes[0] ? remotes[0][1] : null);
+}
+
 // Compute the allow-list for a sandbox session rooted at cwd. Returns an
 // empty array (deny everything) if cwd isn't inside a git repo at all —
 // fail closed rather than skip the check.
