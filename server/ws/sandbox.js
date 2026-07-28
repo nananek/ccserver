@@ -545,6 +545,25 @@ export function buildSandboxSpawn({ cwd, targetCommand }) {
   // sandboxed pty.
   const gitBroker = gitBrokerEnabled ? startGitBroker({ cwd }) : null;
 
+  // The git broker only gates /usr/bin/ssh and gh as seen by bwrap's own
+  // filesystem. When docker is also on, code inside the sandbox can run its
+  // own containers via the nested dockerd (see sandbox-entrypoint.sh); those
+  // containers get their own image filesystem and do NOT inherit the ssh
+  // wrapper / disabled-gh binds, and can mount the forwarded SSH_AUTH_SOCK
+  // (bound at a fixed, discoverable path) directly, reaching the real ssh
+  // binary with the real forwarded agent, unscoped. This is a materially
+  // easier bypass than the ssh-agent-protocol one documented in the README,
+  // so surface it loudly rather than let the docker+gitBroker combination
+  // look like a hard boundary it isn't. See README "Known limitations".
+  if (docker && gitBroker) {
+    console.warn(
+      '[sandbox] docker + gitBroker are both enabled: a process inside the sandbox can '
+      + 'use `docker run` to bypass the git credential broker entirely (nested containers '
+      + "don't inherit the ssh wrapper and can mount the forwarded ssh-agent socket "
+      + 'directly). See README "Known limitations" before relying on gitBroker as a hard boundary.',
+    );
+  }
+
   const { command, installDir } = resolveClaude(claudeBin);
   const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];

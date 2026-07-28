@@ -6,8 +6,13 @@
 // The allow-list is derived once, at sandbox launch, from:
 //   - the session cwd's own git remotes (.git/config)
 //   - every submodule URL reachable from .gitmodules, walked recursively
-//     (submodules of submodules), read directly from the .gitmodules file
-//     so it works even for submodules that haven't been checked out yet
+//     (submodules of submodules), but ONLY for submodules that are actually
+//     checked out on disk (see walk()) -- .gitmodules is repo content, and
+//     an untrusted/malicious repo can write arbitrary URLs into it, so a
+//     declared-but-never-checked-out entry is not trusted into the
+//     allow-list. Requiring a checkout means broadening access takes an
+//     explicit `git submodule update` (and, for the change to take effect,
+//     a session relaunch), not just opening the repo.
 //
 // Entries are normalized to a canonical "host[:port]/path" string (no
 // scheme) so the same repo reached via SSH or HTTPS matches one entry. See
@@ -134,10 +139,12 @@ function resolveGitDir(dir) {
 }
 
 // Recursively collect canonical "host/path" allow-list entries starting at
-// repoRoot. Submodules are only recursed into when actually checked out
-// (their working dir exists); an uninitialized submodule's own nested
-// submodules simply cannot be discovered without a checkout — an accepted
-// limitation, since the allow-list is computed once at launch anyway.
+// repoRoot. A submodule's URL is trusted (added to the allow-list) and
+// recursed into ONLY when it's actually checked out (its working dir
+// exists) -- see the file-level comment for why: .gitmodules is untrusted
+// repo content, and trusting a declared-but-not-checked-out URL would let
+// any repo the user opens smuggle arbitrary hosts/paths into the allow-list
+// just by naming them as a "submodule" that doesn't really exist.
 function walk(dir, depth, entries, visited) {
   if (depth > MAX_DEPTH) return;
   let real;
@@ -173,17 +180,21 @@ function walk(dir, depth, entries, visited) {
       submodules.get(name)[field] = value;
     }
     for (const { url, path } of submodules.values()) {
-      if (!url) continue;
+      if (!url || !path) continue;
+      const childDir = join(dir, path);
+      let checkedOut = false;
+      try {
+        checkedOut = statSync(childDir).isDirectory();
+      } catch {
+        checkedOut = false;
+      }
+      // Not checked out: don't trust the URL (see file-level comment) and
+      // there's nothing on disk to recurse into.
+      if (!checkedOut) continue;
       const resolved = resolveRelativeSubmoduleUrl(parentUrl, url);
       const norm = normalizeGitUrl(resolved);
       if (norm) entries.add(norm);
-      if (!path) continue;
-      const childDir = join(dir, path);
-      try {
-        if (statSync(childDir).isDirectory()) walk(childDir, depth + 1, entries, visited);
-      } catch {
-        // Not checked out — its own nested submodules are undiscoverable.
-      }
+      walk(childDir, depth + 1, entries, visited);
     }
   }
 }
