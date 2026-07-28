@@ -7,13 +7,13 @@
   "//gpg": "true: forward the host gpg-agent (bind ~/.gnupg + the live agent/keyboxd sockets) so commit signing works inside the sandbox using the host's key/token. Coexists with docker. Default false.",
   "gpg": true,
 
+  "//gitBroker": "true (default): git HTTPS/SSH access inside the sandbox is scoped to the repos actually related to the session (its own remotes + submodules, computed once at launch). gh CLI is disabled entirely (its API calls can't be repo-scoped). No config needed for the common case -- this replaces the old approach of binding ~/.config/gh and ~/.ssh directly, which is no longer supported (those paths are never exposed, regardless of this flag or of `binds` below). Set false to turn off the broker/gate (git still works, just unscoped via the forwarded ssh-agent; gh stays disabled either way).",
+  "gitBroker": true,
+
   "//ssh": "The SSH agent is auto-forwarded: ccserver finds the user's agent socket (preferring one with keys loaded) at launch and sets SSH_AUTH_SOCK. No config needed. Set env.SSH_AUTH_SOCK to override.",
 
-  "//binds": "Extra host paths exposed inside the sandbox, on top of the project dir + ~/.claude + ~/.claude.json (and, with gpg:true, ~/.gnupg). mode: 'ro' (default) or 'rw'. Missing sources are skipped. ~ expands to your home.",
-  "binds": [
-    { "src": "~/.config/gh", "mode": "ro" },
-    { "src": "~/.ssh", "mode": "ro" }
-  ],
+  "//binds": "Extra host paths exposed inside the sandbox, on top of the project dir + ~/.claude + ~/.claude.json (and, with gpg:true, ~/.gnupg). mode: 'ro' (default) or 'rw'. Missing sources are skipped. ~ expands to your home. ~/.ssh and ~/.config/gh are always blocked here (see gitBroker above), so don't list them.",
+  "binds": [],
 
   "//env": "Extra environment variables set inside the sandbox (applied last, so they override defaults). e.g. force a specific SSH_AUTH_SOCK.",
   "env": {},

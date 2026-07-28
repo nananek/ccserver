@@ -61,12 +61,16 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // rootless docker inside. See sandbox.js.
   let useSandbox = false;
   let sandboxStateDir = null;
+  let sandboxGitBrokerProc = null;
+  let sandboxGitBrokerDir = null;
   if (sandbox && process.platform !== 'win32' && sandboxAvailable()) {
     try {
       const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args] });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;
+      sandboxGitBrokerProc = spawn.gitBrokerProc || null;
+      sandboxGitBrokerDir = spawn.gitBrokerDir || null;
       useSandbox = true;
     } catch (err) {
       return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
@@ -107,6 +111,8 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     shell: !!shell,
     sandbox: useSandbox,
     sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
+    sandboxGitBrokerProc, // host-side git-broker child process, killed on teardown
+    sandboxGitBrokerDir, // its runtime dir (socket + allow-list), removed on teardown
     ptyProcess,
     socket: null,
     outputBuffer: [],
@@ -641,6 +647,24 @@ export function destroySession(id, { keepSchedule = true } = {}) {
       rmSync(session.sandboxStateDir, { recursive: true, force: true });
     } catch {
       // nothing to remove / still held — harmless
+    }
+  }
+
+  // Tear down the host-side git-broker alongside the sandboxed pty: it's a
+  // plain child process (not part of the bwrap/rootlesskit tree), so it
+  // isn't reaped by the pty kill above and must be stopped explicitly.
+  if (session.sandboxGitBrokerProc) {
+    try {
+      session.sandboxGitBrokerProc.kill('SIGTERM');
+    } catch {
+      // already dead
+    }
+  }
+  if (session.sandboxGitBrokerDir) {
+    try {
+      rmSync(session.sandboxGitBrokerDir, { recursive: true, force: true });
+    } catch {
+      // best effort
     }
   }
 

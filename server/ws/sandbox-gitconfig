@@ -1,0 +1,5 @@
+[credential]
+	helper = /ccserver-sandbox-git-credential-helper.cjs
+	; Off by default in git: without this, credential helpers only ever see
+	; the host, not the repo path, which would defeat repo-scoped gating.
+	useHttpPath = true

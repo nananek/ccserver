@@ -105,11 +105,15 @@ sudo apt install uidmap slirp4netns
 
 `uidmap`/`slirp4netns` が無い場合は docker 無効のサンドボックス (bwrap のみ) として起動します。
 
-### 認証情報の受け渡し (ssh / gpg / gh)
+### 認証情報の受け渡し (ssh / gpg / git ブローカー)
 
 - **ssh-agent**: 自動転送されます。ccserver が起動時にユーザーの agent ソケット (`/tmp/ssh-*/agent.*` 等、鍵がロードされている物を優先) を探して `SSH_AUTH_SOCK` を設定します。設定不要。
 - **gpg**: 設定で `"gpg": true` にすると、`~/.gnupg` と**ホストの生 gpg-agent / keyboxd ソケット**をサンドボックス内へ転送します。ホストの agent (鍵/トークンを保持) で署名するので、**docker 有効のままコミット署名が使えます**。
-- **gh**: `~/.config/gh` を binds に足せば認証を引き継げます。
+- **git (https / ssh)**: `"gitBroker": true` (既定) で、サンドボックス内の git アクセスは **そのセッションの作業ディレクトリ自身のリモート + サブモジュール (再帰) から起動時に一度だけ算出した owner/repo にだけ**制限されます。設定不要、`~/.config/gh` や `~/.ssh` を binds に足す必要はありません (足してもブロックされ、警告が出るだけです)。
+  - HTTPS: git の `credential.helper` がホスト側の git-broker プロセス (サンドボックスの外で動作、`gh auth token` を都度取得) に host+path を問い合わせ、許可されたリポジトリだけにトークンを渡します。トークン自体はサンドボックス内のファイルには一切現れません。
+  - SSH: `/usr/bin/ssh` と `$GIT_SSH_COMMAND` を、起動時に読み取り専用で渡された許可リストと照合するラッパーに差し替えます。許可されなければネットワークに出る前に拒否されます (ssh-agent 転送自体は従来通り)。
+  - **gh CLI は無効化されます**。gh の API 呼び出しは TLS で `api.github.com` に直結するため、リポジトリ単位に絞るには通信の終端 (MITM) が必要になり、今回のスコープには含めていません。
+  - **限界**: これは「侵害/暴走したプロセスが無関係なリポジトリの認証情報を安易に使ってしまう」事故を防ぐ多層防御であり、意図的にバイパスを試みるコードへの完全な防壁ではありません。転送された ssh-agent ソケットに対し `ssh` バイナリを経由せず直接 ssh-agent プロトコルを話すコードは、宛先チェックをすり抜けて任意ホスト向けの署名を依頼できます。許可リストはセッション起動時に一度だけ算出するため、セッション中に追加したサブモジュールは次回起動まで反映されません。`"gitBroker": false` で git 側のゲートのみ無効化できます (ssh-agent 転送は残り、無制限に戻ります。gh はそれでも無効のままです)。
 
 ### 設定ファイル
 
@@ -122,15 +126,13 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 {
   "docker": true,
   "gpg": true,
-  "binds": [
-    { "src": "~/.config/gh", "mode": "ro" },
-    { "src": "~/.ssh", "mode": "ro" }
-  ],
+  "gitBroker": true,
+  "binds": [],
   "env": {}
 }
 ```
 
-- `binds` の `mode` は `ro` (既定) か `rw`。存在しないパスはスキップされます。`~` はホームに展開。
+- `binds` の `mode` は `ro` (既定) か `rw`。存在しないパスはスキップされます。`~` はホームに展開。ただし `~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます (上記参照)。
 - `env` でサンドボックス内の環境変数を追加できます (例: `SSH_AUTH_SOCK` を明示指定して自動検出を上書き)。
 - `claudeBin` で claude の起動方法を指定できます (環境変数 `CCSERVER_CLAUDE_BIN` が優先)。既定は自動検出で、`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。自動検出で外れる場所に claude がある場合や、特定ビルドに固定したい場合のみ絶対パスで指定してください。
 - サンドボックスは Linux 限定です。同じプロジェクトを 2 つのサンドボックスで同時に開いた場合、docker の data-root 競合を避けるため 2 つ目は docker 無しで起動します。

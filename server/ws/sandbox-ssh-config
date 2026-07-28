@@ -1,0 +1,11 @@
+# Passed via `ssh -F` (see sandbox-ssh-wrapper.cjs) so ssh doesn't try to read
+# the host's /etc/ssh/ssh_config: root-owned config files under /etc/ssh
+# read fine as file contents (bwrap ro-binds /etc wholesale) but OpenSSH
+# also checks the *owner* of any Include'd file, and under bwrap's user
+# namespace a host-root-owned file maps to nobody (root isn't in the
+# sandbox's uid map), so OpenSSH refuses it with "Bad owner or permissions".
+# Skipping system/user config entirely sidesteps that; ~/.ssh/config isn't
+# exposed to the sandbox anyway (see sandbox.js's blocked-binds list).
+Host *
+	UserKnownHostsFile /ccserver-sandbox-known-hosts-user /ccserver-sandbox-known-hosts-default
+	StrictHostKeyChecking yes

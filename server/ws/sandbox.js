@@ -21,13 +21,30 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startGitBroker } from './git-broker.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENTRYPOINT = join(__dirname, 'sandbox-entrypoint.sh');
+const GH_DISABLED_SCRIPT = join(__dirname, 'sandbox-gh-disabled.sh');
+const CRED_HELPER_SCRIPT = join(__dirname, 'sandbox-git-credential-helper.cjs');
+const SSH_WRAPPER_SCRIPT = join(__dirname, 'sandbox-ssh-wrapper.cjs');
+const GENERATED_GITCONFIG = join(__dirname, 'sandbox-gitconfig');
+const DEFAULT_KNOWN_HOSTS = join(__dirname, 'sandbox-known-hosts');
+const SSH_CONFIG_FILE = join(__dirname, 'sandbox-ssh-config');
 
 const BWRAP = '/usr/bin/bwrap';
 const ROOTLESSKIT = '/usr/bin/rootlesskit';
 const BASH = '/usr/bin/bash';
+
+// Fixed in-sandbox paths for the git-broker machinery (see buildBwrapArgs).
+const SANDBOX_NODE_PATH = '/ccserver-sandbox-node';
+const SANDBOX_CRED_HELPER_PATH = '/ccserver-sandbox-git-credential-helper.cjs';
+const SANDBOX_ALLOWLIST_PATH = '/ccserver-sandbox-git-allowlist.json';
+const SANDBOX_BROKER_SOCK_PATH = '/ccserver-sandbox-git-broker.sock';
+const SANDBOX_REAL_SSH_PATH = '/ccserver-sandbox-real-ssh';
+const SANDBOX_SSH_CONFIG_PATH = '/ccserver-sandbox-ssh-config';
+const SANDBOX_KNOWN_HOSTS_USER_PATH = '/ccserver-sandbox-known-hosts-user';
+const SANDBOX_KNOWN_HOSTS_DEFAULT_PATH = '/ccserver-sandbox-known-hosts-default';
 
 const HOME = homedir();
 // process.getuid is undefined on Windows; the sandbox is Linux-only, but this
@@ -73,12 +90,19 @@ export function loadSandboxConfig() {
   }
   const docker = raw.docker !== false; // default on
   const gpg = raw.gpg === true;        // forward gpg-agent + ~/.gnupg (opt-in)
+  // Repo-scoped git credential broker: HTTPS credential helper + SSH gate,
+  // both checked against the session cwd's own repo + submodules, and gh
+  // CLI disabled (its API calls can't be repo-scoped without TLS
+  // termination). Default on -- this replaces the old raw ~/.ssh /
+  // ~/.config/gh exposure, which is blocked unconditionally regardless of
+  // this flag (see the extraBinds filter below).
+  const gitBroker = raw.gitBroker !== false;
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
   // How to launch claude. Overridable because the install location is
   // environment-specific (see resolveClaude). Env var wins over the config file.
   const claudeBin = process.env.CCSERVER_CLAUDE_BIN || (typeof raw.claudeBin === 'string' ? raw.claudeBin : null);
-  return { docker, gpg, binds, env, claudeBin, configPath };
+  return { docker, gpg, gitBroker, binds, env, claudeBin, configPath };
 }
 
 // Locate an executable named `cmd` on PATH (or return it as-is if it already
@@ -253,7 +277,7 @@ export function sandboxAvailable() {
 
 // Build the bwrap arguments (everything after the `bwrap` executable, up to
 // but not including the trailing `-- <cmd...>`).
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -348,11 +372,97 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     }
   }
 
-  // User-configured extra binds (gh config, ssh keys, etc.). Use *-try so a
-  // missing source is skipped rather than aborting the launch.
+  // gh: neutralize wherever it resolves (host PATH or common install
+  // paths). gh's API calls go straight to api.github.com over TLS, so
+  // repo-scoping them the way HTTPS/SSH git access is scoped below would
+  // require terminating TLS inside the broker -- out of scope. Rather than
+  // leave gh working with unrestricted host credentials, disable it.
+  //
+  // git broker: repo-scoped HTTPS credential helper + SSH gate. Computed
+  // once at session start from the cwd's own remotes + submodules (see
+  // gitAllowlist.js); gitBroker is the {sockPath, allowlistPath} bag
+  // returned by startGitBroker(), or null when disabled/unavailable.
+  if (gitBroker) {
+    const ghCandidates = new Set(
+      [which('gh'), '/usr/bin/gh', '/usr/local/bin/gh', join(HOME, '.local', 'bin', 'gh')].filter(Boolean),
+    );
+    for (const ghPath of ghCandidates) {
+      if (existsSync(ghPath)) args.push('--ro-bind', GH_DISABLED_SCRIPT, ghPath);
+    }
+
+    // The helper/wrapper scripts are Node scripts (shebang points at this
+    // fixed path); bind the actual node binary here rather than assume
+    // /usr/bin/node exists, mirroring how resolveClaude follows the real
+    // claude binary instead of assuming a host layout.
+    const nodeBin = realpathSync(process.execPath);
+    args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
+    args.push('--ro-bind', CRED_HELPER_SCRIPT, SANDBOX_CRED_HELPER_PATH);
+    args.push('--ro-bind', gitBroker.allowlistPath, SANDBOX_ALLOWLIST_PATH);
+    args.push('--bind-try', gitBroker.sockPath, SANDBOX_BROKER_SOCK_PATH);
+
+    const realSsh = which('ssh');
+    if (realSsh && existsSync(realSsh)) {
+      args.push('--ro-bind', realpathSync(realSsh), SANDBOX_REAL_SSH_PATH);
+      // Overrides the earlier whole-/usr ro-bind (bwrap: last bind for a
+      // given destination wins), so every ssh invocation inside the
+      // sandbox -- not just git's -- passes through the wrapper first.
+      args.push('--ro-bind', SSH_WRAPPER_SCRIPT, realSsh);
+      args.push('--setenv', 'CCSANDBOX_REAL_SSH', SANDBOX_REAL_SSH_PATH);
+      // realSsh (e.g. /usr/bin/ssh) is the path git will invoke; inside the
+      // sandbox that path now resolves to the wrapper (bound above), so
+      // pointing GIT_SSH_COMMAND at it routes git's ssh calls through the
+      // gate even if something clears the ssh binary override.
+      args.push('--setenv', 'GIT_SSH_COMMAND', realSsh);
+
+      // Pin the wrapper's own `ssh -F` to a config that skips system/user
+      // ssh config (see sandbox-ssh-config for why: root-owned files under
+      // /etc/ssh map to nobody in bwrap's user namespace, so OpenSSH
+      // refuses to Include them -- "Bad owner or permissions") and points
+      // known_hosts at a bound-in file instead of the never-exposed
+      // ~/.ssh. The host's own ~/.ssh/known_hosts isn't a secret (just
+      // public host keys), so it's bound too, ahead of the pinned default,
+      // for any host beyond the ones we pin.
+      const userKnownHosts = join(HOME, '.ssh', 'known_hosts');
+      if (existsSync(userKnownHosts)) {
+        args.push('--ro-bind', userKnownHosts, SANDBOX_KNOWN_HOSTS_USER_PATH);
+      }
+      args.push('--ro-bind', DEFAULT_KNOWN_HOSTS, SANDBOX_KNOWN_HOSTS_DEFAULT_PATH);
+      args.push('--ro-bind', SSH_CONFIG_FILE, SANDBOX_SSH_CONFIG_PATH);
+      args.push('--setenv', 'CCSANDBOX_SSH_CONFIG', SANDBOX_SSH_CONFIG_PATH);
+    }
+
+    // Generated gitconfig points credential.helper at our script and forces
+    // useHttpPath (see sandbox-gitconfig for why). HOME is a fresh tmpfs
+    // (above) with nothing else binding ~/.gitconfig, so this is a plain
+    // bind, no merge/override gymnastics needed.
+    args.push('--ro-bind', GENERATED_GITCONFIG, join(HOME, '.gitconfig'));
+
+    args.push(
+      // /etc is ro-bound wholesale above, so a host /etc/gitconfig with its
+      // own credential.helper would otherwise still apply inside the
+      // sandbox, alongside (or instead of) ours.
+      '--setenv', 'GIT_CONFIG_NOSYSTEM', '1',
+      '--setenv', 'CCSANDBOX_GIT_BROKER_SOCK', SANDBOX_BROKER_SOCK_PATH,
+      '--setenv', 'CCSANDBOX_GIT_ALLOWLIST', SANDBOX_ALLOWLIST_PATH,
+    );
+  }
+
+  // User-configured extra binds (ssh keys, custom config, etc.). Use *-try
+  // so a missing source is skipped rather than aborting the launch.
+  //
+  // Raw ~/.ssh (private keys) and ~/.config/gh (gh token) are always
+  // blocked here, unconditionally (even if gitBroker is off): those are
+  // exactly the unrestricted, any-repo credential exposures this feature
+  // replaces, and a stale sandbox.config.json predating this change must
+  // not silently reintroduce them.
+  const BLOCKED_BIND_PATHS = [join(HOME, '.ssh'), join(HOME, '.config', 'gh')];
   for (const b of extraBinds) {
     if (!b || !b.src) continue;
     const src = expandHome(String(b.src));
+    if (BLOCKED_BIND_PATHS.some((p) => src === p || src.startsWith(`${p}/`))) {
+      console.warn(`[sandbox] ignoring configured bind of ${src}: raw ssh keys / gh config are no longer exposed to the sandbox (see the git broker)`);
+      continue;
+    }
     const dest = b.dest ? expandHome(String(b.dest)) : src;
     const flag = b.mode === 'rw' ? '--bind-try' : '--ro-bind-try';
     args.push(flag, src, dest);
@@ -403,6 +513,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
     authSock: null,
     stateDir: null,
     claudeDir: installDir,
+    gitBroker: null,
   });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
   return {
@@ -410,13 +521,15 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
     args: [...bwrapArgs, '--', ...innerCmd],
     docker: false,
     stateDir: null,
+    gitBrokerProc: null,
+    gitBrokerDir: null,
   };
 }
 
 // Returns { command, args } for pty.spawn, wrapping the given target command
 // (e.g. ['claude', '--resume', id] or ['/bin/bash']) in the sandbox.
 export function buildSandboxSpawn({ cwd, targetCommand }) {
-  const { docker: cfgDocker, gpg, binds, env, claudeBin } = loadSandboxConfig();
+  const { docker: cfgDocker, gpg, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
 
   // An explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
@@ -426,9 +539,20 @@ export function buildSandboxSpawn({ cwd, targetCommand }) {
   // teardown. See newStateDir().
   const stateDir = docker ? newStateDir() : null;
 
+  // Computes the repo/submodule allow-list once and spawns the host-side
+  // broker for this launch; see git-broker.js. The caller (sessionManager)
+  // holds onto gitBrokerProc/gitBrokerDir to tear them down alongside the
+  // sandboxed pty.
+  const gitBroker = gitBrokerEnabled ? startGitBroker({ cwd }) : null;
+
   const { command, installDir } = resolveClaude(claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
+
+  const gitBrokerFields = {
+    gitBrokerProc: gitBroker ? gitBroker.proc : null,
+    gitBrokerDir: gitBroker ? gitBroker.dir : null,
+  };
 
   if (docker) {
     return {
@@ -453,6 +577,7 @@ export function buildSandboxSpawn({ cwd, targetCommand }) {
       ],
       docker,
       stateDir,
+      ...gitBrokerFields,
     };
   }
 
@@ -461,5 +586,6 @@ export function buildSandboxSpawn({ cwd, targetCommand }) {
     args: [...bwrapArgs, '--', ...innerCmd],
     docker,
     stateDir,
+    ...gitBrokerFields,
   };
 }
