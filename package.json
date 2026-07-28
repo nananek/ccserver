@@ -11,6 +11,7 @@
     "dev": "npm run dev:server & npm run dev:client",
     "dev:server": "node --watch server/index.js",
     "dev:client": "npm run dev --workspace=client",
+    "test": "npm run test --workspace=server",
     "test:e2e": "playwright test"
   },
   "devDependencies": {
