@@ -1,10 +1,11 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, lazy, Suspense } from 'react';
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
-import TerminalView from './components/TerminalView.jsx';
 import SystemMonitor from './components/SystemMonitor.jsx';
 import UsageButton from './components/UsageButton.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
+
+const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
 
 let tabIdCounter = 0;
 
@@ -191,31 +192,33 @@ export default function App() {
               key={tab.id}
               style={{ display: activeTabId === tab.id ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}
             >
-              <TerminalView
-                cwd={tab.cwd}
-                onClose={() => handleCloseTab(tab.id)}
-                claudeSessionId={tab.claudeSessionId}
-                shell={tab.shell}
-                sandbox={tab.sandbox}
-                notify={notify}
-                notifyEnabled={notifyEnabled}
-                notifyPermission={notifyPermission}
-                onToggleNotify={toggleNotify}
-                visible={activeTabId === tab.id}
-                onSessionId={(sid) => handleTabSessionId(tab.id, sid)}
-                onExited={(exited) => handleTabExited(tab.id, exited)}
-                attachSessionId={tab.attachSessionId}
-                xtermTheme={getTheme(themeId).xterm}
-                themeId={themeId}
-                onThemeChange={setThemeId}
-                tabId={tab.id}
-                onAttention={() => {
-                  if (activeTabId !== tab.id) {
-                    setAttentionTabs((prev) => new Set(prev).add(tab.id));
-                  }
-                }}
-                onFocusTab={() => handleTabClick(tab.id)}
-              />
+              <Suspense fallback={null}>
+                <TerminalView
+                  cwd={tab.cwd}
+                  onClose={() => handleCloseTab(tab.id)}
+                  claudeSessionId={tab.claudeSessionId}
+                  shell={tab.shell}
+                  sandbox={tab.sandbox}
+                  notify={notify}
+                  notifyEnabled={notifyEnabled}
+                  notifyPermission={notifyPermission}
+                  onToggleNotify={toggleNotify}
+                  visible={activeTabId === tab.id}
+                  onSessionId={(sid) => handleTabSessionId(tab.id, sid)}
+                  onExited={(exited) => handleTabExited(tab.id, exited)}
+                  attachSessionId={tab.attachSessionId}
+                  xtermTheme={getTheme(themeId).xterm}
+                  themeId={themeId}
+                  onThemeChange={setThemeId}
+                  tabId={tab.id}
+                  onAttention={() => {
+                    if (activeTabId !== tab.id) {
+                      setAttentionTabs((prev) => new Set(prev).add(tab.id));
+                    }
+                  }}
+                  onFocusTab={() => handleTabClick(tab.id)}
+                />
+              </Suspense>
             </div>
           ))}
       </div>
