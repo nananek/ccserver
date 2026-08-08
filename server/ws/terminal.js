@@ -4,6 +4,7 @@ import {
   getSession,
   attachSocket,
   detachSocket,
+  writeToSession,
   setScheduledPrompt,
   cancelScheduledPrompt,
   scheduledPromptPublic,
@@ -175,15 +176,7 @@ export async function terminalWs(fastify, opts) {
 
         case 'input': {
           if (currentSessionId) {
-            const session = getSession(currentSessionId);
-            if (session?.ptyProcess && !session.exited) {
-              session.ptyProcess.write(msg.data);
-              session.idleNotified = false;
-              if (session.idleTimer) {
-                clearTimeout(session.idleTimer);
-                session.idleTimer = null;
-              }
-            }
+            writeToSession(currentSessionId, msg.data);
           }
           break;
         }

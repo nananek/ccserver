@@ -34,7 +34,7 @@ function formatSize(bytes) {
   return `${i === 0 ? val : val.toFixed(1)} ${units[i]}`;
 }
 
-export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, initialPath }) {
+export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onSessionClick, initialPath }) {
   const [currentPath, setCurrentPath] = useState(initialPath || localStorage.getItem(LAST_DIR_KEY) || '/');
   const [homeDir, setHomeDir] = useState(null);
   const [dirs, setDirs] = useState([]);
@@ -60,6 +60,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
     return saved === 'opencode' || saved === 'claude' ? saved : 'claude';
   });
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
+  const [launchMode, setLaunchMode] = useState('single'); // 'single' | 'combo'
+  const [comboApps, setComboApps] = useState({ workerA: 'claude', workerB: 'opencode', orchestrator: 'claude' });
+  const [orchestratorInstructions, setOrchestratorInstructions] = useState('');
   const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath));
 
   const chooseSandbox = useCallback((val) => {
@@ -396,68 +399,179 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
         // (same pattern as the close/resume dialogs below) sidesteps that
         // entirely.
         <div className="resume-overlay" onClick={() => setOpenMenuOpen(false)}>
-          <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="resume-dialog open-dialog" onClick={(e) => e.stopPropagation()}>
             <h3>起動方法を選択</h3>
-            <div className="open-menu-label">アプリ</div>
-            <div
-              className="open-menu-item"
-              onClick={() => chooseApp('claude')}
-            >
-              <span className="open-menu-check">{appDefault === 'claude' ? '✓' : ''}</span>
-              Claude Code
+            <div className="launch-mode-toggle">
+              <button
+                className={`launch-mode-btn${launchMode === 'single' ? ' active' : ''}`}
+                onClick={() => setLaunchMode('single')}
+              >
+                通常起動
+              </button>
+              <button
+                className={`launch-mode-btn${launchMode === 'combo' ? ' active' : ''}`}
+                onClick={() => setLaunchMode('combo')}
+              >
+                コンボ起動
+              </button>
             </div>
-            <div
-              className="open-menu-item"
-              onClick={() => chooseApp('opencode')}
-            >
-              <span className="open-menu-check">{appDefault === 'opencode' ? '✓' : ''}</span>
-              opencode
-            </div>
-            <div className="open-menu-sep" />
-            <div
-              className="open-menu-item"
-              onClick={() => chooseSandbox(false)}
-            >
-              <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
-              通常起動
-            </div>
-            <div
-              className="open-menu-item"
-              onClick={() => chooseSandbox(true)}
-            >
-              <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
-              🔒 サンドボックスで起動
-            </div>
-            <div className="open-menu-suboptions">
-              <label className="open-menu-suboption">
-                <input
-                  type="checkbox"
-                  checked={sandboxOpts.gpg}
-                  onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpg: e.target.checked })}
+
+            {launchMode === 'single' ? (
+              <>
+                <div className="open-menu-label">アプリ</div>
+                <div
+                  className="open-menu-item"
+                  onClick={() => chooseApp('claude')}
+                >
+                  <span className="open-menu-check">{appDefault === 'claude' ? '✓' : ''}</span>
+                  Claude Code
+                </div>
+                <div
+                  className="open-menu-item"
+                  onClick={() => chooseApp('opencode')}
+                >
+                  <span className="open-menu-check">{appDefault === 'opencode' ? '✓' : ''}</span>
+                  opencode
+                </div>
+                <div className="open-menu-sep" />
+                <div
+                  className="open-menu-item"
+                  onClick={() => chooseSandbox(false)}
+                >
+                  <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
+                  通常起動
+                </div>
+                <div
+                  className="open-menu-item"
+                  onClick={() => chooseSandbox(true)}
+                >
+                  <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
+                  🔒 サンドボックスで起動
+                </div>
+                <div className="open-menu-suboptions">
+                  <label className="open-menu-suboption">
+                    <input
+                      type="checkbox"
+                      checked={sandboxOpts.gpg}
+                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpg: e.target.checked })}
+                    />
+                    GPG署名を使う
+                  </label>
+                  <label className="open-menu-suboption">
+                    <input
+                      type="checkbox"
+                      checked={sandboxOpts.sshAgent}
+                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, sshAgent: e.target.checked })}
+                    />
+                    ssh-agentを転送する
+                  </label>
+                </div>
+                <p className="open-menu-note">
+                  サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。
+                  GPG/ssh-agentは既定オフ、このディレクトリ ({currentPath}) に記憶されます。
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="open-menu-note">
+                  コンボ起動: 1つのプロジェクトディレクトリで動く2つのワーカーと、
+                  それらをMCP経由で操作するオーケストレーターをセットで起動します。
+                  全セッション常時サンドボックスです ({currentPath})。
+                </p>
+                <div className="open-menu-label">ワーカーA</div>
+                <div className="open-menu-app-row">
+                  {['claude', 'opencode'].map((app) => (
+                    <button
+                      key={app}
+                      className={`open-menu-app-btn${comboApps.workerA === app ? ' active' : ''}`}
+                      onClick={() => setComboApps((c) => ({ ...c, workerA: app }))}
+                    >
+                      {app === 'claude' ? 'Claude Code' : 'opencode'}
+                    </button>
+                  ))}
+                </div>
+                <div className="open-menu-label">ワーカーB</div>
+                <div className="open-menu-app-row">
+                  {['claude', 'opencode'].map((app) => (
+                    <button
+                      key={app}
+                      className={`open-menu-app-btn${comboApps.workerB === app ? ' active' : ''}`}
+                      onClick={() => setComboApps((c) => ({ ...c, workerB: app }))}
+                    >
+                      {app === 'claude' ? 'Claude Code' : 'opencode'}
+                    </button>
+                  ))}
+                </div>
+                <div className="open-menu-suboptions">
+                  <label className="open-menu-suboption">
+                    <input
+                      type="checkbox"
+                      checked={sandboxOpts.gpg}
+                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpg: e.target.checked })}
+                    />
+                    GPG署名を使う (両ワーカー共通)
+                  </label>
+                  <label className="open-menu-suboption">
+                    <input
+                      type="checkbox"
+                      checked={sandboxOpts.sshAgent}
+                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, sshAgent: e.target.checked })}
+                    />
+                    ssh-agentを転送する (両ワーカー共通)
+                  </label>
+                </div>
+                <div className="open-menu-label">オーケストレーター</div>
+                <div className="open-menu-app-row">
+                  {['claude', 'opencode'].map((app) => (
+                    <button
+                      key={app}
+                      className={`open-menu-app-btn${comboApps.orchestrator === app ? ' active' : ''}`}
+                      onClick={() => setComboApps((c) => ({ ...c, orchestrator: app }))}
+                    >
+                      {app === 'claude' ? 'Claude Code' : 'opencode'}
+                    </button>
+                  ))}
+                </div>
+                <p className="open-menu-note">
+                  オーケストレーターは専用の隔離ディレクトリで動作し、プロジェクトへの
+                  直接アクセスはありません。操作はすべてMCPツール経由です。
+                </p>
+                <div className="open-menu-label">オーケストレーターへの指示</div>
+                <textarea
+                  className="open-menu-instructions"
+                  placeholder="空の場合は既定テンプレートが使われます"
+                  value={orchestratorInstructions}
+                  onChange={(e) => setOrchestratorInstructions(e.target.value)}
+                  rows={5}
                 />
-                GPG署名を使う
-              </label>
-              <label className="open-menu-suboption">
-                <input
-                  type="checkbox"
-                  checked={sandboxOpts.sshAgent}
-                  onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, sshAgent: e.target.checked })}
-                />
-                ssh-agentを転送する
-              </label>
-            </div>
-            <p className="open-menu-note">
-              サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。
-              GPG/ssh-agentは既定オフ、このディレクトリ ({currentPath}) に記憶されます。
-            </p>
+              </>
+            )}
+
             <div className="resume-actions">
               <button className="btn btn-secondary" onClick={() => setOpenMenuOpen(false)}>キャンセル</button>
-              <button
-                className="btn btn-primary"
-                onClick={() => { setOpenMenuOpen(false); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault }); }}
-              >
-                起動
-              </button>
+              {launchMode === 'combo' ? (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setOpenMenuOpen(false);
+                    onOpenCombo(currentPath, {
+                      workerA: { app: comboApps.workerA },
+                      workerB: { app: comboApps.workerB },
+                      orchestrator: { app: comboApps.orchestrator, instructions: orchestratorInstructions },
+                      sandboxOpts,
+                    });
+                  }}
+                >
+                  コンボ起動
+                </button>
+              ) : (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => { setOpenMenuOpen(false); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault }); }}
+                >
+                  起動
+                </button>
+              )}
             </div>
           </div>
         </div>

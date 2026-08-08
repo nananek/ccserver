@@ -46,6 +46,14 @@ const SANDBOX_SSH_CONFIG_PATH = '/ccserver-sandbox-ssh-config';
 const SANDBOX_KNOWN_HOSTS_USER_PATH = '/ccserver-sandbox-known-hosts-user';
 const SANDBOX_KNOWN_HOSTS_DEFAULT_PATH = '/ccserver-sandbox-known-hosts-default';
 
+// Fixed in-sandbox paths for the MCP bridge (see mcpBroker.js / mcpConfig.js):
+// the group's control or handoff socket is bound at SANDBOX_MCP_SOCK_PATH and
+// the byte-pipe wrapper script at SANDBOX_MCP_BRIDGE_PATH, which the agent
+// CLIs are told to run via --mcp-config / OPENCODE_CONFIG_CONTENT.
+const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.sock';
+const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
+const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
+
 const HOME = homedir();
 // process.getuid is undefined on Windows; the sandbox is Linux-only, but this
 // module is imported unconditionally, so guard the top-level access.
@@ -349,7 +357,7 @@ export function sandboxAvailable() {
 
 // Build the bwrap arguments (everything after the `bwrap` executable, up to
 // but not including the trailing `-- <cmd...>`).
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -391,6 +399,17 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 
   // The project directory (read-write).
   args.push('--bind', cwd, cwd);
+
+  // Combo sessions (worker / orchestrator) get the group's MCP socket bound at
+  // a fixed in-sandbox path, plus the byte-pipe wrapper that relays
+  // stdin/stdout <-> the socket (see sandbox-mcp-wrapper.cjs). The wrapper's
+  // shebang needs the node binary bound at SANDBOX_NODE_PATH -- that bind is
+  // shared with the git-broker branch below, so it's pulled out there.
+  if (mcpSocketPath) {
+    args.push('--bind-try', mcpSocketPath, SANDBOX_MCP_SOCK_PATH);
+    args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
+    args.push('--setenv', 'CCSANDBOX_MCP_SOCK', SANDBOX_MCP_SOCK_PATH);
+  }
 
   // Agent CLI configuration + install dirs (claude + opencode), writable so
   // sessions/auth state survive across sandbox launches and conversations can
@@ -469,6 +488,16 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // the cwd's own remotes + checked-out submodules (see gitAllowlist.js);
   // gitBroker is the {sockPath, allowlistPath} bag returned by
   // startGitBroker(), or null when disabled/unavailable.
+  // The helper/wrapper scripts are Node scripts (shebang points at this
+  // fixed path); bind the actual node binary here rather than assume
+  // /usr/bin/node exists, mirroring how resolveApp follows the real
+  // agent binary instead of assuming a host layout. Shared between the
+  // git-broker machinery and the MCP bridge wrapper.
+  if (gitBroker || mcpSocketPath) {
+    const nodeBin = realpathSync(process.execPath);
+    args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
+  }
+
   if (gitBroker) {
     const ghCandidates = new Set(
       [which('gh'), '/usr/bin/gh', '/usr/local/bin/gh', join(HOME, '.local', 'bin', 'gh')].filter(Boolean),
@@ -477,12 +506,6 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
       if (existsSync(ghPath)) args.push('--ro-bind', GH_WRAPPER_SCRIPT, ghPath);
     }
 
-    // The helper/wrapper scripts are Node scripts (shebang points at this
-    // fixed path); bind the actual node binary here rather than assume
-    // /usr/bin/node exists, mirroring how resolveApp follows the real
-    // agent binary instead of assuming a host layout.
-    const nodeBin = realpathSync(process.execPath);
-    args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
     args.push('--ro-bind', CRED_HELPER_SCRIPT, SANDBOX_CRED_HELPER_PATH);
     args.push('--ro-bind', gitBroker.allowlistPath, SANDBOX_ALLOWLIST_PATH);
     args.push('--bind-try', gitBroker.sockPath, SANDBOX_BROKER_SOCK_PATH);
@@ -601,6 +624,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
     stateDir: null,
     claudeDir: installDir,
     gitBroker: null,
+    mcpSocketPath: null,
   });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
   return {
@@ -621,7 +645,10 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 //                 (the client, via the launch UI) pick these per session/
 //                 directory instead of only through the shared config file;
 //                 an omitted key falls back to loadSandboxConfig()'s value.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts }) {
+//   mcpSocketPath - host path of the group's control/handoff MCP socket to
+//                 bind into the sandbox at a fixed path (combo sessions
+//                 only). null for regular sessions.
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null }) {
   const { docker: cfgDocker, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -661,7 +688,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts }) {
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   const gitBrokerFields = {

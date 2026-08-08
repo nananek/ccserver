@@ -5,6 +5,7 @@ import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
+import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import {
   isValidApp,
   appResumeArgs,
@@ -22,6 +23,15 @@ const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 const IDLE_TIMEOUT_MS = 3000;
 
 const sessions = new Map();
+
+// Observers of session exits (pty terminated, for any reason: normal exit,
+// user teardown, group destroy). Used by groupManager to stop MCP brokers
+// belonging to the dying session. Runtime-only -- no module init cycles.
+const sessionExitListeners = new Set();
+
+export function setSessionExitListener(fn) {
+  sessionExitListeners.add(fn);
+}
 
 function resolveCommand(cmd) {
   if (process.platform !== 'win32') return cmd;
@@ -45,7 +55,7 @@ function defaultApp() {
   return loadSandboxConfig().defaultApp;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, resumeLast }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null }) {
   const id = randomUUID();
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
@@ -78,6 +88,20 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   }
   command = resolveCommand(command);
 
+  // Combo sessions (groupId set) get their role's MCP broker injected via CLI
+  // arg / env -- no file is ever written (see mcpConfig.js). The sandbox
+  // binds the socket at a fixed path and the agent runs the bridge wrapper
+  // there, so the MCP client appears inside the sandbox without the host or
+  // the repo being touched.
+  let mcpArgs = [];
+  let mcpEnv = {};
+  if (mcpSocketPath && sessionApp) {
+    const injected = buildMcpConfigArgsAndEnv(sessionApp);
+    mcpArgs = injected.args;
+    mcpEnv = injected.env;
+    args.push(...mcpArgs);
+  }
+
   // Optionally wrap the target in a filesystem sandbox (Linux only) so it can
   // only see the project directory plus configured paths, with an isolated
   // rootless docker inside. See sandbox.js.
@@ -87,7 +111,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   let sandboxGitBrokerDir = null;
   if (sandbox && process.platform !== 'win32' && sandboxAvailable()) {
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;
@@ -125,6 +149,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       // the whole conversation in an internal scrollable area that the wheel
       // scrolls natively, and its own drag-selection + copy-on-select writes
       // to the browser clipboard via OSC 52 (handled client-side).
+      ...mcpEnv,
     },
   });
   } catch (err) {
@@ -136,6 +161,8 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     cwd,
     shell: !!shell,
     app: sessionApp,
+    groupId,
+    groupRole,
     sandbox: useSandbox,
     sandboxOpts: useSandbox ? (sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
     sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
@@ -287,6 +314,14 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     // resume id and detach it so it auto-resumes the conversation at fire time.
     refreshScheduleOnExit(session);
 
+    for (const fn of sessionExitListeners) {
+      try {
+        fn(session);
+      } catch {
+        // a listener must never break the pty exit path
+      }
+    }
+
     if (session.socket && session.socket.readyState === 1) {
       session.socket.send(JSON.stringify({
         type: 'exit',
@@ -307,6 +342,38 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
 export function getSession(id) {
   return sessions.get(id);
+}
+
+// Write text into a live session's pty, optionally submitting with Enter.
+// Shared by the WS 'input' path (terminal.js) and the MCP send_input tool
+// (mcpTools.js). Idle timer reset mirrors the WS input handler.
+export function writeToSession(id, text, { submit = false } = {}) {
+  const session = sessions.get(id);
+  if (!session?.ptyProcess || session.exited) return false;
+  try {
+    session.ptyProcess.write(text);
+    session.idleNotified = false;
+    if (session.idleTimer) {
+      clearTimeout(session.idleTimer);
+      session.idleTimer = null;
+    }
+    if (submit) {
+      // Delay the Enter so the TUI registers the text first (same pattern as
+      // injectIntoLiveSession).
+      setTimeout(() => {
+        if (!session.exited && session.ptyProcess) {
+          try {
+            session.ptyProcess.write('\r');
+          } catch {
+            // pty may have died between writes
+          }
+        }
+      }, 200);
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const MAX_SCHEDULE_AHEAD_MS = 48 * 60 * 60 * 1000; // 48h
@@ -613,6 +680,8 @@ export function listSessions() {
       sandbox: session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
       app: session.app,
+      groupId: session.groupId || null,
+      groupRole: session.groupRole || null,
     });
   }
   return result;
