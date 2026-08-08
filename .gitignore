@@ -6,3 +6,4 @@ playwright-report/
 .saved-sessions.json
 .scheduled-prompts.json
 server/sandbox.config.json
+/tmp/
