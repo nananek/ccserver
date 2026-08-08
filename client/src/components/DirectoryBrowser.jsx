@@ -508,6 +508,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
                 {session.connected ? '\u25B6' : '\u23F8'}
               </span>
               <span className="session-cwd">{session.cwd}</span>
+              {session.sandbox && (
+                <span className="session-badge sandbox" title="このセッションはサンドボックスで実行中">sandbox</span>
+              )}
               <span className="session-status active">
                 {session.shell
                   ? 'shell'
@@ -535,6 +538,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
             >
               <span className="session-icon">{'\u21BB'}</span>
               <span className="session-cwd">{saved.cwd}</span>
+              {saved.sandbox && (
+                <span className="session-badge sandbox" title="保存時の起動設定: サンドボックス">sandbox</span>
+              )}
               <span className="session-status resumable">
                 {saved.app === 'opencode' ? 'opencode' : 'claude'} · resumable
               </span>

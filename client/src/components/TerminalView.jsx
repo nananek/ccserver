@@ -742,6 +742,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 if (savedClaudeId) {
                   initMsg.claudeSessionId = savedClaudeId;
                   claudeResumeIdRef.current = null;
+                } else if (app === 'opencode' && resumeRef.current) {
+                  // opencode has no conversation id in its byte stream, so a
+                  // re-launch continues via `opencode -c` (last session of the
+                  // project) like the saved-session flow does.
+                  initMsg.resume = true;
                 }
               }
               ws.send(JSON.stringify(initMsg));

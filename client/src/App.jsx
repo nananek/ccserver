@@ -69,7 +69,20 @@ export default function App() {
       setActiveTabId(existingTab.id);
       return;
     }
-    openTerminalTab(session.cwd, { shell: !!session.shell, sessionId: session.id, attachSessionId: session.id, app: session.app === 'opencode' ? 'opencode' : 'claude' });
+    // Carry the session's launch settings over so a re-launch after the
+    // original pty is gone (SESSION_NOT_FOUND -> re-init in TerminalView)
+    // keeps the sandbox instead of silently dropping it.
+    openTerminalTab(session.cwd, {
+      shell: !!session.shell,
+      sessionId: session.id,
+      attachSessionId: session.id,
+      app: session.app === 'opencode' ? 'opencode' : 'claude',
+      sandbox: !!session.sandbox,
+      sandboxOpts: session.sandboxOpts || null,
+      // opencode re-launches resume the last session of the project (-c), so
+      // a continued conversation survives the dead pty like claude's does.
+      resume: session.app === 'opencode',
+    });
   }, [tabs, openTerminalTab]);
 
   const handleResume = useCallback(() => {

@@ -503,6 +503,20 @@ body {
   background: rgba(137, 180, 250, 0.1);
 }
 
+.session-badge {
+  font-size: 11px;
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.session-badge.sandbox {
+  color: var(--warning, #f9e2af);
+  background: rgba(249, 226, 175, 0.12);
+  border: 1px solid rgba(249, 226, 175, 0.35);
+}
+
 .session-delete-btn {
   padding: 2px 8px;
   font-size: 12px;

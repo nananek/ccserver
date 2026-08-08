@@ -100,7 +100,14 @@ export async function terminalWs(fastify, opts) {
           }
 
           const session = getSession(msg.sessionId);
-          if (!session) {
+          // Refuse attaching to an exited session: the pty is gone, so the
+          // client-side re-init path (which carries the tab's launch
+          // settings, e.g. sandbox) is the correct continuation. Attaching
+          // here would otherwise leave the user staring at a stale "Process
+          // exited" screen and, worse, cancel the exit-cleanup timer
+          // (attachSocket clears timeoutTimer), turning the session into a
+          // zombie that lingers until the server restarts.
+          if (!session || session.exited) {
             socket.send(
               JSON.stringify({
                 type: 'error',
