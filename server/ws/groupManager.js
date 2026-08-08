@@ -8,13 +8,23 @@
 // here, by this process, never declared by clients.
 
 import { EventEmitter } from 'node:events';
-import { getSession, destroySession, createSession, writeToSession, setSessionExitListener } from './sessionManager.js';
+import { getSession, destroySession, createSession, writeToSession, setSessionExitListener, setSessionCreateListener } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
 
 const groups = new Map(); // groupId -> group (see createGroup)
 
-export function createGroup({ groupId, cwd, orchestratorDir }) {
+// Roles an orchestrator may open via open_tab: workerA/workerB plus any
+// similarly-shaped worker role (workerC, worker-extra, ...). The
+// orchestrator's own role is deliberately excluded -- an orchestrator must
+// never be able to spawn/replace "itself".
+const WORKER_ROLE_RE = /^worker[A-Za-z0-9_-]+$/;
+
+// FIFO handoff queue cap: workers pushing while the orchestrator is gone must
+// not grow the queue without bound.
+const MAX_HANDOFF_QUEUE = 100;
+
+export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts = null }) {
   const group = {
     id: groupId,
     createdAt: Date.now(),
@@ -22,6 +32,9 @@ export function createGroup({ groupId, cwd, orchestratorDir }) {
     allowedCwds: new Set([cwd]),
     members: new Map(), // role -> sessionId
     orchestratorDir,
+    // Per-launch sandbox flags (gpg/sshAgent) the group's workers launched
+    // with; open_tab workers inherit them unless the tool overrides.
+    sandboxOpts,
     controlBroker: null, // { server, sockPath, dir } | null
     handoffChannels: new Map(), // role -> { server, sockPath, dir, role, sessionId }
     handoffQueue: [],
@@ -31,11 +44,16 @@ export function createGroup({ groupId, cwd, orchestratorDir }) {
 
   // The orchestrator's own socket; hosts the control MCP server. Created at
   // group creation so the orchestrator session can be launched with it.
-  group.controlBroker = startControlBroker({
-    groupId,
-    groupManager: groupManagerApi,
-    sessionManager: sessionApi,
-  });
+  try {
+    group.controlBroker = await startControlBroker({
+      groupId,
+      groupManager: groupManagerApi,
+      sessionManager: sessionApi,
+    });
+  } catch (err) {
+    groups.delete(groupId);
+    throw err;
+  }
 
   return group;
 }
@@ -86,10 +104,10 @@ export function isSessionInGroup(groupId, sessionId) {
 // known yet -- the channel resolves it from the group's member registry at
 // MCP-connection time, so the socket can be bound into the sandbox before
 // createSession() runs.
-export function createMemberHandoffChannel(groupId, role) {
+export async function createMemberHandoffChannel(groupId, role) {
   const group = groups.get(groupId);
   if (!group) return null;
-  const channel = startHandoffChannel({
+  const channel = await startHandoffChannel({
     groupId,
     role,
     getSessionId: () => group.members.get(role) || null,
@@ -106,10 +124,16 @@ export function createMemberHandoffChannel(groupId, role) {
 // allowedCwds (initialized to the shared project dir). Reuses the same
 // channel-then-session flow as the initial trio. Returns { sessionId, app }
 // or { error, message }.
-export function addMember(groupId, role, { app, cwd, sandboxOpts = null }) {
+export async function addMember(groupId, role, { app, cwd, sandboxOpts = null }) {
   const group = groups.get(groupId);
   if (!group) return { error: 'group-not-found', message: 'group not found' };
   if (!isValidApp(app)) return { error: 'bad-request', message: 'app must be claude or opencode' };
+  if (!WORKER_ROLE_RE.test(role)) {
+    return {
+      error: 'invalid-role',
+      message: 'role must be a worker role (e.g. workerA, workerB), never orchestrator',
+    };
+  }
   if (!group.allowedCwds.has(cwd)) {
     return { error: 'cwd-not-allowed', message: `cwd must be one of: ${[...group.allowedCwds].join(', ')}` };
   }
@@ -124,13 +148,15 @@ export function addMember(groupId, role, { app, cwd, sandboxOpts = null }) {
     group.handoffChannels.delete(role);
   }
 
-  const channel = createMemberHandoffChannel(groupId, role);
+  const channel = await createMemberHandoffChannel(groupId, role);
   const res = createSession({
     cwd,
     cols: 80,
     rows: 24,
     sandbox: true,
-    sandboxOpts,
+    // Inherit the flags the group's workers were launched with unless the
+    // tool call overrides them.
+    sandboxOpts: sandboxOpts ?? group.sandboxOpts,
     app,
     groupId,
     groupRole: role,
@@ -158,10 +184,15 @@ export function removeMember(groupId, sessionId) {
   }
 }
 
-// FIFO handoff queue + EventEmitter: workers push, orchestrator takes.
+// FIFO handoff queue + EventEmitter: workers push, orchestrator takes. The
+// queue is capped so workers pushing while the orchestrator is away (crashed,
+// not waiting) can't grow memory without bound -- oldest hands off first.
 export function pushHandoff(groupId, event) {
   const group = groups.get(groupId);
   if (!group) return false;
+  if (group.handoffQueue.length >= MAX_HANDOFF_QUEUE) {
+    group.handoffQueue.shift();
+  }
   group.handoffQueue.push(event);
   group.handoffEmitter.emit('handoff');
   return true;
@@ -229,8 +260,8 @@ export function destroyGroup(groupId) {
   groups.delete(groupId);
 }
 
-// --- session-exit observation (no import cycle: sessionManager never imports
-// this module; we subscribe via setSessionExitListener) ----------------------
+// --- session-exit / session-create observation (no import cycle: sessionManager
+// never imports this module; we subscribe via the listener setters) ----------
 
 function onSessionExit(session) {
   if (!session?.groupId) return;
@@ -245,6 +276,18 @@ function onSessionExit(session) {
   // stop it so no listener leaks, but keep the member registered so the
   // orchestrator can still inspect its status/output (exited: true).
   cleanupMemberChannels(group, session.id);
+}
+
+// A session was created with a groupId/groupRole (e.g. a scheduled prompt
+// auto-resuming a group member after its pty exited): re-bind the role to the
+// new sessionId so the member isn't orphaned from the group. Idempotent --
+// the explicit registerMember() calls in the launch paths set the same
+// values.
+function onSessionCreate(session) {
+  if (!session?.groupId || !session?.groupRole) return;
+  const group = groups.get(session.groupId);
+  if (!group) return;
+  registerMember(session.groupId, session.groupRole, session.id);
 }
 
 function cleanupMemberChannels(group, sessionId) {
@@ -273,3 +316,4 @@ const sessionApi = {
 };
 
 setSessionExitListener(onSessionExit);
+setSessionCreateListener(onSessionCreate);

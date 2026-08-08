@@ -28,7 +28,7 @@ export function listGroupSessions(deps) {
 // orchestrator's context. This is a fallback for stuck-member inspection --
 // the recommended flow is wait_for_handoff.
 export function readOutput(deps, { sessionId, tail = 4000 }) {
-  const n = Math.min(Math.max(Number(tail) || 4000, 1), 100000);
+  const n = Math.min(Math.max(Number.isFinite(tail) ? tail : 4000, 1), 100000);
   if (!deps.groupManager.isSessionInGroup(deps.groupId, sessionId)) {
     return { error: 'unauthorized', message: 'session is not a member of this group' };
   }
@@ -61,9 +61,11 @@ export function sendInput(deps, { sessionId, text, submit = true }) {
 
 // Open a new member session (worker role) inside the group, with its own
 // handoff channel. cwd is restricted to the group's allowedCwds (initialized
-// to the shared project directory -- see groupManager).
-export function openTab(deps, { role, app, cwd }) {
-  const res = deps.groupManager.addMember(deps.groupId, role, { app, cwd, sandboxOpts: null });
+// to the shared project directory -- see groupManager). sandboxOpts (gpg /
+// ssh-agent forwarding) defaults to the group's launch flags; an explicit
+// override is honored.
+export async function openTab(deps, { role, app, cwd, sandboxOpts = null }) {
+  const res = await deps.groupManager.addMember(deps.groupId, role, { app, cwd, sandboxOpts });
   if (res.error) return { error: res.error, message: res.message };
   return { sessionId: res.sessionId, role, cwd, app: res.app };
 }

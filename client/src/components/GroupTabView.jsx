@@ -71,6 +71,9 @@ export default function GroupTabView({
 
   // Report the active member's app upward (App uses it to hide the Usage
   // button for opencode), with an explicit null when no member is active.
+  // `visible` is a dep on purpose: group tabs stay mounted while hidden, and
+  // only the visible one's report must win -- re-emitting on visibility
+  // change keeps App's single shared state in sync across tab switches.
   useEffect(() => {
     const active = members.find((m) => m.role === activeRole);
     const app = active?.app === 'opencode' ? 'opencode' : active?.app === 'claude' ? 'claude' : null;
@@ -78,7 +81,7 @@ export default function GroupTabView({
       prevActiveAppRef.current = app;
       onActiveAppChange?.(app);
     }
-  }, [members, activeRole, onActiveAppChange]);
+  }, [members, activeRole, visible, onActiveAppChange]);
 
   const roleLabel = (role) => {
     if (role === 'orchestrator') return 'Orchestrator';

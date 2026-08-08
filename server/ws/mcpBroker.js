@@ -22,55 +22,79 @@ import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer } from '.
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
 const RUNTIME_BASE = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
 
+// How long to wait (non-blocking) for the socket file after listen() reports
+// success, before giving up.
+const SOCKET_FILE_WAIT_MS = 2000;
+const SOCKET_FILE_POLL_MS = 20;
+
 function sockPathFor(groupId, tag) {
   const id = String(groupId).replace(/-/g, '');
   return join(RUNTIME_BASE, `ccserver-mcp-${id}-${tag}`);
 }
 
-function listenMcp({ groupId, tag, buildServer }) {
-  const sockPath = sockPathFor(groupId, tag);
+// bwrap's --bind-try snapshots the socket file at mount time, so the file
+// must exist before createSession()/buildSandboxSpawn() run. listen()'s
+// callback fires once the socket is bound (the file exists by then), but
+// poll non-blockingly for a short window anyway so a caller can never race
+// the bind with a sandbox launch.
+function waitForSocketFile(sockPath, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const poll = () => {
+      if (existsSync(sockPath)) return resolve();
+      if (Date.now() >= deadline) {
+        return reject(new Error(`socket file ${sockPath} never appeared`));
+      }
+      setTimeout(poll, SOCKET_FILE_POLL_MS);
+    };
+    poll();
+  });
+}
 
+// Async: resolves { server, sockPath, dir } once the socket is actually
+// listening, or rejects with the listen error (or a timeout waiting for the
+// socket file). Callers must propagate the rejection -- a silent failure
+// here would leave sessions sandboxed with a bind to a socket nobody is
+// listening on.
+async function listenMcp({ groupId, tag, buildServer }) {
+  const sockPath = sockPathFor(groupId, tag);
   const server = createServer((socket) => {
     const mcp = buildServer();
     const transport = new SocketTransport(socket);
     mcp.connect(transport);
     socket.on('error', () => {});
   });
-  server.on('error', (err) => {
-    console.error(`[mcp-broker] ${tag} listen failed: ${err.message}`);
+  await new Promise((resolve, reject) => {
+    server.once('error', (err) => {
+      reject(new Error(`[mcp-broker] ${tag} listen failed: ${err.message}`));
+    });
+    server.listen(sockPath, () => resolve());
   });
-  server.listen(sockPath);
-
-  // bwrap's --bind-try snapshots the socket file at mount time, so the socket
-  // must already exist before createSession()/buildSandboxSpawn() run. listen()
-  // is async; busy-wait briefly until the file is there (same trick as
-  // git-broker's startGitBroker).
-  const deadline = Date.now() + 2000;
-  while (!existsSync(sockPath) && Date.now() < deadline) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  try {
+    await waitForSocketFile(sockPath, SOCKET_FILE_WAIT_MS);
+  } catch (err) {
+    try { server.close(); } catch { /* not listening */ }
+    throw err;
   }
-
   return { server, sockPath, dir: null };
 }
 
 // deps: { groupId, groupManager, sessionManager }
-export function startControlBroker(deps) {
-  const broker = listenMcp({
+export async function startControlBroker(deps) {
+  return listenMcp({
     groupId: deps.groupId,
     tag: 'control',
     buildServer: () => buildControlMcpServer(deps),
   });
-  return { server: broker.server, sockPath: broker.sockPath, dir: broker.dir };
 }
 
 // deps: { groupId, role, getSessionId, groupManager, sessionManager }
-export function startHandoffChannel(deps) {
-  const broker = listenMcp({
+export async function startHandoffChannel(deps) {
+  return listenMcp({
     groupId: deps.groupId,
     tag: `handoff-${deps.role}`,
     buildServer: () => buildHandoffMcpServer(deps),
   });
-  return { server: broker.server, sockPath: broker.sockPath, dir: broker.dir };
 }
 
 export function stopBroker({ server, sockPath }) {

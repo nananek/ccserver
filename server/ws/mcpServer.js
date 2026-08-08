@@ -81,9 +81,14 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'open_tab',
-    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. cwd is restricted to the group project directory.',
-    { role: z.string(), app: z.enum(['claude', 'opencode']), cwd: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.openTab(deps, args)) }] }),
+    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is restricted to the group project directory. sandboxOpts (gpg/ssh-agent forwarding) defaults to the group launch flags.',
+    {
+      role: z.string().regex(/^worker[A-Za-z0-9_-]+$/),
+      app: z.enum(['claude', 'opencode']),
+      cwd: z.string(),
+      sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
+    },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await tools.openTab(deps, args)) }] }),
   );
 
   server.tool(

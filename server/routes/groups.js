@@ -111,18 +111,28 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(500).send({ error: `Failed to write orchestrator instructions: ${err.message}` });
     }
 
-    groupManager.createGroup({ groupId, cwd, orchestratorDir });
+    // Broker start failures (socket path collision, permission errors, ...)
+    // must surface as a launch error, not a silent "success".
+    try {
+      await groupManager.createGroup({ groupId, cwd, orchestratorDir, sandboxOpts });
+    } catch (err) {
+      return reply.code(500).send({ error: `Failed to start control broker: ${err.message}` });
+    }
     const controlBroker = groupManager.getGroup(groupId).controlBroker;
 
     // Roll back cleanly if any of the three spawns fails.
-    const spawned = [];
     const fail = (message) => {
       groupManager.destroyGroup(groupId);
       return reply.code(400).send({ error: message });
     };
 
     for (const [role, app] of [['workerA', workerAApp], ['workerB', workerBApp]]) {
-      const channel = groupManager.createMemberHandoffChannel(groupId, role);
+      let channel;
+      try {
+        channel = await groupManager.createMemberHandoffChannel(groupId, role);
+      } catch (err) {
+        return fail(`worker ${role} handoff channel failed: ${err.message}`);
+      }
       const res = createSession({
         cwd,
         cols: 80,
@@ -138,7 +148,6 @@ export async function groupsRoute(fastify, opts) {
         return fail(`worker ${role} failed to launch: ${res.error || 'unknown error'}`);
       }
       groupManager.registerMember(groupId, role, res.sessionId);
-      spawned.push(res.sessionId);
     }
 
     const orchRes = createSession({
@@ -156,7 +165,6 @@ export async function groupsRoute(fastify, opts) {
       return fail(`orchestrator failed to launch: ${orchRes.error || 'unknown error'}`);
     }
     groupManager.registerMember(groupId, 'orchestrator', orchRes.sessionId);
-    spawned.push(orchRes.sessionId);
 
     fastify.log.info(`[groups] ${groupId} launched at ${cwd} (workers ${workerAApp}/${workerBApp}, orchestrator ${orchApp})`);
     return {

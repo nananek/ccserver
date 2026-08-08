@@ -152,19 +152,42 @@ export default function App() {
     });
   }, [activeTabId]);
 
+  // Server-side teardown for a group tab: DELETE /api/groups/:id destroys the
+  // 3 member sessions + MCP brokers. Must run even when the close-confirm is
+  // skipped ("次回以降確認しない"), otherwise the sessions and their Unix
+  // sockets leak for as long as the server runs.
+  const destroyGroupTab = useCallback(async (tab) => {
+    try {
+      await authFetch(`/api/groups/${tab.groupId}`, { method: 'DELETE' });
+    } catch {
+      // group teardown already happened server-side or is unreachable;
+      // closing the tab is still the right move
+    }
+  }, []);
+
   const handleCloseTab = useCallback((tabId) => {
     // タブを閉じてもセッション自体はサーバー側で動き続けるが、
     // 再アタッチの手間があるため、稼働中のタブは閉じる前に確認する。
     // プロセスが終了済みのタブや「次回以降確認しない」設定時は確認なしで閉じる。
     // グループタブは3セッションを破棄するため必ず確認する。
     const tab = tabs.find((t) => t.id === tabId);
-    if (tab && ((tab.type === 'terminal' && !tab.exited) || tab.type === 'group') && !skipCloseConfirm) {
+    if (tab?.type === 'group') {
+      if (skipCloseConfirm) {
+        destroyGroupTab(tab);
+        doCloseTab(tabId);
+      } else {
+        setDontAskAgain(false);
+        setCloseConfirm({ tabId, kind: 'group' });
+      }
+      return;
+    }
+    if (tab && tab.type === 'terminal' && !tab.exited && !skipCloseConfirm) {
       setDontAskAgain(false);
-      setCloseConfirm({ tabId, kind: tab.type === 'group' ? 'group' : 'terminal' });
+      setCloseConfirm({ tabId, kind: 'terminal' });
       return;
     }
     doCloseTab(tabId);
-  }, [tabs, skipCloseConfirm, doCloseTab]);
+  }, [tabs, skipCloseConfirm, doCloseTab, destroyGroupTab]);
 
   const confirmCloseTab = useCallback(async () => {
     if (!closeConfirm) return;
@@ -174,16 +197,11 @@ export default function App() {
     }
     const tab = tabs.find((t) => t.id === closeConfirm.tabId);
     if (tab?.type === 'group') {
-      try {
-        await authFetch(`/api/groups/${tab.groupId}`, { method: 'DELETE' });
-      } catch {
-        // group teardown already happened server-side or is unreachable;
-        // closing the tab is still the right move
-      }
+      await destroyGroupTab(tab);
     }
     doCloseTab(closeConfirm.tabId);
     setCloseConfirm(null);
-  }, [closeConfirm, dontAskAgain, tabs, doCloseTab]);
+  }, [closeConfirm, dontAskAgain, tabs, doCloseTab, destroyGroupTab]);
 
   const handleTabClick = useCallback((tabId) => {
     setActiveTabId(tabId);

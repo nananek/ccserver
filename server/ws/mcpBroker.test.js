@@ -25,11 +25,11 @@ before(async () => {
   broker = await import('./mcpBroker.js');
 
   groupId = randomUUID();
-  groupManager.createGroup({ groupId, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });
+  await groupManager.createGroup({ groupId, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });
   groupManager.registerMember(groupId, 'workerA', 'wire-sess-a');
   groupManager.registerMember(groupId, 'orchestrator', 'wire-sess-o');
   control = groupManager.getGroup(groupId).controlBroker;
-  handoff = groupManager.createMemberHandoffChannel(groupId, 'workerA');
+  handoff = await groupManager.createMemberHandoffChannel(groupId, 'workerA');
   handoff.sessionId = 'wire-sess-a';
 });
 
@@ -150,7 +150,7 @@ test('handoff socket: worker handoff reaches the control socket wait_for_handoff
 
 test('control socket: cross-group session refused over the wire (authorization boundary)', async () => {
   const otherGroupId = randomUUID();
-  groupManager.createGroup({ groupId: otherGroupId, cwd: '/srv/other', orchestratorDir: '/srv/other-orch' });
+  await groupManager.createGroup({ groupId: otherGroupId, cwd: '/srv/other', orchestratorDir: '/srv/other-orch' });
   groupManager.registerMember(otherGroupId, 'workerA', 'other-sess-x');
 
   const c = mcpClient(control.sockPath);

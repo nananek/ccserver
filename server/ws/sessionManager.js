@@ -25,12 +25,20 @@ const IDLE_TIMEOUT_MS = 3000;
 const sessions = new Map();
 
 // Observers of session exits (pty terminated, for any reason: normal exit,
-// user teardown, group destroy). Used by groupManager to stop MCP brokers
-// belonging to the dying session. Runtime-only -- no module init cycles.
+// user teardown, group destroy) and of session creations. Used by
+// groupManager to stop MCP brokers of dying sessions and to re-bind roles
+// when a member session is (re)created outside the explicit launch paths
+// (e.g. a scheduled prompt auto-resuming a group member). Runtime-only -- no
+// module init cycles.
 const sessionExitListeners = new Set();
+const sessionCreateListeners = new Set();
 
 export function setSessionExitListener(fn) {
   sessionExitListeners.add(fn);
+}
+
+export function setSessionCreateListener(fn) {
+  sessionCreateListeners.add(fn);
 }
 
 function resolveCommand(cmd) {
@@ -337,6 +345,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   });
 
   sessions.set(id, session);
+
+  for (const fn of sessionCreateListeners) {
+    try {
+      fn(session);
+    } catch {
+      // a listener must never break session creation
+    }
+  }
+
   return { sessionId: id, session };
 }
 
@@ -428,6 +445,8 @@ function persistSchedules() {
         shell: !!s.shell,
         app: s.app || 'claude',
         claudeSessionId: s.claudeSessionId || null,
+        groupId: s.groupId || null,
+        groupRole: s.groupRole || null,
       });
     }
     if (arr.length > 0) {
@@ -560,6 +579,10 @@ function fireSchedule(scheduleId) {
     sandboxOpts: entry.sandboxOpts,
     app: entry.app,
     resumeLast: entry.app === 'opencode',
+    // A group member keeps its membership across the resume: groupManager's
+    // session-create listener re-binds the role to the new sessionId.
+    groupId: entry.groupId,
+    groupRole: entry.groupRole,
   });
   if (!res?.session) return;
   const session = res.session;
@@ -601,6 +624,8 @@ export function setScheduledPrompt(id, at, text) {
     app: session.app || 'claude',
     claudeSessionId: resumeIdForSession(session),
     sessionId: id,
+    groupId: session.groupId || null,
+    groupRole: session.groupRole || null,
     timer: setTimeout(() => fireSchedule(scheduleId), delay),
   };
   schedules.set(scheduleId, entry);
@@ -653,6 +678,10 @@ export function restoreSchedules() {
       // Legacy persisted schedules predate the app field and were claude.
       app: isValidApp(e.app) ? e.app : 'claude',
       claudeSessionId: e.claudeSessionId || null,
+      // Group membership survives a restart: an auto-resume re-binds the
+      // role (see fireSchedule), so a member isn't orphaned by a reboot.
+      groupId: e.groupId || null,
+      groupRole: e.groupRole || null,
       sessionId: null,
       timer: null,
     };

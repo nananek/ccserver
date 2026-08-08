@@ -7,8 +7,11 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn } from './sandbox.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
@@ -48,7 +51,7 @@ test('buildSandboxSpawn binds the MCP socket, wrapper and node binary when mcpSo
     assert.equal(args[idxBind - 1], sockPath);
     assert.ok(idxBridge > 0, 'bridge wrapper path present');
     assert.equal(args[idxBridge - 2], '--ro-bind');
-    assert.equal(args[idxBridge - 1], join(process.cwd(), 'ws', 'sandbox-mcp-wrapper.cjs'));
+    assert.equal(args[idxBridge - 1], join(__dirname, 'sandbox-mcp-wrapper.cjs'));
     const sockEnv = args.indexOf('CCSANDBOX_MCP_SOCK');
     assert.ok(sockEnv > 0, 'CCSANDBOX_MCP_SOCK set');
     assert.equal(args[sockEnv + 1], SANDBOX_MCP_SOCK_PATH);

@@ -162,9 +162,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onS
       const res = await authFetch('/api/sessions');
       if (res.ok) {
         const data = await res.json();
-        setSessions(data.sessions);
+        // Group members (workerA/workerB/orchestrator) are reached through
+        // the combo group's own sub-tab UI; listing them here would let a
+        // click attach the same sessionId from a second tab, detaching the
+        // live one inside the group (attachSocket replaces the old socket).
+        setSessions((data.sessions || []).filter((s) => s.groupId == null));
         if (data.savedSessions) {
-          setSavedSessions(data.savedSessions);
+          setSavedSessions((data.savedSessions || []).filter((s) => s.groupId == null));
         }
       }
     } catch {

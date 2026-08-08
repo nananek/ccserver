@@ -33,9 +33,9 @@ after(() => {
   try { rmSync(runtimeDir, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-function makeGroup() {
+async function makeGroupAsync() {
   const id = randomUUID();
-  groupManager.createGroup({ groupId: id, cwd: `/srv/project-${id}`, orchestratorDir: `/srv/orch-${id}` });
+  await groupManager.createGroup({ groupId: id, cwd: `/srv/project-${id}`, orchestratorDir: `/srv/orch-${id}` });
   groupsToDestroy.push(id);
   return id;
 }
@@ -61,8 +61,8 @@ function handoffDeps(groupId, role, sessionId) {
   };
 }
 
-test('listGroupSessions reports registered members with roles', () => {
-  const g = makeGroup();
+test('listGroupSessions reports registered members with roles', async () => {
+  const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a');
   groupManager.registerMember(g, 'workerB', 'sess-b');
   groupManager.registerMember(g, 'orchestrator', 'sess-o');
@@ -75,8 +75,8 @@ test('listGroupSessions reports registered members with roles', () => {
   assert.equal(members.length, 3);
 });
 
-test('isSessionInGroup: only registered members pass', () => {
-  const g = makeGroup();
+test('isSessionInGroup: only registered members pass', async () => {
+  const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a');
   assert.equal(groupManager.isSessionInGroup(g, 'sess-a'), true);
   assert.equal(groupManager.isSessionInGroup(g, 'sess-other'), false);
@@ -85,9 +85,9 @@ test('isSessionInGroup: only registered members pass', () => {
 
 // The critical boundary: a group's tools must refuse every session id that
 // belongs to a different group (or none at all).
-test('authorization: cross-group session ids are refused by every tool', () => {
-  const a = makeGroup();
-  const b = makeGroup();
+test('authorization: cross-group session ids are refused by every tool', async () => {
+  const a = await makeGroupAsync();
+  const b = await makeGroupAsync();
   groupManager.registerMember(a, 'workerA', 'sess-a1');
   groupManager.registerMember(a, 'orchestrator', 'sess-a2');
   groupManager.registerMember(b, 'workerA', 'sess-b1');
@@ -111,15 +111,15 @@ test('authorization: cross-group session ids are refused by every tool', () => {
   assert.equal(u.error, 'unauthorized');
 });
 
-test('readOutput: authorized member with no live session yields not-found (no crash)', () => {
-  const g = makeGroup();
+test('readOutput: authorized member with no live session yields not-found (no crash)', async () => {
+  const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
   const r = tools.readOutput(controlDeps(g), { sessionId: 'sess-a1' });
   assert.equal(r.error, 'not-found');
 });
 
-test('readOutput: rejects the session from a destroyed group', () => {
-  const g = makeGroup();
+test('readOutput: rejects the session from a destroyed group', async () => {
+  const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
   groupManager.destroyGroup(g);
   const r = tools.readOutput(controlDeps(g), { sessionId: 'sess-a1' });
@@ -127,7 +127,7 @@ test('readOutput: rejects the session from a destroyed group', () => {
 });
 
 test('handoff: worker pushes and orchestrator receives the structured event', async () => {
-  const g = makeGroup();
+  const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
 
   const wd = handoffDeps(g, 'workerA', 'sess-a1');
@@ -144,7 +144,7 @@ test('handoff: worker pushes and orchestrator receives the structured event', as
 });
 
 test('handoff: FIFO order across two workers', async () => {
-  const g = makeGroup();
+  const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
   groupManager.registerMember(g, 'workerB', 'sess-b1');
 
@@ -160,14 +160,14 @@ test('handoff: FIFO order across two workers', async () => {
   assert.equal(e2.status, 'blocked');
 });
 
-test('handoff: invalid status is rejected before reaching the queue', () => {
-  const g = makeGroup();
+test('handoff: invalid status is rejected before reaching the queue', async () => {
+  const g = await makeGroupAsync();
   const res = tools.handoffToOrchestrator(handoffDeps(g, 'workerA', 'sess-a1'), { summary: 'x', status: 'sideways' });
   assert.equal(res.error, 'bad-request');
 });
 
 test('waitForHandoff: empty queue times out with a tiny timedOut result (not an error)', async () => {
-  const g = makeGroup();
+  const g = await makeGroupAsync();
   const started = Date.now();
   const ev = await tools.waitForHandoff(controlDeps(g), { timeoutMs: 60 });
   assert.equal(ev.timedOut, true);
@@ -175,7 +175,7 @@ test('waitForHandoff: empty queue times out with a tiny timedOut result (not an 
 });
 
 test('waitForHandoff: a handoff that arrives while waiting resolves immediately', async () => {
-  const g = makeGroup();
+  const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
   const wait = tools.waitForHandoff(controlDeps(g), { timeoutMs: 500 });
   setTimeout(() => {
@@ -185,26 +185,109 @@ test('waitForHandoff: a handoff that arrives while waiting resolves immediately'
   assert.equal(ev.summary, 'late arrival');
 });
 
-test('openTab: cwd outside the group project dir is refused before any spawn', () => {
-  const g = makeGroup();
+test('openTab: cwd outside the group project dir is refused before any spawn', async () => {
+  const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
-  const res = tools.openTab(controlDeps(g), { role: 'workerC', app: 'claude', cwd: '/somewhere/else' });
+  const res = await tools.openTab(controlDeps(g), { role: 'workerC', app: 'claude', cwd: '/somewhere/else' });
   assert.equal(res.error, 'cwd-not-allowed');
 });
 
-test('openTab: invalid app is refused', () => {
-  const g = makeGroup();
-  const res = tools.openTab(controlDeps(g), { role: 'workerC', app: 'shell', cwd: `/srv/project-${g}` });
+test('openTab: invalid app is refused', async () => {
+  const g = await makeGroupAsync();
+  const res = await tools.openTab(controlDeps(g), { role: 'workerC', app: 'shell', cwd: `/srv/project-${g}` });
   assert.equal(res.error, 'bad-request');
 });
 
-test('openTab: unknown group errors cleanly', () => {
-  const res = tools.openTab(controlDeps('no-such-group'), { role: 'workerC', app: 'claude', cwd: '/x' });
+test('openTab: unknown group errors cleanly', async () => {
+  const res = await tools.openTab(controlDeps('no-such-group'), { role: 'workerC', app: 'claude', cwd: '/x' });
   assert.equal(res.error, 'group-not-found');
 });
 
-test('closeTab: destroying a member removes it from the group', () => {
-  const g = makeGroup();
+// The orchestrator must never be able to spawn/replace "itself".
+test('openTab: role orchestrator is refused (self-destruction guard)', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'orchestrator', 'sess-o');
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+
+  const res = await tools.openTab(controlDeps(g), { role: 'orchestrator', app: 'claude', cwd: `/srv/project-${g}` });
+  assert.equal(res.error, 'invalid-role');
+  // The existing orchestrator member is untouched (same sessionId still bound).
+  assert.equal(groupManager.isSessionInGroup(g, 'sess-o'), true);
+  const { members } = tools.listGroupSessions(controlDeps(g));
+  const orch = members.find((m) => m.role === 'orchestrator');
+  assert.equal(orch.sessionId, 'sess-o');
+});
+
+test('openTab: non-worker role formats are refused', async () => {
+  const g = await makeGroupAsync();
+  for (const bad of ['boss', 'Orchestrator', 'worker', 'orchestrator', ''] ) {
+    const res = await tools.openTab(controlDeps(g), { role: bad, app: 'claude', cwd: `/srv/project-${g}` });
+    assert.equal(res.error, 'invalid-role', `role ${JSON.stringify(bad)} should be refused`);
+  }
+});
+
+test('readOutput: authorized live member returns raw + stripped text (tail 0 clamps to 1 chunk, not 4000)', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const fakeSession = {
+    cwd: '/srv/project-x',
+    app: 'claude',
+    exited: false,
+    outputBuffer: ['\x1b[31mred\x1b[0m text ', 'more\n'],
+  };
+  const deps = {
+    groupId: g,
+    groupManager,
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+  };
+  // tail: 0 must NOT silently fall back to the 4000 default -- it clamps to
+  // the 1-chunk minimum instead.
+  const out = tools.readOutput(deps, { sessionId: 'sess-a1', tail: 0 });
+  assert.equal(out.error, undefined);
+  assert.equal(out.text, 'more\n');
+  assert.equal(out.raw, 'more\n');
+  // A larger tail includes everything.
+  const full = tools.readOutput(deps, { sessionId: 'sess-a1', tail: 100 });
+  assert.equal(full.text, 'red text more\n');
+});
+
+test('handoff queue is capped: overflow drops the oldest entries', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  for (let i = 0; i < 120; i++) {
+    tools.handoffToOrchestrator(handoffDeps(g, 'workerA', 'sess-a1'), { summary: `s${i}`, status: 'done' });
+  }
+  const ev = await tools.waitForHandoff(controlDeps(g), { timeoutMs: 200 });
+  assert.equal(ev.summary, 's20'); // the 20 oldest were dropped (cap 100)
+});
+
+// The scheduled-prompt auto-resume path creates a session carrying the
+// original groupId/groupRole; the session-create listener must re-bind the
+// role to the new sessionId (a real shell session stands in for an agent --
+// no sandbox or agent CLI needed).
+test('session created with groupId/groupRole is auto-registered to its role', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'dead-old-session');
+
+  const sm = await import('./sessionManager.js');
+  const res = sm.createSession({
+    cwd: '/tmp', cols: 80, rows: 24,
+    shell: true, sandbox: false,
+    groupId: g, groupRole: 'workerA',
+  });
+  assert.ok(res.session, 'shell session should spawn');
+  try {
+    assert.equal(groupManager.isSessionInGroup(g, res.sessionId), true);
+    assert.equal(groupManager.isSessionInGroup(g, 'dead-old-session'), false);
+    const { members } = tools.listGroupSessions(controlDeps(g));
+    assert.equal(members.find((m) => m.role === 'workerA').sessionId, res.sessionId);
+  } finally {
+    sm.destroySession(res.sessionId, { keepSchedule: false });
+  }
+});
+
+test('closeTab: destroying a member removes it from the group', async () => {
+  const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
   groupManager.registerMember(g, 'orchestrator', 'sess-o');
   const res = tools.closeTab(controlDeps(g), { sessionId: 'sess-a1' });
