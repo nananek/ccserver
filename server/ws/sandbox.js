@@ -395,12 +395,18 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // Agent CLI configuration + install dirs (claude + opencode), writable so
   // sessions/auth state survive across sandbox launches and conversations can
   // be resumed. ~/.local/bin is exposed so the user's own tools resolve.
+  // opencode's XDG state dir (~/.local/state/opencode) holds TUI-selected
+  // state (model.json, kv.json, session.json); without it the chosen model
+  // resets to the provider default on every launch.
+  const opencodeState = join(HOME, '.local', 'state', 'opencode');
+  mkdirSync(opencodeState, { recursive: true });
   const appBinds = [
     [join(HOME, '.claude'), 'rw'],
     [join(HOME, '.claude.json'), 'rw'],
     [join(HOME, '.local', 'share', 'claude'), 'rw'],
     [join(HOME, '.config', 'opencode'), 'rw'],
     [join(HOME, '.local', 'share', 'opencode'), 'rw'],
+    [opencodeState, 'rw'],
     [join(HOME, '.local', 'bin'), 'ro'],
   ];
   for (const [src, mode] of appBinds) {

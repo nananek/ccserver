@@ -106,7 +106,7 @@ opencode を選んだ場合の挙動の違い:
 
 ## サンドボックス (bwrap + rootless docker)
 
-「🔒 サンドボックスで起動」(上記「使い方 > 起動」参照) を選ぶと、`bwrap` でファイルシステムを制限した状態で起動します。選択したプロジェクトと最小限の設定 (`~/.claude`, `~/.claude.json` 等) だけが見え、**隣接する他プロジェクトは見えません**。
+「🔒 サンドボックスで起動」(上記「使い方 > 起動」参照) を選ぶと、`bwrap` でファイルシステムを制限した状態で起動します。選択したプロジェクトと最小限の設定 (`~/.claude`, `~/.claude.json`, `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode` 等) だけが見え、**隣接する他プロジェクトは見えません**。
 
 docker も安全に使えるよう、サンドボックス**内部**に rootless dockerd を起動します。`rootlesskit` (subuid マッピング) の内側で `bwrap` を動かす構成のため、`docker run -v ...` でもサンドボックス外へは到達できません (daemon 自身が制限された FS の中にいるため)。
 
