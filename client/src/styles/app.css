@@ -876,6 +876,16 @@ body {
   background: var(--border);
 }
 
+/* Selection-mode toggle lives in the scroll-controls row (right of the
+   scroll buttons); its active state is the mode's persistent visual
+   confirmation (see .terminal-view.selection-mode). */
+.scroll-btn.selection-mode-btn.active {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
 /* Special Keys Toolbar */
 .terminal-special-keys {
   display: flex;

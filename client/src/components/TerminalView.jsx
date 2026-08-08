@@ -259,12 +259,19 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // any single-finger drag starts a selection immediately (no long-press
   // wait) and the terminal is blurred/kept unfocused so the on-screen
   // keyboard doesn't pop up and shift the layout underneath it.
+  //
+  // Blurring alone isn't enough: xterm.js focuses its input textarea on
+  // every mousedown (including the synthetic ones we dispatch for
+  // touch-selection), which would pop the IME right back up. So selection
+  // mode also sets disableStdin -- xterm turns the textarea readonly in
+  // response, and iOS/Android never open an IME for a readonly input.
   const [selectionMode, setSelectionMode] = useState(false);
   const selectionModeRef = useRef(false);
   useEffect(() => {
     selectionModeRef.current = selectionMode;
     const term = xtermRef.current;
     if (!term) return;
+    term.options.disableStdin = selectionMode;
     if (selectionMode) {
       term.blur();
     } else {
@@ -1340,6 +1347,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           >
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6l4 4 4-4"/></svg>
           </button>
+          {isMobile && (
+            <button
+              className={'scroll-btn selection-mode-btn' + (selectionMode ? ' active' : '')}
+              onClick={() => setSelectionMode((v) => !v)}
+              title={selectionMode ? 'テキスト選択モードを終了' : 'テキスト選択モード'}
+            >
+              選択
+            </button>
+          )}
         </div>
       )}
       <div className="terminal-special-keys">
@@ -1355,15 +1371,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             {key.label}
           </button>
         ))}
-        {isMobile && (
-          <button
-            className={'special-key-btn selection-mode-btn' + (selectionMode ? ' active' : '')}
-            onClick={() => setSelectionMode((v) => !v)}
-            title={selectionMode ? 'テキスト選択モードを終了' : 'テキスト選択モード'}
-          >
-            選択
-          </button>
-        )}
         <button
           className={'special-key-btn key-config-btn' + (showKeyConfig ? ' active' : '')}
           onClick={() => setShowKeyConfig((v) => !v)}
