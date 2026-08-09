@@ -73,6 +73,21 @@ export default function App() {
   // group, then add a single group tab for all three (each member attaches
   // over the regular WS attach flow once its TerminalView mounts).
   const handleOpenCombo = useCallback(async (cwd, cfg) => {
+    // A group tab is a single-slot UI per project directory: re-opening a
+    // combo for a directory that already has an open group tab must just
+    // activate that tab -- spawning a second group for the same project is
+    // never intended, and attaching a second tab to the same sessions would
+    // 'detach' the first one (the server replaces the old socket), leaving
+    // the first tab stuck on "Session taken over". Guard on cwd: the server
+    // assigns a fresh groupId per POST, so a groupId-based lookup could never
+    // match an existing tab.
+    const existing = tabs.find((t) => t.type === 'group' && t.cwd === cwd);
+    if (existing) {
+      setActiveTabId(existing.id);
+      setLastDir(cwd);
+      setGroupsVersion((v) => v + 1);
+      return;
+    }
     try {
       const res = await authFetch('/api/groups', {
         method: 'POST',
@@ -84,23 +99,13 @@ export default function App() {
         throw new Error(body.error || `HTTP ${res.status}`);
       }
       const data = await res.json();
-      // A group tab is a single-slot UI: re-opening an already-open group
-      // must just activate its existing tab. Attaching a second tab to the
-      // same sessions would 'detach' the first one (the server replaces the
-      // old socket), leaving the first tab stuck on "Session taken over".
-      const existing = tabs.find((t) => t.type === 'group' && t.groupId === data.groupId);
-      if (existing) {
-        setActiveTabId(existing.id);
-        setLastDir(cwd);
-        setGroupsVersion((v) => v + 1);
-        return;
-      }
       const id = `group-${++tabIdCounter}`;
       const dirName = cwd.split(/[/\\]/).filter(Boolean).pop() || cwd;
       setTabs((prev) => [...prev, {
         id,
         type: 'group',
         label: dirName,
+        cwd,
         groupId: data.groupId,
         members: data.members || [],
       }]);
@@ -140,6 +145,7 @@ export default function App() {
         id,
         type: 'group',
         label: dirName,
+        cwd: data.cwd,
         groupId: data.groupId,
         members: data.members || [],
       }]);
