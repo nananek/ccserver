@@ -28,7 +28,6 @@ export default function GroupTabView({
   const [members, setMembers] = useState(initialMembers || []);
   const [activeRole, setActiveRole] = useState(() => initialMembers?.[0]?.role || null);
   const membersRef = useRef(members);
-  const prevActiveAppRef = useRef(null);
 
   useEffect(() => { membersRef.current = members; }, [members]);
 
@@ -70,17 +69,15 @@ export default function GroupTabView({
   }, [visible, groupId]);
 
   // Report the active member's app upward (App uses it to hide the Usage
-  // button for opencode), with an explicit null when no member is active.
-  // `visible` is a dep on purpose: group tabs stay mounted while hidden, and
-  // only the visible one's report must win -- re-emitting on visibility
-  // change keeps App's single shared state in sync across tab switches.
+  // button for opencode). While this tab is visible it emits on every change
+  // -- no per-instance dedup: App's single shared state must always reflect
+  // the currently visible group tab, and multiple group tabs stay mounted
+  // while hidden (their own last-reported value would otherwise go stale).
   useEffect(() => {
+    if (!visible) return;
     const active = members.find((m) => m.role === activeRole);
     const app = active?.app === 'opencode' ? 'opencode' : active?.app === 'claude' ? 'claude' : null;
-    if (app !== prevActiveAppRef.current) {
-      prevActiveAppRef.current = app;
-      onActiveAppChange?.(app);
-    }
+    onActiveAppChange?.(app);
   }, [members, activeRole, visible, onActiveAppChange]);
 
   const roleLabel = (role) => {

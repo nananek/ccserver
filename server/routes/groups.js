@@ -10,7 +10,7 @@
 // socket (see mcpBroker.js / mcpTools.js).
 
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, statSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
@@ -112,10 +112,13 @@ export async function groupsRoute(fastify, opts) {
     }
 
     // Broker start failures (socket path collision, permission errors, ...)
-    // must surface as a launch error, not a silent "success".
+    // must surface as a launch error, not a silent "success". The freshly
+    // created orchestratorDir (CLAUDE.md/AGENTS.md) is removed so failed
+    // launches don't litter disk.
     try {
       await groupManager.createGroup({ groupId, cwd, orchestratorDir, sandboxOpts });
     } catch (err) {
+      try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ }
       return reply.code(500).send({ error: `Failed to start control broker: ${err.message}` });
     }
     const controlBroker = groupManager.getGroup(groupId).controlBroker;
@@ -123,31 +126,21 @@ export async function groupsRoute(fastify, opts) {
     // Roll back cleanly if any of the three spawns fails.
     const fail = (message) => {
       groupManager.destroyGroup(groupId);
+      try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ }
       return reply.code(400).send({ error: message });
     };
 
-    for (const [role, app] of [['workerA', workerAApp], ['workerB', workerBApp]]) {
-      let channel;
-      try {
-        channel = await groupManager.createMemberHandoffChannel(groupId, role);
-      } catch (err) {
-        return fail(`worker ${role} handoff channel failed: ${err.message}`);
-      }
-      const res = createSession({
-        cwd,
-        cols: 80,
-        rows: 24,
-        sandbox: true,
-        sandboxOpts,
-        app,
-        groupId,
-        groupRole: role,
-        mcpSocketPath: channel ? channel.sockPath : null,
-      });
-      if (res.error || !res.session) {
-        return fail(`worker ${role} failed to launch: ${res.error || 'unknown error'}`);
-      }
-      groupManager.registerMember(groupId, role, res.sessionId);
+    // Workers reuse addMember (the open_tab path) so validation, channel
+    // creation, session spawn and registration can't drift between the
+    // initial trio and later open_tab additions. Two workers in parallel.
+    const workerResults = await Promise.all(
+      [['workerA', workerAApp], ['workerB', workerBApp]].map(async ([role, app]) => ({
+        role,
+        res: await groupManager.addMember(groupId, role, { app, cwd, sandboxOpts }),
+      })),
+    );
+    for (const { role, res } of workerResults) {
+      if (res.error) return fail(`worker ${role} failed to launch: ${res.message || res.error}`);
     }
 
     const orchRes = createSession({

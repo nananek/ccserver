@@ -8,7 +8,7 @@
 // here, by this process, never declared by clients.
 
 import { EventEmitter } from 'node:events';
-import { getSession, destroySession, createSession, writeToSession, setSessionExitListener, setSessionCreateListener } from './sessionManager.js';
+import { getSession, destroySession, createSession, writeToSession, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
 
@@ -120,6 +120,38 @@ export async function createMemberHandoffChannel(groupId, role) {
   return channel;
 }
 
+// Provide the MCP socket a (re)created member session should be launched
+// with -- used by the scheduled-prompt auto-resume path. A dead worker gets a
+// fresh handoff channel; the orchestrator gets its control broker back (it
+// was stopped when the orchestrator exited). Returns null when the group is
+// gone or the broker can't be (re)started -- the caller then launches without
+// MCP, which the member's own MCP client would never connect anyway.
+export async function resolveGroupMcpSocket(groupId, groupRole) {
+  const group = groups.get(groupId);
+  if (!group) return null;
+  if (groupRole === 'orchestrator') {
+    if (group.controlBroker) return group.controlBroker.sockPath;
+    try {
+      group.controlBroker = await startControlBroker({
+        groupId,
+        groupManager: groupManagerApi,
+        sessionManager: sessionApi,
+      });
+      return group.controlBroker.sockPath;
+    } catch {
+      return null;
+    }
+  }
+  const existing = group.handoffChannels.get(groupRole);
+  if (existing) return existing.sockPath;
+  try {
+    const channel = await createMemberHandoffChannel(groupId, groupRole);
+    return channel ? channel.sockPath : null;
+  } catch {
+    return null;
+  }
+}
+
 // open_tab: add a new worker session to the group. cwd is restricted to
 // allowedCwds (initialized to the shared project dir). Reuses the same
 // channel-then-session flow as the initial trio. Returns { sessionId, app }
@@ -148,7 +180,10 @@ export async function addMember(groupId, role, { app, cwd, sandboxOpts = null })
     group.handoffChannels.delete(role);
   }
 
-  const channel = await createMemberHandoffChannel(groupId, role);
+  const channel = await createMemberHandoffChannel(groupId, role).catch(() => null);
+  if (!channel) {
+    return { error: 'channel-failed', message: 'failed to create handoff channel' };
+  }
   const res = createSession({
     cwd,
     cols: 80,
@@ -160,13 +195,11 @@ export async function addMember(groupId, role, { app, cwd, sandboxOpts = null })
     app,
     groupId,
     groupRole: role,
-    mcpSocketPath: channel ? channel.sockPath : null,
+    mcpSocketPath: channel.sockPath,
   });
   if (res.error || !res.session) {
-    if (channel) {
-      stopBroker(channel);
-      group.handoffChannels.delete(role);
-    }
+    stopBroker(channel);
+    group.handoffChannels.delete(role);
     return { error: 'spawn-failed', message: res.error || 'session creation failed' };
   }
   registerMember(groupId, role, res.sessionId);
@@ -270,12 +303,21 @@ function onSessionExit(session) {
   if (session.groupRole === 'orchestrator') {
     // Orchestrator died: stop its control broker. Workers keep running.
     onOrchestratorExit(session.groupId);
-    return;
+  } else {
+    // Worker died: its handoff channel is useless (its MCP client is gone) --
+    // stop it so no listener leaks, but keep the member registered so the
+    // orchestrator can still inspect its status/output (exited: true).
+    cleanupMemberChannels(group, session.id);
   }
-  // Worker died: its handoff channel is useless (its MCP client is gone) --
-  // stop it so no listener leaks, but keep the member registered so the
-  // orchestrator can still inspect its status/output (exited: true).
-  cleanupMemberChannels(group, session.id);
+  // A group whose every member session is gone is dead weight: it was not
+  // torn down via DELETE /api/groups/:id (browser crash, idle timeouts, all
+  // ptys exited on their own) and must not linger in the registry -- the
+  // brokers are already stopped, so this just drops the Map entry.
+  const liveCount = [...group.members.values()].some((sid) => {
+    const s = getSession(sid);
+    return s && !s.exited;
+  });
+  if (!liveCount) destroyGroup(session.groupId);
 }
 
 // A session was created with a groupId/groupRole (e.g. a scheduled prompt
@@ -317,3 +359,4 @@ const sessionApi = {
 
 setSessionExitListener(onSessionExit);
 setSessionCreateListener(onSessionCreate);
+setMcpSocketResolver(resolveGroupMcpSocket);

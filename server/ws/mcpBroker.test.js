@@ -168,3 +168,32 @@ test('control socket: wait_for_handoff times out quietly with timedOut:true', as
   assert.deepEqual(out, { timedOut: true });
   c.close();
 });
+
+// Regression: the startup wait used a once('error') rejecter that stayed
+// attached after a successful listen; the first post-startup 'error' removed
+// it (once), leaving the net.Server with ZERO 'error' listeners -- and an
+// EventEmitter 'error' with no listeners throws, crashing the whole process
+// on the SECOND error. A permanent handler must remain for the server's
+// lifetime.
+test('post-startup errors on the broker server never crash the process (permanent error handler)', async () => {
+  const c = mcpClient(control.sockPath);
+  await c.connected;
+  c.close();
+
+  const server = control.server;
+  // Two consecutive errors: without the permanent handler the second one
+  // throws synchronously.
+  assert.doesNotThrow(() => {
+    server.emit('error', new Error('first post-startup error'));
+  });
+  assert.doesNotThrow(() => {
+    server.emit('error', new Error('second post-startup error'));
+  });
+
+  // The server still serves connections.
+  const c2 = mcpClient(control.sockPath);
+  await c2.connected;
+  const { tools } = await c2.call('tools/list');
+  assert.ok(tools.length > 0);
+  c2.close();
+});

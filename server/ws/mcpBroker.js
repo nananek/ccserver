@@ -64,11 +64,24 @@ async function listenMcp({ groupId, tag, buildServer }) {
     mcp.connect(transport);
     socket.on('error', () => {});
   });
+  // Permanent error handler: an EventEmitter 'error' with zero listeners
+  // throws and crashes the whole process, so this must NEVER be removed once
+  // the server exists. Startup failure detection uses a separate once-listener
+  // that is explicitly removed on success (see below).
+  server.on('error', (err) => {
+    console.error(`[mcp-broker] ${tag} socket error: ${err.message}`);
+  });
   await new Promise((resolve, reject) => {
-    server.once('error', (err) => {
+    const onStartupError = (err) => {
       reject(new Error(`[mcp-broker] ${tag} listen failed: ${err.message}`));
+    };
+    server.once('error', onStartupError);
+    server.listen(sockPath, () => {
+      // Listening succeeded -- detach the startup-only rejecter so it can't
+      // linger and fire on a later, unrelated error.
+      server.off('error', onStartupError);
+      resolve();
     });
-    server.listen(sockPath, () => resolve());
   });
   try {
     await waitForSocketFile(sockPath, SOCKET_FILE_WAIT_MS);
