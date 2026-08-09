@@ -45,6 +45,7 @@ const DEFAULT_KEY_IDS = [
 
 const STORAGE_KEY = 'ccserver-special-keys';
 const CUSTOM_KEYS_STORAGE = 'ccserver-custom-keys';
+const SKIP_NOSANDBOX_AUTOY_WARNING_KEY = 'ccserver-skip-nosandbox-autoy-warning';
 
 function loadCustomKeys() {
   try {
@@ -236,6 +237,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
   const [showAutoYesLog, setShowAutoYesLog] = useState(false);
+  // Non-sandbox Auto-Y confirmation: enabling Auto-Y outside a sandbox means
+  // permission prompts are auto-approved straight on the host (no bwrap
+  // isolation), so a first-time "are you sure" dialog with a dismiss flag
+  // mirrors App.jsx's skip-close-confirm pattern.
+  const [showSandboxWarning, setShowSandboxWarning] = useState(false);
+  const [dontAskNoSandboxWarning, setDontAskNoSandboxWarning] = useState(false);
+  const [skipNoSandboxWarning, setSkipNoSandboxWarning] = useState(
+    () => localStorage.getItem(SKIP_NOSANDBOX_AUTOY_WARNING_KEY) === '1'
+  );
   const [schedule, setSchedule] = useState(null); // { at, text } | null
   const [showScheduler, setShowScheduler] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
@@ -1155,6 +1165,20 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     }
   }, []);
 
+  // Confirm the non-sandbox Auto-Y warning: persist the dismiss flag if
+  // checked, then send the enable exactly as the toggle would have.
+  const confirmNoSandboxAutoYes = useCallback(() => {
+    if (dontAskNoSandboxWarning) {
+      localStorage.setItem(SKIP_NOSANDBOX_AUTOY_WARNING_KEY, '1');
+      setSkipNoSandboxWarning(true);
+    }
+    setShowSandboxWarning(false);
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'set_auto_yes', enabled: true }));
+    }
+  }, [dontAskNoSandboxWarning]);
+
   // Tick a live clock while the scheduler panel is open so the displayed
   // server time stays current.
   useEffect(() => {
@@ -1199,8 +1223,16 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 className={`btn auto-yes-toggle${autoYes ? ' active' : ''}`}
                 onClick={() => {
                   const ws = wsRef.current;
+                  const next = !autoYes;
+                  // Outside a sandbox there is no bwrap isolation to catch
+                  // auto-approved destructive operations — require an explicit
+                  // (dismissable) confirmation before enabling.
+                  if (next && !sandbox && !skipNoSandboxWarning) {
+                    setShowSandboxWarning(true);
+                    return;
+                  }
                   if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'set_auto_yes', enabled: !autoYes }));
+                    ws.send(JSON.stringify({ type: 'set_auto_yes', enabled: next }));
                   }
                 }}
                 title={autoYes ? 'Auto-yes enabled (click to disable)' : 'Auto-yes disabled (click to enable)'}
@@ -1590,6 +1622,30 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           Send
         </button>
       </div>
+      {showSandboxWarning && (
+        <div className="resume-overlay" onClick={() => setShowSandboxWarning(false)}>
+          <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>サンドボックス外でAuto-Yを有効にしますか?</h3>
+            <p>このセッションはサンドボックスで隔離されていません。Auto-Yは権限確認プロンプトをすべて自動承認するため、ファイル削除やコマンド実行などの操作が確認なしにホスト環境へ直接反映されます。</p>
+            <label className="close-confirm-checkbox">
+              <input
+                type="checkbox"
+                checked={dontAskNoSandboxWarning}
+                onChange={(e) => setDontAskNoSandboxWarning(e.target.checked)}
+              />
+              次回以降確認しない
+            </label>
+            <div className="resume-actions">
+              <button className="btn btn-secondary" onClick={() => setShowSandboxWarning(false)}>
+                キャンセル
+              </button>
+              <button className="btn btn-primary" onClick={confirmNoSandboxAutoYes}>
+                有効にする
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
