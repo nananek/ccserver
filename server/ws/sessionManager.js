@@ -14,7 +14,7 @@ import {
 } from './appLaunch.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SAVED_SESSIONS_PATH = join(__dirname, '..', '..', '.saved-sessions.json');
+const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
 const SCHEDULES_PATH = join(__dirname, '..', '..', '.scheduled-prompts.json');
 
 const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours for active sessions

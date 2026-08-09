@@ -68,6 +68,39 @@ test('savedSessionPublic preserves group membership (restart filter keeps workin
   assert.equal(plain.claudeSessionId, 'conv-123');
 });
 
+// writeToSession is the shared input path for the WS 'input' handler and the
+// MCP send_input tool: it must write into the live pty, reset the idle
+// watchdog, and (with submit) send Enter after the text. Real shell session.
+test('writeToSession types into a live session; submit appends Enter', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const id = res.sessionId;
+  assert.ok(res.session, 'shell session should spawn');
+  try {
+    await sleep(400); // let the shell reach its prompt
+
+    assert.equal(sessionManager.writeToSession(id, 'echo WRITE_TO_SESSION_MARKER', { submit: true }), true);
+    await sleep(1200); // echo + shell runs the command
+
+    const buf = sessionManager.getSession(id).outputBuffer.join('');
+    // Two occurrences: the typed command (echoed back) AND the command's own
+    // output. Escape noise between them (bracketed-paste toggling) varies by
+    // shell, so count rather than match a strict sequence.
+    const occurrences = buf.match(/WRITE_TO_SESSION_MARKER/g) || [];
+    assert.ok(occurrences.length >= 2, `the typed text and the echo output must both appear (got ${occurrences.length}): ${buf}`);
+  } finally {
+    sessionManager.destroySession(id, { keepSchedule: false });
+  }
+});
+
+test('writeToSession on an exited session returns false', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const id = res.sessionId;
+  await sleep(300);
+  sessionManager.destroySession(id, { keepSchedule: false });
+  assert.equal(sessionManager.writeToSession(id, 'ls'), false);
+  assert.equal(sessionManager.writeToSession('no-such-session', 'ls'), false);
+});
+
 test('resolveGroupMcpSocket: creates a worker handoff channel, reuses/recreates the control broker', async () => {
   const gid = randomUUID();
   await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });

@@ -277,6 +277,16 @@ body {
   position: relative;
 }
 
+.group-gone-banner {
+  margin: 8px 12px;
+  padding: 8px 12px;
+  background: var(--error-bg, rgba(255, 80, 80, 0.12));
+  color: var(--error);
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
 .theme-picker {
   position: relative;
   flex-shrink: 0;

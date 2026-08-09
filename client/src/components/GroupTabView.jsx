@@ -24,11 +24,16 @@ export default function GroupTabView({
   notifyPermission,
   onToggleNotify,
   onActiveAppChange,
+  tabId,
+  onAttention,
+  onFocusTab,
 }) {
   const [members, setMembers] = useState(initialMembers || []);
   const [activeRole, setActiveRole] = useState(() => initialMembers?.[0]?.role || null);
   const [restartingOrch, setRestartingOrch] = useState(false);
+  const [groupGone, setGroupGone] = useState(false);
   const membersRef = useRef(members);
+  const wasVisibleRef = useRef(visible);
 
   useEffect(() => { membersRef.current = members; }, [members]);
 
@@ -45,7 +50,15 @@ export default function GroupTabView({
     const poll = async () => {
       try {
         const res = await authFetch(`/api/groups/${groupId}`);
+        if (res.status === 404) {
+          // The group is gone server-side (torn down from another client /
+          // the server restarted and the group was destroyed): nothing left
+          // to poll. Show a banner instead of silently staying stale.
+          setGroupGone(true);
+          return;
+        }
         if (!res.ok) return;
+        setGroupGone(false);
         const data = await res.json();
         if (cancelled) return;
         const next = data.members || [];
@@ -74,8 +87,17 @@ export default function GroupTabView({
   // -- no per-instance dedup: App's single shared state must always reflect
   // the currently visible group tab, and multiple group tabs stay mounted
   // while hidden (their own last-reported value would otherwise go stale).
+  // On becoming hidden it emits null so switching tabs never leaves a stale
+  // group's app in App's state.
   useEffect(() => {
-    if (!visible) return;
+    if (!visible) {
+      if (wasVisibleRef.current) {
+        wasVisibleRef.current = false;
+        onActiveAppChange?.(null);
+      }
+      return;
+    }
+    wasVisibleRef.current = true;
     const active = members.find((m) => m.role === activeRole);
     const app = active?.app === 'opencode' ? 'opencode' : active?.app === 'claude' ? 'claude' : null;
     onActiveAppChange?.(app);
@@ -141,6 +163,11 @@ export default function GroupTabView({
           </button>
         )}
       </div>
+      {groupGone && (
+        <div className="group-gone-banner">
+          このグループはサーバー上で削除されています。このタブを閉じてください。
+        </div>
+      )}
       <div className="group-subtab-body">
         {members.map((m) => (
           <div
@@ -171,6 +198,14 @@ export default function GroupTabView({
                 notifyEnabled={notifyEnabled}
                 notifyPermission={notifyPermission}
                 onToggleNotify={onToggleNotify}
+                tabId={tabId}
+                onAttention={onAttention}
+                onFocusTab={() => {
+                  // Bring up this group tab AND the specific member whose
+                  // notification was clicked.
+                  setActiveRole(m.role);
+                  onFocusTab?.();
+                }}
               />
             </Suspense>
           </div>

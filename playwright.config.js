@@ -20,7 +20,11 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: `npm run build --workspace=client && NODE_ENV=production PORT=${PORT} node server/index.js`,
+    // CCSERVER_GROUPS_PATH/CCSERVER_SAVED_SESSIONS_PATH keep the e2e server's
+    // state out of the repo root: a killed test run would otherwise leave a
+    // .saved-groups.json behind that the next run's restoreGroups() resurrects
+    // as ghost groups.
+    command: `npm run build --workspace=client && NODE_ENV=production PORT=${PORT} CCSERVER_GROUPS_PATH=$(mktemp -u /tmp/ccserver-e2e-groups.XXXXXX) CCSERVER_SAVED_SESSIONS_PATH=$(mktemp -u /tmp/ccserver-e2e-sessions.XXXXXX) node server/index.js`,
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

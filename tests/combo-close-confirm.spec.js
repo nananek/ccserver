@@ -2,10 +2,25 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, expect } from '@playwright/test';
+import { resolveApp, SANDBOX_PATH } from '../server/ws/sandbox.js';
 
 // Combo launch is unconditionally sandboxed (the server rejects it without
-// bwrap), so the whole suite only makes sense where bwrap exists.
+// bwrap), so the whole suite only makes sense where bwrap exists. The agent
+// CLIs are the second prerequisite (POST /api/groups spawns claude+opencode
+// sessions and 400s when a binary can't be resolved) -- skip when either is
+// absent (plain CI runners have neither).
 const sandboxAvailable = existsSync('/usr/bin/bwrap');
+
+function appResolves(app) {
+  try {
+    const r = resolveApp(app).command;
+    if (r.startsWith('/')) return existsSync(r);
+    return SANDBOX_PATH.split(':').some((dir) => dir && existsSync(join(dir, r)));
+  } catch {
+    return false;
+  }
+}
+const agentsAvailable = appResolves('claude') && appResolves('opencode');
 
 const newCwd = () => mkdtempSync(join(tmpdir(), 'ccserver-combo-e2e-'));
 
@@ -36,6 +51,7 @@ async function destroyGroup(page, groupId) {
 }
 
 test.skip(!sandboxAvailable, 'bwrap not available — sandbox cannot run');
+test.skip(!agentsAvailable, 'claude/opencode not installed — group sessions cannot spawn');
 
 test('combo group tab lifecycle: create via API, attach, close-confirm mentions 3 sessions, DELETE tears down', async ({ page }) => {
   const cwd = newCwd();

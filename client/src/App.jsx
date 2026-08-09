@@ -25,6 +25,9 @@ export default function App() {
   const [closeConfirm, setCloseConfirm] = useState(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
   const [groupActiveApp, setGroupActiveApp] = useState(null);
+  // Bumped whenever a group is created / destroyed / re-opened, so the
+  // directory browser's groups list refetches (it is otherwise fetch-on-mount).
+  const [groupsVersion, setGroupsVersion] = useState(0);
   const [skipCloseConfirm, setSkipCloseConfirm] = useState(
     () => localStorage.getItem('ccserver-skip-close-confirm') === '1'
   );
@@ -81,6 +84,17 @@ export default function App() {
         throw new Error(body.error || `HTTP ${res.status}`);
       }
       const data = await res.json();
+      // A group tab is a single-slot UI: re-opening an already-open group
+      // must just activate its existing tab. Attaching a second tab to the
+      // same sessions would 'detach' the first one (the server replaces the
+      // old socket), leaving the first tab stuck on "Session taken over".
+      const existing = tabs.find((t) => t.type === 'group' && t.groupId === data.groupId);
+      if (existing) {
+        setActiveTabId(existing.id);
+        setLastDir(cwd);
+        setGroupsVersion((v) => v + 1);
+        return;
+      }
       const id = `group-${++tabIdCounter}`;
       const dirName = cwd.split(/[/\\]/).filter(Boolean).pop() || cwd;
       setTabs((prev) => [...prev, {
@@ -92,12 +106,13 @@ export default function App() {
       }]);
       setActiveTabId(id);
       setLastDir(cwd);
+      setGroupsVersion((v) => v + 1);
     } catch (err) {
       // Surface launch failures in the directory browser (which owns the
       // combo modal); a failed group launch should not silently no-op.
       window.alert(`コンボ起動に失敗しました: ${err.message}`);
     }
-  }, []);
+  }, [tabs]);
 
   // Re-open a group (from the browser's groups list): fetch its current
   // membership, then add a group tab. Live members re-attach over the normal
@@ -111,6 +126,14 @@ export default function App() {
         throw new Error(body.error || `HTTP ${res.status}`);
       }
       const data = await res.json();
+      // Same single-slot rule as handleOpenCombo: activating an existing tab
+      // instead of attaching a second one to the same sessions.
+      const existing = tabs.find((t) => t.type === 'group' && t.groupId === data.groupId);
+      if (existing) {
+        setActiveTabId(existing.id);
+        setGroupsVersion((v) => v + 1);
+        return;
+      }
       const id = `group-${++tabIdCounter}`;
       const dirName = (data.cwd || '').split(/[/\\]/).filter(Boolean).pop() || data.groupId;
       setTabs((prev) => [...prev, {
@@ -121,10 +144,11 @@ export default function App() {
         members: data.members || [],
       }]);
       setActiveTabId(id);
+      setGroupsVersion((v) => v + 1);
     } catch (err) {
       window.alert(`グループを開けませんでした: ${err.message}`);
     }
-  }, []);
+  }, [tabs]);
 
   const handleSessionClick = useCallback((session) => {
     // Check if a tab is already open for this session
@@ -186,21 +210,27 @@ export default function App() {
   const destroyGroupTab = useCallback(async (tab) => {
     try {
       await authFetch(`/api/groups/${tab.groupId}`, { method: 'DELETE' });
+      setGroupsVersion((v) => v + 1);
     } catch {
       // group teardown already happened server-side or is unreachable;
       // closing the tab is still the right move
     }
   }, []);
 
-  const handleCloseTab = useCallback((tabId) => {
+  const handleCloseTab = useCallback(async (tabId) => {
     // タブを閉じてもセッション自体はサーバー側で動き続けるが、
     // 再アタッチの手間があるため、稼働中のタブは閉じる前に確認する。
     // プロセスが終了済みのタブや「次回以降確認しない」設定時は確認なしで閉じる。
-    // グループタブは3セッションを破棄するため必ず確認する。
+    // グループタブは3セッションを破棄するため、「次回以降確認しない」が
+    // 設定されていない限り必ず確認する。
     const tab = tabs.find((t) => t.id === tabId);
     if (tab?.type === 'group') {
       if (skipCloseConfirm) {
-        destroyGroupTab(tab);
+        // サーバ側のグループ破棄は完了させてからタブを閉じる: 先にタブだけ
+        // 閉じて DELETE が後追いで走ると、その間に Groups リストから再
+        // オープンしたときにサーバ側 teardown と競合する (attach→404→
+        // 再init→MCPソケット消失で復旧不能なエラー画面)。
+        await destroyGroupTab(tab);
         doCloseTab(tabId);
       } else {
         setDontAskAgain(false);
@@ -292,7 +322,7 @@ export default function App() {
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} initialPath={lastDir} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} initialPath={lastDir} groupsVersion={groupsVersion} />
         </div>
         <div style={{ display: activeTabId === 'monitor' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <SystemMonitor visible={activeTabId === 'monitor'} />
@@ -355,6 +385,13 @@ export default function App() {
                 notifyPermission={notifyPermission}
                 onToggleNotify={toggleNotify}
                 onActiveAppChange={setGroupActiveApp}
+                tabId={tab.id}
+                onAttention={() => {
+                  if (activeTabId !== tab.id) {
+                    setAttentionTabs((prev) => new Set(prev).add(tab.id));
+                  }
+                }}
+                onFocusTab={() => handleTabClick(tab.id)}
               />
             </div>
           ))}

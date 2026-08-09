@@ -34,7 +34,7 @@ function formatSize(bytes) {
   return `${i === 0 ? val : val.toFixed(1)} ${units[i]}`;
 }
 
-export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onOpenGroup, onSessionClick, initialPath }) {
+export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onOpenGroup, onSessionClick, initialPath, groupsVersion }) {
   const [currentPath, setCurrentPath] = useState(initialPath || localStorage.getItem(LAST_DIR_KEY) || '/');
   const [homeDir, setHomeDir] = useState(null);
   const [dirs, setDirs] = useState([]);
@@ -192,7 +192,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
 
   useEffect(() => {
     fetchSessions();
-  }, [fetchSessions]);
+  }, [fetchSessions, groupsVersion]);
 
   const handleSessionClick = useCallback((session) => {
     onSessionClick(session);

@@ -112,6 +112,41 @@ test('control socket: tools/list exposes all control tools', async () => {
   c.close();
 });
 
+// The whole isolation boundary rests on identity being closure-bound: no
+// control tool may ever take a groupId from the wire. Structural check over
+// EVERY tool's schema, so a future tool (or a schema edit to an existing one)
+// that adds a groupId input fails this test instead of silently opening a
+// cross-group hole.
+test('no control tool schema accepts a groupId from the wire', async () => {
+  const c = mcpClient(control.sockPath);
+  await c.connected;
+  const { tools } = await c.call('tools/list');
+  for (const t of tools) {
+    const props = t.inputSchema?.properties || {};
+    assert.ok(
+      !('groupId' in props),
+      `${t.name} must never take groupId from the wire (identity is closure-bound)`,
+    );
+  }
+  c.close();
+});
+
+// The handoff tool's only inputs are summary/status/nextRole -- a worker
+// must not be able to declare its own identity.
+test('handoff tool schema exposes only summary/status/nextRole (no identity inputs)', async () => {
+  const c = mcpClient(handoff.sockPath);
+  await c.connected;
+  const { tools } = await c.call('tools/list');
+  const props = tools[0].inputSchema.properties;
+  for (const forbidden of ['sessionId', 'groupId', 'role']) {
+    assert.ok(
+      !(forbidden in props),
+      `handoff_to_orchestrator must never accept ${forbidden} from the wire`,
+    );
+  }
+  c.close();
+});
+
 test('control socket: tools/call list_group_sessions over the wire', async () => {
   const c = mcpClient(control.sockPath);
   await c.connected;
@@ -146,6 +181,31 @@ test('handoff socket: worker handoff reaches the control socket wait_for_handoff
   assert.equal(ev.fromRole, 'workerA');
   assert.equal(ev.summary, 'worker A finished the plan');
   assert.equal(ev.status, 'done');
+  worker.close();
+  orch.close();
+});
+
+// The handoff's fromSessionId/fromRole must come from the socket's closure
+// even if a hostile worker tries to declare a different identity on the wire.
+test('handoff socket: wire-supplied identity fields are ignored (closure wins)', async () => {
+  const worker = mcpClient(handoff.sockPath);
+  const orch = mcpClient(control.sockPath);
+  await Promise.all([worker.connected, orch.connected]);
+
+  const waitPromise = callTool(orch, 'wait_for_handoff', { timeoutMs: 2000 });
+  const res = await callTool(worker, 'handoff_to_orchestrator', {
+    summary: 'tampered attempt',
+    status: 'done',
+    sessionId: 'evil-session',
+    groupId: 'evil-group',
+    role: 'orchestrator',
+  });
+  assert.deepEqual(res, { ok: true });
+
+  const ev = await waitPromise;
+  assert.equal(ev.fromSessionId, 'wire-sess-a', 'identity must come from the socket closure, not the wire');
+  assert.equal(ev.fromRole, 'workerA');
+  assert.equal(ev.groupId, undefined, 'no groupId field may exist at all');
   worker.close();
   orch.close();
 });

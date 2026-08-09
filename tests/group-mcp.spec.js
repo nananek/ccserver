@@ -2,17 +2,33 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, expect } from '@playwright/test';
+import { resolveApp, SANDBOX_PATH } from '../server/ws/sandbox.js';
 
 // Server-side combo group API contract: POST /api/groups spawns 3 sandboxed
 // member sessions (2 workers + 1 orchestrator in its isolated dir), GET
 // resolves them, DELETE tears all of them down. The sandbox (bwrap) is a hard
 // prerequisite of the whole feature, so skip where it's missing -- same
-// guard as sandbox-resume.spec.js.
+// guard as sandbox-resume.spec.js. The agent CLIs are a second hard
+// prerequisite: POST /api/groups launches claude+opencode sessions and
+// returns 400 when the app binary can't be resolved, so skip when either is
+// absent (plain CI runners have neither).
 const sandboxAvailable = existsSync('/usr/bin/bwrap');
+
+function appResolves(app) {
+  try {
+    const r = resolveApp(app).command;
+    if (r.startsWith('/')) return existsSync(r);
+    return SANDBOX_PATH.split(':').some((dir) => dir && existsSync(join(dir, r)));
+  } catch {
+    return false;
+  }
+}
+const agentsAvailable = appResolves('claude') && appResolves('opencode');
 
 const newCwd = () => mkdtempSync(join(tmpdir(), 'ccserver-group-mcp-'));
 
 test.skip(!sandboxAvailable, 'bwrap not available — sandbox cannot run');
+test.skip(!agentsAvailable, 'claude/opencode not installed — group sessions cannot spawn');
 
 test('POST /api/groups creates 3 members; GET lists them; DELETE destroys them', async ({ page }) => {
   const cwd = newCwd();
@@ -73,13 +89,13 @@ test('POST /api/groups creates 3 members; GET lists them; DELETE destroys them',
     expect(delStatus).toBe(200);
     groupId = null;
 
-    await page.waitForTimeout(1500);
-    const leftover = await page.evaluate(async (gid) => {
+    // destroyGroup is synchronous on the server; poll instead of a fixed
+    // wait so the assertion is deterministic.
+    await expect.poll(async () => page.evaluate(async (gid) => {
       const res = await fetch('/api/sessions');
       const data = await res.json();
       return data.sessions.filter((s) => s.groupId === gid).length;
-    }, group.groupId);
-    expect(leftover).toBe(0);
+    }, group.groupId)).toBe(0);
 
     const gone = await page.evaluate(async (gid) => {
       const res = await fetch(`/api/groups/${gid}`);

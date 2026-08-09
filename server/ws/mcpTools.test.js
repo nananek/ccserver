@@ -168,6 +168,40 @@ test('handoff: invalid status is rejected before reaching the queue', async () =
   assert.equal(res.error, 'bad-request');
 });
 
+// The unit-level half of the "identity is closure-bound" invariant: even a
+// caller that passes identity-looking fields in the tool arguments gets the
+// closure's values (mcpTools only reads summary/status/nextRole).
+test('handoff: identity fields in the arguments are ignored (closure wins)', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+
+  const res = tools.handoffToOrchestrator(handoffDeps(g, 'workerA', 'sess-a1'), {
+    summary: 'tampered',
+    status: 'done',
+    sessionId: 'evil-session',
+    groupId: 'evil-group',
+    role: 'orchestrator',
+  });
+  assert.equal(res.ok, true);
+
+  const ev = await tools.waitForHandoff(controlDeps(g), { timeoutMs: 500 });
+  assert.equal(ev.fromSessionId, 'sess-a1', 'identity must come from the deps closure, not the arguments');
+  assert.equal(ev.fromRole, 'workerA');
+  assert.equal(ev.groupId, undefined);
+});
+
+// Every control tool must be callable without any identity input -- the
+// schemas forbid it at the wire layer (mcpBroker.test.js walks the schemas);
+// this is the implementation half: no tool may even READ a wire-supplied
+// identity, which the deps-shape (groupId only in deps) enforces at compile
+// time. Sanity-check the read path against a session id that is NOT a member.
+test('sendInput: authorized member whose session is gone yields not-found (no crash)', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const r = tools.sendInput(controlDeps(g), { sessionId: 'sess-a1', text: 'ls' });
+  assert.equal(r.error, 'not-found');
+});
+
 test('waitForHandoff: empty queue times out with a tiny timedOut result (not an error)', async () => {
   const g = await makeGroupAsync();
   const started = Date.now();

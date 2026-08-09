@@ -20,17 +20,27 @@ import { randomUUID } from 'node:crypto';
 
 let runtimeDir;
 let groupManager;
+let groupsToDestroy = [];
 
 before(async () => {
   runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-gm-test-'));
   process.env.XDG_RUNTIME_DIR = runtimeDir;
   process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
+  process.env.CCSERVER_SAVED_SESSIONS_PATH = join(runtimeDir, 'saved-sessions.json');
   groupManager = await import('./groupManager.js');
 });
 
 after(() => {
+  for (const id of groupsToDestroy) groupManager.destroyGroup(id);
   try { rmSync(runtimeDir, { recursive: true, force: true }); } catch { /* ignore */ }
 });
+
+async function makeGroup(cwd = '/srv/proj') {
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd, orchestratorDir: join(runtimeDir, gid) });
+  groupsToDestroy.push(gid);
+  return gid;
+}
 
 test('persistGroups writes the member registry; destroyGroup removes the entry', async () => {
   const gid = randomUUID();
@@ -156,4 +166,136 @@ test('listGroups reports membership and live-ness', async () => {
 
   groupManager.destroyGroup(gid);
   assert.equal(groupManager.listGroups().some((g) => g.groupId === gid), false);
+});
+
+test('restoreGroups matches member resume info from .saved-sessions.json (restored members)', async () => {
+  const gid = randomUUID();
+  const orchDir = join(runtimeDir, `restore-${gid}`);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([{
+    id: gid,
+    createdAt: 1,
+    cwd: '/srv/proj',
+    allowedCwds: ['/srv/proj'],
+    orchestratorDir: orchDir,
+    orchestratorApp: 'claude',
+    instructions: '# Orch',
+    sandboxOpts: { gpg: true },
+    members: { workerA: 'dead-sess-a', orchestrator: 'dead-sess-o' },
+  }]));
+  // A graceful shutdown saved these with their group membership; the
+  // 'another-group' entry must NOT leak into this group's members.
+  writeFileSync(process.env.CCSERVER_SAVED_SESSIONS_PATH, JSON.stringify([
+    { cwd: '/srv/proj', claudeSessionId: 'conv-1', sandbox: true, sandboxOpts: { gpg: true }, app: 'claude', groupId: gid, groupRole: 'workerA' },
+    { cwd: orchDir, claudeSessionId: null, sandbox: true, sandboxOpts: null, app: 'opencode', groupId: gid, groupRole: 'orchestrator' },
+    { cwd: '/other', claudeSessionId: 'conv-x', sandbox: true, sandboxOpts: null, app: 'claude', groupId: 'another-group', groupRole: 'workerA' },
+  ]));
+  groupsToDestroy.push(gid);
+
+  const info = groupManager.restoreGroups();
+  assert.equal(info.restored, 1);
+
+  const members = groupManager.listGroupMembers(gid);
+  const workerA = members.find((m) => m.role === 'workerA');
+  assert.equal(workerA.restored, true, 'pty gone but resume info matched from the saved session');
+  assert.equal(workerA.claudeSessionId, 'conv-1');
+  assert.equal(workerA.app, 'claude');
+  assert.equal(workerA.sandbox, true);
+  assert.equal(workerA.sandboxOpts.gpg, true);
+  const orch = members.find((m) => m.role === 'orchestrator');
+  assert.equal(orch.restored, true);
+  assert.equal(orch.app, 'opencode');
+  assert.equal(workerA.cwd, '/srv/proj');
+});
+
+// --- addMember (open_tab) spawn/teardown paths, exercised with a fake
+// session facade (no real ptys): the atomic-replacement invariant -- the old
+// member is only destroyed AFTER the new channel + session exist, and a
+// failure anywhere leaves the old member fully usable.
+
+test('addMember spawns a session and registers it with a handoff channel (open_tab path)', async () => {
+  const gid = await makeGroup();
+  let seenOpts = null;
+  const fake = {
+    getSession: () => null,
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-new', session: {} }; },
+    destroySession: () => { throw new Error('nothing to destroy on a fresh role'); },
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    const res = await groupManager.addMember(gid, 'workerA', { app: 'claude', cwd: '/srv/proj' });
+    assert.equal(res.sessionId, 'sess-new');
+    assert.equal(seenOpts.groupRole, 'workerA');
+    assert.equal(seenOpts.sandbox, true);
+    assert.equal(seenOpts.cwd, '/srv/proj');
+    assert.ok(seenOpts.mcpSocketPath, 'session launched with the channel socket bound');
+    assert.equal(groupManager.isSessionInGroup(gid, 'sess-new'), true);
+    const ch = groupManager.getGroup(gid).handoffChannels.get('workerA');
+    assert.ok(ch, 'handoff channel created');
+    assert.equal(ch.sessionId, 'sess-new', 'channel bound to the new member');
+    assert.ok(existsSync(ch.sockPath), 'channel socket file exists on disk');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('addMember replacing an existing role is atomic: old session destroyed only after the new one is in place', async () => {
+  const gid = await makeGroup();
+  groupManager.registerMember(gid, 'workerA', 'sess-old');
+  await groupManager.createMemberHandoffChannel(gid, 'workerA'); // as a launched member would have
+  const oldChannel = groupManager.getGroup(gid).handoffChannels.get('workerA');
+  assert.equal(oldChannel.sessionId, 'sess-old');
+
+  const destroyed = [];
+  const fake = {
+    getSession: () => null,
+    createSession: (opts) => {
+      assert.equal(opts.groupRole, 'workerA');
+      return { sessionId: 'sess-new', session: {} };
+    },
+    destroySession: (sid) => destroyed.push(sid),
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    const res = await groupManager.addMember(gid, 'workerA', { app: 'claude', cwd: '/srv/proj' });
+    assert.equal(res.sessionId, 'sess-new');
+    assert.equal(groupManager.isSessionInGroup(gid, 'sess-old'), false, 'old member unregistered');
+    assert.equal(groupManager.isSessionInGroup(gid, 'sess-new'), true);
+    assert.deepEqual(destroyed, ['sess-old'], 'old session destroyed exactly once, after the swap');
+    const ch = groupManager.getGroup(gid).handoffChannels.get('workerA');
+    assert.ok(ch && ch !== oldChannel, 'channel replaced');
+    assert.equal(ch.sessionId, 'sess-new');
+    assert.ok(existsSync(ch.sockPath), 'replacement channel socket file exists');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('addMember spawn failure leaves the previous member and its channel intact', async () => {
+  const gid = await makeGroup();
+  groupManager.registerMember(gid, 'workerA', 'sess-old');
+  await groupManager.createMemberHandoffChannel(gid, 'workerA');
+
+  const fake = {
+    getSession: () => null,
+    createSession: () => ({ error: 'spawn failed' }),
+    destroySession: () => { throw new Error('the old session must never be destroyed on spawn failure'); },
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    const res = await groupManager.addMember(gid, 'workerA', { app: 'claude', cwd: '/srv/proj' });
+    assert.equal(res.error, 'spawn-failed');
+    assert.equal(groupManager.isSessionInGroup(gid, 'sess-old'), true, 'old member untouched');
+    const ch = groupManager.getGroup(gid).handoffChannels.get('workerA');
+    assert.ok(ch, 'channel restored for the old member');
+    assert.equal(ch.sessionId, 'sess-old');
+    assert.ok(existsSync(ch.sockPath), 'restored channel is listening again (socket file recreated)');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
 });

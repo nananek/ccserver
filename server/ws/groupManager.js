@@ -113,7 +113,7 @@ export function listGroupMembers(groupId) {
   if (!group) return [];
   const out = [];
   for (const [role, sessionId] of group.members) {
-    const session = getSession(sessionId);
+    const session = sessionApi.getSession(sessionId);
     const saved = group.memberSaved.get(role);
     out.push({
       role,
@@ -143,7 +143,7 @@ export function listGroups() {
     createdAt: g.createdAt,
     memberCount: g.members.size,
     liveCount: [...g.members.values()].filter((sid) => {
-      const s = getSession(sid);
+      const s = sessionApi.getSession(sid);
       return s && !s.exited;
     }).length,
   }));
@@ -271,7 +271,7 @@ export async function createMemberHandoffChannel(groupId, role) {
     sessionManager: sessionApi,
   });
   channel.role = role;
-  channel.sessionId = null;
+  channel.sessionId = group.members.get(role) || null;
   group.handoffChannels.set(role, channel);
   return channel;
 }
@@ -335,17 +335,26 @@ export async function addMember(groupId, role, { app, cwd, sandboxOpts = null })
   }
 
   // A role is single-slot: replacing it retires the previous occupant. The
-  // replacement is atomic -- the old session/channel are only destroyed AFTER
-  // the new channel and session exist, so a failure anywhere leaves the old
-  // member untouched instead of a ghost role with a destroyed session.
+  // replacement is atomic -- the old session is only destroyed AFTER the new
+  // channel and session exist, so a failure anywhere leaves the old member
+  // untouched instead of a ghost role with a destroyed session.
   const prevSessionId = group.members.get(role);
   const prevChannel = group.handoffChannels.get(role);
 
+  // The replacement channel shares the role's deterministic socket path with
+  // its predecessor, so the old channel is retired FIRST: leaving it around
+  // would have stopBroker() remove the replacement's own socket file (both
+  // channels use the same path), orphaning the new listener's file. If the
+  // replacement fails, the old channel is re-listened -- the old session is
+  // never touched until the new one exists.
+  if (prevChannel) stopBroker(prevChannel);
+
   const channel = await createMemberHandoffChannel(groupId, role).catch(() => null);
   if (!channel) {
+    if (prevChannel) await ensureHandoffChannel(group, role).catch(() => { /* best effort */ });
     return { error: 'channel-failed', message: 'failed to create handoff channel' };
   }
-  const res = createSession({
+  const res = sessionApi.createSession({
     cwd,
     cols: 80,
     rows: 24,
@@ -360,23 +369,39 @@ export async function addMember(groupId, role, { app, cwd, sandboxOpts = null })
   });
   if (res.error || !res.session) {
     stopBroker(channel);
-    if (prevChannel) group.handoffChannels.set(role, prevChannel); // restore the old slot
+    if (prevChannel) await ensureHandoffChannel(group, role).catch(() => { /* best effort */ });
     else group.handoffChannels.delete(role);
     return { error: 'spawn-failed', message: res.error || 'session creation failed' };
   }
 
   // New member is fully in place -- only now retire the previous occupant.
-  if (prevChannel) stopBroker(prevChannel);
-  if (prevSessionId) destroySession(prevSessionId, { keepSchedule: false });
+  if (prevSessionId) sessionApi.destroySession(prevSessionId, { keepSchedule: false });
   registerMember(groupId, role, res.sessionId);
   return { sessionId: res.sessionId, app };
+}
+
+// (Re)listen a role's handoff channel and re-register it in the group. Used
+// to bring a retired channel back when a member replacement fails -- the
+// previous member keeps working (and can still hand off) untouched.
+async function ensureHandoffChannel(group, role) {
+  const channel = await startHandoffChannel({
+    groupId: group.id,
+    role,
+    getSessionId: () => group.members.get(role) || null,
+    groupManager: groupManagerApi,
+    sessionManager: sessionApi,
+  });
+  channel.role = role;
+  channel.sessionId = group.members.get(role) || null;
+  group.handoffChannels.set(role, channel);
+  return channel;
 }
 
 // close_tab / explicit removal: destroy the session and its handoff channel.
 export function removeMember(groupId, sessionId) {
   const group = groups.get(groupId);
   if (!group) return;
-  destroySession(sessionId, { keepSchedule: false });
+  sessionApi.destroySession(sessionId, { keepSchedule: false });
   cleanupMemberChannels(group, sessionId);
   for (const [role, sid] of group.members) {
     if (sid === sessionId) group.members.delete(role);
@@ -450,7 +475,7 @@ export function destroyGroup(groupId) {
   group.pendingTakes.clear();
   for (const sessionId of [...group.members.values()]) {
     try {
-      destroySession(sessionId, { keepSchedule: false });
+      sessionApi.destroySession(sessionId, { keepSchedule: false });
     } catch {
       // best effort
     }
@@ -498,7 +523,7 @@ function onSessionExit(session) {
   // ptys exited on their own) and must not linger in the registry -- the
   // brokers are already stopped, so this just drops the Map entry.
   const liveCount = [...group.members.values()].some((sid) => {
-    const s = getSession(sid);
+    const s = sessionApi.getSession(sid);
     return s && !s.exited;
   });
   if (!liveCount) destroyGroup(session.groupId);
@@ -536,10 +561,23 @@ const groupManagerApi = {
   removeMember,
 };
 
-const sessionApi = {
+// Session-manager facade. A `let` so tests can swap in fakes (see
+// setSessionApiForTests) to exercise addMember's spawn/teardown paths without
+// real ptys. All references go through this binding (function bodies only),
+// so the swap takes effect on the next call.
+const defaultSessionApi = {
   getSession,
+  destroySession,
+  createSession,
   writeToSession,
 };
+let sessionApi = defaultSessionApi;
+
+// Test seam: replace the session facade (or pass null/undefined to restore
+// the real one). Never called outside tests.
+export function setSessionApiForTests(api) {
+  sessionApi = api || defaultSessionApi;
+}
 
 setSessionExitListener(onSessionExit);
 setSessionCreateListener(onSessionCreate);
