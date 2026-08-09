@@ -157,6 +157,12 @@ body {
   flex-shrink: 0;
 }
 
+.tab-item.no-sandbox .tab-label::before {
+  content: '⚠️';
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
 .tab-label {
   display: flex;
   align-items: center;
@@ -261,6 +267,12 @@ body {
 .group-subtab-exited {
   color: var(--error);
   font-size: 10px;
+}
+
+.group-subtab-item.no-sandbox .group-subtab-label::before {
+  content: '⚠️';
+  font-size: 11px;
+  flex-shrink: 0;
 }
 
 .group-restart-orch-btn {
@@ -672,6 +684,12 @@ body {
   border: 1px solid rgba(249, 226, 175, 0.35);
 }
 
+.session-badge.no-sandbox {
+  color: var(--error, #f38ba8);
+  background: rgba(243, 139, 168, 0.12);
+  border: 1px solid rgba(243, 139, 168, 0.35);
+}
+
 .session-delete-btn {
   padding: 2px 8px;
   font-size: 12px;
@@ -837,6 +855,16 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Non-sandboxed agent session: no bwrap isolation, so flag it in the error
+   color (the same token the active Auto-Y toggle uses). */
+.terminal-header.no-sandbox {
+  border-bottom-color: var(--error, #f38ba8);
+}
+
+.terminal-header.no-sandbox .terminal-title {
+  color: var(--error, #f38ba8);
 }
 
 .header-actions {

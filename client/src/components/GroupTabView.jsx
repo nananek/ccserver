@@ -137,7 +137,7 @@ export default function GroupTabView({
         {members.map((m) => (
           <div
             key={m.role}
-            className={`group-subtab-item${m.role === activeRole ? ' active' : ''}${m.exited ? ' exited' : ''}`}
+            className={`group-subtab-item${m.role === activeRole ? ' active' : ''}${m.exited ? ' exited' : ''}${!m.sandbox ? ' no-sandbox' : ''}`}
             onClick={() => setActiveRole(m.role)}
             role="button"
             tabIndex={0}

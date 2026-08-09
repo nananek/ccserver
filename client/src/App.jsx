@@ -301,7 +301,7 @@ export default function App() {
         {tabs.map((tab) => (
           <div
             key={tab.id}
-            className={`tab-item${tab.id === activeTabId ? ' active' : ''}${attentionTabs.has(tab.id) ? ' attention' : ''}`}
+            className={`tab-item${tab.id === activeTabId ? ' active' : ''}${attentionTabs.has(tab.id) ? ' attention' : ''}${tab.type === 'terminal' && !tab.shell && !tab.sandbox ? ' no-sandbox' : ''}`}
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
