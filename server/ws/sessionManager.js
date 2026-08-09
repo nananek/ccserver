@@ -215,6 +215,8 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     claudeSessionId: null,
     idleTimer: null,
     idleNotified: false,
+    settled: false, // reached the first idle gap (TUI init burst over) -- the send_input settle gate
+    settleWaiters: [], // resolvers waiting on `settled` (see waitUntilSettled)
     autoYes: false,
     autoYesLog: [],
     autoYesPending: null,
@@ -248,6 +250,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       }
       session.idleTimer = setTimeout(() => {
         if (session.exited) return;
+        // The first idle gap means a freshly-launched TUI has finished its
+        // initialization burst: mark the session settled and wake anyone
+        // waiting on the settle gate (send_input's waitUntilSettled).
+        if (!session.settled) {
+          session.settled = true;
+          const waiters = session.settleWaiters;
+          session.settleWaiters = [];
+          for (const w of waiters) w();
+        }
         // A scheduled prompt may be waiting for this (freshly auto-resumed)
         // session to settle before typing its text. Deliver it once quiet.
         if (session.pendingInjection) {
@@ -417,6 +428,35 @@ export function writeToSession(id, text, { submit = false } = {}) {
   } catch {
     return false;
   }
+}
+
+// Gate for tools that type into a freshly-launched agent TUI (send_input):
+// wait until the session's output has gone idle (first IDLE_TIMEOUT_MS gap)
+// so keystrokes aren't dropped by a TUI that is still initializing. Resolves
+// immediately -- with the session's current settled state -- for sessions
+// that can never settle (missing, exited, plain shell, already settled).
+// Best-effort: callers write regardless of the outcome; a timed-out wait just
+// reports { settled: false, timedOut: true } so the caller can re-check.
+const SETTLE_WAIT_TIMEOUT_MS = 10 * 1000;
+
+export function waitUntilSettled(id, { timeoutMs = SETTLE_WAIT_TIMEOUT_MS } = {}) {
+  const session = sessions.get(id);
+  if (!session || session.exited || session.shell || session.settled) {
+    return Promise.resolve({ settled: !!session?.settled, timedOut: false });
+  }
+  return new Promise((resolve) => {
+    const onSettled = () => resolve({ settled: true, timedOut: false });
+    session.settleWaiters.push(onSettled);
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      setTimeout(() => {
+        const i = session.settleWaiters.indexOf(onSettled);
+        if (i !== -1) {
+          session.settleWaiters.splice(i, 1);
+          resolve({ settled: false, timedOut: true });
+        }
+      }, timeoutMs);
+    }
+  });
 }
 
 const MAX_SCHEDULE_AHEAD_MS = 48 * 60 * 60 * 1000; // 48h

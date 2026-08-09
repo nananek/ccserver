@@ -93,9 +93,9 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'send_input',
-    'Type text into a group member session terminal, optionally submitting with Enter (submit defaults true). This sends keystrokes, not a shell command primitive.',
+    'Type text into a group member session terminal, optionally submitting with Enter (submit defaults true). This sends keystrokes, not a shell command primitive. For a just-launched session the tool first waits for the TUI to settle (up to ~10s) so keystrokes are not dropped; the result includes settled:false when the input was sent without confirmed readiness.',
     { sessionId: z.string(), text: z.string(), submit: z.boolean().optional() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.sendInput(deps, args)) }] }),
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await tools.sendInput(deps, args)) }] }),
   );
 
   server.tool(

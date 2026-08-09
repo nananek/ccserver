@@ -47,7 +47,7 @@ function controlDeps(groupId) {
   return {
     groupId,
     groupManager,
-    sessionManager: { getSession: () => null, writeToSession: () => false },
+    sessionManager: { getSession: () => null, writeToSession: () => false, waitUntilSettled: async () => ({ settled: true }) },
   };
 }
 
@@ -59,7 +59,7 @@ function handoffDeps(groupId, role, sessionId) {
     role,
     getSessionId: () => sessionId,
     groupManager,
-    sessionManager: { getSession: () => null, writeToSession: () => false },
+    sessionManager: { getSession: () => null, writeToSession: () => false, waitUntilSettled: async () => ({ settled: true }) },
   };
 }
 
@@ -99,7 +99,7 @@ test('authorization: cross-group session ids are refused by every tool', async (
   const r = tools.readOutput(depsA, { sessionId: 'sess-b1' });
   assert.equal(r.error, 'unauthorized');
 
-  const i = tools.sendInput(depsA, { sessionId: 'sess-b1', text: 'ls' });
+  const i = await tools.sendInput(depsA, { sessionId: 'sess-b1', text: 'ls' });
   assert.equal(i.error, 'unauthorized');
 
   const c = tools.closeTab(depsA, { sessionId: 'sess-b1' });
@@ -198,7 +198,7 @@ test('handoff: identity fields in the arguments are ignored (closure wins)', asy
 test('sendInput: authorized member whose session is gone yields not-found (no crash)', async () => {
   const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
-  const r = tools.sendInput(controlDeps(g), { sessionId: 'sess-a1', text: 'ls' });
+  const r = await tools.sendInput(controlDeps(g), { sessionId: 'sess-a1', text: 'ls' });
   assert.equal(r.error, 'not-found');
 });
 
@@ -211,12 +211,124 @@ test('sendInput moves the current turn to the targeted member', async () => {
   const deps = {
     groupId: g,
     groupManager,
-    sessionManager: { getSession: () => ({}), writeToSession: () => true },
+    sessionManager: { getSession: () => ({}), writeToSession: () => true, waitUntilSettled: async () => ({ settled: true }) },
   };
 
-  const r = tools.sendInput(deps, { sessionId: 'sess-a1', text: 'go' });
-  assert.deepEqual(r, { ok: true });
+  const r = await tools.sendInput(deps, { sessionId: 'sess-a1', text: 'go' });
+  assert.deepEqual(r, { ok: true, settled: true });
   assert.equal(groupManager.getGroup(g).currentTurn, 'workerA');
+});
+
+// Issue #15: open_tab returns as soon as the pty is up, but the TUI is still
+// initializing -- keystrokes written into it are dropped. sendInput must hold
+// the write until the settle gate (first idle gap) opens.
+test('sendInput: holds the write until the settle gate opens (fresh session)', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+
+  let writeCalls = 0;
+  let releaseGate;
+  const gate = new Promise((r) => { releaseGate = r; });
+  const deps = {
+    groupId: g,
+    groupManager,
+    sessionManager: {
+      waitUntilSettled: async () => {
+        await gate;
+        return { settled: true };
+      },
+      writeToSession: () => { writeCalls++; return true; },
+    },
+  };
+
+  const pending = tools.sendInput(deps, { sessionId: 'sess-a1', text: 'go', submit: false });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(writeCalls, 0, 'must not write before the TUI has settled');
+  releaseGate();
+  const r = await pending;
+  assert.deepEqual(r, { ok: true, settled: true });
+  assert.equal(writeCalls, 1);
+});
+
+test('sendInput: still writes when the settle gate times out, reporting settled:false', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+
+  let writeCalls = 0;
+  const deps = {
+    groupId: g,
+    groupManager,
+    sessionManager: {
+      waitUntilSettled: async () => ({ settled: false, timedOut: true }),
+      writeToSession: () => { writeCalls++; return true; },
+    },
+  };
+
+  const r = await tools.sendInput(deps, { sessionId: 'sess-a1', text: 'go' });
+  assert.equal(writeCalls, 1, 'the write is best-effort: it happens even on a settle timeout');
+  assert.deepEqual(r, { ok: true, settled: false });
+});
+
+test('sendInput: an already-settled session writes without waiting (no latency regression)', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+
+  let gateWaited = false;
+  const deps = {
+    groupId: g,
+    groupManager,
+    sessionManager: {
+      waitUntilSettled: async () => { gateWaited = true; return { settled: true }; },
+      writeToSession: () => true,
+    },
+  };
+
+  const r = await tools.sendInput(deps, { sessionId: 'sess-a1', text: 'go' });
+  assert.deepEqual(r, { ok: true, settled: true });
+  // The settle gate must still be consulted (the wait itself is what the
+  // real sessionManager short-circuits for already-settled sessions) -- the
+  // no-wait property is covered against the real sessionManager below.
+  assert.equal(gateWaited, true);
+});
+
+// Full wiring test: the real sessionManager's idle timer (3s of quiet output)
+// opens the settle gate, and sendInput holds the write until then. A real
+// bash session stands in for a freshly-launched agent TUI (shell flag flipped
+// after spawn to activate the agent-only idle path).
+test('sendInput (real session): holds the write until the idle gap opens the settle gate', async () => {
+  const sm = await import('./sessionManager.js');
+  const res = sm.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const s = res.session;
+  assert.ok(s, 'shell session should spawn');
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', res.sessionId);
+  try {
+    s.shell = false;
+    s.settled = false;
+    s.settleWaiters = [];
+    const writes = [];
+    const deps = {
+      groupId: g,
+      groupManager,
+      sessionManager: {
+        getSession: (id) => sm.getSession(id),
+        writeToSession: (id, text, opts) => { writes.push(text); return sm.writeToSession(id, text, opts); },
+        waitUntilSettled: (id, opts) => sm.waitUntilSettled(id, opts),
+      },
+    };
+
+    // TUI startup burst: bash echoes a line, then goes quiet.
+    s.ptyProcess.write('echo TUI_BOOT_MARKER\r');
+    const pending = tools.sendInput(deps, { sessionId: res.sessionId, text: 'go', submit: false });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(writes.length, 0, 'must not write while the TUI is still initializing');
+    const r = await pending;
+    assert.deepEqual(r, { ok: true, settled: true });
+    assert.deepEqual(writes, ['go']);
+    assert.equal(s.settled, true, 'the session must have settled via its idle timer');
+  } finally {
+    sm.destroySession(res.sessionId, { keepSchedule: false });
+  }
 });
 
 test('waitForHandoff: empty queue times out with a tiny timedOut result (not an error)', async () => {

@@ -101,6 +101,55 @@ test('writeToSession on an exited session returns false', async () => {
   assert.equal(sessionManager.writeToSession('no-such-session', 'ls'), false);
 });
 
+// Issue #15 settle gate: waitUntilSettled resolves immediately for sessions
+// that can never settle (plain shells have no idle timer, unknown ids, and
+// already-settled sessions short-circuit to their current state).
+test('waitUntilSettled: shell sessions and unknown ids resolve immediately without settling', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(res.session, 'shell session should spawn');
+  try {
+    const r = await sessionManager.waitUntilSettled(res.sessionId);
+    assert.deepEqual(r, { settled: false, timedOut: false });
+  } finally {
+    sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+  }
+
+  assert.deepEqual(await sessionManager.waitUntilSettled('no-such-session'), { settled: false, timedOut: false });
+});
+
+test('waitUntilSettled: an already-settled session resolves immediately with settled:true', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const s = res.session;
+  assert.ok(s);
+  try {
+    s.settled = true;
+    const r = await sessionManager.waitUntilSettled(s.id);
+    assert.deepEqual(r, { settled: true, timedOut: false });
+  } finally {
+    sessionManager.destroySession(s.id, { keepSchedule: false });
+  }
+});
+
+test('waitUntilSettled: times out (and removes its waiter) when no idle gap arrives', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const s = res.session;
+  assert.ok(s);
+  try {
+    // Stand in for an agent session that produces no output: the idle timer
+    // (and thus the settle gate) only exists for non-shell sessions.
+    s.shell = false;
+    s.settled = false;
+    s.settleWaiters = [];
+    const started = Date.now();
+    const r = await sessionManager.waitUntilSettled(s.id, { timeoutMs: 60 });
+    assert.ok(Date.now() - started >= 50);
+    assert.deepEqual(r, { settled: false, timedOut: true });
+    assert.equal(s.settleWaiters.length, 0, 'a timed-out waiter must remove itself');
+  } finally {
+    sessionManager.destroySession(s.id, { keepSchedule: false });
+  }
+});
+
 test('resolveGroupMcpSocket: creates a worker handoff channel, reuses/recreates the control broker', async () => {
   const gid = randomUUID();
   await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });

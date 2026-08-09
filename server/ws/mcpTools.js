@@ -70,11 +70,17 @@ export function readOutput(deps, { sessionId, tail }) {
 }
 
 // Type text into a group member's terminal (optionally submitting with
-// Enter). Not a shell command execution primitive -- just keystrokes.
-export function sendInput(deps, { sessionId, text, submit = true }) {
+// Enter). Not a shell command execution primitive -- just keystrokes. If the
+// target's TUI was just launched (open_tab) it may still be initializing, so
+// wait for the session to settle (first idle gap) before typing, otherwise
+// the keystrokes can be dropped. Best-effort: the write happens regardless of
+// the settle outcome; `settled: false` in the result means the input may not
+// have been received.
+export async function sendInput(deps, { sessionId, text, submit = true }) {
   if (!deps.groupManager.isSessionInGroup(deps.groupId, sessionId)) {
     return { error: 'unauthorized', message: 'session is not a member of this group' };
   }
+  const { settled } = await deps.sessionManager.waitUntilSettled(sessionId);
   const ok = deps.sessionManager.writeToSession(sessionId, String(text), { submit: !!submit });
   if (ok) {
     // Orchestrator instructed this member: the turn moves to it.
@@ -82,7 +88,7 @@ export function sendInput(deps, { sessionId, text, submit = true }) {
     if (role) deps.groupManager.setCurrentTurn(deps.groupId, role);
   }
   return ok
-    ? { ok: true }
+    ? { ok: true, settled }
     : { error: 'not-found', message: 'session not found or exited' };
 }
 
