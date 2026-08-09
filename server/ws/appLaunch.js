@@ -18,10 +18,11 @@ export function appDisplayName(app) {
 }
 
 // CLI args to start `app` fresh, or to resume a conversation:
-//   claude   -> claude [--resume <id>]
-//   opencode -> opencode [--session <id>] | opencode -c (resume last, used when
-//               no session id is known, e.g. scheduled prompts / server
-//               restart where the TUI never exposed an id)
+//   claude   -> claude [--resume <id>] | claude --continue (resume last)
+//   opencode -> opencode [--session <id>] | opencode -c (resume last)
+// resumeLast ("resume the most recent conversation in the cwd") is used when
+// no session id is known, e.g. scheduled prompts / orchestrator restart where
+// the TUI never exposed an id.
 export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
   if (app === 'opencode') {
     if (resumeId) return ['--session', resumeId];
