@@ -47,9 +47,21 @@ export function extractResumeSessionId(app, rawText) {
 // claude uses Ink's select UI; opencode renders a box titled "Permission
 // required" with "Allow once" / "Allow always" / "Reject" (Enter accepts the
 // default "Allow once", matching the Enter we send).
+//
+// Verified against real opencode 1.18.15 TUI output (captured via node-pty,
+// Aug 2026): the box shows `△ Permission required`, a description
+// (`← Access external directory ...`), patterns, and the option row. The
+// default focus is "Allow once" (amber highlight) even for destructive
+// commands like `rm -f` — Enter auto-approves. claude's Ink select, by
+// contrast, defaults to the proceed/yes side, so both agents approve on
+// Enter. The box title alone is the signal: the option labels in model prose
+// (a plan mentioning "allow once"/"allow always") would be a false positive,
+// and the trailing-border lookahead keeps model prose like "permission
+// required." from matching (a real box has a border/glyph right after the
+// title, prose has a word or punctuation).
 export function detectPermissionPrompt(app, bufNoSpace) {
   if (app === 'opencode') {
-    return /Permissionrequired|Allowonce|Allowalways/i.test(bufNoSpace);
+    return /Permissionrequired(?![\w.,!?;:\u3001\u3002\uff01\uff1f\u2014-])/i.test(bufNoSpace);
   }
   return (
     /Doyouwantto(proceed|makethisedit|use)/i.test(bufNoSpace) ||

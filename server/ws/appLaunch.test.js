@@ -11,6 +11,32 @@ import {
 
 const noSpace = (s) => s.replace(/\s+/g, '');
 
+// Same ANSI-stripping regex sessionManager.js applies to pty output chunks.
+const stripAnsi = (s) => s.replace(
+  /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Z0-9]|[>=<]|#[0-9])/g,
+  ''
+);
+
+// Accumulate stripped chunks the way sessionManager.js's autoYesBuf does
+// (10KB cap, 5KB tail, then space-collapse) and report whether the prompt
+// detector ever fires.
+function accumulateDetect(app, chunks) {
+  let buf = '';
+  for (const c of chunks) {
+    buf += stripAnsi(c);
+    if (buf.length > 10000) buf = buf.slice(-5000);
+    if (detectPermissionPrompt(app, noSpace(buf))) return true;
+  }
+  return false;
+}
+
+// Raw ANSI frame captured from a real opencode 1.18.15 TUI session via
+// node-pty (Aug 2026): the "Permission required" box for `rm -f /tmp/...`
+// (external directory access). Kept as a single literal so the regression
+// tests exercise the detector against real renderer output, not hand-written
+// approximations.
+const OPENCODE_PERMISSION_BOX_RAW = '                                                                   \x1b[0m\x1b[30;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[30;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m  \x1b[0m\x1b[30;6H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m△\x1b[0m\x1b[30;7H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m \x1b[0m\x1b[30;8H\x1b[38;2;238;238;238m\x1b[48;2;20;20;20mPermission required\x1b[0m\x1b[30;27H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                            \x1b[0m\x1b[31;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[31;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m    \x1b[0m\x1b[31;8H\x1b[38;2;128;128;128m\x1b[48;2;20;20;20m←\x1b[0m\x1b[31;9H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m \x1b[0m\x1b[31;10H\x1b[38;2;238;238;238m\x1b[48;2;20;20;20mAccess external directory /tmp\x1b[0m\x1b[31;40H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                               \x1b[0m\x1b[32;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[32;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                                   \x1b[0m\x1b[33;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[33;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m  \x1b[0m\x1b[33;6H\x1b[38;2;128;128;128m\x1b[48;2;20;20;20mPatterns\x1b[0m\x1b[33;14H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                         \x1b[0m\x1b[34;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[34;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                                   \x1b[0m\x1b[35;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[35;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m  \x1b[0m\x1b[35;6H\x1b[38;2;238;238;238m\x1b[48;2;20;20;20m- /tmp/*\x1b[0m\x1b[35;14H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                         \x1b[0m\x1b[36;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[36;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                                   \x1b[0m\x1b[37;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[37;6H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m     \x1b[0m\x1b[37;12H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m \x1b[0m\x1b[37;14H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m                            \x1b[0m\x1b[37;43H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m           \x1b[0m\x1b[37;55H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m \x1b[0m\x1b[37;57H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m   \x1b[0m\x1b[38;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[38;4H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m  \x1b[0m\x1b[38;6H\x1b[38;2;255;255;255m\x1b[48;2;245;167;66m \x1b[0m\x1b[38;7H\x1b[38;2;10;10;10m\x1b[48;2;245;167;66mAllow once\x1b[0m\x1b[38;17H\x1b[38;2;255;255;255m\x1b[48;2;245;167;66m \x1b[0m\x1b[38;18H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m  \x1b[0m\x1b[38;20H\x1b[38;2;128;128;128m\x1b[48;2;30;30;30mAllow always\x1b[0m\x1b[38;32H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m   \x1b[0m\x1b[38;35H\x1b[38;2;128;128;128m\x1b[48;2;30;30;30mReject\x1b[0m\x1b[38;41H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m             ';
+
 test('APPS covers both agents', () => {
   assert.deepEqual(APPS, ['claude', 'opencode']);
 });
@@ -76,9 +102,60 @@ test('detectPermissionPrompt: claude Ink prompts', () => {
 
 test('detectPermissionPrompt: opencode permission box', () => {
   const buf = (s) => noSpace(s);
+  assert.ok(detectPermissionPrompt('opencode', buf('┃  △ Permission required ┃')));
   assert.ok(detectPermissionPrompt('opencode', buf('Permission required')));
-  assert.ok(detectPermissionPrompt('opencode', buf('Permission required Bash(...)')));
-  assert.ok(detectPermissionPrompt('opencode', buf('Allow once')));
-  assert.ok(detectPermissionPrompt('opencode', buf('Allow always')));
+  // Option labels alone are not enough -- the real box always renders the
+  // title first, and model prose can mention "allow once"/"allow always".
+  assert.ok(!detectPermissionPrompt('opencode', buf('Allow once')));
+  assert.ok(!detectPermissionPrompt('opencode', buf('Allow always')));
   assert.ok(!detectPermissionPrompt('opencode', buf('just some normal output')));
+});
+
+test('detectPermissionPrompt: opencode real captured permission box', () => {
+  // Raw ANSI frame captured from a real opencode 1.18.15 TUI session via
+  // node-pty (Aug 2026): the "Permission required" box shown for an
+  // `rm -f /tmp/...` command (external directory access), cursor-positioned
+  // with box-drawing glyphs and the amber-highlighted "Allow once" default.
+  const box = OPENCODE_PERMISSION_BOX_RAW;
+  assert.ok(box.includes('Permission required'));
+  assert.ok(detectPermissionPrompt('opencode', noSpace(stripAnsi(box))));
+  assert.ok(accumulateDetect('opencode', [box]));
+});
+
+test('detectPermissionPrompt: opencode box split across delivery chunks', () => {
+  // The TUI can split a render across pty writes; the title must still be
+  // recognized once accumulated (cut mid-word between "Permission"/"required"
+  // and between the title and the option row).
+  const clean = stripAnsi(OPENCODE_PERMISSION_BOX_RAW);
+  const midTitle = clean.indexOf('Permission') + 'Permission'.length;
+  assert.ok(accumulateDetect('opencode', [clean.slice(0, midTitle), clean.slice(midTitle)]));
+  const cut = clean.indexOf('Permission required') + 'Permission required'.length;
+  assert.ok(accumulateDetect('opencode', [clean.slice(0, cut), clean.slice(cut)]));
+});
+
+test('detectPermissionPrompt: opencode narrow-terminal wraps', () => {
+  // A narrow terminal wraps "Permission required" across lines; the
+  // space-collapse must still reconstruct the title.
+  const clean = stripAnsi(OPENCODE_PERMISSION_BOX_RAW);
+  const betweenWords = clean.replace('Permission required', 'Permission\nrequired');
+  assert.ok(accumulateDetect('opencode', [betweenWords]));
+  const midWord = clean.replace('Permission required', 'Permission requir\ned');
+  assert.ok(accumulateDetect('opencode', [midWord]));
+});
+
+test('detectPermissionPrompt: opencode model prose is not a prompt', () => {
+  // False-positive guards: "allow once"/"allow always"/"permission required"
+  // appearing in ordinary model output must not trigger the Enter send.
+  const prose = [
+    'The plan will allow once and then allow always for external fetches',
+    'Error: permission required.',
+    'Permission required to write to the file',
+    'You can grant access once',
+    'permission required — try again later',
+    'Please allow always; it speeds things up',
+  ];
+  for (const p of prose) {
+    assert.ok(!detectPermissionPrompt('opencode', noSpace(p)), p);
+    assert.ok(!accumulateDetect('opencode', [p]), p);
+  }
 });
