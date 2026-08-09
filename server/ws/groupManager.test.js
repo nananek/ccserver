@@ -168,6 +168,32 @@ test('listGroups reports membership and live-ness', async () => {
   assert.equal(groupManager.listGroups().some((g) => g.groupId === gid), false);
 });
 
+// The assembly race (routes/groups.js): workerA's pty crashes while workerB
+// and the orchestrator are still being spawned. Before markGroupAssembled()
+// the "no live members" auto-destroy in onSessionExit must NOT fire -- the
+// half-built group (and its control broker) has to survive so the remaining
+// members can still be registered.
+test('a member exiting mid-assembly does not auto-destroy the group; it does after assembly', async () => {
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });
+  groupManager.registerMember(gid, 'workerA', 'sess-a');
+  groupsToDestroy.push(gid);
+
+  // workerA died right after registering; siblings don't exist yet. The
+  // group (and the control broker created by createGroup) must survive.
+  groupManager.onSessionExit({ id: 'sess-a', groupId: gid, groupRole: 'workerA', exited: true });
+  assert.ok(groupManager.getGroup(gid), 'assembling group must survive a member crash');
+
+  // Once assembly completes, the normal rule applies again: all dead -> gone.
+  groupManager.registerMember(gid, 'workerB', 'sess-b');
+  groupManager.registerMember(gid, 'orchestrator', 'sess-o');
+  groupManager.markGroupAssembled(gid);
+  groupManager.onSessionExit({ id: 'sess-a', groupId: gid, groupRole: 'workerA', exited: true });
+  groupManager.onSessionExit({ id: 'sess-b', groupId: gid, groupRole: 'workerB', exited: true });
+  groupManager.onSessionExit({ id: 'sess-o', groupId: gid, groupRole: 'orchestrator', exited: true });
+  assert.equal(groupManager.getGroup(gid), null, 'assembled group with no live members self-destructs');
+});
+
 test('restoreGroups matches member resume info from .saved-sessions.json (restored members)', async () => {
   const gid = randomUUID();
   const orchDir = join(runtimeDir, `restore-${gid}`);

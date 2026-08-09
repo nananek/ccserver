@@ -66,6 +66,17 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const [orchestratorInstructions, setOrchestratorInstructions] = useState('');
   const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath));
 
+  // Combo-mode state is per-launch, not sticky: leaving the modal (cancel,
+  // overlay click, or a launch) must return it to the plain single mode,
+  // otherwise the user's next "起動" -- possibly for a different project --
+  // would silently fire a full combo spawn with the previous instructions.
+  // One close path for every exit route so future routes can't forget.
+  const closeOpenMenu = useCallback(() => {
+    setLaunchMode('single');
+    setOrchestratorInstructions('');
+    setOpenMenuOpen(false);
+  }, []);
+
   const chooseSandbox = useCallback((val) => {
     setSandboxDefault(val);
     localStorage.setItem(SANDBOX_KEY, val ? '1' : '0');
@@ -416,7 +427,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         // the right edge on iPhone. A centered, viewport-relative modal
         // (same pattern as the close/resume dialogs below) sidesteps that
         // entirely.
-        <div className="resume-overlay" onClick={() => setOpenMenuOpen(false)}>
+        <div className="resume-overlay" onClick={closeOpenMenu}>
           <div className="resume-dialog open-dialog" onClick={(e) => e.stopPropagation()}>
             <h3>起動方法を選択</h3>
             <div className="launch-mode-toggle">
@@ -566,12 +577,12 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
             )}
 
             <div className="resume-actions">
-              <button className="btn btn-secondary" onClick={() => setOpenMenuOpen(false)}>キャンセル</button>
+              <button className="btn btn-secondary" onClick={closeOpenMenu}>キャンセル</button>
               {launchMode === 'combo' ? (
                 <button
                   className="btn btn-primary"
                   onClick={() => {
-                    setOpenMenuOpen(false);
+                    closeOpenMenu();
                     onOpenCombo(currentPath, {
                       workerA: { app: comboApps.workerA },
                       workerB: { app: comboApps.workerB },
@@ -585,7 +596,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               ) : (
                 <button
                   className="btn btn-primary"
-                  onClick={() => { setOpenMenuOpen(false); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault }); }}
+                  onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault }); }}
                 >
                   起動
                 </button>

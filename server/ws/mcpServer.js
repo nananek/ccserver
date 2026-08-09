@@ -17,16 +17,32 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import * as tools from './mcpTools.js';
 
+// Newline-delimited JSON frames: a well-behaved MCP client sends a newline
+// per message, so a buffer beyond this means the peer is not speaking MCP
+// (or is hostile). Bounds the memory a single connection can pin.
+const MAX_TRANSPORT_BUFFER_CHARS = 1024 * 1024;
+
 export class SocketTransport {
   constructor(socket) {
     this.socket = socket;
     this._buf = '';
+    this._closed = false;
   }
 
   start() {
     this.socket.setEncoding('utf-8');
     this.socket.on('data', (chunk) => {
+      if (this._closed) return;
       this._buf += chunk;
+      // The socket path is reachable by anything running as the same user,
+      // not just the group's sandbox: a peer that never sends a newline
+      // must not be able to grow this buffer without bound. Over the cap,
+      // drop the connection (the in-flight partial frame is unrecoverable).
+      if (this._buf.length > MAX_TRANSPORT_BUFFER_CHARS) {
+        try { this.socket.destroy(); } catch { /* already gone */ }
+        this._closed = true;
+        return;
+      }
       let nl;
       while ((nl = this._buf.indexOf('\n')) !== -1) {
         const line = this._buf.slice(0, nl);
@@ -40,7 +56,10 @@ export class SocketTransport {
         }
       }
     });
-    this.socket.on('close', () => this.onclose?.());
+    this.socket.on('close', () => {
+      this._closed = true;
+      this.onclose?.();
+    });
     this.socket.on('error', (e) => this.onerror?.(e));
   }
 
@@ -67,7 +86,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'read_output',
-    'Read the recent terminal output of a group member session. Returns raw bytes and ANSI-stripped text. tail is a count of output chunks (the server buffers up to ~512KB of the most recent output, chunked), not characters. This is a fallback for inspecting a possibly-stuck member -- for normal flow, prefer wait_for_handoff.',
+    'Read the recent terminal output of a group member session. Returns raw bytes and ANSI-stripped text. tail is a count of output chunks (default 200; the server buffers up to ~512KB of the most recent output, chunked), not characters. The returned text is capped at 16KB (the buffer tail) with truncated:true when the cap is hit. This is a fallback for inspecting a possibly-stuck member -- for normal flow, prefer wait_for_handoff.',
     { sessionId: z.string(), tail: z.number().optional() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.readOutput(deps, args)) }] }),
   );

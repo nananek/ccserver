@@ -211,6 +211,10 @@ test('fireSchedule drops the prompt when the member group no longer exists', asy
   const orch = shellMember('/tmp', gid, 'orchestrator');
 
   assert.ok(sessionManager.setScheduledPrompt(member.id, Date.now() + 500, 'MARKER_ORPHAN_DROP'));
+  // Mark the assembly complete (POST /groups does this after the last member
+  // registers; this test drives the group directly, so it does it here) --
+  // from then on the all-exited cleanup applies.
+  groupManager.markGroupAssembled(gid);
   // Tear the whole group down before the fire: members die, the all-exited
   // cleanup removes the group from the registry.
   sessionManager.destroySession(member.id); // keepSchedule

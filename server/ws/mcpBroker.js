@@ -66,11 +66,23 @@ async function listenMcp({ groupId, tag, buildServer }) {
   } catch {
     // best effort
   }
+  const connections = new Set(); // accepted sockets, destroyed on stopBroker
   const server = createServer((socket) => {
+    connections.add(socket);
+    socket.on('close', () => connections.delete(socket));
+    socket.on('error', () => {});
     const mcp = buildServer();
     const transport = new SocketTransport(socket);
-    mcp.connect(transport);
-    socket.on('error', () => {});
+    // mcp.connect() is async (transport.start() + the MCP initialize
+    // handshake). A rejected promise here must NOT become an unhandled
+    // rejection (Node's default --unhandled-rejections=throw would crash the
+    // whole server, every unrelated pty included) -- e.g. a sandbox torn
+    // down right after accept leaves a socket that dies mid-handshake. Log
+    // and close the connection; the broker itself stays up.
+    mcp.connect(transport).catch((err) => {
+      console.error(`[mcp-broker] ${tag} connection handshake failed: ${err.message}`);
+      try { socket.destroy(); } catch { /* already gone */ }
+    });
   });
   // Permanent error handler: an EventEmitter 'error' with zero listeners
   // throws and crashes the whole process, so this must NEVER be removed once
@@ -94,10 +106,13 @@ async function listenMcp({ groupId, tag, buildServer }) {
   try {
     await waitForSocketFile(sockPath, SOCKET_FILE_WAIT_MS);
   } catch (err) {
+    for (const socket of connections) {
+      try { socket.destroy(); } catch { /* already gone */ }
+    }
     try { server.close(); } catch { /* not listening */ }
     throw err;
   }
-  return { server, sockPath, dir: null };
+  return { server, sockPath, dir: null, connections };
 }
 
 // deps: { groupId, groupManager, sessionManager }
@@ -118,7 +133,20 @@ export async function startHandoffChannel(deps) {
   });
 }
 
-export function stopBroker({ server, sockPath }) {
+export function stopBroker({ server, sockPath, connections }) {
+  // Drop established connections too: server.close() only stops accepting
+  // new ones, and a lingering connected socket would keep its McpServer
+  // (and its queued handoffs/waits) alive for as long as the client holds
+  // the connection open.
+  if (connections) {
+    for (const socket of connections) {
+      try {
+        socket.destroy();
+      } catch {
+        // already gone
+      }
+    }
+  }
   if (server) {
     try {
       server.close();

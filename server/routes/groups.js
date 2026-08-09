@@ -183,6 +183,10 @@ export async function groupsRoute(fastify, opts) {
       return fail(`orchestrator failed to launch: ${orchRes.error || 'unknown error'}`);
     }
     groupManager.registerMember(groupId, 'orchestrator', orchRes.sessionId);
+    // Assembly is complete: the group is now subject to the "no live members"
+    // auto-destroy in onSessionExit. Before this point a member crash must
+    // not tear the half-built group (and its control broker) down.
+    groupManager.markGroupAssembled(groupId);
 
     fastify.log.info(`[groups] ${groupId} launched at ${cwd} (workers ${workerAApp}/${workerBApp}, orchestrator ${orchApp})`);
     return {

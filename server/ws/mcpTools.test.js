@@ -287,6 +287,42 @@ test('readOutput: authorized live member returns raw + stripped text (tail 0 cla
   assert.equal(full.text, 'red text more\n');
 });
 
+// Cost control: read_output exists to keep the orchestrator's context small,
+// so a default call must not return the whole ~512KB buffer.
+test('readOutput: default tail stays small and output is hard-capped with truncated:true', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  // 800 chunks x 200 chars = 160KB of output -- far past the 16KB cap.
+  const fakeSession = {
+    cwd: '/srv/project-x',
+    app: 'claude',
+    exited: false,
+    outputBuffer: Array.from({ length: 800 }, (_, i) => `chunk ${i} ` + 'x'.repeat(190)),
+  };
+  const deps = {
+    groupId: g,
+    groupManager,
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+  };
+  const out = tools.readOutput(deps, { sessionId: 'sess-a1' });
+  assert.equal(out.error, undefined);
+  assert.ok(out.raw.length <= 16 * 1024, `raw must be capped (got ${out.raw.length})`);
+  assert.ok(out.text.length <= 16 * 1024, `text must be capped (got ${out.text.length})`);
+  assert.equal(out.truncated, true);
+  // The tail of the output survives the cap.
+  assert.ok(out.raw.endsWith('x'.repeat(190)), 'the newest chunk must be included');
+
+  // An explicit huge tail is still capped by the char limit, not by chunks.
+  const huge = tools.readOutput(deps, { sessionId: 'sess-a1', tail: 100000 });
+  assert.ok(huge.raw.length <= 16 * 1024);
+  assert.equal(huge.truncated, true);
+
+  // Small output: no truncation flag, everything returned.
+  const small = tools.readOutput(deps, { sessionId: 'sess-a1', tail: 1 });
+  assert.equal(small.truncated, false);
+  assert.ok(small.raw.endsWith('x'.repeat(190)));
+});
+
 test('handoff queue is capped: overflow drops the oldest entries', async () => {
   const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');

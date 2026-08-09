@@ -17,19 +17,33 @@ if (!sockPath) {
 }
 
 function connect(attempt = 0) {
+  // A failed connect() fires 'error' and then immediately 'close'. The
+  // close handler must NOT exit while a retry is scheduled, or the reconnect
+  // logic would be dead on arrival (the very race this wrapper exists to
+  // survive: the broker socket may not be in place yet at bind-try snapshot
+  // time). `retrying` is how 'close' knows 'error' already scheduled one.
+  let retrying = false;
+  let established = false;
   const sock = net.createConnection(sockPath);
   sock.on('connect', () => {
+    established = true;
     process.stdin.pipe(sock);
     sock.pipe(process.stdout);
   });
   sock.on('error', () => {
     if (attempt < 5) {
+      retrying = true;
       setTimeout(() => connect(attempt + 1), 200);
     } else {
       process.stderr.write('sandbox: MCP broker unreachable\n');
       process.exit(1);
     }
   });
-  sock.on('close', () => process.exit(0));
+  sock.on('close', () => {
+    if (retrying) return; // 'error' already scheduled the next attempt
+    if (established) process.exit(0); // broker teardown: relay over
+    if (attempt < 5) setTimeout(() => connect(attempt + 1), 200);
+    else process.exit(1);
+  });
 }
 connect();

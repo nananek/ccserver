@@ -31,8 +31,20 @@ export function listGroupSessions(deps) {
 // ANSI-stripped text view are both returned; prefer `text` for feeding the
 // orchestrator's context. This is a fallback for stuck-member inspection --
 // the recommended flow is wait_for_handoff.
-export function readOutput(deps, { sessionId, tail = 4000 }) {
-  const n = Math.min(Math.max(Number.isFinite(tail) ? tail : 4000, 1), 100000);
+//
+// Cost control: this feature exists to keep the orchestrator's context
+// small, so a default call must not balloon it. `tail` counts output chunks
+// (default 200 -- the server buffers up to ~512KB in chunks), and the
+// returned text is hard-capped at MAX_READOUTPUT_CHARS; when the cap bites,
+// the tail of the buffer is returned and `truncated: true` is set so the
+// caller knows the head of the output was dropped.
+const DEFAULT_OUTPUT_TAIL_CHUNKS = 200;
+const MAX_OUTPUT_TAIL_CHUNKS = 100000;
+const MAX_READOUTPUT_CHARS = 16 * 1024;
+
+export function readOutput(deps, { sessionId, tail }) {
+  const t = Number.isFinite(tail) ? tail : DEFAULT_OUTPUT_TAIL_CHUNKS;
+  const n = Math.min(Math.max(t, 1), MAX_OUTPUT_TAIL_CHUNKS);
   if (!deps.groupManager.isSessionInGroup(deps.groupId, sessionId)) {
     return { error: 'unauthorized', message: 'session is not a member of this group' };
   }
@@ -40,7 +52,12 @@ export function readOutput(deps, { sessionId, tail = 4000 }) {
   if (!session) {
     return { error: 'not-found', message: 'session not found' };
   }
-  const raw = session.outputBuffer.slice(-n).join('');
+  let raw = session.outputBuffer.slice(-n).join('');
+  let truncated = false;
+  if (raw.length > MAX_READOUTPUT_CHARS) {
+    raw = raw.slice(-MAX_READOUTPUT_CHARS);
+    truncated = true;
+  }
   return {
     sessionId,
     cwd: session.cwd,
@@ -48,6 +65,7 @@ export function readOutput(deps, { sessionId, tail = 4000 }) {
     exited: !!session.exited,
     raw,
     text: stripAnsi(raw),
+    truncated,
   };
 }
 

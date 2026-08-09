@@ -259,3 +259,74 @@ test('post-startup errors on the broker server never crash the process (permanen
   assert.ok(tools.length > 0);
   c2.close();
 });
+
+// A client that drops its socket mid-handshake must never take the process
+// down (the handshake promise would otherwise become an unhandled rejection)
+// and the broker must keep serving new connections.
+test('abrupt disconnect during handshake does not crash the broker', async () => {
+  const sock = net.createConnection(control.sockPath);
+  await new Promise((resolve, reject) => {
+    sock.on('connect', resolve);
+    sock.on('error', reject);
+  });
+  // Fire off an initialize frame, then slam the connection shut before the
+  // handshake can complete.
+  sock.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'rude', version: '1' } } })}\n`);
+  sock.destroy();
+
+  // Give the handshake a beat to (try to) settle, then confirm the broker
+  // still accepts a normal client -- reaching here at all means no crash.
+  await new Promise((r) => setTimeout(r, 100));
+  const c = mcpClient(control.sockPath);
+  await c.connected;
+  const { tools } = await c.call('tools/list');
+  assert.ok(tools.length > 0);
+  c.close();
+});
+
+// The transport buffer must be bounded: a peer that never sends a newline
+// must be dropped instead of pinning unbounded memory server-side.
+test('oversized newline-less frame gets the connection dropped (buffer cap)', async () => {
+  const sock = net.createConnection(control.sockPath);
+  const closed = new Promise((resolve) => sock.on('close', resolve));
+  await new Promise((resolve, reject) => {
+    sock.on('connect', resolve);
+    sock.on('error', reject);
+  });
+  sock.write('x'.repeat(1024 * 1024 + 1));
+  await closed;
+
+  // Broker still alive and serving.
+  const c = mcpClient(control.sockPath);
+  await c.connected;
+  const { tools } = await c.call('tools/list');
+  assert.ok(tools.length > 0);
+  c.close();
+});
+
+// stopBroker must destroy established connections, not just stop accepting
+// new ones: a lingering client socket would otherwise keep its McpServer
+// alive after teardown.
+test('stopBroker destroys established connections', async () => {
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: '/srv/stop-test', orchestratorDir: '/srv/stop-test-orch' });
+  const channel = await groupManager.createMemberHandoffChannel(gid, 'workerA');
+
+  // One connection to observe the server-initiated close; a second one just
+  // proves connections were fully established (accepted) before teardown.
+  const closedByServer = new Promise((resolve) => {
+    const raw = net.createConnection(channel.sockPath);
+    raw.on('connect', () => {});
+    raw.on('close', resolve);
+    raw.on('error', () => {});
+  });
+  await new Promise((resolve, reject) => {
+    const raw2 = net.createConnection(channel.sockPath);
+    raw2.on('connect', resolve);
+    raw2.on('error', reject);
+  });
+
+  broker.stopBroker(channel);
+  await closedByServer;
+  groupManager.destroyGroup(gid);
+});

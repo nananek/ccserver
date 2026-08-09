@@ -45,6 +45,12 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     cwd,
     allowedCwds: new Set([cwd]),
     members: new Map(), // role -> sessionId
+    // Set while the group is still being assembled (the initial trio is
+    // spawned after createGroup returns, see routes/groups.js). During
+    // assembly the auto-destroy in onSessionExit is suppressed: a member
+    // whose pty crashes before its siblings exist must not take the whole
+    // half-built group (and its control broker) down with it.
+    assembling: true,
     orchestratorDir,
     // App the orchestrator was launched with; used by the orchestrator
     // restart endpoint (POST /api/groups/:id/orchestrator).
@@ -89,6 +95,15 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
 
 export function getGroup(groupId) {
   return groups.get(groupId) || null;
+}
+
+// Declare a group fully assembled (all initial members spawned): from here on
+// the "no live members" auto-destroy in onSessionExit applies. Called by the
+// POST /groups handler after the last member is registered. No-op for groups
+// that are already assembled or gone.
+export function markGroupAssembled(groupId) {
+  const group = groups.get(groupId);
+  if (group) group.assembling = false;
 }
 
 // Bind a member sessionId to a role. Also wires the role's handoff channel
@@ -204,6 +219,9 @@ export function restoreGroups() {
       cwd: typeof e.cwd === 'string' ? e.cwd : null,
       allowedCwds: new Set(Array.isArray(e.allowedCwds) ? e.allowedCwds.filter((c) => typeof c === 'string') : []),
       members: new Map(),
+      // Restored groups are complete by definition (they were persisted
+      // after assembly finished): never subject them to the assembly grace.
+      assembling: false,
       orchestratorDir: typeof e.orchestratorDir === 'string' ? e.orchestratorDir : null,
       orchestratorApp: typeof e.orchestratorApp === 'string' ? e.orchestratorApp : null,
       instructions: typeof e.instructions === 'string' ? e.instructions : null,
@@ -505,7 +523,9 @@ export function destroyGroup(groupId) {
 // --- session-exit / session-create observation (no import cycle: sessionManager
 // never imports this module; we subscribe via the listener setters) ----------
 
-function onSessionExit(session) {
+// Exporting for tests: groupManager.test.js drives the assembly-race path
+// directly (no real pty available to trigger the listener organically).
+export function onSessionExit(session) {
   if (!session?.groupId) return;
   const group = groups.get(session.groupId);
   if (!group) return;
@@ -521,12 +541,14 @@ function onSessionExit(session) {
   // A group whose every member session is gone is dead weight: it was not
   // torn down via DELETE /api/groups/:id (browser crash, idle timeouts, all
   // ptys exited on their own) and must not linger in the registry -- the
-  // brokers are already stopped, so this just drops the Map entry.
+  // brokers are already stopped, so this just drops the Map entry. Groups
+  // still being assembled are exempt: their members are registered one by
+  // one, so "no live members" is expected mid-flight (see `assembling`).
   const liveCount = [...group.members.values()].some((sid) => {
     const s = sessionApi.getSession(sid);
     return s && !s.exited;
   });
-  if (!liveCount) destroyGroup(session.groupId);
+  if (!group.assembling && !liveCount) destroyGroup(session.groupId);
 }
 
 // A session was created with a groupId/groupRole (e.g. a scheduled prompt
