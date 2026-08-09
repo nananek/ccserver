@@ -24,16 +24,19 @@ export default function GroupTabView({
   notifyPermission,
   onToggleNotify,
   onActiveAppChange,
+  onCurrentTurnChange,
   tabId,
   onAttention,
   onFocusTab,
 }) {
   const [members, setMembers] = useState(initialMembers || []);
   const [activeRole, setActiveRole] = useState(() => initialMembers?.[0]?.role || null);
+  const [currentTurn, setCurrentTurn] = useState(null);
   const [restartingOrch, setRestartingOrch] = useState(false);
   const [groupGone, setGroupGone] = useState(false);
   const membersRef = useRef(members);
   const wasVisibleRef = useRef(visible);
+  const currentTurnRef = useRef(null);
 
   useEffect(() => { membersRef.current = members; }, [members]);
 
@@ -61,6 +64,11 @@ export default function GroupTabView({
         setGroupGone(false);
         const data = await res.json();
         if (cancelled) return;
+        setCurrentTurn(data.currentTurn ?? null);
+        if (currentTurnRef.current !== (data.currentTurn ?? null)) {
+          currentTurnRef.current = data.currentTurn ?? null;
+          onCurrentTurnChange?.(data.currentTurn ?? null);
+        }
         const next = data.members || [];
         const prev = membersRef.current;
         if (JSON.stringify(next) !== JSON.stringify(prev)) {
@@ -137,7 +145,7 @@ export default function GroupTabView({
         {members.map((m) => (
           <div
             key={m.role}
-            className={`group-subtab-item${m.role === activeRole ? ' active' : ''}${m.exited ? ' exited' : ''}${!m.sandbox ? ' no-sandbox' : ''}`}
+            className={`group-subtab-item${m.role === activeRole ? ' active' : ''}${m.role === currentTurn ? ' current-turn' : ''}${m.exited ? ' exited' : ''}${!m.sandbox ? ' no-sandbox' : ''}`}
             onClick={() => setActiveRole(m.role)}
             role="button"
             tabIndex={0}

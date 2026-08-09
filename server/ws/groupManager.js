@@ -73,6 +73,13 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     // shutdown .saved-sessions.json at restore time. Lets a restarted server
     // show members as resumable even though their pty sessions are gone.
     memberSaved: new Map(),
+    // Who has the turn now ('orchestrator' | a worker role | null). Updated
+    // on pushHandoff (turn -> orchestrator, or the event's explicit nextRole)
+    // and on sendInput (turn -> the targeted worker). Surfaced through
+    // GET /groups/:id for the tab UI's polling; lastHandoffAt is the
+    // Date.now() of the most recent handoff (for a "n min ago" display).
+    currentTurn: null,
+    lastHandoffAt: null,
   };
   groups.set(groupId, group);
 
@@ -274,6 +281,27 @@ export function isSessionInGroup(groupId, sessionId) {
   return [...group.members.values()].includes(sessionId);
 }
 
+// Record that the turn has moved to `role` (e.g. a worker that sendInput just
+// targeted). No-op when the group or the role is unknown. Used by the MCP
+// sendInput path so the tab UI's polling sees who's up next.
+export function setCurrentTurn(groupId, role) {
+  const group = groups.get(groupId);
+  if (!group) return false;
+  if (!group.members.has(role)) return false;
+  group.currentTurn = role;
+  return true;
+}
+
+// Reverse of isSessionInGroup: which role does `sessionId` hold, if any?
+export function getRoleForSession(groupId, sessionId) {
+  const group = groups.get(groupId);
+  if (!group) return null;
+  for (const [role, sid] of group.members) {
+    if (sid === sessionId) return role;
+  }
+  return null;
+}
+
 // Create a handoff socket for a (future) member session. The sessionId isn't
 // known yet -- the channel resolves it from the group's member registry at
 // MCP-connection time, so the socket can be bound into the sandbox before
@@ -437,6 +465,10 @@ export function pushHandoff(groupId, event) {
     group.handoffQueue.shift();
   }
   group.handoffQueue.push(event);
+  // A worker handed off: the turn moves to the orchestrator -- or, when the
+  // handoff declares an explicit nextRole, straight to that role.
+  group.currentTurn = event.nextRole || 'orchestrator';
+  group.lastHandoffAt = Date.now();
   group.handoffEmitter.emit('handoff');
   return true;
 }
@@ -590,6 +622,8 @@ function cleanupMemberChannels(group, sessionId) {
 const groupManagerApi = {
   listGroupMembers,
   isSessionInGroup,
+  getRoleForSession,
+  setCurrentTurn,
   pushHandoff,
   takeHandoff,
   addMember,

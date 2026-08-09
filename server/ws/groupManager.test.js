@@ -162,6 +162,53 @@ test('destroyGroup settles pending takeHandoff waiters', async () => {
   assert.deepEqual(res, { error: 'group-destroyed' });
 });
 
+test('pushHandoff records the turn moving to the orchestrator (with lastHandoffAt)', async () => {
+  const gid = await makeGroup();
+  groupManager.registerMember(gid, 'workerA', 'sess-a');
+  groupManager.registerMember(gid, 'orchestrator', 'sess-o');
+
+  assert.equal(groupManager.getGroup(gid).currentTurn, null);
+  assert.equal(groupManager.getGroup(gid).lastHandoffAt, null);
+
+  assert.equal(groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'x' }), true);
+  const group = groupManager.getGroup(gid);
+  assert.equal(group.currentTurn, 'orchestrator');
+  assert.ok(group.lastHandoffAt, 'lastHandoffAt is stamped');
+  assert.ok(group.lastHandoffAt <= Date.now());
+});
+
+test('pushHandoff honors an explicit nextRole for the incoming turn', async () => {
+  const gid = await makeGroup();
+  groupManager.registerMember(gid, 'workerA', 'sess-a');
+  groupManager.registerMember(gid, 'workerB', 'sess-b');
+  groupManager.registerMember(gid, 'orchestrator', 'sess-o');
+
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'passing to B', nextRole: 'workerB' });
+  assert.equal(groupManager.getGroup(gid).currentTurn, 'workerB');
+});
+
+test('setCurrentTurn moves the turn to a registered role only', async () => {
+  const gid = await makeGroup();
+  groupManager.registerMember(gid, 'workerA', 'sess-a');
+  groupManager.registerMember(gid, 'orchestrator', 'sess-o');
+
+  assert.equal(groupManager.setCurrentTurn(gid, 'workerA'), true);
+  assert.equal(groupManager.getGroup(gid).currentTurn, 'workerA');
+
+  // Unknown role / unknown group are no-ops.
+  assert.equal(groupManager.setCurrentTurn(gid, 'ghost'), false);
+  assert.equal(groupManager.getGroup(gid).currentTurn, 'workerA');
+  assert.equal(groupManager.setCurrentTurn('no-such-group', 'workerA'), false);
+});
+
+test('getRoleForSession maps a sessionId back to its role', async () => {
+  const gid = await makeGroup();
+  groupManager.registerMember(gid, 'workerA', 'sess-a');
+  assert.equal(groupManager.getRoleForSession(gid, 'sess-a'), 'workerA');
+  assert.equal(groupManager.getRoleForSession(gid, 'sess-unknown'), null);
+  assert.equal(groupManager.getRoleForSession('no-such-group', 'sess-a'), null);
+});
+
 test('addMember refuses to grow a full group (member cap)', async () => {
   const gid = randomUUID();
   await groupManager.createGroup({ groupId: gid, cwd: `/srv/proj-${gid}`, orchestratorDir: `/srv/orch-${gid}` });

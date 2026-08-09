@@ -202,6 +202,23 @@ test('sendInput: authorized member whose session is gone yields not-found (no cr
   assert.equal(r.error, 'not-found');
 });
 
+test('sendInput moves the current turn to the targeted member', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  groupManager.registerMember(g, 'orchestrator', 'sess-o');
+
+  // A working writeToSession (the default controlDeps always returns false).
+  const deps = {
+    groupId: g,
+    groupManager,
+    sessionManager: { getSession: () => ({}), writeToSession: () => true },
+  };
+
+  const r = tools.sendInput(deps, { sessionId: 'sess-a1', text: 'go' });
+  assert.deepEqual(r, { ok: true });
+  assert.equal(groupManager.getGroup(g).currentTurn, 'workerA');
+});
+
 test('waitForHandoff: empty queue times out with a tiny timedOut result (not an error)', async () => {
   const g = await makeGroupAsync();
   const started = Date.now();

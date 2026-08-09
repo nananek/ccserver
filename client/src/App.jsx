@@ -288,6 +288,15 @@ export default function App() {
     ));
   }, []);
 
+  // Lift a group's current turn into its top-level tab entry (GroupTabView
+  // polls it while visible; the last-known value persists on the tab object
+  // so the tab bar shows who's up even while the group tab is closed).
+  const handleGroupTurnChange = useCallback((tabId, currentTurn) => {
+    setTabs((prev) => prev.map((t) =>
+      t.id === tabId ? { ...t, currentTurn } : t
+    ));
+  }, []);
+
   const activeTab = tabs.find((t) => t.id === activeTabId);
   // Usage (Claude spend) is only meaningful for claude sessions; hide it for
   // opencode terminals and for a group tab whose active sub-tab is opencode.
@@ -307,6 +316,11 @@ export default function App() {
             <span className="tab-label">
               <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
               {tab.label}
+              {tab.type === 'group' && tab.currentTurn && (
+                <span className="tab-turn-badge" title={`現在の手番: ${tab.currentTurn}`}>
+                  {tab.currentTurn === 'orchestrator' ? 'ORCH' : tab.currentTurn.toUpperCase()}
+                </span>
+              )}
             </span>
             {tab.type !== 'browser' && tab.type !== 'monitor' && (
               <button
@@ -391,6 +405,7 @@ export default function App() {
                 notifyPermission={notifyPermission}
                 onToggleNotify={toggleNotify}
                 onActiveAppChange={setGroupActiveApp}
+                onCurrentTurnChange={(turn) => handleGroupTurnChange(tab.id, turn)}
                 tabId={tab.id}
                 onAttention={() => {
                   if (activeTabId !== tab.id) {

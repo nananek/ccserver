@@ -244,6 +244,8 @@ export async function groupsRoute(fastify, opts) {
       groupId,
       cwd,
       members: groupManager.listGroupMembers(groupId),
+      currentTurn: groupManager.getGroup(groupId)?.currentTurn ?? null,
+      lastHandoffAt: groupManager.getGroup(groupId)?.lastHandoffAt ?? null,
     };
   });
 
@@ -262,6 +264,8 @@ export async function groupsRoute(fastify, opts) {
       allowedCwds: [...group.allowedCwds],
       orchestratorDir: group.orchestratorDir,
       members: groupManager.listGroupMembers(group.id),
+      currentTurn: group.currentTurn,
+      lastHandoffAt: group.lastHandoffAt,
     };
   });
 

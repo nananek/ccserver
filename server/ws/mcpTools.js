@@ -76,6 +76,11 @@ export function sendInput(deps, { sessionId, text, submit = true }) {
     return { error: 'unauthorized', message: 'session is not a member of this group' };
   }
   const ok = deps.sessionManager.writeToSession(sessionId, String(text), { submit: !!submit });
+  if (ok) {
+    // Orchestrator instructed this member: the turn moves to it.
+    const role = deps.groupManager.getRoleForSession(deps.groupId, sessionId);
+    if (role) deps.groupManager.setCurrentTurn(deps.groupId, role);
+  }
   return ok
     ? { ok: true }
     : { error: 'not-found', message: 'session not found or exited' };
