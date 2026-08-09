@@ -144,6 +144,10 @@ export function listGroupMembers(groupId) {
       cwd: session?.cwd ?? saved?.cwd ?? null,
       exited: session ? !!session.exited : true,
       connected: !!(session?.socket),
+      // Activity: ms since the member last produced output (null when there
+      // is no live session to timestamp, e.g. a restored member).
+      lastOutputAt: session?.lastOutputAt ?? null,
+      idleForMs: session?.lastOutputAt != null ? Date.now() - session.lastOutputAt : null,
       // Resume info: a live-but-exited session carries its extracted
       // conversation id; a restored member carries the saved one.
       claudeSessionId: session?.claudeSessionId ?? saved?.claudeSessionId ?? null,

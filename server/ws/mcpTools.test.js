@@ -331,6 +331,39 @@ test('sendInput (real session): holds the write until the idle gap opens the set
   }
 });
 
+// Issue #16: get_tab_status must expose the session's activity timestamp so
+// the orchestrator can tell "slow but working" from "stuck". idleForMs is the
+// elapsed time since the last output at call time.
+test('getTabStatus: reports lastOutputAt and the derived idleForMs', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const lastOutputAt = Date.now() - 5000;
+  const fakeSession = { cwd: '/srv/proj', app: 'claude', exited: false, socket: {}, lastOutputAt };
+  const deps = {
+    groupId: g,
+    groupManager,
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+  };
+  const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
+  assert.equal(r.error, undefined);
+  assert.equal(r.lastOutputAt, lastOutputAt);
+  assert.ok(r.idleForMs >= 5000 && r.idleForMs <= 6000, `idleForMs must be the time since the last output (got ${r.idleForMs})`);
+});
+
+test('getTabStatus: no output yet (lastOutputAt null) yields idleForMs null', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const fakeSession = { cwd: '/srv/proj', app: 'claude', exited: false, lastOutputAt: null };
+  const deps = {
+    groupId: g,
+    groupManager,
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+  };
+  const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
+  assert.equal(r.lastOutputAt, null);
+  assert.equal(r.idleForMs, null);
+});
+
 test('waitForHandoff: empty queue times out with a tiny timedOut result (not an error)', async () => {
   const g = await makeGroupAsync();
   const started = Date.now();

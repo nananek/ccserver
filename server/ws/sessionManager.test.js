@@ -150,6 +150,34 @@ test('waitUntilSettled: times out (and removes its waiter) when no idle gap arri
   }
 });
 
+// Issue #16: lastOutputAt is the activity timestamp exposed to the
+// orchestrator (get_tab_status / list_group_sessions) so a hung member can be
+// distinguished from one that is merely slow. It must be null until the first
+// output chunk arrives, then advance with every chunk -- shells included (the
+// plain shell session here stands in for an agent TUI).
+test('lastOutputAt: null at spawn, then advanced by real pty output (shell included)', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const id = res.sessionId;
+  const s = res.session;
+  assert.ok(s, 'shell session should spawn');
+  try {
+    assert.equal(s.lastOutputAt, null, 'no output received yet after spawn');
+
+    await sleep(400); // let the shell reach its prompt
+    const first = s.lastOutputAt;
+    assert.ok(first != null, 'the shell prompt output must be recorded as activity');
+    assert.ok(Date.now() - first < 5000, 'the timestamp must be recent');
+
+    sessionManager.writeToSession(id, 'echo ACTIVITY_MARKER', { submit: true });
+    await sleep(1200); // echo + shell runs the command
+    const second = s.lastOutputAt;
+    assert.ok(second != null && second > first, 'later output keeps advancing the timestamp');
+    assert.ok(Date.now() - second < 5000, 'the timestamp must track the newest output');
+  } finally {
+    sessionManager.destroySession(id, { keepSchedule: false });
+  }
+});
+
 test('resolveGroupMcpSocket: creates a worker handoff channel, reuses/recreates the control broker', async () => {
   const gid = randomUUID();
   await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });

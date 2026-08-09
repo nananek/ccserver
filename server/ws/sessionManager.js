@@ -217,6 +217,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     idleNotified: false,
     settled: false, // reached the first idle gap (TUI init burst over) -- the send_input settle gate
     settleWaiters: [], // resolvers waiting on `settled` (see waitUntilSettled)
+    lastOutputAt: null, // epoch ms of the most recent output chunk; null until the first one (activity timestamp, Issue #16)
     autoYes: false,
     autoYesLog: [],
     autoYesPending: null,
@@ -228,6 +229,9 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
   ptyProcess.onData((rawData) => {
     const data = rawData;
+    // Activity timestamp: every output chunk counts, shells included (unlike
+    // the agent-only idle detection below). Pure activity bookkeeping.
+    session.lastOutputAt = Date.now();
     appendToBuffer(session, data);
 
     if (session.socket && session.socket.readyState === 1) {

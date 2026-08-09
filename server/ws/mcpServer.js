@@ -79,7 +79,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'list_group_sessions',
-    'List all sessions in this orchestration group (workers and orchestrator) with role, app, cwd and live status.',
+    'List all sessions in this orchestration group (workers and orchestrator) with role, app, cwd, live status and idleForMs (ms since each session last produced output; null when no live session exists). A member expected to be working but showing a large idleForMs may be stuck -- confirm with read_output before assuming progress.',
     {},
     async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listGroupSessions(deps)) }] }),
   );
@@ -119,7 +119,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'get_tab_status',
-    'Return the live status of a group member session (exited, connected, cwd, app).',
+    'Return the live status of a group member session (exited, connected, cwd, app) plus lastOutputAt (epoch ms of its last output; null if none yet) and idleForMs (ms since then). A large idleForMs on a member that should be working may mean it is stuck -- check with read_output to confirm.',
     { sessionId: z.string() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.getTabStatus(deps, args)) }] }),
   );

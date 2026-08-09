@@ -313,6 +313,40 @@ test('restoreGroups matches member resume info from .saved-sessions.json (restor
   assert.equal(orch.restored, true);
   assert.equal(orch.app, 'opencode');
   assert.equal(workerA.cwd, '/srv/proj');
+  // Restored members have no live pty, hence no activity timestamp (Issue #16).
+  assert.equal(workerA.lastOutputAt, null);
+  assert.equal(workerA.idleForMs, null);
+  assert.equal(orch.lastOutputAt, null);
+  assert.equal(orch.idleForMs, null);
+});
+
+// Issue #16: live members carry their activity timestamp through
+// list_group_sessions so the orchestrator can scan the whole group for a
+// stuck member in one call (fake session facade -- no real pty needed).
+test('listGroupMembers: live sessions report lastOutputAt/idleForMs; session-less members report null', async () => {
+  const gid = await makeGroup();
+  const lastOutputAt = Date.now() - 3000;
+  const fake = {
+    getSession: (id) => (id === 'live-sess' ? { exited: false, socket: null, lastOutputAt } : null),
+    createSession: () => { throw new Error('unused'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(gid, 'workerA', 'live-sess');
+    groupManager.registerMember(gid, 'orchestrator', 'dead-sess');
+    const members = groupManager.listGroupMembers(gid);
+    const workerA = members.find((m) => m.role === 'workerA');
+    const orch = members.find((m) => m.role === 'orchestrator');
+    assert.equal(workerA.lastOutputAt, lastOutputAt);
+    assert.ok(workerA.idleForMs >= 3000 && workerA.idleForMs <= 4000, `idleForMs must be the time since the last output (got ${workerA.idleForMs})`);
+    assert.equal(orch.lastOutputAt, null, 'no live session -> no timestamp');
+    assert.equal(orch.idleForMs, null);
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
 });
 
 // --- addMember (open_tab) spawn/teardown paths, exercised with a fake
