@@ -617,7 +617,7 @@ async function fireSchedule(scheduleId) {
   // down, broker failed), the prompt is dropped rather than orphaned: a
   // member session without MCP can never hand off again, and in the
   // group-gone case nobody is waiting anyway.
-  const mcpSocketPath = entry.groupId
+  const mcpSocketPath = entry.groupId && entry.groupRole
     ? await resolveMcpSocketForSession(entry.groupId, entry.groupRole)
     : null;
   if (entry.groupId && !mcpSocketPath) {

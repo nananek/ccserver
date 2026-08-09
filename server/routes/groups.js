@@ -108,6 +108,7 @@ export async function groupsRoute(fastify, opts) {
       writeFileSync(join(orchestratorDir, 'CLAUDE.md'), instructions);
       writeFileSync(join(orchestratorDir, 'AGENTS.md'), instructions);
     } catch (err) {
+      try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ }
       return reply.code(500).send({ error: `Failed to write orchestrator instructions: ${err.message}` });
     }
 

@@ -124,8 +124,8 @@ export async function createMemberHandoffChannel(groupId, role) {
 // with -- used by the scheduled-prompt auto-resume path. A dead worker gets a
 // fresh handoff channel; the orchestrator gets its control broker back (it
 // was stopped when the orchestrator exited). Returns null when the group is
-// gone or the broker can't be (re)started -- the caller then launches without
-// MCP, which the member's own MCP client would never connect anyway.
+// gone or the broker can't be (re)started -- the caller (fireSchedule) then
+// drops the prompt instead of spawning a member that could never hand off.
 export async function resolveGroupMcpSocket(groupId, groupRole) {
   const group = groups.get(groupId);
   if (!group) return null;
