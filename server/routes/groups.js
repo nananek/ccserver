@@ -143,6 +143,25 @@ export function cleanupOrphanedOrchestrators(keepIds) {
   }
 }
 
+// Session options for the orchestrator-restart route. Extracted (and pure)
+// so the resume policy is unit-testable: the restart always continues the
+// group's most recent orchestrator conversation (orchestratorDir is exclusive
+// to the group, so `resumeLast` maps 1:1 onto "the previous conversation").
+export function orchestratorRestartSessionOpts({ group, app, mcpSocketPath }) {
+  return {
+    cwd: group.orchestratorDir,
+    cols: 80,
+    rows: 24,
+    sandbox: true,
+    sandboxOpts: null,
+    app,
+    resumeLast: true,
+    groupId: group.id,
+    groupRole: 'orchestrator',
+    mcpSocketPath,
+  };
+}
+
 export async function groupsRoute(fastify, opts) {
   fastify.post('/groups', async (request, reply) => {
     const body = request.body || {};
@@ -301,17 +320,7 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(500).send({ error: 'failed to re-create the control broker' });
     }
 
-    const res = createSession({
-      cwd: group.orchestratorDir,
-      cols: 80,
-      rows: 24,
-      sandbox: true,
-      sandboxOpts: null,
-      app,
-      groupId: group.id,
-      groupRole: 'orchestrator',
-      mcpSocketPath,
-    });
+    const res = createSession(orchestratorRestartSessionOpts({ group, app, mcpSocketPath }));
     if (res.error || !res.session) {
       return reply.code(500).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
     }

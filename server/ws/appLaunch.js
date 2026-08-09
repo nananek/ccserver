@@ -28,7 +28,9 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
     if (resumeLast) return ['-c'];
     return [];
   }
-  return resumeId ? ['--resume', resumeId] : [];
+  if (resumeId) return ['--resume', resumeId];
+  if (resumeLast) return ['--continue'];
+  return [];
 }
 
 // Try to recover a conversation id from recent (ANSI-stripped) terminal

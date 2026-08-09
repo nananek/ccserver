@@ -55,11 +55,11 @@ test('appDisplayName maps apps to labels', () => {
   assert.equal(appDisplayName('bogus'), 'Claude Code');
 });
 
-test('appResumeArgs: claude resumes by id only', () => {
+test('appResumeArgs: claude resumes by id or --continue', () => {
   assert.deepEqual(appResumeArgs('claude', null), []);
   assert.deepEqual(appResumeArgs('claude', 'abc123'), ['--resume', 'abc123']);
   assert.deepEqual(appResumeArgs('claude', 'abc123', { resumeLast: true }), ['--resume', 'abc123']);
-  assert.deepEqual(appResumeArgs('claude', null, { resumeLast: true }), []);
+  assert.deepEqual(appResumeArgs('claude', null, { resumeLast: true }), ['--continue']);
 });
 
 test('appResumeArgs: opencode resumes by id or -c', () => {
