@@ -67,7 +67,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'read_output',
-    'Read the recent terminal output of a group member session. Returns raw bytes and ANSI-stripped text. This is a fallback for inspecting a possibly-stuck member -- for normal flow, prefer wait_for_handoff.',
+    'Read the recent terminal output of a group member session. Returns raw bytes and ANSI-stripped text. tail is a count of output chunks (the server buffers up to ~512KB of the most recent output, chunked), not characters. This is a fallback for inspecting a possibly-stuck member -- for normal flow, prefer wait_for_handoff.',
     { sessionId: z.string(), tail: z.number().optional() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.readOutput(deps, args)) }] }),
   );

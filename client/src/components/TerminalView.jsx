@@ -216,7 +216,7 @@ function osc52Response(text) {
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, app = 'claude', resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, app = 'claude', resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab, groupId, groupRole }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -647,6 +647,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             sandbox: !!sandboxRef.current,
             sandboxOpts: sandboxOptsRef.current || null,
             app: appRef.current,
+            // Group membership is carried into a re-launch so the server can
+            // re-create the member's MCP channel and register it to the role.
+            groupId: groupId || null,
+            groupRole: groupRole || null,
           };
           if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;
@@ -752,6 +756,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 sandbox: !!sandboxRef.current,
                 sandboxOpts: sandboxOptsRef.current || null,
                 app: appRef.current,
+                groupId: groupId || null,
+                groupRole: groupRole || null,
               };
               if (!shellRef.current) {
                 const app = appRef.current;

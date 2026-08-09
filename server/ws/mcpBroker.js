@@ -58,6 +58,14 @@ function waitForSocketFile(sockPath, timeoutMs) {
 // listening on.
 async function listenMcp({ groupId, tag, buildServer }) {
   const sockPath = sockPathFor(groupId, tag);
+  // A socket file left over from a crash (teardown never ran) would make
+  // listen() fail with EADDRINUSE. The path is group-scoped and derived, so
+  // a stale file can never belong to a live listener -- safe to drop.
+  try {
+    rmSync(sockPath, { force: true });
+  } catch {
+    // best effort
+  }
   const server = createServer((socket) => {
     const mcp = buildServer();
     const transport = new SocketTransport(socket);

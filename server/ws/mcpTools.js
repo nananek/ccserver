@@ -14,6 +14,10 @@
 
 const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Z0-9]|[>=<]|#[0-9])/g;
 
+// Handoff summaries are orchestrator input (context) -- cap their size so a
+// noisy worker can't balloon the queue's memory beyond the count cap.
+const MAX_HANDOFF_SUMMARY_CHARS = 32 * 1024;
+
 export function stripAnsi(text) {
   return text.replace(ANSI_RE, '');
 }
@@ -119,7 +123,7 @@ export function handoffToOrchestrator(deps, { summary, status = 'done', nextRole
   const ok = deps.groupManager.pushHandoff(deps.groupId, {
     fromSessionId: sessionId,
     fromRole: deps.role || null,
-    summary: String(summary || ''),
+    summary: String(summary || '').slice(0, MAX_HANDOFF_SUMMARY_CHARS),
     status,
     nextRole: nextRole || null,
     at: Date.now(),

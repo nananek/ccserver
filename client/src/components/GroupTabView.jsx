@@ -27,6 +27,7 @@ export default function GroupTabView({
 }) {
   const [members, setMembers] = useState(initialMembers || []);
   const [activeRole, setActiveRole] = useState(() => initialMembers?.[0]?.role || null);
+  const [restartingOrch, setRestartingOrch] = useState(false);
   const membersRef = useRef(members);
 
   useEffect(() => { membersRef.current = members; }, [members]);
@@ -80,6 +81,27 @@ export default function GroupTabView({
     onActiveAppChange?.(app);
   }, [members, activeRole, visible, onActiveAppChange]);
 
+  // Restart a dead orchestrator: the server spawns a fresh orchestrator
+  // session in the group's own dir and re-creates the control broker. The
+  // poll loop picks the new member up on the next tick.
+  const restartOrchestrator = useCallback(async () => {
+    if (restartingOrch) return;
+    setRestartingOrch(true);
+    try {
+      const res = await authFetch(`/api/groups/${groupId}/orchestrator`, { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      window.alert(`オーケストレーターを再起動できませんでした: ${err.message}`);
+    } finally {
+      setRestartingOrch(false);
+    }
+  }, [groupId, restartingOrch]);
+
+  const orchestrator = members.find((m) => m.role === 'orchestrator');
+
   const roleLabel = (role) => {
     if (role === 'orchestrator') return 'Orchestrator';
     if (role === 'workerA') return 'Worker A';
@@ -108,6 +130,16 @@ export default function GroupTabView({
             </span>
           </div>
         ))}
+        {orchestrator?.exited && (
+          <button
+            className="btn btn-secondary group-restart-orch-btn"
+            onClick={restartOrchestrator}
+            disabled={restartingOrch}
+            title="オーケストレーターが終了しています。再起動しますか?"
+          >
+            {restartingOrch ? '再起動中...' : 'Orchestrator 再起動'}
+          </button>
+        )}
       </div>
       <div className="group-subtab-body">
         {members.map((m) => (
@@ -121,6 +153,17 @@ export default function GroupTabView({
                 app={m.app === 'opencode' ? 'opencode' : 'claude'}
                 attachSessionId={m.sessionId}
                 visible={m.role === activeRole && visible}
+                // Resume settings for a dead member (exited after a restart
+                // or on its own): the attach fails with SESSION_NOT_FOUND and
+                // TerminalView re-launches with these, keeping the member's
+                // group membership (groupId/groupRole) and conversation
+                // (claudeSessionId / opencode resume) intact.
+                claudeSessionId={m.claudeSessionId}
+                sandbox={m.sandbox}
+                sandboxOpts={m.sandboxOpts}
+                resume={m.app === 'opencode'}
+                groupId={groupId}
+                groupRole={m.role}
                 xtermTheme={xtermTheme}
                 themeId={themeId}
                 onThemeChange={onThemeChange}

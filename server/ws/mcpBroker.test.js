@@ -21,6 +21,8 @@ let handoff;
 before(async () => {
   runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-mcp-wire-'));
   process.env.XDG_RUNTIME_DIR = runtimeDir;
+  // Group persistence must never touch the repo-root state file during tests.
+  process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
   groupManager = await import('./groupManager.js');
   broker = await import('./mcpBroker.js');
 

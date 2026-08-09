@@ -984,6 +984,18 @@ export function loadSavedSessions() {
   }
 }
 
+// Read .saved-sessions.json WITHOUT unlinking it or touching the cache --
+// used by groupManager.restoreGroups() to match each restored group member's
+// resume info (app/cwd/claudeSessionId/sandbox) while the file is still
+// intact for the client's own saved-session listing.
+export function peekSavedSessions() {
+  try {
+    return JSON.parse(readFileSync(SAVED_SESSIONS_PATH, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
 function appendToBuffer(session, data) {
   session.outputBuffer.push(data);
   session.bufferSize += data.length;

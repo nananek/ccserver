@@ -10,11 +10,11 @@
 // socket (see mcpBroker.js / mcpTools.js).
 
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync, statSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, statSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
-import { createSession } from '../ws/sessionManager.js';
+import { createSession, getSession } from '../ws/sessionManager.js';
 import { sandboxAvailable } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
 
@@ -68,6 +68,30 @@ function appFromBody(spec, fallback) {
   return fallback;
 }
 
+// Orchestrator dirs that are not part of a restored group are leftovers from
+// a crash (dir created, group never persisted / group destroyed mid-write).
+// Called once at startup with the ids restoreGroups() returned.
+export function cleanupOrphanedOrchestrators(keepIds) {
+  const keep = new Set(keepIds || []);
+  let names;
+  try {
+    names = readdirSync(ORCHESTRATOR_ROOT);
+  } catch {
+    return; // root doesn't exist yet -- nothing to clean
+  }
+  for (const name of names) {
+    if (keep.has(name)) continue;
+    const dir = join(ORCHESTRATOR_ROOT, name);
+    try {
+      if (statSync(dir).isDirectory()) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    } catch {
+      // best effort
+    }
+  }
+}
+
 export async function groupsRoute(fastify, opts) {
   fastify.post('/groups', async (request, reply) => {
     const body = request.body || {};
@@ -117,7 +141,7 @@ export async function groupsRoute(fastify, opts) {
     // created orchestratorDir (CLAUDE.md/AGENTS.md) is removed so failed
     // launches don't litter disk.
     try {
-      await groupManager.createGroup({ groupId, cwd, orchestratorDir, sandboxOpts });
+      await groupManager.createGroup({ groupId, cwd, orchestratorDir, sandboxOpts, orchestratorApp: orchApp, instructions });
     } catch (err) {
       try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ }
       return reply.code(500).send({ error: `Failed to start control broker: ${err.message}` });
@@ -168,6 +192,10 @@ export async function groupsRoute(fastify, opts) {
     };
   });
 
+  fastify.get('/groups', async (request, reply) => {
+    return { groups: groupManager.listGroups() };
+  });
+
   fastify.get('/groups/:id', async (request, reply) => {
     const group = groupManager.getGroup(request.params.id);
     if (!group) {
@@ -178,7 +206,60 @@ export async function groupsRoute(fastify, opts) {
       cwd: group.cwd,
       allowedCwds: [...group.allowedCwds],
       orchestratorDir: group.orchestratorDir,
-      controlBrokerSockPath: group.controlBroker ? group.controlBroker.sockPath : null,
+      members: groupManager.listGroupMembers(group.id),
+    };
+  });
+
+  // Restart a dead orchestrator: recreate the control broker and spawn a new
+  // orchestrator session in the group's own directory. Workers stay as they
+  // are. 404 when the group is gone; 409 while an orchestrator still lives.
+  fastify.post('/groups/:id/orchestrator', async (request, reply) => {
+    const group = groupManager.getGroup(request.params.id);
+    if (!group) {
+      return reply.code(404).send({ error: 'Group not found' });
+    }
+    const existing = group.members.get('orchestrator');
+    if (existing) {
+      const s = getSession(existing);
+      if (s && !s.exited) {
+        return reply.code(409).send({ error: 'orchestrator is still running' });
+      }
+    }
+
+    // Prefer the persisted launch app; fall back to the restored member's
+    // saved app (legacy groups persisted before orchestratorApp existed).
+    const orchMember = groupManager.listGroupMembers(request.params.id).find((m) => m.role === 'orchestrator');
+    const app = group.orchestratorApp || orchMember?.app || 'claude';
+    if (!isValidApp(app)) {
+      return reply.code(400).send({ error: 'orchestrator app unavailable for restart' });
+    }
+    if (!group.orchestratorDir) {
+      return reply.code(400).send({ error: 'orchestrator dir missing' });
+    }
+
+    const mcpSocketPath = await groupManager.resolveGroupMcpSocket(request.params.id, 'orchestrator');
+    if (!mcpSocketPath) {
+      return reply.code(500).send({ error: 'failed to re-create the control broker' });
+    }
+
+    const res = createSession({
+      cwd: group.orchestratorDir,
+      cols: 80,
+      rows: 24,
+      sandbox: true,
+      sandboxOpts: null,
+      app,
+      groupId: group.id,
+      groupRole: 'orchestrator',
+      mcpSocketPath,
+    });
+    if (res.error || !res.session) {
+      return reply.code(500).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
+    }
+    groupManager.registerMember(group.id, 'orchestrator', res.sessionId);
+    fastify.log.info(`[groups] ${group.id} orchestrator restarted (${app})`);
+    return {
+      groupId: group.id,
       members: groupManager.listGroupMembers(group.id),
     };
   });

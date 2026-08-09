@@ -99,6 +99,33 @@ export default function App() {
     }
   }, []);
 
+  // Re-open a group (from the browser's groups list): fetch its current
+  // membership, then add a group tab. Live members re-attach over the normal
+  // WS flow; members whose pty died (server restart) show as exited and
+  // re-launch via GroupTabView's re-init path.
+  const handleOpenGroup = useCallback(async (groupId) => {
+    try {
+      const res = await authFetch(`/api/groups/${groupId}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const id = `group-${++tabIdCounter}`;
+      const dirName = (data.cwd || '').split(/[/\\]/).filter(Boolean).pop() || data.groupId;
+      setTabs((prev) => [...prev, {
+        id,
+        type: 'group',
+        label: dirName,
+        groupId: data.groupId,
+        members: data.members || [],
+      }]);
+      setActiveTabId(id);
+    } catch (err) {
+      window.alert(`グループを開けませんでした: ${err.message}`);
+    }
+  }, []);
+
   const handleSessionClick = useCallback((session) => {
     // Check if a tab is already open for this session
     const existingTab = tabs.find((t) => t.sessionId === session.id);
@@ -265,7 +292,7 @@ export default function App() {
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onSessionClick={handleSessionClick} initialPath={lastDir} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} initialPath={lastDir} />
         </div>
         <div style={{ display: activeTabId === 'monitor' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <SystemMonitor visible={activeTabId === 'monitor'} />

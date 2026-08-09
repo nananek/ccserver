@@ -263,6 +263,14 @@ body {
   font-size: 10px;
 }
 
+.group-restart-orch-btn {
+  margin: 3px 8px 3px auto;
+  padding: 3px 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+  align-self: center;
+}
+
 .group-subtab-body {
   flex: 1 1 auto;
   min-height: 0;

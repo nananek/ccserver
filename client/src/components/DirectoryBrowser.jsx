@@ -34,7 +34,7 @@ function formatSize(bytes) {
   return `${i === 0 ? val : val.toFixed(1)} ${units[i]}`;
 }
 
-export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onSessionClick, initialPath }) {
+export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onOpenGroup, onSessionClick, initialPath }) {
   const [currentPath, setCurrentPath] = useState(initialPath || localStorage.getItem(LAST_DIR_KEY) || '/');
   const [homeDir, setHomeDir] = useState(null);
   const [dirs, setDirs] = useState([]);
@@ -47,6 +47,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onS
   const [newFolderName, setNewFolderName] = useState('');
   const [sessions, setSessions] = useState([]);
   const [savedSessions, setSavedSessions] = useState([]);
+  const [groups, setGroups] = useState([]);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
@@ -173,6 +174,19 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onS
       }
     } catch {
       // ignore — sessions panel is supplementary
+    }
+    // Combo groups live in their own tab UI; list them here so a reloaded
+    // browser can re-open a group (live members re-attach, restored ones
+    // resume). A running group's members are filtered from the session list
+    // above, so this is the only way back in after a page reload.
+    try {
+      const res = await authFetch('/api/groups');
+      if (res.ok) {
+        const data = await res.json();
+        setGroups((data.groups || []).filter((g) => g.liveCount > 0 || g.memberCount > 0));
+      }
+    } catch {
+      // ignore — groups panel is supplementary
     }
   }, []);
 
@@ -608,7 +622,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onS
         </div>
       )}
 
-      {(sessions.length > 0 || savedSessions.length > 0) && (
+      {(sessions.length > 0 || savedSessions.length > 0 || groups.length > 0) && (
         <div className="session-list">
           <div className="session-list-header">Active Sessions</div>
           {sessions.map((session) => (
@@ -671,6 +685,31 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onS
               </button>
             </div>
           ))}
+          {groups.length > 0 && (
+            <>
+              <div className="session-list-header">Groups</div>
+              {groups.map((g) => (
+                <div
+                  key={g.groupId}
+                  className="session-item"
+                  onClick={() => onOpenGroup(g.groupId)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') onOpenGroup(g.groupId);
+                  }}
+                >
+                  <span className="session-icon">{'\u26A1'}</span>
+                  <span className="session-cwd">{g.cwd}</span>
+                  <span className="session-status resumable">
+                    {g.liveCount > 0
+                      ? `group · ${g.memberCount} members · ${g.liveCount} live`
+                      : `group · ${g.memberCount} members · closed (click to reopen)`}
+                  </span>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
 

@@ -10,6 +10,7 @@ import {
   scheduledPromptPublic,
   computeNextLocalTime,
   getServerTimeInfo,
+  resolveMcpSocketForSession,
 } from './sessionManager.js';
 
 // Build a schedule_state payload including server timezone info so the client
@@ -29,7 +30,7 @@ export async function terminalWs(fastify, opts) {
   fastify.get('/ws/terminal', { websocket: true }, (socket, req) => {
     let currentSessionId = null;
 
-    socket.on('message', (rawMessage) => {
+    socket.on('message', async (rawMessage) => {
       let msg;
       try {
         msg = JSON.parse(rawMessage.toString());
@@ -43,10 +44,43 @@ export async function terminalWs(fastify, opts) {
         return;
       }
 
+      try {
+        await handleMessage(msg);
+      } catch (err) {
+        fastify.log.error({ err }, 'terminal message handler error');
+        try {
+          socket.send(JSON.stringify({ type: 'error', message: String(err?.message || err), code: 'INTERNAL_ERROR' }));
+        } catch { /* socket may be gone */ }
+      }
+    });
+
+    async function handleMessage(msg) {
       switch (msg.type) {
         case 'init': {
           if (currentSessionId) {
             detachSocket(currentSessionId, socket);
+          }
+
+          // A restored group member (see GroupTabView) re-launches via init
+          // with its groupId/groupRole: the group's MCP resolver recreates
+          // the member's handoff channel / the orchestrator's control broker
+          // so the resumed session can reach the group again. Without a
+          // socket the member would be invisible to the UI and unable to
+          // hand off -- refuse to spawn it, exactly like fireSchedule drops
+          // the prompt in the same situation.
+          const groupId = typeof msg.groupId === 'string' ? msg.groupId : null;
+          const groupRole = typeof msg.groupRole === 'string' ? msg.groupRole : null;
+          let mcpSocketPath = null;
+          if (groupId && groupRole) {
+            mcpSocketPath = await resolveMcpSocketForSession(groupId, groupRole);
+            if (!mcpSocketPath) {
+              socket.send(JSON.stringify({
+                type: 'error',
+                message: `Cannot re-launch group member ${groupRole}: the group's MCP channel could not be re-created (group may have been destroyed)`,
+                code: 'SPAWN_FAILED',
+              }));
+              break;
+            }
           }
 
           const result = createSession({
@@ -59,6 +93,9 @@ export async function terminalWs(fastify, opts) {
             sandboxOpts: msg.sandboxOpts || null,
             app: msg.app || null,
             resumeLast: !!msg.resume,
+            groupId,
+            groupRole,
+            mcpSocketPath,
           });
 
           if (result.error) {
@@ -262,7 +299,7 @@ export async function terminalWs(fastify, opts) {
           break;
         }
       }
-    });
+    }
 
     socket.on('close', () => {
       if (currentSessionId) {

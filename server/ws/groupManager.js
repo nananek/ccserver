@@ -8,9 +8,18 @@
 // here, by this process, never declared by clients.
 
 import { EventEmitter } from 'node:events';
-import { getSession, destroySession, createSession, writeToSession, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver } from './sessionManager.js';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
+import { dirname, join, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { getSession, destroySession, createSession, writeToSession, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, peekSavedSessions } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// Groups survive a server restart via this file (groupId, member roles,
+// orchestrator dir/app/instructions -- see persistGroups). Overridable for
+// tests, which must never touch the real repo-root state file.
+const GROUPS_PATH = process.env.CCSERVER_GROUPS_PATH || join(__dirname, '..', '..', '.saved-groups.json');
 
 const groups = new Map(); // groupId -> group (see createGroup)
 
@@ -24,7 +33,12 @@ const WORKER_ROLE_RE = /^worker[A-Za-z0-9_-]+$/;
 // not grow the queue without bound.
 const MAX_HANDOFF_QUEUE = 100;
 
-export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts = null }) {
+// Group size cap: an orchestrator (a live LLM, subject to prompt injection
+// via worker output) must not be able to spawn members without bound and
+// exhaust pty/sandbox/socket resources. Includes the orchestrator itself.
+const MAX_GROUP_MEMBERS = 8;
+
+export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts = null, orchestratorApp = null, instructions = null }) {
   const group = {
     id: groupId,
     createdAt: Date.now(),
@@ -32,6 +46,12 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     allowedCwds: new Set([cwd]),
     members: new Map(), // role -> sessionId
     orchestratorDir,
+    // App the orchestrator was launched with; used by the orchestrator
+    // restart endpoint (POST /api/groups/:id/orchestrator).
+    orchestratorApp,
+    // Starting text for the orchestrator's CLAUDE.md/AGENTS.md, re-written on
+    // restore so a restarted server can bring the orchestrator dir back.
+    instructions,
     // Per-launch sandbox flags (gpg/sshAgent) the group's workers launched
     // with; open_tab workers inherit them unless the tool overrides.
     sandboxOpts,
@@ -39,6 +59,14 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     handoffChannels: new Map(), // role -> { server, sockPath, dir, role, sessionId }
     handoffQueue: [],
     handoffEmitter: new EventEmitter(),
+    // takeHandoff() waiters, so destroyGroup can settle them instead of
+    // leaving the closure attached to the emitter forever.
+    pendingTakes: new Set(),
+    // role -> { app, cwd, claudeSessionId, sandbox, sandboxOpts } -- the last
+    // known launch/resume info of each member, matched from the graceful-
+    // shutdown .saved-sessions.json at restore time. Lets a restarted server
+    // show members as resumable even though their pty sessions are gone.
+    memberSaved: new Map(),
   };
   groups.set(groupId, group);
 
@@ -55,6 +83,7 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     throw err;
   }
 
+  persistGroups();
   return group;
 }
 
@@ -70,27 +99,154 @@ export function registerMember(groupId, role, sessionId) {
   group.members.set(role, sessionId);
   const channel = group.handoffChannels.get(role);
   if (channel) channel.sessionId = sessionId;
+  persistGroups();
   return true;
 }
 
 // Resolve member sessions against sessionManager; a session that is gone from
-// the manager (destroyed) shows up as exited with its cached fields.
+// the manager (destroyed) shows up as exited with its cached fields. After a
+// restart there are no sessions at all -- the member's last-known launch
+// info (from .saved-sessions.json via restoreGroups) is returned instead so
+// the UI can offer a resumable re-launch.
 export function listGroupMembers(groupId) {
   const group = groups.get(groupId);
   if (!group) return [];
   const out = [];
   for (const [role, sessionId] of group.members) {
     const session = getSession(sessionId);
+    const saved = group.memberSaved.get(role);
     out.push({
       role,
       sessionId,
-      app: session?.app ?? null,
-      cwd: session?.cwd ?? null,
+      app: session?.app ?? saved?.app ?? null,
+      cwd: session?.cwd ?? saved?.cwd ?? null,
       exited: session ? !!session.exited : true,
       connected: !!(session?.socket),
+      // Resume info: a live-but-exited session carries its extracted
+      // conversation id; a restored member carries the saved one.
+      claudeSessionId: session?.claudeSessionId ?? saved?.claudeSessionId ?? null,
+      sandbox: session?.sandbox ?? saved?.sandbox ?? false,
+      sandboxOpts: session?.sandboxOpts ?? saved?.sandboxOpts ?? null,
+      // true when the member only exists via the restart restore, i.e. its
+      // pty is gone and a re-launch (resume) is the only way back.
+      restored: !session && !!saved,
     });
   }
   return out;
+}
+
+// Compact public listing for GET /api/groups (client "groups" section).
+export function listGroups() {
+  return [...groups.values()].map((g) => ({
+    groupId: g.id,
+    cwd: g.cwd,
+    createdAt: g.createdAt,
+    memberCount: g.members.size,
+    liveCount: [...g.members.values()].filter((sid) => {
+      const s = getSession(sid);
+      return s && !s.exited;
+    }).length,
+  }));
+}
+
+// --- persistence (groups survive a server restart) -------------------------
+
+// Best effort: group state must never crash the launch/teardown paths.
+function persistGroups() {
+  try {
+    const arr = [];
+    for (const g of groups.values()) {
+      arr.push({
+        id: g.id,
+        createdAt: g.createdAt,
+        cwd: g.cwd,
+        allowedCwds: [...g.allowedCwds],
+        orchestratorDir: g.orchestratorDir,
+        orchestratorApp: g.orchestratorApp || null,
+        instructions: g.instructions || null,
+        sandboxOpts: g.sandboxOpts || null,
+        members: Object.fromEntries([...g.members]),
+      });
+    }
+    if (arr.length > 0) {
+      writeFileSync(GROUPS_PATH, JSON.stringify(arr));
+    } else {
+      try { unlinkSync(GROUPS_PATH); } catch { /* nothing to remove */ }
+    }
+  } catch {
+    // best effort -- persistence must never crash the session manager
+  }
+}
+
+// Rebuild the in-memory registry at startup from .saved-groups.json. The
+// member ptys are gone (a restart kills them all), so members are registered
+// from the persisted map and their resume info is matched from the graceful-
+// shutdown .saved-sessions.json (see peekSavedSessions). The orchestrator dir
+// is re-created (with its instruction files) so a scheduled auto-resume or an
+// orchestrator restart can use it as cwd again.
+export function restoreGroups() {
+  let arr;
+  try {
+    arr = JSON.parse(readFileSync(GROUPS_PATH, 'utf-8'));
+  } catch {
+    return { restored: 0, ids: [] }; // no file / unreadable
+  }
+  if (!Array.isArray(arr)) return { restored: 0, ids: [] };
+
+  const savedSessions = peekSavedSessions() || [];
+  const ids = [];
+  let restored = 0;
+  for (const e of arr) {
+    if (!e || typeof e.id !== 'string') continue;
+    const group = {
+      id: e.id,
+      createdAt: e.createdAt || Date.now(),
+      cwd: typeof e.cwd === 'string' ? e.cwd : null,
+      allowedCwds: new Set(Array.isArray(e.allowedCwds) ? e.allowedCwds.filter((c) => typeof c === 'string') : []),
+      members: new Map(),
+      orchestratorDir: typeof e.orchestratorDir === 'string' ? e.orchestratorDir : null,
+      orchestratorApp: typeof e.orchestratorApp === 'string' ? e.orchestratorApp : null,
+      instructions: typeof e.instructions === 'string' ? e.instructions : null,
+      sandboxOpts: e.sandboxOpts || null,
+      controlBroker: null,
+      handoffChannels: new Map(),
+      handoffQueue: [],
+      handoffEmitter: new EventEmitter(),
+      pendingTakes: new Set(),
+      memberSaved: new Map(),
+    };
+    if (e.members && typeof e.members === 'object') {
+      for (const [role, sid] of Object.entries(e.members)) {
+        if (typeof sid === 'string') group.members.set(role, sid);
+      }
+    }
+    for (const s of savedSessions) {
+      if (s && s.groupId === group.id && typeof s.groupRole === 'string') {
+        group.memberSaved.set(s.groupRole, {
+          app: typeof s.app === 'string' ? s.app : null,
+          cwd: typeof s.cwd === 'string' ? s.cwd : null,
+          claudeSessionId: typeof s.claudeSessionId === 'string' ? s.claudeSessionId : null,
+          sandbox: !!s.sandbox,
+          sandboxOpts: s.sandboxOpts || null,
+        });
+      }
+    }
+    if (group.orchestratorDir) {
+      try {
+        mkdirSync(group.orchestratorDir, { recursive: true, mode: 0o700 });
+      } catch { /* nothing to do */ }
+      if (group.instructions) {
+        try {
+          writeFileSync(join(group.orchestratorDir, 'CLAUDE.md'), group.instructions);
+          writeFileSync(join(group.orchestratorDir, 'AGENTS.md'), group.instructions);
+        } catch { /* best effort */ }
+      }
+    }
+    groups.set(group.id, group);
+    ids.push(group.id);
+    restored++;
+  }
+  return { restored, ids };
 }
 
 // The authorization chokepoint: is `sessionId` a member of this group?
@@ -169,16 +325,21 @@ export async function addMember(groupId, role, { app, cwd, sandboxOpts = null })
   if (!group.allowedCwds.has(cwd)) {
     return { error: 'cwd-not-allowed', message: `cwd must be one of: ${[...group.allowedCwds].join(', ')}` };
   }
-
-  // A role is single-slot: replacing it destroys the previous occupant and
-  // its handoff channel (a fresh channel for the role is created below).
-  const prevSessionId = group.members.get(role);
-  if (prevSessionId) destroySession(prevSessionId, { keepSchedule: false });
-  const prevChannel = group.handoffChannels.get(role);
-  if (prevChannel) {
-    stopBroker(prevChannel);
-    group.handoffChannels.delete(role);
+  // The orchestrator (a live LLM, reachable by prompt injection through the
+  // workers) must not be able to grow the group without bound.
+  if (!group.members.has(role) && group.members.size >= MAX_GROUP_MEMBERS) {
+    return {
+      error: 'too-many-members',
+      message: `group is full (max ${MAX_GROUP_MEMBERS} members)`,
+    };
   }
+
+  // A role is single-slot: replacing it retires the previous occupant. The
+  // replacement is atomic -- the old session/channel are only destroyed AFTER
+  // the new channel and session exist, so a failure anywhere leaves the old
+  // member untouched instead of a ghost role with a destroyed session.
+  const prevSessionId = group.members.get(role);
+  const prevChannel = group.handoffChannels.get(role);
 
   const channel = await createMemberHandoffChannel(groupId, role).catch(() => null);
   if (!channel) {
@@ -199,9 +360,14 @@ export async function addMember(groupId, role, { app, cwd, sandboxOpts = null })
   });
   if (res.error || !res.session) {
     stopBroker(channel);
-    group.handoffChannels.delete(role);
+    if (prevChannel) group.handoffChannels.set(role, prevChannel); // restore the old slot
+    else group.handoffChannels.delete(role);
     return { error: 'spawn-failed', message: res.error || 'session creation failed' };
   }
+
+  // New member is fully in place -- only now retire the previous occupant.
+  if (prevChannel) stopBroker(prevChannel);
+  if (prevSessionId) destroySession(prevSessionId, { keepSchedule: false });
   registerMember(groupId, role, res.sessionId);
   return { sessionId: res.sessionId, app };
 }
@@ -215,6 +381,7 @@ export function removeMember(groupId, sessionId) {
   for (const [role, sid] of group.members) {
     if (sid === sessionId) group.members.delete(role);
   }
+  persistGroups();
 }
 
 // FIFO handoff queue + EventEmitter: workers push, orchestrator takes. The
@@ -242,6 +409,7 @@ export function takeHandoff(groupId, timeoutMs) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      group.pendingTakes.delete(finish);
       group.handoffEmitter.off('handoff', onHandoff);
       resolve(val);
     };
@@ -251,6 +419,7 @@ export function takeHandoff(groupId, timeoutMs) {
     const timer = timeoutMs > 0
       ? setTimeout(() => finish({ timedOut: true }), timeoutMs)
       : null;
+    group.pendingTakes.add(finish);
     group.handoffEmitter.on('handoff', onHandoff);
     onHandoff();
   });
@@ -267,11 +436,18 @@ export function onOrchestratorExit(groupId) {
   }
 }
 
-// Destroy the whole group: all member sessions + all brokers. The
-// orchestratorDir (CLAUDE.md/AGENTS.md) is intentionally left in place.
+// Destroy the whole group: all member sessions + all brokers, then remove the
+// persisted entry. The orchestratorDir is removed with it -- a destroyed
+// group can never be resumed (its schedules were cancelled with its member
+// sessions), so leaving the dir behind would only litter disk. Guarded by the
+// basename==groupId check so a malformed/foreign path is never deleted.
 export function destroyGroup(groupId) {
   const group = groups.get(groupId);
   if (!group) return;
+  for (const finish of [...group.pendingTakes]) {
+    finish({ error: 'group-destroyed' });
+  }
+  group.pendingTakes.clear();
   for (const sessionId of [...group.members.values()]) {
     try {
       destroySession(sessionId, { keepSchedule: false });
@@ -291,6 +467,14 @@ export function destroyGroup(groupId) {
   group.handoffQueue = [];
   group.handoffEmitter.removeAllListeners();
   groups.delete(groupId);
+  if (group.orchestratorDir && basename(group.orchestratorDir) === group.id) {
+    try {
+      rmSync(group.orchestratorDir, { recursive: true, force: true });
+    } catch {
+      // best effort
+    }
+  }
+  persistGroups();
 }
 
 // --- session-exit / session-create observation (no import cycle: sessionManager
