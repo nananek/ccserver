@@ -115,6 +115,41 @@ test('restoreGroups rebuilds a group from the persisted file (restart survival)'
   groupManager.destroyGroup(gid);
 });
 
+test('a newer takeHandoff supersedes a still-pending one (no zombie listener)', async () => {
+  const gid = await makeGroup();
+
+  // Call A: a pending wait that never resolves on its own (timeoutMs <= 0).
+  const waitA = groupManager.takeHandoff(gid, 0);
+  // Call B: the real waiter arriving while A is still unresolved. Under the
+  // pre-fix implementation A's listener would stay attached and consume the
+  // next pushHandoff, leaving B stuck until timeout; now A is orphaned first.
+  const waitB = groupManager.takeHandoff(gid, 0);
+
+  const event = { type: 'done', from: 'workerA' };
+  assert.equal(groupManager.pushHandoff(gid, event), true);
+
+  const [resA, resB] = await Promise.all([waitA, waitB]);
+  assert.deepEqual(resA, { orphaned: true }, 'superseded waiter settles as orphaned, not by stealing the event');
+  assert.deepEqual(resB, event, 'the latest waiter receives the pushed event');
+});
+
+test('a superseded waiter is removed from pendingTakes (no zombie listener left behind)', async () => {
+  const gid = await makeGroup();
+
+  const waitA = groupManager.takeHandoff(gid, 0);
+  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 1);
+
+  // The newer waiter supersedes A, which must not linger in pendingTakes --
+  // otherwise its listener would consume the next pushHandoff before waitB.
+  const waitB = groupManager.takeHandoff(gid, 0);
+  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 1, 'orphaned A must not linger');
+  assert.deepEqual(await waitA, { orphaned: true });
+
+  groupManager.pushHandoff(gid, { type: 'first' });
+  assert.deepEqual(await waitB, { type: 'first' });
+  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 0, 'resolved waiter cleans up');
+});
+
 test('destroyGroup settles pending takeHandoff waiters', async () => {
   const gid = randomUUID();
   await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });

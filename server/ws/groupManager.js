@@ -443,9 +443,22 @@ export function pushHandoff(groupId, event) {
 
 // Resolves with the next handoff event, or { timedOut: true } when timeoutMs
 // elapses with the queue still empty (timeoutMs <= 0 means never).
+//
+// Only one waiter per group is ever meaningful (the orchestrator calls
+// wait_for_handoff one at a time). A client-side cancelled MCP request leaves
+// its takeHandoff promise -- and its listener -- alive server-side for up to
+// timeoutMs (15 min by default), and such a "zombie" listener, being older,
+// would consume the next pushHandoff before the real waiter ever sees it.
+// So a new takeHandoff first settles every still-pending waiter for the same
+// group as { orphaned: true } (each finish tears its own listener/timer down),
+// then registers the fresh waiter as the sole consumer.
 export function takeHandoff(groupId, timeoutMs) {
   const group = groups.get(groupId);
   if (!group) return Promise.resolve({ error: 'group-not-found' });
+  for (const stale of [...group.pendingTakes]) {
+    console.warn(`[groupManager] takeHandoff(${groupId}): superseding a still-pending waiter`);
+    stale({ orphaned: true });
+  }
   return new Promise((resolve) => {
     let settled = false;
     const finish = (val) => {
