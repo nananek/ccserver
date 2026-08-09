@@ -1189,7 +1189,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
 
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}${selectionMode ? ' selection-mode' : ''}`} ref={terminalViewRef}>
-      <div className={`terminal-header${!sandbox ? ' no-sandbox' : ''}`}>
+      <div className={`terminal-header${!sandbox && !shell ? ' no-sandbox' : ''}`}>
         <span className="terminal-title">{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)} &mdash; {cwd}</span>
         <div className="header-actions">
           <div className="theme-picker" ref={themeMenuRef}>
