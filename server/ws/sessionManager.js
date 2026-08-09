@@ -445,10 +445,14 @@ export function waitUntilSettled(id, { timeoutMs = SETTLE_WAIT_TIMEOUT_MS } = {}
     return Promise.resolve({ settled: !!session?.settled, timedOut: false });
   }
   return new Promise((resolve) => {
-    const onSettled = () => resolve({ settled: true, timedOut: false });
+    let timer = null;
+    const onSettled = () => {
+      if (timer) clearTimeout(timer);
+      resolve({ settled: true, timedOut: false });
+    };
     session.settleWaiters.push(onSettled);
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-      setTimeout(() => {
+      timer = setTimeout(() => {
         const i = session.settleWaiters.indexOf(onSettled);
         if (i !== -1) {
           session.settleWaiters.splice(i, 1);
