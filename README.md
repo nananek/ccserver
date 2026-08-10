@@ -289,9 +289,8 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | GET | `/api/dirs?path=<path>&showHidden=1` | 指定パスのサブディレクトリ/ファイル一覧 |
 | GET | `/api/dirs/home` | `{ home, defaultApp }` — サーバーのホームディレクトリと、設定ファイルの既定起動アプリ |
 | POST | `/api/dirs` | `{ parent, name }` でフォルダ作成 |
-| GET | `/api/sessions` | 実行中セッション + 保存済み (未起動) セッションの一覧 |
+| GET | `/api/sessions` | 実行中セッションの一覧 |
 | DELETE | `/api/sessions/:id` | セッションを終了する (予約プロンプトも解除) |
-| DELETE | `/api/sessions/saved/:index` | 保存済みセッション一覧からエントリを削除 |
 | GET | `/api/files?path=<path>` | ファイルをダウンロード |
 | POST | `/api/files` | multipart アップロード (`destination` フィールド + ファイルパート) |
 | GET | `/api/system-stats?ipmi=1` | CPU/メモリ/温度/GPU (`nvidia-smi`)/IPMI (要 `ENABLE_IPMI=1`)・load average |
