@@ -11,6 +11,7 @@ import {
   computeNextLocalTime,
   getServerTimeInfo,
   resolveMcpSocketForSession,
+  resolveWorkerBindsForSession,
 } from './sessionManager.js';
 
 // Build a schedule_state payload including server timezone info so the client
@@ -82,6 +83,13 @@ export async function terminalWs(fastify, opts) {
               break;
             }
           }
+          // An orchestrator re-launched through the browser's re-init path gets
+          // its read-only worker mounts re-derived too (like the restart
+          // endpoint and the scheduled auto-resume), so it still sees the
+          // workers' project dirs under /workers/<role>.
+          const roBinds = groupId && groupRole === 'orchestrator'
+            ? await resolveWorkerBindsForSession(groupId, groupRole)
+            : [];
 
           const result = createSession({
             cwd: msg.cwd || homedir(),
@@ -96,6 +104,7 @@ export async function terminalWs(fastify, opts) {
             groupId,
             groupRole,
             mcpSocketPath,
+            roBinds,
           });
 
           if (result.error) {

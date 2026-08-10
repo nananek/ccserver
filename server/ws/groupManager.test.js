@@ -486,6 +486,33 @@ test('resolveWorkerRoBinds maps worker cwds to /workers/<role> for the orchestra
   }
 });
 
+test('resolveWorkerRoBinds drops roles that fail WORKER_ROLE_RE (defense in depth)', async () => {
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });
+  const fake = {
+    getSession: () => ({ cwd: '/srv/proj' }),
+    createSession: () => { throw new Error('unused'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    // A crafted role (path traversal / non-worker) that somehow reached the
+    // registry must never become a /workers/<role> mount destination.
+    groupManager.registerMember(gid, 'workerA', 'sess-a');
+    groupManager.registerMember(gid, '../../etc/passwd', 'sess-x');
+    groupManager.registerMember(gid, 'workerB/..', 'sess-y');
+    groupManager.registerMember(gid, 'boss', 'sess-z');
+    assert.deepEqual(
+      groupManager.resolveWorkerRoBinds(gid, 'orchestrator'),
+      [{ src: '/srv/proj', dest: '/workers/workerA' }],
+    );
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+});
+
 // --- addMember (open_tab) spawn/teardown paths, exercised with a fake
 // session facade (no real ptys): the atomic-replacement invariant -- the old
 // member is only destroyed AFTER the new channel + session exist, and a

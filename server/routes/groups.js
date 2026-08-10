@@ -275,8 +275,10 @@ export async function groupsRoute(fastify, opts) {
     // Both workers are registered by now (addMember calls registerMember
     // internally), so the orchestrator's ro-mounts can be derived from the
     // live registry: each worker's cwd is mounted read-only at /workers/<role>.
-    const roBinds = groupManager.listWorkerCwds(groupId)
-      .map(({ role, cwd }) => ({ src: cwd, dest: `/workers/${role}` }));
+    // resolveWorkerRoBinds re-validates each role against WORKER_ROLE_RE
+    // before it becomes a mount destination (defense in depth -- roles can
+    // also enter the registry through client-controlled re-init paths).
+    const roBinds = groupManager.resolveWorkerRoBinds(groupId, 'orchestrator');
 
     const orchRes = createSession({
       cwd: orchestratorDir,
@@ -361,8 +363,10 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(500).send({ error: 'failed to re-create the control broker' });
     }
 
-    const roBinds = groupManager.listWorkerCwds(group.id)
-      .map(({ role, cwd }) => ({ src: cwd, dest: `/workers/${role}` }));
+    // Re-validate roles via resolveWorkerRoBinds (WORKER_ROLE_RE) -- the same
+    // filter the scheduler path uses, so a crafted role can never become a
+    // /workers/<role> mount destination.
+    const roBinds = groupManager.resolveWorkerRoBinds(group.id, 'orchestrator');
 
     const res = createSession(orchestratorRestartSessionOpts({ group, app, mcpSocketPath, roBinds }));
     if (res.error || !res.session) {
