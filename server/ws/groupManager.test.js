@@ -60,11 +60,11 @@ test('persistGroups writes the member registry; destroyGroup removes the entry',
   assert.deepEqual(entry.members, { workerA: 'sess-a1', orchestrator: 'sess-o' });
   assert.equal(entry.orchestratorApp, 'opencode');
 
-  groupManager.destroyGroup(gid);
   // The orchestratorDir is a per-project resource: destroying the group must
   // not remove it (its CLAUDE.md survives for the next group on the project).
   const orchDir = join(runtimeDir, gid);
   mkdirSync(orchDir, { recursive: true });
+  groupManager.destroyGroup(gid);
   assert.equal(existsSync(orchDir), true, 'orchestratorDir survives destroyGroup');
   // No groups remain, so the persisted file is unlinked entirely (not just
   // pruned) -- the group entry must be gone either way.
