@@ -218,7 +218,13 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     settled: false, // reached the first idle gap (TUI init burst over) -- the send_input settle gate
     settleWaiters: [], // resolvers waiting on `settled` (see waitUntilSettled)
     lastOutputAt: null, // epoch ms of the most recent output chunk; null until the first one (activity timestamp, Issue #16)
-    autoYes: false,
+    // Workers (groupRole in 'workerX' form) always run inside the sandbox, so
+    // start them with Auto-Y enabled. The orchestrator (groupRole ===
+    // 'orchestrator') and standalone sessions (groupRole === null) keep the
+    // historical off default. groupRole is already validated server-side
+    // (WORKER_ROLE_RE in groupManager), so "anything but the fixed
+    // 'orchestrator' string is a worker" is a safe check here.
+    autoYes: !!groupRole && groupRole !== 'orchestrator',
     autoYesLog: [],
     autoYesPending: null,
     autoYesBuf: '',

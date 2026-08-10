@@ -68,6 +68,28 @@ test('savedSessionPublic preserves group membership (restart filter keeps workin
   assert.equal(plain.claudeSessionId, 'conv-123');
 });
 
+// Workers always run inside the sandbox, so their sessions start with Auto-Y
+// enabled; the orchestrator and standalone sessions keep it off.
+test('createSession defaults Auto-Y on for workers, off for orchestrator/standalone', () => {
+  const spawn = (groupRole) => sessionManager.createSession({
+    cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false, groupRole,
+  });
+  const worker = spawn('workerA');
+  const workerB = spawn('workerB');
+  const orch = spawn('orchestrator');
+  const standalone = spawn(null);
+  try {
+    assert.equal(worker.session.autoYes, true, "workerA (a worker) should start with Auto-Y on");
+    assert.equal(workerB.session.autoYes, true, "workerB (a worker) should start with Auto-Y on");
+    assert.equal(orch.session.autoYes, false, "the orchestrator keeps Auto-Y off");
+    assert.equal(standalone.session.autoYes, false, "standalone sessions keep Auto-Y off");
+  } finally {
+    for (const res of [worker, workerB, orch, standalone]) {
+      sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+    }
+  }
+});
+
 // writeToSession is the shared input path for the WS 'input' handler and the
 // MCP send_input tool: it must write into the live pty, reset the idle
 // watchdog, and (with submit) send Enter after the text. Real shell session.
