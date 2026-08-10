@@ -37,6 +37,17 @@ test('orchestratorRestartSessionOpts: resumeLast is independent of the app', () 
   }
 });
 
+test('orchestratorRestartSessionOpts: roBinds passes through (default [])', () => {
+  // Default: no roBinds -> empty array (worker/standalone sessions).
+  const plain = orchestratorRestartSessionOpts({ group: { id: 'g', orchestratorDir: '/d' }, app: 'claude', mcpSocketPath: '/s' });
+  assert.deepEqual(plain.roBinds, []);
+  // Orchestrator restart supplies them; the pure helper just echoes them.
+  const binds = [{ src: '/srv/proj', dest: '/workers/workerA' }];
+  const opts = orchestratorRestartSessionOpts({ group: { id: 'g', orchestratorDir: '/d' }, app: 'claude', mcpSocketPath: '/s', roBinds: binds });
+  assert.deepEqual(opts.roBinds, binds);
+  assert.equal(opts.groupRole, 'orchestrator');
+});
+
 test('orchestratorDirForCwd is deterministic per project path', () => {
   const a = orchestratorDirForCwd('/srv/proj');
   assert.equal(orchestratorDirForCwd('/srv/proj'), a, 'same cwd -> same dir');

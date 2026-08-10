@@ -11,7 +11,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, peekSavedSessions } from './sessionManager.js';
+import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setWorkerBindsResolver, peekSavedSessions } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
 
@@ -163,6 +163,35 @@ export function listGroupMembers(groupId) {
     });
   }
   return out;
+}
+
+// role -> host cwd の一覧 (orchestrator自身は含まない)。listGroupMembers と同じ
+// フォールバック規則 (生きているセッションの cwd -> 無ければ memberSaved の cwd)
+// を使う。cwd が分からないメンバーは省く。
+export function listWorkerCwds(groupId) {
+  const group = groups.get(groupId);
+  if (!group) return [];
+  const out = [];
+  for (const [role, sessionId] of group.members) {
+    if (role === 'orchestrator') continue;
+    const session = sessionApi.getSession(sessionId);
+    const saved = group.memberSaved.get(role);
+    const cwd = session?.cwd ?? saved?.cwd ?? null;
+    if (cwd) out.push({ role, cwd });
+  }
+  return out;
+}
+
+// createSession に渡す { src, dest } 形式に変換したもの。groupRole が
+// 'orchestrator' の時だけ意味がある (ワーカー自身やスタンドアロンセッションには
+// 絶対に渡さない -- ワーカー間で互いのディレクトリが見えてはいけない)。
+// dest に使う role は addMember 時点で既に WORKER_ROLE_RE 検証済みだが、念のため
+// ここでも同じ正規表現で弾く (多層防御)。
+export function resolveWorkerRoBinds(groupId, groupRole) {
+  if (groupRole !== 'orchestrator') return [];
+  return listWorkerCwds(groupId)
+    .filter(({ role }) => WORKER_ROLE_RE.test(role))
+    .map(({ role, cwd }) => ({ src: cwd, dest: `/workers/${role}` }));
 }
 
 // Compact public listing for GET /api/groups (client "groups" section).
@@ -656,3 +685,4 @@ export function setSessionApiForTests(api) {
 setSessionExitListener(onSessionExit);
 setSessionCreateListener(onSessionCreate);
 setMcpSocketResolver(resolveGroupMcpSocket);
+setWorkerBindsResolver(resolveWorkerRoBinds);

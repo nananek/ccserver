@@ -357,7 +357,7 @@ export function sandboxAvailable() {
 
 // Build the bwrap arguments (everything after the `bwrap` executable, up to
 // but not including the trailing `-- <cmd...>`).
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, roBinds = [] }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -399,6 +399,16 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 
   // The project directory (read-write).
   args.push('--bind', cwd, cwd);
+
+  // Orchestrator-only: mount each worker's project directory read-only at a
+  // fixed path (/workers/<role>). roBinds is only ever filled by
+  // groupManager.resolveWorkerRoBinds when groupRole === 'orchestrator' --
+  // worker and standalone sessions always pass []. The -try variants keep the
+  // launch from failing when a host path is temporarily missing (created right
+  // after a mkdir, deleted since), matching the authSock/gpg socket flow.
+  for (const { src, dest } of roBinds) {
+    if (src && dest) args.push('--ro-bind-try', src, dest);
+  }
 
   // Combo sessions (worker / orchestrator) get the group's MCP socket bound at
   // a fixed in-sandbox path, plus the byte-pipe wrapper that relays
@@ -648,7 +658,11 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 //   mcpSocketPath - host path of the group's control/handoff MCP socket to
 //                 bind into the sandbox at a fixed path (combo sessions
 //                 only). null for regular sessions.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null }) {
+//   roBinds       - [{ src, dest }] host dirs to mount read-only at fixed
+//                 in-sandbox paths (orchestrator-only: the workers' project
+//                 dirs at /workers/<role>). [] for worker/standalone
+//                 sessions.
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, roBinds = [] }) {
   const { docker: cfgDocker, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -688,7 +702,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, roBinds });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   const gitBrokerFields = {

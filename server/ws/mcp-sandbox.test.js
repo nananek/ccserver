@@ -79,3 +79,55 @@ test('buildSandboxSpawn without mcpSocketPath adds no MCP bindings', () => {
     else process.env.CCSERVER_SANDBOX_CONFIG = prev;
   }
 });
+
+test('buildSandboxSpawn mounts roBinds read-only at /workers/<role>', () => {
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const srcA = join(tmpRoot, 'proj-a');
+    const srcB = join(tmpRoot, 'proj-b');
+    const spawn = buildSandboxSpawn({
+      cwd: tmpRoot,
+      targetCommand: ['claude'],
+      app: 'claude',
+      sandboxOpts: null,
+      roBinds: [
+        { src: srcA, dest: '/workers/workerA' },
+        { src: srcB, dest: '/workers/workerB' },
+      ],
+    });
+    const args = spawn.args;
+    const idxA = args.indexOf('/workers/workerA');
+    const idxB = args.indexOf('/workers/workerB');
+    assert.ok(idxA > 0, '/workers/workerA destination present');
+    assert.equal(args[idxA - 2], '--ro-bind-try');
+    assert.equal(args[idxA - 1], srcA);
+    assert.ok(idxB > 0, '/workers/workerB destination present');
+    assert.equal(args[idxB - 2], '--ro-bind-try');
+    assert.equal(args[idxB - 1], srcB);
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+  }
+});
+
+test('buildSandboxSpawn with no/empty roBinds adds no worker mounts', () => {
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    for (const roBinds of [undefined, []]) {
+      const spawn = buildSandboxSpawn({
+        cwd: tmpRoot,
+        targetCommand: ['claude'],
+        app: 'claude',
+        sandboxOpts: null,
+        ...(roBinds === undefined ? {} : { roBinds }),
+      });
+      assert.ok(!spawn.args.includes('--ro-bind-try'), 'no ro worker mounts when roBinds is empty/absent');
+      assert.ok(!spawn.args.some((a) => typeof a === 'string' && a.startsWith('/workers/')), 'no /workers/* destination');
+    }
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+  }
+});

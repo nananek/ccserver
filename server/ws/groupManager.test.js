@@ -400,6 +400,92 @@ test('listGroupMembers: live sessions report lastOutputAt/idleForMs; session-les
   }
 });
 
+// listWorkerCwds / resolveWorkerRoBinds (orchestrator ro-mount of worker cwds):
+// - workers only -- the orchestrator itself is never listed
+// - a member whose cwd is unknown (no live session, no saved info) is skipped
+// - fallback to memberSaved.cwd when the live session is gone
+// - resolveWorkerRoBinds only produces binds for groupRole === 'orchestrator'
+//   (a worker never sees its siblings' dirs), and /workers/<role> is the dest
+
+test('listWorkerCwds returns worker cwds only (orchestrator excluded, unknown cwd skipped)', async () => {
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });
+  const fake = {
+    getSession: (id) => (id === 'sess-a' ? { cwd: '/srv/proj' } : null), // sess-b unknown; sess-o unknown
+    createSession: () => { throw new Error('unused'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(gid, 'workerA', 'sess-a');
+    groupManager.registerMember(gid, 'workerB', 'sess-b');
+    groupManager.registerMember(gid, 'orchestrator', 'sess-o');
+    const cwds = groupManager.listWorkerCwds(gid);
+    assert.deepEqual(cwds, [{ role: 'workerA', cwd: '/srv/proj' }]);
+    assert.equal(groupManager.listWorkerCwds('no-such-group').length, 0);
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('listWorkerCwds falls back to the saved member cwd when the live session is gone', async () => {
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });
+  const fake = {
+    getSession: () => null, // no live sessions at all
+    createSession: () => { throw new Error('unused'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(gid, 'workerA', 'dead-sess-a');
+    groupManager.registerMember(gid, 'workerB', 'dead-sess-b');
+    groupManager.registerMember(gid, 'orchestrator', 'dead-sess-o');
+    groupManager.getGroup(gid).memberSaved.set('workerB', { cwd: '/srv/proj' });
+    const cwds = groupManager.listWorkerCwds(gid);
+    assert.deepEqual(cwds, [{ role: 'workerB', cwd: '/srv/proj' }]);
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('resolveWorkerRoBinds maps worker cwds to /workers/<role> for the orchestrator only', async () => {
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });
+  const fake = {
+    getSession: (id) => (id === 'sess-a' ? { cwd: '/srv/proj' } : (id === 'sess-b' ? { cwd: '/srv/proj' } : null)),
+    createSession: () => { throw new Error('unused'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(gid, 'workerA', 'sess-a');
+    groupManager.registerMember(gid, 'workerB', 'sess-b');
+    groupManager.registerMember(gid, 'orchestrator', 'sess-o');
+    assert.deepEqual(
+      groupManager.resolveWorkerRoBinds(gid, 'orchestrator'),
+      [
+        { src: '/srv/proj', dest: '/workers/workerA' },
+        { src: '/srv/proj', dest: '/workers/workerB' },
+      ],
+    );
+    // Non-orchestrator roles never get worker binds -- workers must not see
+    // each other's directories.
+    assert.deepEqual(groupManager.resolveWorkerRoBinds(gid, 'workerA'), []);
+    assert.deepEqual(groupManager.resolveWorkerRoBinds(gid, 'workerB'), []);
+    assert.deepEqual(groupManager.resolveWorkerRoBinds(gid, null), []);
+    assert.deepEqual(groupManager.resolveWorkerRoBinds('no-such-group', 'orchestrator'), []);
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+});
+
 // --- addMember (open_tab) spawn/teardown paths, exercised with a fake
 // session facade (no real ptys): the atomic-replacement invariant -- the old
 // member is only destroyed AFTER the new channel + session exist, and a
