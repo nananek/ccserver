@@ -1,11 +1,9 @@
-import { listSessions, loadSavedSessions, getSession, destroySession, removeSavedSession } from '../ws/sessionManager.js';
+import { listSessions, getSession, destroySession } from '../ws/sessionManager.js';
 
 export async function sessionsRoute(fastify, opts) {
   fastify.get('/sessions', async (request, reply) => {
     const activeSessions = listSessions();
-    const activeCwds = new Set(activeSessions.map((s) => s.cwd));
-    const savedSessions = loadSavedSessions().filter((s) => !activeCwds.has(s.cwd));
-    return { sessions: activeSessions, savedSessions };
+    return { sessions: activeSessions };
   });
 
   fastify.delete('/sessions/:id', async (request, reply) => {
@@ -31,12 +29,4 @@ export async function sessionsRoute(fastify, opts) {
       return { raw: raw.slice(-5000), stripped: stripAnsi(raw).slice(-5000) };
     });
   }
-
-  fastify.delete('/sessions/saved/:index', async (request, reply) => {
-    const index = parseInt(request.params.index, 10);
-    if (isNaN(index) || !removeSavedSession(index)) {
-      return reply.code(404).send({ error: 'Saved session not found' });
-    }
-    return { success: true };
-  });
 }

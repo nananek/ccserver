@@ -46,7 +46,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [sessions, setSessions] = useState([]);
-  const [savedSessions, setSavedSessions] = useState([]);
   const [groups, setGroups] = useState([]);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -179,9 +178,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         // click attach the same sessionId from a second tab, detaching the
         // live one inside the group (attachSocket replaces the old socket).
         setSessions((data.sessions || []).filter((s) => s.groupId == null));
-        if (data.savedSessions) {
-          setSavedSessions((data.savedSessions || []).filter((s) => s.groupId == null));
-        }
       }
     } catch {
       // ignore — sessions panel is supplementary
@@ -209,42 +205,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     onSessionClick(session);
   }, [onSessionClick]);
 
-  const handleSavedSessionClick = useCallback((saved) => {
-    const app = saved.app === 'opencode' ? 'opencode' : 'claude';
-    // Preserve the session's original sandbox setting; fall back to the current
-    // default only for legacy saved entries that predate the persisted flag.
-    const sandbox = saved.sandbox ?? sandboxDefault;
-    const opts = saved.sandboxOpts ?? loadSandboxOpts(saved.cwd);
-    if (app === 'opencode') {
-      // opencode sessions resume the last session of the project via -c.
-      onOpen(saved.cwd, { sandbox, sandboxOpts: opts, app, resume: true });
-      return;
-    }
-    const claudeResumeKey = `ccserver-resume:claude:${saved.cwd}`;
-    if (saved.claudeSessionId) {
-      localStorage.setItem(claudeResumeKey, saved.claudeSessionId);
-    }
-    onOpen(saved.cwd, { sandbox, sandboxOpts: opts, app: 'claude' });
-  }, [onOpen, sandboxDefault]);
-
   const handleDeleteSession = useCallback(async (session) => {
     if (!window.confirm(`セッションを終了しますか?\n${session.cwd}`)) return;
     try {
       const res = await authFetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-    } catch (err) {
-      setError(err.message);
-    }
-    fetchSessions();
-  }, [fetchSessions]);
-
-  const handleDeleteSavedSession = useCallback(async (index) => {
-    if (!window.confirm('保存済みセッションを削除しますか?')) return;
-    try {
-      const res = await authFetch(`/api/sessions/saved/${index}`, { method: 'DELETE' });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${res.status}`);
@@ -633,7 +597,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         </div>
       )}
 
-      {(sessions.length > 0 || savedSessions.length > 0 || groups.length > 0) && (
+      {(sessions.length > 0 || groups.length > 0) && (
         <div className="session-list">
           <div className="session-list-header">Active Sessions</div>
           {sessions.map((session) => (
@@ -665,36 +629,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 className="btn btn-secondary session-delete-btn"
                 onClick={(e) => { e.stopPropagation(); handleDeleteSession(session); }}
                 title="Terminate session"
-              >
-                &#10005;
-              </button>
-            </div>
-          ))}
-          {savedSessions.map((saved, i) => (
-            <div
-              key={`saved-${i}`}
-              className="session-item"
-              onClick={() => handleSavedSessionClick(saved)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleSavedSessionClick(saved);
-              }}
-            >
-              <span className="session-icon">{'\u21BB'}</span>
-              <span className="session-cwd">{saved.cwd}</span>
-              {saved.sandbox ? (
-                <span className="session-badge sandbox" title="保存時の起動設定: サンドボックス">sandbox</span>
-              ) : (
-                <span className="session-badge no-sandbox" title="保存時の起動設定: サンドボックス外">no sandbox</span>
-              )}
-              <span className="session-status resumable">
-                {saved.app === 'opencode' ? 'opencode' : 'claude'} · resumable
-              </span>
-              <button
-                className="btn btn-secondary session-delete-btn"
-                onClick={(e) => { e.stopPropagation(); handleDeleteSavedSession(i); }}
-                title="Remove saved session"
               >
                 &#10005;
               </button>
