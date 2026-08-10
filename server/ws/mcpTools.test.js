@@ -75,6 +75,10 @@ test('listGroupSessions reports registered members with roles', async () => {
   assert.equal(byRole.workerB.sessionId, 'sess-b');
   assert.equal(byRole.orchestrator.sessionId, 'sess-o');
   assert.equal(members.length, 3);
+  // No live sessions behind these member ids (getSession returns null) ->
+  // autoYes is null, like connected/lastOutputAt.
+  assert.equal(byRole.workerA.autoYes, null);
+  assert.equal(byRole.orchestrator.autoYes, null);
 });
 
 test('isSessionInGroup: only registered members pass', async () => {
@@ -338,7 +342,7 @@ test('getTabStatus: reports lastOutputAt and the derived idleForMs', async () =>
   const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
   const lastOutputAt = Date.now() - 5000;
-  const fakeSession = { cwd: '/srv/proj', app: 'claude', exited: false, socket: {}, lastOutputAt };
+  const fakeSession = { cwd: '/srv/proj', app: 'claude', exited: false, socket: {}, lastOutputAt, autoYes: true };
   const deps = {
     groupId: g,
     groupManager,
@@ -347,13 +351,14 @@ test('getTabStatus: reports lastOutputAt and the derived idleForMs', async () =>
   const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
   assert.equal(r.error, undefined);
   assert.equal(r.lastOutputAt, lastOutputAt);
+  assert.equal(r.autoYes, true, 'autoYes reflects the live session state');
   assert.ok(r.idleForMs >= 5000 && r.idleForMs <= 6000, `idleForMs must be the time since the last output (got ${r.idleForMs})`);
 });
 
 test('getTabStatus: no output yet (lastOutputAt null) yields idleForMs null', async () => {
   const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
-  const fakeSession = { cwd: '/srv/proj', app: 'claude', exited: false, lastOutputAt: null };
+  const fakeSession = { cwd: '/srv/proj', app: 'claude', exited: false, lastOutputAt: null, autoYes: false };
   const deps = {
     groupId: g,
     groupManager,
@@ -362,6 +367,32 @@ test('getTabStatus: no output yet (lastOutputAt null) yields idleForMs null', as
   const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
   assert.equal(r.lastOutputAt, null);
   assert.equal(r.idleForMs, null);
+  assert.equal(r.autoYes, false);
+});
+
+test('listGroupSessions: autoYes reflects each live session state', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  groupManager.registerMember(g, 'workerB', 'sess-b1');
+  const fake = {
+    getSession: (id) => (id === 'sess-a1'
+      ? { app: 'claude', cwd: '/srv/proj', exited: false, autoYes: true }
+      : id === 'sess-b1'
+        ? { app: 'opencode', cwd: '/srv/proj', exited: false, autoYes: false }
+        : null),
+    createSession: () => { throw new Error('unused'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    const { members } = tools.listGroupSessions(controlDeps(g));
+    const byRole = Object.fromEntries(members.map((m) => [m.role, m]));
+    assert.equal(byRole.workerA.autoYes, true);
+    assert.equal(byRole.workerB.autoYes, false);
+  } finally {
+    groupManager.setSessionApiForTests(null);
+  }
 });
 
 test('waitForHandoff: empty queue times out with a tiny timedOut result (not an error)', async () => {

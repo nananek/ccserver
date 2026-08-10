@@ -8,8 +8,8 @@
 // here, by this process, never declared by clients.
 
 import { EventEmitter } from 'node:events';
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
-import { dirname, join, basename } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync, rmSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, peekSavedSessions } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
@@ -55,8 +55,9 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     // App the orchestrator was launched with; used by the orchestrator
     // restart endpoint (POST /api/groups/:id/orchestrator).
     orchestratorApp,
-    // Starting text for the orchestrator's CLAUDE.md/AGENTS.md, re-written on
-    // restore so a restarted server can bring the orchestrator dir back.
+    // Starting text for the orchestrator's CLAUDE.md/AGENTS.md; written at
+    // create time and (re)created at restore only when the files are missing,
+    // so the orchestrator's own edits survive server restarts.
     instructions,
     // Per-launch sandbox flags (gpg/sshAgent) the group's workers launched
     // with; open_tab workers inherit them unless the tool overrides.
@@ -148,6 +149,9 @@ export function listGroupMembers(groupId) {
       // is no live session to timestamp, e.g. a restored member).
       lastOutputAt: session?.lastOutputAt ?? null,
       idleForMs: session?.lastOutputAt != null ? Date.now() - session.lastOutputAt : null,
+      // Auto-Y (automatic permission-approval) state of the live session;
+      // null when there is no live session (e.g. a restored member).
+      autoYes: session?.autoYes ?? null,
       // Resume info: a live-but-exited session carries its extracted
       // conversation id; a restored member carries the saved one.
       claudeSessionId: session?.claudeSessionId ?? saved?.claudeSessionId ?? null,
@@ -264,7 +268,10 @@ export function restoreGroups() {
       try {
         mkdirSync(group.orchestratorDir, { recursive: true, mode: 0o700 });
       } catch { /* nothing to do */ }
-      if (group.instructions) {
+      // Only (re)create the instruction files when they're missing -- the
+      // orchestrator may have edited CLAUDE.md/AGENTS.md since launch, and a
+      // restart must not clobber those edits with the persisted originals.
+      if (group.instructions && !existsSync(join(group.orchestratorDir, 'CLAUDE.md'))) {
         try {
           writeFileSync(join(group.orchestratorDir, 'CLAUDE.md'), group.instructions);
           writeFileSync(join(group.orchestratorDir, 'AGENTS.md'), group.instructions);
@@ -529,10 +536,10 @@ export function onOrchestratorExit(groupId) {
 }
 
 // Destroy the whole group: all member sessions + all brokers, then remove the
-// persisted entry. The orchestratorDir is removed with it -- a destroyed
-// group can never be resumed (its schedules were cancelled with its member
-// sessions), so leaving the dir behind would only litter disk. Guarded by the
-// basename==groupId check so a malformed/foreign path is never deleted.
+// persisted entry. The orchestratorDir is intentionally left in place -- it is
+// a per-project resource (see routes/groups.js) whose CLAUDE.md/AGENTS.md hold
+// the orchestrator's accumulated knowledge, to be reused by the next group
+// launched for the same project.
 export function destroyGroup(groupId) {
   const group = groups.get(groupId);
   if (!group) return;
@@ -559,13 +566,6 @@ export function destroyGroup(groupId) {
   group.handoffQueue = [];
   group.handoffEmitter.removeAllListeners();
   groups.delete(groupId);
-  if (group.orchestratorDir && basename(group.orchestratorDir) === group.id) {
-    try {
-      rmSync(group.orchestratorDir, { recursive: true, force: true });
-    } catch {
-      // best effort
-    }
-  }
   persistGroups();
 }
 

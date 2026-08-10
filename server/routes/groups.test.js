@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { orchestratorRestartSessionOpts } from './groups.js';
+import { orchestratorRestartSessionOpts, orchestratorDirForCwd, groupExistsForCwd } from './groups.js';
 
 test('orchestratorRestartSessionOpts: restart continues the last conversation', () => {
   const opts = orchestratorRestartSessionOpts({
@@ -35,4 +35,21 @@ test('orchestratorRestartSessionOpts: resumeLast is independent of the app', () 
     assert.equal(opts.resumeLast, true, `resumeLast must be set for ${app}`);
     assert.equal(opts.app, app);
   }
+});
+
+test('orchestratorDirForCwd is deterministic per project path', () => {
+  const a = orchestratorDirForCwd('/srv/proj');
+  assert.equal(orchestratorDirForCwd('/srv/proj'), a, 'same cwd -> same dir');
+  assert.equal(orchestratorDirForCwd('/srv/proj/'), a, 'trailing slash normalizes to the same dir');
+  assert.notEqual(orchestratorDirForCwd('/srv/other'), a, 'different cwd -> different dir');
+});
+
+test('groupExistsForCwd matches an existing group for the same project', () => {
+  const groups = [
+    { groupId: 'g1', cwd: '/srv/proj', liveCount: 2 },
+    { groupId: 'g2', cwd: '/srv/other', liveCount: 0 },
+  ];
+  assert.equal(groupExistsForCwd('/srv/proj', groups).groupId, 'g1');
+  assert.equal(groupExistsForCwd('/srv/proj/', groups).groupId, 'g1', 'cwd spelling variants match');
+  assert.equal(groupExistsForCwd('/srv/nowhere', groups), null);
 });

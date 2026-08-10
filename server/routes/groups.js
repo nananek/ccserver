@@ -8,10 +8,15 @@
 // only CLAUDE.md/AGENTS.md, in a mandatory sandbox, with zero visibility of
 // the project tree. Its only reach into the workers is the control MCP server
 // socket (see mcpBroker.js / mcpTools.js).
+//
+// orchestratorDir is deterministic per project (hashed from the resolved cwd),
+// so the orchestrator's CLAUDE.md/AGENTS.md edits survive group launches and
+// server restarts for the same project. Concurrent groups for one cwd are
+// refused at creation time, so at most one live group ever owns a dir at once.
 
-import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync, statSync, rmSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { randomUUID, createHash } from 'node:crypto';
+import { mkdirSync, writeFileSync, statSync, rmSync, existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
 import { createSession, getSession } from '../ws/sessionManager.js';
@@ -19,6 +24,26 @@ import { sandboxAvailable } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
 
 const ORCHESTRATOR_ROOT = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'orchestrator');
+
+// The orchestrator dir is derived deterministically from the project path
+// (not the random groupId), so the orchestrator's CLAUDE.md/AGENTS.md edits
+// survive the group being destroyed and a new group launching for the same
+// project. resolve() normalizes spelling variants (trailing slash, "..", ...)
+// so they all map to the same dir. 24 hex chars (96 bits) of the sha256 is
+// plenty of collision headroom for a handful of projects.
+export function orchestratorDirForCwd(cwd) {
+  const hash = createHash('sha256').update(resolve(cwd)).digest('hex').slice(0, 24);
+  return join(ORCHESTRATOR_ROOT, hash);
+}
+
+// Pure duplicate-project detection for POST /groups: two groups for the same
+// project would share one orchestratorDir, cross-talking through resumeLast
+// and fighting over CLAUDE.md. `groups` is a listGroups() listing; resolve()
+// keeps cwd spelling variants from slipping past the check. Exposed for tests.
+export function groupExistsForCwd(cwd, groups) {
+  const target = resolve(cwd);
+  return groups.find((g) => resolve(g.cwd) === target) || null;
+}
 
 // A starting text for the orchestrator's CLAUDE.md/AGENTS.md -- nothing more.
 // ccserver holds NO opinion on workflows: this is a scratch template the user
@@ -119,34 +144,12 @@ function appFromBody(spec, fallback) {
   return fallback;
 }
 
-// Orchestrator dirs that are not part of a restored group are leftovers from
-// a crash (dir created, group never persisted / group destroyed mid-write).
-// Called once at startup with the ids restoreGroups() returned.
-export function cleanupOrphanedOrchestrators(keepIds) {
-  const keep = new Set(keepIds || []);
-  let names;
-  try {
-    names = readdirSync(ORCHESTRATOR_ROOT);
-  } catch {
-    return; // root doesn't exist yet -- nothing to clean
-  }
-  for (const name of names) {
-    if (keep.has(name)) continue;
-    const dir = join(ORCHESTRATOR_ROOT, name);
-    try {
-      if (statSync(dir).isDirectory()) {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    } catch {
-      // best effort
-    }
-  }
-}
-
 // Session options for the orchestrator-restart route. Extracted (and pure)
 // so the resume policy is unit-testable: the restart always continues the
 // group's most recent orchestrator conversation (orchestratorDir is exclusive
-// to the group, so `resumeLast` maps 1:1 onto "the previous conversation").
+// to the project (cwd); concurrent groups for the same project are refused at
+// creation time, so at most one live group ever owns it at a time --
+// `resumeLast` maps 1:1 onto "the previous conversation").
 export function orchestratorRestartSessionOpts({ group, app, mcpSocketPath }) {
   return {
     cwd: group.orchestratorDir,
@@ -170,6 +173,17 @@ export async function groupsRoute(fastify, opts) {
     if (!validCwd(cwd)) {
       return reply.code(400).send({ error: 'cwd must be an existing directory (not /)' });
     }
+    // The orchestrator dir is derived from cwd, so a second group for the same
+    // project would share it (cross-talk through resumeLast, CLAUDE.md fights).
+    // Refuse up front -- live or closed -- and point at the existing group.
+    const existingGroup = groupExistsForCwd(cwd, groupManager.listGroups());
+    if (existingGroup) {
+      return reply.code(409).send({
+        error: existingGroup.liveCount > 0
+          ? `a group is already running for this project (${existingGroup.groupId}); use it instead of creating a new one`
+          : `a group already exists for this project (${existingGroup.groupId}, currently closed); reopen it instead of creating a new one`,
+      });
+    }
     if (!sandboxAvailable()) {
       return reply.code(400).send({ error: 'combo launch requires the sandbox (bwrap not found on this host)' });
     }
@@ -185,35 +199,43 @@ export async function groupsRoute(fastify, opts) {
       : null;
 
     const groupId = randomUUID();
-    const orchestratorDir = join(ORCHESTRATOR_ROOT, groupId);
+    const orchestratorDir = orchestratorDirForCwd(cwd);
+    // Only a dir this request created is cleaned up on failure or overwritten
+    // with the default template: a reused dir holds the project's accumulated
+    // orchestrator notes and must survive a failed launch.
+    const dirAlreadyExisted = existsSync(orchestratorDir);
     try {
       mkdirSync(orchestratorDir, { recursive: true, mode: 0o700 });
     } catch (err) {
       return reply.code(500).send({ error: `Failed to create orchestrator dir: ${err.message}` });
     }
 
-    const instructions = (body.orchestrator && typeof body.orchestrator.instructions === 'string'
+    const explicitInstructions = (body.orchestrator && typeof body.orchestrator.instructions === 'string'
       && body.orchestrator.instructions.trim())
       ? body.orchestrator.instructions
-      : DEFAULT_ORCHESTRATOR_TEMPLATE;
+      : null;
+    // Reusing an existing dir: keep whatever the orchestrator wrote there
+    // (CLAUDE.md/AGENTS.md) unless the user explicitly supplied instructions
+    // for this launch. A fresh dir gets the default template.
+    const instructions = explicitInstructions || (dirAlreadyExisted ? null : DEFAULT_ORCHESTRATOR_TEMPLATE);
     // Both files: opencode prefers AGENTS.md and falls back to CLAUDE.md;
     // claude reads CLAUDE.md. Same content either way.
-    try {
-      writeFileSync(join(orchestratorDir, 'CLAUDE.md'), instructions);
-      writeFileSync(join(orchestratorDir, 'AGENTS.md'), instructions);
-    } catch (err) {
-      try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ }
-      return reply.code(500).send({ error: `Failed to write orchestrator instructions: ${err.message}` });
+    if (instructions) {
+      try {
+        writeFileSync(join(orchestratorDir, 'CLAUDE.md'), instructions);
+        writeFileSync(join(orchestratorDir, 'AGENTS.md'), instructions);
+      } catch (err) {
+        if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+        return reply.code(500).send({ error: `Failed to write orchestrator instructions: ${err.message}` });
+      }
     }
 
     // Broker start failures (socket path collision, permission errors, ...)
-    // must surface as a launch error, not a silent "success". The freshly
-    // created orchestratorDir (CLAUDE.md/AGENTS.md) is removed so failed
-    // launches don't litter disk.
+    // must surface as a launch error, not a silent "success".
     try {
       await groupManager.createGroup({ groupId, cwd, orchestratorDir, sandboxOpts, orchestratorApp: orchApp, instructions });
     } catch (err) {
-      try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       return reply.code(500).send({ error: `Failed to start control broker: ${err.message}` });
     }
     const controlBroker = groupManager.getGroup(groupId).controlBroker;
@@ -221,7 +243,7 @@ export async function groupsRoute(fastify, opts) {
     // Roll back cleanly if any of the three spawns fails.
     const fail = (message) => {
       groupManager.destroyGroup(groupId);
-      try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       return reply.code(400).send({ error: message });
     };
 

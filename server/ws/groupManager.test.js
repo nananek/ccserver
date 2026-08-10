@@ -5,8 +5,9 @@
 //   - destroyGroup settles pending takeHandoff waiters instead of leaving
 //     them attached to the (now removed) emitter
 //   - addMember refuses to grow a full group (member cap) before any spawn
-//   - destroyGroup removes the orchestratorDir -- but only when its basename
-//     equals the groupId (a malformed/foreign path is never deleted)
+//   - destroyGroup leaves the orchestratorDir in place (it is a per-project
+//     resource reused across group launches for the same project)
+//   - restoreGroups does not overwrite an orchestrator's edited CLAUDE.md
 //
 // Real control brokers listen on UDS during createGroup (same as
 // mcpBroker.test.js); no agent CLIs, no bwrap, no browser needed.
@@ -60,8 +61,11 @@ test('persistGroups writes the member registry; destroyGroup removes the entry',
   assert.equal(entry.orchestratorApp, 'opencode');
 
   groupManager.destroyGroup(gid);
-  // orchestratorDir basename == groupId here, so it is removed with the group.
-  assert.equal(existsSync(join(runtimeDir, gid)), false);
+  // The orchestratorDir is a per-project resource: destroying the group must
+  // not remove it (its CLAUDE.md survives for the next group on the project).
+  const orchDir = join(runtimeDir, gid);
+  mkdirSync(orchDir, { recursive: true });
+  assert.equal(existsSync(orchDir), true, 'orchestratorDir survives destroyGroup');
   // No groups remain, so the persisted file is unlinked entirely (not just
   // pruned) -- the group entry must be gone either way.
   let after = [];
@@ -113,6 +117,35 @@ test('restoreGroups rebuilds a group from the persisted file (restart survival)'
   assert.equal(workerA.restored, false);
 
   groupManager.destroyGroup(gid);
+});
+
+test('restoreGroups does not overwrite an edited CLAUDE.md on restart', async () => {
+  const gid = randomUUID();
+  const orchDir = join(runtimeDir, `orch-edit-${gid}`);
+  mkdirSync(orchDir, { recursive: true });
+  writeFileSync(join(orchDir, 'CLAUDE.md'), '# Orchestrator edited this');
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([{
+    id: gid,
+    createdAt: 1,
+    cwd: '/srv/proj',
+    allowedCwds: ['/srv/proj'],
+    orchestratorDir: orchDir,
+    orchestratorApp: 'claude',
+    instructions: '# Orchestrator instructions',
+    sandboxOpts: null,
+    members: { workerA: 'dead-sess-a', orchestrator: 'dead-sess-o' },
+  }]));
+
+  const info = groupManager.restoreGroups();
+  assert.equal(info.restored, 1);
+  assert.equal(
+    readFileSync(join(orchDir, 'CLAUDE.md'), 'utf-8'),
+    '# Orchestrator edited this',
+    'an orchestrator\u2019s edits must survive a server restart',
+  );
+  // CLAUDE.md exists, so the block skips AGENTS.md too -- it is not recreated.
+  assert.equal(existsSync(join(orchDir, 'AGENTS.md')), false, 'AGENTS.md is left untouched when CLAUDE.md exists');
+  groupsToDestroy.push(gid);
 });
 
 test('a newer takeHandoff supersedes a still-pending one (no zombie listener)', async () => {
@@ -226,13 +259,13 @@ test('addMember refuses to grow a full group (member cap)', async () => {
   groupManager.destroyGroup(gid);
 });
 
-test('destroyGroup only removes an orchestratorDir whose basename equals the groupId', async () => {
+test('destroyGroup never removes the orchestratorDir (per-project resource)', async () => {
   const gid = randomUUID();
-  const fakeDir = join(runtimeDir, 'unrelated-dir');
-  mkdirSync(fakeDir, { recursive: true });
-  await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: fakeDir });
+  const dir = join(runtimeDir, `project-dir-${gid}`);
+  mkdirSync(dir, { recursive: true });
+  await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: dir });
   groupManager.destroyGroup(gid);
-  assert.equal(existsSync(fakeDir), true, 'foreign path must never be deleted');
+  assert.equal(existsSync(dir), true, 'orchestratorDir must survive the group being destroyed');
 });
 
 test('listGroups reports membership and live-ness', async () => {
@@ -316,6 +349,7 @@ test('restoreGroups matches member resume info from .saved-sessions.json (restor
   // Restored members have no live pty, hence no activity timestamp (Issue #16).
   assert.equal(workerA.lastOutputAt, null);
   assert.equal(workerA.idleForMs, null);
+  assert.equal(workerA.autoYes, null, 'restored member has no live session -> autoYes null');
   assert.equal(orch.lastOutputAt, null);
   assert.equal(orch.idleForMs, null);
 });
@@ -327,7 +361,7 @@ test('listGroupMembers: live sessions report lastOutputAt/idleForMs; session-les
   const gid = await makeGroup();
   const lastOutputAt = Date.now() - 3000;
   const fake = {
-    getSession: (id) => (id === 'live-sess' ? { exited: false, socket: null, lastOutputAt } : null),
+    getSession: (id) => (id === 'live-sess' ? { exited: false, socket: null, lastOutputAt, autoYes: true } : null),
     createSession: () => { throw new Error('unused'); },
     destroySession: () => {},
     writeToSession: () => false,
@@ -341,8 +375,10 @@ test('listGroupMembers: live sessions report lastOutputAt/idleForMs; session-les
     const orch = members.find((m) => m.role === 'orchestrator');
     assert.equal(workerA.lastOutputAt, lastOutputAt);
     assert.ok(workerA.idleForMs >= 3000 && workerA.idleForMs <= 4000, `idleForMs must be the time since the last output (got ${workerA.idleForMs})`);
+    assert.equal(workerA.autoYes, true, 'live session carries its autoYes state');
     assert.equal(orch.lastOutputAt, null, 'no live session -> no timestamp');
     assert.equal(orch.idleForMs, null);
+    assert.equal(orch.autoYes, null, 'no live session -> autoYes null');
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(gid);

@@ -9,7 +9,7 @@ import { sessionsRoute } from './routes/sessions.js';
 import { filesRoute } from './routes/files.js';
 import { systemRoute } from './routes/system.js';
 import { usageRoute } from './routes/usage.js';
-import { groupsRoute, cleanupOrphanedOrchestrators } from './routes/groups.js';
+import { groupsRoute } from './routes/groups.js';
 import { terminalWs } from './ws/terminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups } from './ws/groupManager.js';
@@ -78,7 +78,6 @@ try {
   if (groupInfo?.restored) {
     fastify.log.info(`Restored ${groupInfo.restored} combo group(s)`);
   }
-  cleanupOrphanedOrchestrators(groupInfo?.ids);
 } catch (err) {
   fastify.log.error({ err }, 'Failed to restore combo groups');
 }
