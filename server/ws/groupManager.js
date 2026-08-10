@@ -8,7 +8,7 @@
 // here, by this process, never declared by clients.
 
 import { EventEmitter } from 'node:events';
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, peekSavedSessions } from './sessionManager.js';
