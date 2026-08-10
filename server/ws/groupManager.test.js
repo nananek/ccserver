@@ -8,6 +8,8 @@
 //   - destroyGroup leaves the orchestratorDir in place (it is a per-project
 //     resource reused across group launches for the same project)
 //   - restoreGroups does not overwrite an orchestrator's edited CLAUDE.md
+//   - groupExistsForCwd (routes/groups.js) matches a real registered group,
+//     i.e. POST /groups's 409 duplicate-project check sees the live listing
 //
 // Real control brokers listen on UDS during createGroup (same as
 // mcpBroker.test.js); no agent CLIs, no bwrap, no browser needed.
@@ -146,6 +148,19 @@ test('restoreGroups does not overwrite an edited CLAUDE.md on restart', async ()
   // CLAUDE.md exists, so the block skips AGENTS.md too -- it is not recreated.
   assert.equal(existsSync(join(orchDir, 'AGENTS.md')), false, 'AGENTS.md is left untouched when CLAUDE.md exists');
   groupsToDestroy.push(gid);
+});
+
+test('groupExistsForCwd matches a real registered group (POST /groups 409 detection)', async () => {
+  const { groupExistsForCwd } = await import('../routes/groups.js');
+  // Unique cwd: only this test's group can match it (other tests leave
+  // '/srv/proj' groups in the registry until the after() cleanup).
+  const cwd = `/srv/proj-${randomUUID()}`;
+  const gid = await makeGroup(cwd);
+  const listing = groupManager.listGroups();
+  const hit = groupExistsForCwd(`${cwd}/`, listing);
+  assert.ok(hit, 'the live listGroups() listing must be matched');
+  assert.equal(hit.groupId, gid);
+  assert.equal(groupExistsForCwd('/srv/other', listing), null, 'a different project must not match');
 });
 
 test('a newer takeHandoff supersedes a still-pending one (no zombie listener)', async () => {
