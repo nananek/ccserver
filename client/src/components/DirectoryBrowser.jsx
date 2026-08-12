@@ -100,9 +100,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   }, [forceSandbox]);
 
   const chooseApp = useCallback((val) => {
+    if (availableApps && !availableApps[val]) return; // server lacks this CLI
     setAppDefault(val);
     localStorage.setItem(APP_KEY, val);
-  }, []);
+  }, [availableApps]);
 
   // gpg/sshAgent are remembered per directory, not globally -- reload whenever
   // the browser navigates to a different one.
@@ -162,7 +163,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       if (data.availableApps) {
         setAvailableApps(data.availableApps);
         const avail = ['claude', 'opencode', 'copilot'].filter((a) => data.availableApps[a]);
-        if (avail.length > 0 && !data.availableApps[appDefault]) {
+        // The server's defaultApp seeding above runs in the same effect tick,
+        // so appDefault is still the stale pre-seeding value here -- evaluate
+        // the effective default (server's when the browser hasn't chosen yet,
+        // else the remembered one) before testing availability.
+        const effectiveDefault = ['claude', 'opencode', 'copilot'].includes(data.defaultApp) && !localStorage.getItem(APP_KEY)
+          ? data.defaultApp
+          : appDefault;
+        if (avail.length > 0 && !data.availableApps[effectiveDefault]) {
           setAppDefault(avail[0]);
         }
       }
