@@ -173,6 +173,19 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         if (avail.length > 0 && !data.availableApps[effectiveDefault]) {
           setAppDefault(avail[0]);
         }
+        // Same rule for the combo modal's role selections: workerA and the
+        // orchestrator start as claude, workerB as opencode -- a role whose
+        // default points at a missing CLI must not stay selected-active (the
+        // launch would be refused server-side). Combo only offers
+        // claude/opencode, so the fallback is restricted to those.
+        const comboAvail = ['claude', 'opencode'].filter((a) => data.availableApps[a]);
+        if (comboAvail.length > 0) {
+          setComboApps((c) => ({
+            workerA: data.availableApps[c.workerA] ? c.workerA : comboAvail[0],
+            workerB: data.availableApps[c.workerB] ? c.workerB : comboAvail[0],
+            orchestrator: data.availableApps[c.orchestrator] ? c.orchestrator : comboAvail[0],
+          }));
+        }
       }
     }).catch(() => {});
   }, []);

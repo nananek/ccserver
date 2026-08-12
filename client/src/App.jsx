@@ -330,10 +330,13 @@ export default function App() {
   // opencode (copilot never appears in groups). The server can also hide it:
   // sandbox.config.json's "showUsage": false, or claude not being installed
   // at all (the /usage capture would never succeed).
+  // `availableApps` null/absent (fetch pending or failed, older server) means
+  // "unknown", not "claude missing" -- the button stays shown in that case and
+  // is only auto-hidden when the server actually reports claude absent.
   const usageHidden = (activeTab?.type === 'terminal' && (activeTab.app === 'opencode' || activeTab.app === 'copilot'))
     || (activeTab?.type === 'group' && groupActiveApp === 'opencode')
     || !usagePrefs.showUsage
-    || !usagePrefs.availableApps?.claude;
+    || (usagePrefs.availableApps && !usagePrefs.availableApps.claude);
 
   return (
     <div className="app">
