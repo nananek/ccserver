@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveApp, SANDBOX_PATH } from './sandbox.js';
+import { resolveApp, installedApps, SANDBOX_PATH } from './sandbox.js';
 
 // which() (used by resolveApp/resolveAgentCommand) resolves against
 // SANDBOX_PATH -- a fixed constant, not the calling process's own PATH -- so
@@ -50,5 +50,29 @@ test('resolveApp keeps the bare command name when SANDBOX_PATH resolves it', { s
   // path -- the sandbox's own PATH will resolve it identically at launch.
   if (SANDBOX_PATH.split(':').some((dir) => dir && existsSync(join(dir, 'claude')))) {
     assert.ok(['claude', 'claude.exe'].includes(r.command), `expected bare name, got: ${r.command}`);
+  }
+});
+
+// found: an installed app must report found: true (the launch is a real
+// binary), while a genuinely missing one reports found: false with only the
+// fallback bare command name -- the signal the server uses to refuse the
+// launch and the client to grey out the picker entry.
+test('resolveApp reports found: true for an installed app', { skip: !isInstalled('claude') }, () => {
+  assert.equal(resolveApp('claude').found, true);
+});
+
+test('resolveApp reports found: false when the app is genuinely missing', { skip: isInstalled('claude') }, () => {
+  const r = resolveApp('claude');
+  assert.equal(r.found, false);
+  assert.equal(typeof r.command, 'string', 'the fallback bare name is still returned');
+});
+
+// installedApps() must agree with resolveApp on every app id -- host- and
+// install-state-independent (it is a pure mirror of the per-app resolution).
+test('installedApps mirrors resolveApp found flags for all three apps', () => {
+  const installed = installedApps();
+  assert.deepEqual(Object.keys(installed).sort(), ['claude', 'copilot', 'opencode']);
+  for (const app of ['claude', 'opencode', 'copilot']) {
+    assert.equal(installed[app], resolveApp(app).found, `${app} flag must match resolveApp`);
   }
 });

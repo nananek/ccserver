@@ -1,16 +1,20 @@
 import { readdir, mkdir, stat } from 'node:fs/promises';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
-import { loadSandboxConfig } from '../ws/sandbox.js';
+import { loadSandboxConfig, installedApps } from '../ws/sandbox.js';
 import { resolvedHostname } from '../ws/notify.js';
 
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
-    const { defaultApp, forceSandbox } = loadSandboxConfig();
+    const { defaultApp, forceSandbox, showUsage } = loadSandboxConfig();
     // hostname for the browser tab title ("<host> ccserver"): the same
     // resolution the notify footer uses, so the tab matches _from: <host>.
     // Extra field, so existing clients are unaffected.
-    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname() };
+    // showUsage / availableApps: the client's Usage button visibility and the
+    // launch modal's app picker both need server-side facts -- whether the
+    // Usage button is enabled in config, and which agent CLIs are installed
+    // here. Both are extra fields, so existing clients are unaffected.
+    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: installedApps() };
   });
 
   fastify.get('/dirs', async (request, reply) => {

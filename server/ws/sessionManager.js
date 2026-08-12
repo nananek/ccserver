@@ -121,6 +121,27 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
   // Which agent CLI this session runs. Shell sessions have no app.
   const sessionApp = shell ? null : (isValidApp(app) ? app : defaultApp());
+
+  // Refuse launches of an agent that doesn't exist on this host, instead of
+  // letting node-pty fail with an opaque execvp/ENOENT error (exit 127) right
+  // after the "起動しました" message. resolveApp's `found` covers every search
+  // path (PATH, the server's node bin dir, ~/.local/bin, and the app-specific
+  // extras) and honors the claudeBin override; the searched-dirs text mirrors
+  // resolveAgentCommand's candidates. A defaultApp pointing at a missing
+  // install is refused the same way: silently switching to another app would
+  // start scheduled prompts / orchestrator restarts in an unintended agent.
+  if (sessionApp && !resolveApp(sessionApp).found) {
+    const searched = {
+      claude: "PATH, the server's node bin directory, ~/.local/bin",
+      opencode: "PATH, the server's node bin directory, ~/.local/bin, ~/.opencode/bin",
+      copilot: "PATH, the server's node bin directory, ~/.local/bin",
+    }[sessionApp];
+    return {
+      sessionId: id,
+      session: null,
+      error: `Cannot launch: ${sessionApp} is not installed on this server (searched ${searched}).`,
+    };
+  }
   // Which model this session launches with. Explicit null / absent means "use
   // the app's persisted-or-default model" (no --model flag is emitted); only a
   // non-empty string becomes a CLI model selection. Shells never carry one.

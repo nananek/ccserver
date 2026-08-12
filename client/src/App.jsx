@@ -32,6 +32,11 @@ export default function App() {
   );
   const pendingOpenRef = useRef(null);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
+  // Server-side facts from /api/dirs/home: whether the Usage button is
+  // enabled (sandbox.config.json's "showUsage") and which agent CLIs are
+  // installed here (availableApps). Usage is only meaningful when claude
+  // exists, so a missing claude hides the button regardless of showUsage.
+  const [usagePrefs, setUsagePrefs] = useState({ showUsage: true, availableApps: null });
 
   useEffect(() => {
     applyThemeCss(themeId);
@@ -47,7 +52,14 @@ export default function App() {
     authFetch('/api/dirs/home')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data?.hostname) document.title = `${data.hostname} ccserver`;
+        if (!data) return;
+        if (data.hostname) document.title = `${data.hostname} ccserver`;
+        // Absent keys (older server / default config) keep the button shown
+        // and the app picker unrestricted.
+        setUsagePrefs({
+          showUsage: data.showUsage !== false,
+          availableApps: data.availableApps || null,
+        });
       })
       .catch(() => {});
   }, []);
@@ -315,9 +327,13 @@ export default function App() {
   const activeTab = tabs.find((t) => t.id === activeTabId);
   // Usage (Claude spend) is only meaningful for claude sessions; hide it for
   // opencode/copilot terminals and for a group tab whose active sub-tab is
-  // opencode (copilot never appears in groups).
+  // opencode (copilot never appears in groups). The server can also hide it:
+  // sandbox.config.json's "showUsage": false, or claude not being installed
+  // at all (the /usage capture would never succeed).
   const usageHidden = (activeTab?.type === 'terminal' && (activeTab.app === 'opencode' || activeTab.app === 'copilot'))
-    || (activeTab?.type === 'group' && groupActiveApp === 'opencode');
+    || (activeTab?.type === 'group' && groupActiveApp === 'opencode')
+    || !usagePrefs.showUsage
+    || !usagePrefs.availableApps?.claude;
 
   return (
     <div className="app">

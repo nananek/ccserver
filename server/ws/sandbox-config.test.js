@@ -68,6 +68,27 @@ test('defaultApp accepts copilot and falls back to claude for anything else', ()
   });
 });
 
+test('showUsage defaults to true when the key is absent', () => {
+  withConfig({ docker: true }, () => {
+    assert.equal(loadSandboxConfig().showUsage, true);
+  });
+});
+
+test('showUsage is false only for an explicit false value', () => {
+  withConfig({ showUsage: false }, () => {
+    assert.equal(loadSandboxConfig().showUsage, false);
+  });
+  withConfig({ showUsage: true }, () => {
+    assert.equal(loadSandboxConfig().showUsage, true);
+  });
+  withConfig({ showUsage: 'no' }, () => {
+    assert.equal(loadSandboxConfig().showUsage, true);
+  });
+  withConfig({}, () => {
+    assert.equal(loadSandboxConfig().showUsage, true);
+  });
+});
+
 // ccserver-notify config (see notify.js): the Discord webhook is parsed only
 // when it is an https:// URL; anything else is dropped. The env override
 // CCSERVER_DISCORD_WEBHOOK wins over the config file.

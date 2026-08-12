@@ -57,6 +57,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // the sandbox toggle is overridden -- every launch is sandboxed and the
   // "通常起動" choice is disabled. Set from /api/dirs/home.
   const [forceSandbox, setForceSandbox] = useState(false);
+  // Which agent CLIs the server can actually launch ({ claude, opencode,
+  // copilot } booleans), from /api/dirs/home. null until the fetch resolves;
+  // while null every picker entry stays enabled (old-server fallback).
+  const [availableApps, setAvailableApps] = useState(null);
   // 'claude' until the server's configured default (sandbox.config.json's
   // "defaultApp") arrives via /api/dirs/home, or the user picks explicitly.
   const [appDefault, setAppDefault] = useState(() => {
@@ -149,6 +153,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       if (data.forceSandbox) {
         setForceSandbox(true);
         setSandboxDefault(true);
+      }
+      // Server-side install detection: grey out picker entries for CLIs that
+      // don't exist here, and correct a stale default (localStorage
+      // ccserver-app-default, or the server's defaultApp) that points at an
+      // uninstalled app -- the launch button label and modal checkmark must
+      // never advertise an app that cannot start.
+      if (data.availableApps) {
+        setAvailableApps(data.availableApps);
+        const avail = ['claude', 'opencode', 'copilot'].filter((a) => data.availableApps[a]);
+        if (avail.length > 0 && !data.availableApps[appDefault]) {
+          setAppDefault(avail[0]);
+        }
       }
     }).catch(() => {});
   }, []);
@@ -432,22 +448,25 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               <>
                 <div className="open-menu-label">アプリ</div>
                 <div
-                  className="open-menu-item"
+                  className={`open-menu-item${availableApps && !availableApps.claude ? ' open-menu-item-disabled' : ''}`}
                   onClick={() => chooseApp('claude')}
+                  title={availableApps && !availableApps.claude ? 'サーバーに未インストール' : ''}
                 >
                   <span className="open-menu-check">{appDefault === 'claude' ? '✓' : ''}</span>
                   Claude Code
                 </div>
                 <div
-                  className="open-menu-item"
+                  className={`open-menu-item${availableApps && !availableApps.opencode ? ' open-menu-item-disabled' : ''}`}
                   onClick={() => chooseApp('opencode')}
+                  title={availableApps && !availableApps.opencode ? 'サーバーに未インストール' : ''}
                 >
                   <span className="open-menu-check">{appDefault === 'opencode' ? '✓' : ''}</span>
                   opencode
                 </div>
                 <div
-                  className="open-menu-item"
+                  className={`open-menu-item${availableApps && !availableApps.copilot ? ' open-menu-item-disabled' : ''}`}
                   onClick={() => chooseApp('copilot')}
+                  title={availableApps && !availableApps.copilot ? 'サーバーに未インストール' : ''}
                 >
                   <span className="open-menu-check">{appDefault === 'copilot' ? '✓' : ''}</span>
                   GitHub Copilot
@@ -505,8 +524,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   {['claude', 'opencode'].map((app) => (
                     <button
                       key={app}
-                      className={`open-menu-app-btn${comboApps.workerA === app ? ' active' : ''}`}
-                      onClick={() => setComboApps((c) => ({ ...c, workerA: app }))}
+                      className={`open-menu-app-btn${comboApps.workerA === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
+                      onClick={() => { if (!availableApps || availableApps[app]) setComboApps((c) => ({ ...c, workerA: app })); }}
+                      title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                     >
                       {app === 'claude' ? 'Claude Code' : 'opencode'}
                     </button>
@@ -529,8 +549,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   {['claude', 'opencode'].map((app) => (
                     <button
                       key={app}
-                      className={`open-menu-app-btn${comboApps.workerB === app ? ' active' : ''}`}
-                      onClick={() => setComboApps((c) => ({ ...c, workerB: app }))}
+                      className={`open-menu-app-btn${comboApps.workerB === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
+                      onClick={() => { if (!availableApps || availableApps[app]) setComboApps((c) => ({ ...c, workerB: app })); }}
+                      title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                     >
                       {app === 'claude' ? 'Claude Code' : 'opencode'}
                     </button>
@@ -612,8 +633,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   {['claude', 'opencode'].map((app) => (
                     <button
                       key={app}
-                      className={`open-menu-app-btn${comboApps.orchestrator === app ? ' active' : ''}`}
-                      onClick={() => setComboApps((c) => ({ ...c, orchestrator: app }))}
+                      className={`open-menu-app-btn${comboApps.orchestrator === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
+                      onClick={() => { if (!availableApps || availableApps[app]) setComboApps((c) => ({ ...c, orchestrator: app })); }}
+                      title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                     >
                       {app === 'claude' ? 'Claude Code' : 'opencode'}
                     </button>

@@ -166,7 +166,11 @@ export function loadSandboxConfig() {
   // See appLaunch.js's APPS; anything else (including unset) falls back to
   // claude -- see sessionManager.js's defaultApp().
   const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' ? raw.defaultApp : 'claude';
-  return { docker, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
+  // Show the client's top-bar Usage button (Claude Code /usage spend). Off
+  // for setups that don't want it; the client also hides the button on its
+  // own when claude is not installed (the capture would never succeed).
+  const showUsage = raw.showUsage !== false;
+  return { docker, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
@@ -255,6 +259,11 @@ function resolveAgentCommand(cmd, extraDirs = []) {
 // that must be exposed read-only in the sandbox for that invocation to work.
 //   command    - argv[0] to run
 //   installDir - extra ro-bind so the resolved binary is present, or null
+//   found      - whether the CLI actually resolved somewhere searchable. When
+//                false, `command` is only a fallback bare name that will fail
+//                at spawn time (execvp ENOENT) -- callers should refuse the
+//                launch up front instead (see sessionManager's not-installed
+//                error and installedApps()).
 //
 // claude: "claude" (so the sandbox's PATH resolves it) unless overridden via
 //   CCSERVER_CLAUDE_BIN / "claudeBin" in the sandbox config.
@@ -269,21 +278,34 @@ export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
     if (r) {
       let real = r.path;
       try { real = realpathSync(r.path); } catch { /* keep as given */ }
-      return { command: real, installDir: appInstallDir(real) };
+      return { command: real, installDir: appInstallDir(real), found: true };
     }
-    return { command: process.platform === 'win32' ? 'opencode.exe' : 'opencode', installDir: null };
+    return { command: process.platform === 'win32' ? 'opencode.exe' : 'opencode', installDir: null, found: false };
   }
   if (app === 'copilot') {
     const r = resolveAgentCommand('copilot', [join(HOME, '.local', 'bin')]);
-    if (r) return { command: r.command, installDir: appInstallDir(r.path) };
-    return { command: process.platform === 'win32' ? 'copilot.exe' : 'copilot', installDir: null };
+    if (r) return { command: r.command, installDir: appInstallDir(r.path), found: true };
+    return { command: process.platform === 'win32' ? 'copilot.exe' : 'copilot', installDir: null, found: false };
   }
   const command = configuredBin || (process.platform === 'win32' ? 'claude.exe' : 'claude');
   const r = resolveAgentCommand(command);
   // Keep the bare name when PATH resolves it (the sandbox PATH can too); use
   // an absolute path for installs PATH can't see (e.g. systemd).
-  if (r) return { command: r.command, installDir: appInstallDir(r.path) };
-  return { command, installDir: null };
+  if (r) return { command: r.command, installDir: appInstallDir(r.path), found: true };
+  return { command, installDir: null, found: false };
+}
+
+// Which agent CLIs are actually launchable on this host, keyed by app id.
+// Exposed via GET /dirs/home so the client can grey out (and the server can
+// refuse) launches of uninstalled apps. A few statSync calls per request --
+// recomputed every call, no caching needed. claude respects the claudeBin
+// override (resolveApp does), so a configured but missing path reads false.
+export function installedApps() {
+  return {
+    claude: resolveApp('claude').found,
+    opencode: resolveApp('opencode').found,
+    copilot: resolveApp('copilot').found,
+  };
 }
 
 // Backwards-compatible alias used by the claude-only /usage capture.
