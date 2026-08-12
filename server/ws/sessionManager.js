@@ -121,6 +121,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
   // Which agent CLI this session runs. Shell sessions have no app.
   const sessionApp = shell ? null : (isValidApp(app) ? app : defaultApp());
+  const resolved = sessionApp ? resolveApp(sessionApp) : null;
 
   // Refuse launches of an agent that doesn't exist on this host, instead of
   // letting node-pty fail with an opaque execvp/ENOENT error (exit 127) right
@@ -130,7 +131,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // resolveAgentCommand's candidates. A defaultApp pointing at a missing
   // install is refused the same way: silently switching to another app would
   // start scheduled prompts / orchestrator restarts in an unintended agent.
-  if (sessionApp && !resolveApp(sessionApp).found) {
+  if (sessionApp && !resolved.found) {
     const searched = {
       claude: "PATH, the server's node bin directory, ~/.local/bin",
       opencode: "PATH, the server's node bin directory, ~/.local/bin, ~/.opencode/bin",
@@ -188,7 +189,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     command = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/bash');
     args = [];
   } else {
-    command = resolveApp(sessionApp).command;
+    command = resolved.command;
     args = appResumeArgs(sessionApp, claudeSessionId, { resumeLast });
     // Model selection must accompany fresh launches and resume alike; the
     // helper only emits the flag for apps whose CLI is verified to accept it.
