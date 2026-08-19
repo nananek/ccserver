@@ -1,5 +1,7 @@
 # ccserver
 
+**Languages:** [日本語](README.md) | [English](README.en.md) | [Français](README.fr.md)
+
 > **Context & Coordination Server** — AI CLIセッションのコンテキスト管理とエージェント間連携を行う Web サーバー。
 
 > **Note:** このプロジェクトは対応するAI CLIの各ベンダー・プロジェクトとは無関係の非公式サードパーティツールです。各ベンダー・プロジェクトによる公式サポートの対象外です。
