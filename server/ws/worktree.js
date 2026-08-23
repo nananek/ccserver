@@ -18,7 +18,7 @@
 // HEAD commit -- see plan section 2.3.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { projectHashForCwd } from './projectHash.js';
@@ -115,6 +115,24 @@ function commonDirOf(worktreePath) {
   }
 }
 
+function commonDirOfProject(projectCwd) {
+  try {
+    const raw = git(projectCwd, ['rev-parse', '--git-common-dir']).trim();
+    return resolve(projectCwd, raw);
+  } catch {
+    return null;
+  }
+}
+
+function branchOf(worktreePath) {
+  try {
+    const ref = git(worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim();
+    return ref || null;
+  } catch {
+    return null;
+  }
+}
+
 // Idempotent worktree resolver (plan sections 2.3, 3.2, 3.6.1). Always safe
 // to call again for the same (projectCwd, role): an already-healthy worktree
 // is reused untouched, never recreated.
@@ -163,6 +181,31 @@ export function resolveMemberWorktree(projectCwd, role, hintBranch = null) {
       lostWork: false,
       branch,
     };
+  }
+
+  // A crash between mkdir/worktree setup can leave the deterministic target
+  // directory behind without a corresponding git worktree registration.
+  // `git worktree add` refuses such a path even when it is empty, so remove
+  // only an empty stale directory and let the normal add path continue.
+  // Never remove a non-empty unregistered directory here.
+  if (!existing && existsSync(path)) {
+    let empty = false;
+    try { empty = readdirSync(path).length === 0; } catch { /* handled below */ }
+    if (empty) {
+      try { rmdirSync(path); } catch { /* let git report the real failure */ }
+    } else if (isGitRepo(path) && commonDirOf(path) === commonDirOfProject(projectCwd)) {
+      // The registration may have been pruned externally while the checkout
+      // itself survived. Reusing it preserves the user's files and avoids
+      // trying to overwrite a potentially valuable worktree.
+      return {
+        usedWorktree: true,
+        cwd: path,
+        gitCommonDir: commonDirOf(path),
+        created: false,
+        lostWork: false,
+        branch: branchOf(path),
+      };
+    }
   }
 
   // Registered in .git/worktrees/ but the directory itself is gone

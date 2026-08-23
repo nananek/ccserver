@@ -57,6 +57,15 @@ test('resolveMemberWorktree: first-time creation is a fresh detached worktree', 
   assert.ok(res.gitCommonDir && existsSync(res.gitCommonDir));
 });
 
+test('resolveMemberWorktree: removes an empty target left by an interrupted setup', () => {
+  const path = worktree.worktreePathFor(repo, 'worker-stale');
+  mkdirSync(path, { recursive: true });
+  const res = worktree.resolveMemberWorktree(repo, 'worker-stale');
+  assert.equal(res.usedWorktree, true);
+  assert.equal(res.created, true);
+  assert.ok(existsSync(res.cwd));
+});
+
 test('resolveMemberWorktree: reuses an existing healthy worktree untouched', () => {
   const first = worktree.resolveMemberWorktree(repo, 'workerB');
   writeFileSync(join(first.cwd, 'scratch.txt'), 'untouched marker');
