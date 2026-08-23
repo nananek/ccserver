@@ -19,6 +19,7 @@ import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { warmUsage } from './usage.js';
+import { warmCodexUsage } from './codexUsage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
@@ -144,6 +145,8 @@ try {
   fastify.log.error({ err }, 'Failed to restore scheduled prompts');
 }
 
-// Warm the Claude usage cache so the first click on the top-bar Usage button is
-// instant (best effort — a failed capture just leaves the cache empty).
+// Warm the Claude/Codex usage caches so the first click on the top-bar Usage
+// button is instant (best effort — a failed capture just leaves the cache
+// empty).
 warmUsage();
+warmCodexUsage();

@@ -1116,13 +1116,16 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   return args;
 }
 
-// Minimal sandbox: just enough to launch claude in an isolated filesystem, with
-// NO docker, gpg, ssh, or extra binds. bwrap creates its own user namespace
-// (--unshare-user) and network stays shared with the host (so claude can still
-// reach the API). Used for the lightweight background `/usage` capture, which
-// only needs Claude's own config bound in — see server/usage.js.
-export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
-  const { command, installDir } = resolveClaude();
+// Minimal sandbox: just enough to launch an agent CLI in an isolated
+// filesystem, with NO docker, gpg, ssh, or extra binds. bwrap creates its own
+// user namespace (--unshare-user) and network stays shared with the host (so
+// the CLI can still reach its API). Used for the lightweight background usage
+// captures that don't need a real project: Claude's `/usage` TUI scrape (see
+// server/usage.js) and Codex's `account/rateLimits/read` JSON-RPC call (see
+// server/codexUsage.js). `app` selects which CLI's config/install dir gets
+// resolved; defaults to 'claude' for the original caller.
+export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' }) {
+  const { command, installDir } = resolveApp(app);
   const bwrapArgs = buildBwrapArgs({
     cwd,
     docker: false,

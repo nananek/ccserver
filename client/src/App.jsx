@@ -386,18 +386,19 @@ export default function App() {
   }, []);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  // Usage (Claude spend) is only meaningful for claude sessions; hide it for
-  // opencode/copilot/codex terminals and for a group tab whose active sub-tab
-  // is opencode/codex (copilot never appears in groups). The server can also hide it:
-  // sandbox.config.json's "showUsage": false, or claude not being installed
-  // at all (the /usage capture would never succeed).
+  // Usage is meaningful for claude (Claude Code's /usage) and codex (Codex's
+  // rate-limit read) sessions; hide it for opencode/copilot terminals and for
+  // a group tab whose active sub-tab is opencode (copilot never appears in
+  // groups). The server can also hide it: sandbox.config.json's
+  // "showUsage": false, or the active tab's app not being installed at all
+  // (the capture would never succeed).
   // `availableApps` null/absent (fetch pending or failed, older server) means
-  // "unknown", not "claude missing" -- the button stays shown in that case and
-  // is only auto-hidden when the server actually reports claude absent.
-  const usageHidden = (activeTab?.type === 'terminal' && (activeTab.app === 'opencode' || activeTab.app === 'copilot' || activeTab.app === 'codex'))
-    || (activeTab?.type === 'group' && (groupActiveApp === 'opencode' || groupActiveApp === 'codex'))
+  // "unknown" -- the button stays shown in that case and is only auto-hidden
+  // when the server actually reports the active app's CLI absent.
+  const usageApp = activeTab?.type === 'group' ? groupActiveApp : (activeTab?.app || 'claude');
+  const usageHidden = (usageApp !== 'claude' && usageApp !== 'codex')
     || !usagePrefs.showUsage
-    || (usagePrefs.availableApps && !usagePrefs.availableApps.claude);
+    || (usagePrefs.availableApps && usageApp && !usagePrefs.availableApps[usageApp]);
 
   return (
     <div className="app">
@@ -434,7 +435,7 @@ export default function App() {
         ))}
         <div className="tab-bar-spacer" />
         </div>
-        <UsageButton hidden={usageHidden} />
+        <UsageButton hidden={usageHidden} app={usageApp === 'codex' ? 'codex' : 'claude'} />
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>

@@ -26,10 +26,10 @@ VS Code のようにフォルダを選択し、ブラウザ内のターミナル
 - Node.js >= 22 / npm >= 9
 - C++ コンパイラ（node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`）
 - 対応する AI CLI のいずれか 1 つ以上 — Claude Code、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`)、[OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) の各CLIは個別に任意です。サーバーにインストールされているCLIだけを起動時に選べます。
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — Usage表示など、一部の機能で使用します。インストールされていない場合も、opencodeやCopilot CLIだけで通常のセッションを利用できます。
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — Usage表示など、一部の機能で使用します。インストールされていない場合も、opencodeやCopilot CLIだけで通常のセッションを利用できます。Usageボタンは Codex CLI (下記) でも利用できます。
 - [opencode](https://opencode.ai/) — インストール: [公式サイト](https://opencode.ai/)を参照。入れずに選んだ場合、ターミナルに `execvp(3) failed` 等のエラーが表示され起動に失敗します。
 - [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) — インストール: `npm i -g @github/copilot` (またはインストールスクリプト / `brew install copilot-cli` / winget)。入れずに選んだ場合も同様に起動に失敗します。認証は初回 `/login` (OAuth) か環境変数 `GH_TOKEN` / `GITHUB_TOKEN` で行います。
-- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) — OpenAI公式手順でインストールします。新規起動は `codex`、モデルは `--model <model>`、再開は `codex resume <id>` または `codex resume --last` です。
+- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) — OpenAI公式手順でインストールします。新規起動は `codex`、モデルは `--model <model>`、再開は `codex resume <id>` または `codex resume --last` です。Usage表示は `codex app-server` のJSON-RPC (`account/rateLimits/read`) を使用します。
 
 ## インストールと起動
 
@@ -195,12 +195,14 @@ OpenAI Codexについて:
 
 ### 使用量 (Usage) ボタン
 
-画面上部タブバー右端の **Usage** ボタンから、Claude Code の `/usage` (セッション / 週次の利用率・リセット時刻・プラン) をポップオーバーで確認できます。ボタンには現在セッションの使用率が常時表示されます (opencode / copilot セッションでは非表示)。
+画面上部タブバー右端の **Usage** ボタンから、Claude Code の `/usage` または Codex の利用率 (セッション/週次相当の利用率・リセット時刻・プラン) をポップオーバーで確認できます。ボタンには現在セッションの使用率が常時表示されます (opencode / copilot セッションでは非表示)。表示内容は現在アクティブなタブのアプリ (claude / codex) に応じて自動的に切り替わります。
 
-- 裏側では `claude --ax-screen-reader` を短時間起動して `/usage` の描画をパースし、結果を約 2 分キャッシュします (`/usage` の閲覧自体は API を消費しません)。「更新」ボタンで即時に再取得できます。
-- bwrap がある環境では、**Claude の設定だけを見せる最小サンドボックス** (docker/gpg/ssh なし) で起動します。無ければ claude を直接起動します。
-- API: `GET /api/usage` (`?force=1` で強制再取得)。サーバー起動時にキャッシュを 1 度ウォームします。
-- ボタンは設定ファイルの `showUsage: false` で非表示にできます。さらに **claude がサーバーにインストールされていない環境では、設定に関わらず自動的に非表示**になります (この場合 `GET /api/usage` は `claude is not installed on this server` を返します)。
+- **Claude**: 裏側で `claude --ax-screen-reader` を短時間起動して `/usage` の描画をパースします (`/usage` の閲覧自体は API を消費しません)。
+- **Codex**: `codex app-server` を起動し、JSON-RPC (`account/rateLimits/read`) でレート制限のスナップショットを直接取得します。TUI 描画のスクレイピングではないため、起動待ちやプロジェクト信頼ダイアログのハンドリングは不要です。
+- どちらも結果を約 1 分キャッシュします。「更新」ボタンで即時に再取得できます。
+- bwrap がある環境では、**該当 CLI の設定だけを見せる最小サンドボックス** (docker/gpg/ssh なし) で起動します。無ければ CLI を直接起動します。
+- API: `GET /api/usage?app=claude|codex` (`&force=1` で強制再取得、`app` 省略時は `claude`)。サーバー起動時に両方のキャッシュを 1 度ウォームします。
+- ボタンは設定ファイルの `showUsage: false` で非表示にできます。さらに **アクティブなタブのアプリ (claude/codex) がサーバーにインストールされていない環境では、設定に関わらず自動的に非表示**になります (この場合 `GET /api/usage` は `claude is not installed on this server` / `codex is not installed on this server` を返します)。
 
 ### ccserver-usage (使用量参照用 MCP)
 
@@ -392,9 +394,9 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `gpg` | `false` | コミット署名用に gpg-agent を転送 (上記参照)。UI で上書き可。 |
 | `sshAgent` | `false` | ssh-agent を転送 (上記参照)。UI で上書き可。 |
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (上記参照)。 |
-| `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (`/usage` 取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 |
+| `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (Claude の `/usage` / Codex のレート制限取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 |
 | `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (コンボのロール別選択は別途ブラウザの `localStorage` に記憶され、copilot はそもそも選択不可)。 |
-| `showUsage` | `true` | タブバー右端の Usage ボタン (Claude Code の `/usage`) を表示するか。`false` で非表示。**claude がサーバーに無い場合は設定に関わらず自動的に非表示**になります。 |
+| `showUsage` | `true` | タブバー右端の Usage ボタン (Claude Code の `/usage` / Codex のレート制限読み取り) を表示するか。`false` で非表示。**アクティブなタブのアプリ (claude/codex) がサーバーに無い場合は設定に関わらず自動的に非表示**になります。 |
 | `usageMcp` | `false` | Claude セッションへ `ccserver-usage` MCP (`get_usage` ツール) を注入するか。安全のため既定はオフで、`true` の明示時だけ有効です。`showUsage` とは独立しています。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~` はホームに展開。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
@@ -443,13 +445,14 @@ ccserver/
 │   ├── package.json
 │   ├── index.js                    # Fastify エントリポイント (トークン認証・静的配信含む)
 │   ├── usage.js                    # `claude --ax-screen-reader` を叩いて /usage をパース・キャッシュ
+│   ├── codexUsage.js               # `codex app-server` に JSON-RPC で account/rateLimits/read を投げてキャッシュ
 │   ├── sandbox.config.example.json
 │   ├── routes/
 │   │   ├── dirs.js                 # GET/POST /api/dirs, GET /api/dirs/home
 │   │   ├── sessions.js             # GET/DELETE /api/sessions...
 │   │   ├── files.js                # GET/POST /api/files (アップロード/ダウンロード)
 │   │   ├── system.js               # GET /api/system-stats (CPU/メモリ/温度/GPU/IPMI/ストレージ)
-│   │   └── usage.js                # GET /api/usage
+│   │   └── usage.js                # GET /api/usage (?app=claude|codex)
 │   └── ws/
 │       ├── terminal.js             # WebSocket + node-pty ブリッジ (/ws/terminal)
 │       ├── sessionManager.js       # セッション・予約プロンプトの状態管理/永続化

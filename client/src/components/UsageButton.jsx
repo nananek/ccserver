@@ -24,7 +24,7 @@ function fmtAge(updatedAt) {
   return `${Math.round(m / 60)}時間前`;
 }
 
-export default function UsageButton({ hidden = false }) {
+export default function UsageButton({ hidden = false, app = 'claude' }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null);   // { usage, updatedAt, error, ... }
   const [loading, setLoading] = useState(false);
@@ -34,7 +34,7 @@ export default function UsageButton({ hidden = false }) {
   const load = useCallback(async (force = false) => {
     setLoading(true);
     try {
-      const res = await authFetch(`/api/usage${force ? '?force=1' : ''}`);
+      const res = await authFetch(`/api/usage?app=${app}${force ? '&force=1' : ''}`);
       const json = await res.json();
       setData(json);
     } catch (err) {
@@ -42,10 +42,12 @@ export default function UsageButton({ hidden = false }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [app]);
 
-  // Prime the button (session % badge) once on mount, using the cache.
-  useEffect(() => { load(false); }, [load]);
+  // Prime the button (session % badge) once on mount, using the cache, and
+  // again whenever the active app changes -- reset first so a tab switch
+  // never flashes the other app's stale numbers under the new label.
+  useEffect(() => { setData(null); load(false); }, [app, load]);
 
   // Fetch fresh-ish data whenever the popover opens.
   useEffect(() => {
@@ -70,9 +72,10 @@ export default function UsageButton({ hidden = false }) {
   const limits = data?.usage?.limits || [];
   const session = limits.find((l) => /session/i.test(l.label)) || limits[0];
   const now = Date.now();
+  const appLabel = app === 'codex' ? 'Codex 使用量' : 'Claude 使用量';
 
-  // The Usage popover reads Claude Code's /usage; it carries no meaning for
-  // opencode sessions, so hide it there.
+  // The Usage popover reads Claude Code's /usage or Codex's rate-limit API;
+  // it carries no meaning for opencode/copilot sessions, so hide it there.
   if (hidden) return null;
 
   return (
@@ -80,7 +83,7 @@ export default function UsageButton({ hidden = false }) {
       <button
         className="btn usage-btn"
         onClick={() => setOpen((v) => !v)}
-        title="Claude 使用量"
+        title={appLabel}
       >
         <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <path d="M2 13h12M4 13V8M8 13V4M12 13V6" />
@@ -91,7 +94,7 @@ export default function UsageButton({ hidden = false }) {
       {open && (
         <div className="usage-menu">
           <div className="usage-menu-header">
-            <span>Claude 使用量</span>
+            <span>{appLabel}</span>
             <button
               className="btn btn-secondary btn-sm"
               onClick={() => load(true)}
