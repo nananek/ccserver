@@ -66,6 +66,24 @@ test('resolveMemberWorktree: removes an empty target left by an interrupted setu
   assert.ok(existsSync(res.cwd));
 });
 
+test('resolveMemberWorktree: recovers when the worktree admin dir is gone but the checkout survives', () => {
+  const first = worktree.resolveMemberWorktree(repo, 'worker-orphaned');
+  writeFileSync(join(first.cwd, 'scratch.txt'), 'about to be lost');
+  // Simulate external interference that deletes just the git-side admin dir
+  // (.git/worktrees/<role>) while leaving the checkout's files on disk --
+  // e.g. a stray `rm -rf` of .git/worktrees, or a `git worktree remove` run
+  // against a stale/relocated project path. The checkout's `.git` gitlink
+  // is now dangling: `git worktree add` would otherwise fail forever with
+  // "already exists" against this non-empty, unrecognizable directory.
+  rmSync(join(repo, '.git', 'worktrees', 'worker-orphaned'), { recursive: true, force: true });
+
+  const recreated = worktree.resolveMemberWorktree(repo, 'worker-orphaned');
+  assert.equal(recreated.usedWorktree, true);
+  assert.equal(recreated.created, true);
+  assert.ok(existsSync(recreated.cwd));
+  assert.ok(!existsSync(join(recreated.cwd, 'scratch.txt')), 'dead checkout was discarded, not reused');
+});
+
 test('resolveMemberWorktree: reuses an existing healthy worktree untouched', () => {
   const first = worktree.resolveMemberWorktree(repo, 'workerB');
   writeFileSync(join(first.cwd, 'scratch.txt'), 'untouched marker');

@@ -18,7 +18,7 @@
 // HEAD commit -- see plan section 2.3.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, rmdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { projectHashForCwd } from './projectHash.js';
@@ -115,6 +115,22 @@ function commonDirOf(worktreePath) {
   }
 }
 
+// A linked worktree's directory holds a `.git` *file* (not a directory)
+// containing `gitdir: <projectCommonDir>/worktrees/<role>` -- the admin dir
+// that actually owns the checkout's refs/index. Returns that target path
+// (resolved, so a relative gitdir also works), or null when `path/.git`
+// isn't a worktree-style gitlink (a plain repo, or nothing at all).
+function worktreeGitdirTarget(path) {
+  let content;
+  try {
+    content = readFileSync(join(path, '.git'), 'utf-8');
+  } catch {
+    return null;
+  }
+  const match = /^gitdir:\s*(.+?)\s*$/m.exec(content);
+  return match ? resolve(path, match[1]) : null;
+}
+
 function commonDirOfProject(projectCwd) {
   try {
     const raw = git(projectCwd, ['rev-parse', '--git-common-dir']).trim();
@@ -205,6 +221,27 @@ export function resolveMemberWorktree(projectCwd, role, hintBranch = null) {
         lostWork: false,
         branch: branchOf(path),
       };
+    } else {
+      // Not empty and not a working repo either -- check for a *dead*
+      // linked worktree: its `.git` gitlink still points at
+      // `<projectCommonDir>/worktrees/<role>`, but that admin dir itself is
+      // gone (e.g. it was deleted directly, or `git worktree remove` ran
+      // against a stale/relocated project path and only cleaned its own
+      // side). `git worktree list`/`prune` have nothing to go on here --
+      // there is no registration left to prune -- and `git worktree add`
+      // refuses to write into a non-empty directory, so every call would
+      // otherwise fail forever with "already exists". Only discard it when
+      // the gitlink demonstrably belonged to *this* project's worktree
+      // admin dir, never an unrelated directory that happens to occupy the
+      // path.
+      const gitdirTarget = worktreeGitdirTarget(path);
+      const projectCommonDir = commonDirOfProject(projectCwd);
+      if (
+        gitdirTarget && !existsSync(gitdirTarget)
+        && projectCommonDir && gitdirTarget.startsWith(join(projectCommonDir, 'worktrees') + '/')
+      ) {
+        try { rmSync(path, { recursive: true, force: true }); } catch { /* let git report the real failure */ }
+      }
     }
   }
 
