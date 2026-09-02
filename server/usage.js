@@ -17,6 +17,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig } from './ws/sandbox.js';
 import { recordSessionLimitReset } from './sessionLimitState.js';
+import { buildSessionEnv } from './ws/sessionEnv.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
 // The first capture can include Claude startup, the project trust prompt, and
@@ -198,8 +199,9 @@ function capture() {
       return;
     }
 
-    // Drop any forwarded ssh-agent env; irrelevant here and can confuse tools.
-    const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
+    // Drop server-only env (NODE_ENV, PORT, CCSERVER_*, forwarded ssh-agent);
+    // irrelevant here and can confuse tools. See ws/sessionEnv.js.
+    const cleanEnv = buildSessionEnv();
 
     let ptyProc;
     try {

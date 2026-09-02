@@ -18,6 +18,7 @@ import { homedir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './ws/sandbox.js';
+import { buildSessionEnv } from './ws/sessionEnv.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
 const CAPTURE_TIMEOUT_MS = 10 * 1000; // hard cap on a single capture (real round trip is ~100ms)
@@ -121,8 +122,9 @@ function capture() {
       return;
     }
 
-    // Drop any forwarded ssh-agent env; irrelevant here and can confuse tools.
-    const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
+    // Drop server-only env (NODE_ENV, PORT, CCSERVER_*, forwarded ssh-agent);
+    // see ws/sessionEnv.js.
+    const cleanEnv = buildSessionEnv();
 
     let proc;
     try {

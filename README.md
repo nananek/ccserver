@@ -60,6 +60,8 @@ npm run build --workspace=client
 NODE_ENV=production node server/index.js
 ```
 
+> **Note:** シェルに `NODE_ENV=production` が設定されていると、`npm install` / `npm ci` は devDependencies (vite 等) を省略するため `npm run build --workspace=client` が `vite: not found` で失敗します。その場合は `npm install --include=dev` でインストールしてください。なお ccserver が起動するセッションには `NODE_ENV` / `PORT` / `CCSERVER_*` は引き継がれません (サーバー専用の変数として除外されます)。
+
 ブラウザで http://localhost:3001 を開く。ポートは環境変数 `PORT` で変更可能 (`PORT=8080 NODE_ENV=production node server/index.js`)。
 
 常駐させたい場合は [systemd でバックグラウンド実行](#systemd-でバックグラウンド実行)、Tailnet 内から HTTPS で見たい場合は [Tailscale Serve で HTTPS 公開](#tailscale-serve-で-https-公開) を参照。

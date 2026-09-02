@@ -58,6 +58,8 @@ npm run build --workspace=client
 NODE_ENV=production node server/index.js
 ```
 
+> **Note :** Si votre shell définit `NODE_ENV=production`, `npm install` / `npm ci` ignorent les devDependencies (vite, etc.) et `npm run build --workspace=client` échoue avec `vite: not found`. Dans ce cas, installez avec `npm install --include=dev`. Les sessions lancées par ccserver n'héritent pas de `NODE_ENV` / `PORT` / `CCSERVER_*` (variables réservées au serveur, elles sont retirées).
+
 Ouvrez <http://localhost:3001>. Le port peut être modifié avec `PORT`.
 
 ## Utilisation

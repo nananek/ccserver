@@ -12,6 +12,7 @@ import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning }
 import { shouldInjectMetaAgent, metaAgentEnabled, getMetaSockPath, metaBrokerRunning, ensureMetaAgentDir } from './metaAgent.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
 import { bunTmpdirEnv } from './bunTmpdir.js';
+import { buildSessionEnv } from './sessionEnv.js';
 import {
   isValidApp,
   appResumeArgs,
@@ -286,7 +287,9 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   });
   const metaSocketPath = useMeta ? getMetaSockPath() : null;
 
-  const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
+  // Server-only variables (NODE_ENV, PORT, CCSERVER_*, forwarded ssh-agent)
+  // must not reach the session; see sessionEnv.js.
+  const cleanEnv = buildSessionEnv();
 
   let command, args;
   if (shell) {
