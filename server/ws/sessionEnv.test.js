@@ -1,6 +1,7 @@
 // Unit tests for the session base environment (see sessionEnv.js): the
-// server-only variables must be dropped, everything else must pass through
-// untouched, and the caller's later spreads must still win.
+// server-only variables must be dropped whatever their spelling, everything
+// else must pass through untouched, and the caller's later spreads must
+// still win.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,7 +21,21 @@ const SERVER_ENV = Object.freeze({
   SSH_AGENT_PID: '4242',
   CCSANDBOX_DOCKER: '0',
   MY_CCSERVER_TOKEN: 'not-a-server-var',
-  ccserver_lowercase: 'kept',
+});
+
+// How the same server variables look in process.env on Windows when the
+// service was configured with lower/mixed-case names: Node resolves
+// process.env.NODE_ENV etc. to these values, so they are in effect on the
+// server and must be stripped just like the upper-case spellings.
+const WINDOWS_SPELLED_SERVER_ENV = Object.freeze({
+  Path: 'C:\\Windows\\system32',
+  USERPROFILE: 'C:\\Users\\user',
+  node_env: 'production',
+  Port: '3456',
+  ccserver_token: 'secret',
+  Ccserver_Db_Path: 'C:\\ccserver\\ccserver.sqlite3',
+  ssh_auth_sock: '\\\\.\\pipe\\openssh-ssh-agent',
+  Ssh_Agent_Pid: '4242',
 });
 
 test('buildSessionEnv drops NODE_ENV and PORT', () => {
@@ -32,7 +47,7 @@ test('buildSessionEnv drops NODE_ENV and PORT', () => {
 test('buildSessionEnv drops every CCSERVER_-prefixed variable', () => {
   const env = buildSessionEnv(SERVER_ENV);
   for (const key of Object.keys(env)) {
-    assert.equal(key.startsWith('CCSERVER_'), false, `${key} leaked`);
+    assert.equal(key.toUpperCase().startsWith('CCSERVER_'), false, `${key} leaked`);
   }
   assert.equal('CCSERVER_TOKEN' in env, false);
   assert.equal('CCSERVER_DB_PATH' in env, false);
@@ -54,13 +69,25 @@ test('buildSessionEnv passes unrelated variables through with their values', () 
     LANG: 'ja_JP.UTF-8',
     CCSANDBOX_DOCKER: '0',
     MY_CCSERVER_TOKEN: 'not-a-server-var',
-    ccserver_lowercase: 'kept',
   });
 });
 
-test('buildSessionEnv matches the prefix only at the start of the name, case-sensitively', () => {
-  const env = buildSessionEnv({ MY_CCSERVER_TOKEN: 'a', ccserver_token: 'b', CCSERVER: 'c', CCSERVERX: 'd' });
-  assert.deepEqual(env, { MY_CCSERVER_TOKEN: 'a', ccserver_token: 'b', CCSERVER: 'c', CCSERVERX: 'd' });
+test('buildSessionEnv drops server-only variables regardless of case (Windows spellings)', () => {
+  const env = buildSessionEnv(WINDOWS_SPELLED_SERVER_ENV);
+  assert.deepEqual(env, {
+    Path: 'C:\\Windows\\system32',
+    USERPROFILE: 'C:\\Users\\user',
+  });
+});
+
+test('buildSessionEnv drops a lower-case CCSERVER_ prefix and every mixed-case variant', () => {
+  const env = buildSessionEnv({ ccserver_token: 'a', CcServer_Token: 'b', cCSERVER_x: 'c', PATH: '/bin' });
+  assert.deepEqual(env, { PATH: '/bin' });
+});
+
+test('buildSessionEnv matches the prefix only at the start of the name', () => {
+  const env = buildSessionEnv({ MY_CCSERVER_TOKEN: 'a', my_ccserver_token: 'b', CCSERVER: 'c', CCSERVERX: 'd', ccserver: 'e' });
+  assert.deepEqual(env, { MY_CCSERVER_TOKEN: 'a', my_ccserver_token: 'b', CCSERVER: 'c', CCSERVERX: 'd', ccserver: 'e' });
 });
 
 test('buildSessionEnv returns a new object and does not mutate its input', () => {
@@ -101,11 +128,18 @@ test('later spreads still override the base (per-session CCSERVER_* values survi
   assert.equal('CCSERVER_TOKEN' in merged, false);
 });
 
-test('isServerOnlyEnvKey agrees with the exported lists', () => {
-  for (const key of SERVER_ONLY_ENV_KEYS) assert.equal(isServerOnlyEnvKey(key), true, key);
-  for (const prefix of SERVER_ONLY_ENV_PREFIXES) assert.equal(isServerOnlyEnvKey(`${prefix}ANYTHING`), true, prefix);
+test('isServerOnlyEnvKey agrees with the exported lists, in any case', () => {
+  for (const key of SERVER_ONLY_ENV_KEYS) {
+    assert.equal(isServerOnlyEnvKey(key), true, key);
+    assert.equal(isServerOnlyEnvKey(key.toLowerCase()), true, key.toLowerCase());
+  }
+  for (const prefix of SERVER_ONLY_ENV_PREFIXES) {
+    assert.equal(isServerOnlyEnvKey(`${prefix}ANYTHING`), true, prefix);
+    assert.equal(isServerOnlyEnvKey(`${prefix.toLowerCase()}anything`), true, prefix.toLowerCase());
+  }
   assert.equal(isServerOnlyEnvKey('PATH'), false);
   assert.equal(isServerOnlyEnvKey('HOME'), false);
   assert.equal(isServerOnlyEnvKey('NODE_OPTIONS'), false);
   assert.equal(isServerOnlyEnvKey('CCSANDBOX_MCP_SOCK'), false);
+  assert.equal(isServerOnlyEnvKey('ccsandbox_mcp_sock'), false);
 });
