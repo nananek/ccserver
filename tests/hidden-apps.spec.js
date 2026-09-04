@@ -55,6 +55,22 @@ test('combo role pickers (workerA/workerB/orchestrator) drop codex, keep claude/
   await expect(page.locator('.open-menu-app-btn', { hasText: 'OpenAI Codex' })).toHaveCount(0);
 });
 
+test('combo launch is disabled (not silently sent) when every combo-eligible app is hidden', async ({ page }) => {
+  // Edge case found in self-review: an operator who only contracted GitHub
+  // Copilot (which can't join combos) hides claude/opencode/codex entirely.
+  // The role pickers correctly render zero buttons for each role, but
+  // without a launch-time guard, comboApps state kept its stale default
+  // (claude/opencode/claude) and コンボ起動 would silently launch those
+  // hidden apps -- a picker-vs-launch-value mismatch that defeated the hide.
+  await stubDirsHome(page, { ...HOME_RESPONSE, hiddenApps: ['claude', 'opencode', 'codex'] });
+  await page.goto('/');
+  await page.getByRole('button', { name: '起動方法を選択' }).click();
+  await page.locator('.resume-dialog .launch-mode-btn', { hasText: 'コンボ起動' }).click();
+  await expect(page.locator('.open-menu-app-btn')).toHaveCount(0);
+  const launchBtn = page.locator('.resume-actions button.btn-primary', { hasText: 'コンボ起動' });
+  await expect(launchBtn).toBeDisabled();
+});
+
 test('worker preset management dialog drops codex from the app picker', async ({ page }) => {
   await stubDirsHome(page);
   await page.goto('/');

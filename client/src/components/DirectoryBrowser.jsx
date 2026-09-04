@@ -226,12 +226,19 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       if (rows.some((r) => r.role === p.role)) return rows; // roles are unique per launch
       if (rows.length >= MAX_COMBO_WORKERS) return rows;
       const visible = COMBO_WORKER_APPS.filter((a) => !hiddenApps.includes(a));
+      // 'claude' is only a safe fallback when it isn't itself hidden -- with
+      // every combo-eligible app hidden (issue #105 edge case: an operator
+      // who only contracted GitHub Copilot, which can't join combos), there
+      // is no valid app to assign, so refuse to add the row rather than
+      // silently reintroducing a hidden app (see the コンボ起動 disabled
+      // check below, which this also protects).
+      if (visible.length === 0) return rows;
       return [...rows, {
         uid: ++workerUidRef.current,
         presetId: p.id,
         name: p.name,
         role: p.role,
-        app: visible.includes(p.app) ? p.app : (visible[0] || 'claude'),
+        app: visible.includes(p.app) ? p.app : visible[0],
         model: p.model || '',
       }];
     });
@@ -258,7 +265,11 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
 
   const openPresetManage = useCallback(() => {
     setEditingPresetId(null);
-    const fallbackApp = COMBO_WORKER_APPS.find((a) => !hiddenApps.includes(a)) || 'claude';
+    // '' when every combo-eligible app is hidden: no picker button will show
+    // as active (visibleComboApps is empty too), and the server rejects an
+    // empty/missing app on save, so this can never silently smuggle a hidden
+    // app into a saved preset.
+    const fallbackApp = COMBO_WORKER_APPS.find((a) => !hiddenApps.includes(a)) || '';
     setPresetForm({ name: '', role: '', app: fallbackApp, model: '' });
     setPresetFormError(null);
     setManageOpen(true);
@@ -603,6 +614,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // app never renders at all.
   const visibleApps = ALL_APPS.filter((a) => !hiddenApps.includes(a));
   const visibleComboApps = COMBO_WORKER_APPS.filter((a) => !hiddenApps.includes(a));
+  // Safety net for issue #105's combo-mode edge case: when every combo-
+  // eligible app is hidden (e.g. an operator who only contracted GitHub
+  // Copilot, which can't join combos), the reconciliation effect above has
+  // nothing to correct comboApps.workerA/workerB/orchestrator to, so they
+  // can still hold a stale/default hidden app id even though the role
+  // pickers above render zero buttons for it. Without this check, コンボ起動
+  // would silently launch that hidden app -- the one screen where a
+  // rendering-vs-launch-value mismatch could defeat the hide entirely.
+  const comboHasHiddenAppSelected = COMBO_ROLES.some((role) => !visibleComboApps.includes(comboApps[role]))
+    || selectedWorkers.some((r) => !visibleComboApps.includes(r.app));
 
   // Sandbox choice + gpg/sshAgent suboptions for the single-launch pane.
   // The meta agent has no separate picker -- it inherits the global
@@ -1113,6 +1134,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               {launchMode === 'combo' ? (
                 <button
                   className="btn btn-primary"
+                  disabled={comboHasHiddenAppSelected}
+                  title={comboHasHiddenAppSelected ? '非表示に設定されたアプリが選択されています。ロールのアプリを選び直してください。' : ''}
                   onClick={() => {
                     // Build the payload BEFORE closing the menu: closeOpenMenu
                     // resets the draft model/sandbox state, and React state
