@@ -6,13 +6,13 @@
 
 > **Note:** このプロジェクトは対応するAI CLIの各ベンダー・プロジェクトとは無関係の非公式サードパーティツールです。各ベンダー・プロジェクトによる公式サポートの対象外です。
 
-ディレクトリを指定して複数の AI CLI ([Claude Code](https://docs.anthropic.com/en/docs/claude-code)、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli)、[OpenAI Codex CLI](https://developers.openai.com/codex/cli/)) を起動・管理する Web フロントエンド。VS Code のようにフォルダを選択し、ブラウザ内のターミナルで操作できます。
+ディレクトリを指定して複数の AI CLI ([Claude Code](https://docs.anthropic.com/en/docs/claude-code)、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli)、[OpenAI Codex CLI](https://developers.openai.com/codex/cli/)、Command Code) を起動・管理する Web フロントエンド。VS Code のようにフォルダを選択し、ブラウザ内のターミナルで操作できます。
 
 📖 **詳しいドキュメントは [ドキュメントサイト](https://nananek.github.io/ccserver/) を参照してください。**
 
 ## 主な機能
 
-- 複数 AI CLI の統一管理 (Claude Code / opencode / GitHub Copilot CLI / OpenAI Codex CLI) — [起動ガイド](https://nananek.github.io/ccserver/guides/launching/)
+- 複数 AI CLI の統一管理 (Claude Code / opencode / GitHub Copilot CLI / OpenAI Codex CLI / Command Code) — [起動ガイド](https://nananek.github.io/ccserver/guides/launching/)
 - `bwrap` + rootless docker によるプロジェクト単位の隔離サンドボックス実行 — [サンドボックス](https://nananek.github.io/ccserver/sandbox/overview/)
 - 予約プロンプト (指定時刻・利用制限解除時刻に自動でプロンプトを投入) — [詳細](https://nananek.github.io/ccserver/guides/scheduled-prompts/)
 - `ccserver-notify` MCP による Discord / webhook / Vikunja 通知 — [詳細](https://nananek.github.io/ccserver/guides/notify/)
@@ -23,7 +23,7 @@
 ## アーキテクチャ
 
 ```
-ブラウザ (xterm.js) <── WebSocket ──> Fastify <── node-pty ──> claude / opencode / copilot / codex CLI
+ブラウザ (xterm.js) <── WebSocket ──> Fastify <── node-pty ──> claude / opencode / copilot / codex / command-code CLI
                     <── HTTP REST ──>         (ディレクトリ一覧 API)
 ```
 
@@ -36,7 +36,7 @@
 
 - Node.js >= 22.13 / npm >= 9
 - C++ コンパイラ (node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`)
-- 対応する AI CLI のいずれか 1 つ以上 (Claude Code / opencode / GitHub Copilot CLI / OpenAI Codex CLI)。サーバーにインストールされている CLI だけを起動時に選べます。
+- 対応する AI CLI のいずれか 1 つ以上 (Claude Code / opencode / GitHub Copilot CLI / OpenAI Codex CLI / Command Code)。サーバーにインストールされている CLI だけを起動時に選べます。
 
 詳細 (各 CLI のインストール方法・docker 利用時の追加パッケージ等) は [必要な環境](https://nananek.github.io/ccserver/getting-started/requirements/) を参照してください。
 

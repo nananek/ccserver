@@ -10,6 +10,7 @@ const claudeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" str
 // matching the other app icons.
 const copilotIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M8 2.5v2"/><path d="M4.5 5h7"/><circle cx="8" cy="9.5" r="4"/><path d="M5.8 8.2h.01M10.2 8.2h.01"/><path d="M5.8 11c1.2 1.1 3.2 1.1 4.4 0"/></svg>;
 const codexIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M3 4.5 8 2l5 2.5v7L8 14l-5-2.5z"/><path d="m3 4.5 5 2.7 5-2.7M8 7.2V14"/></svg>;
+const commandcodeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="m3 5 4 3-4 3M9 11h4"/><path d="M2 3h12v10H2z"/></svg>;
 // Meta agent: a key -- the session carries the privileged ccserver-meta MCP.
 const metaIcon = <svg className="tab-icon tab-icon-meta" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="5" cy="11" r="3"/><path d="M7.2 8.8 13.5 2.5"/><path d="M10.8 5.2l2.2 2.2"/><path d="M13.5 2.5V5"/></svg>;
 
@@ -41,6 +42,7 @@ export default function TabIcon({ type, app, shell, isMetaAgent }) {
     if (app === 'opencode') icons.push(opencodeIcon);
     if (app === 'copilot') icons.push(copilotIcon);
     if (app === 'codex') icons.push(codexIcon);
+    if (app === 'commandcode') icons.push(commandcodeIcon);
     if (app === 'claude' && !shell) icons.push(claudeIcon);
     return <>{icons}</>;
   }

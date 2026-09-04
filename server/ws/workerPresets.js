@@ -11,10 +11,10 @@ import { randomUUID } from 'node:crypto';
 import { getDb } from '../db.js';
 import { WORKER_ROLE_RE } from './groupManager.js';
 
-// Presets can only contain CLIs that can join a group's MCP broker: copilot
-// has no CLI-arg/env MCP injection (config-file only) and is refused
-// explicitly -- this whitelist is intentionally narrower than appLaunch.js's
-// APPS.
+// Presets can only contain CLIs that can join a group's MCP broker:
+// copilot/commandcode have no CLI-arg/env MCP injection (config-file only /
+// unverified) and are refused explicitly -- this whitelist is intentionally
+// narrower than appLaunch.js's APPS.
 export const PRESET_APPS = ['claude', 'opencode', 'codex'];
 
 const NAME_MAX = 80;
@@ -94,9 +94,10 @@ export function normalizePresetInput(input, opts = {}) {
 
   if (has('app') && source.app !== null && source.app !== undefined && source.app !== '') {
     if (!PRESET_APPS.includes(source.app)) {
-      // Lowercase "copilot" here on purpose: this string flows into the REST
-      // 400s whose long-standing contract the E2E suite matches on.
-      errors.push('app must be claude, opencode, or codex (copilot is not supported in groups)');
+      // Keep "copilot is not supported in groups" verbatim: this string flows
+      // into the REST 400s whose long-standing contract the E2E suite matches
+      // on (see tests/copilot-launch.spec.js).
+      errors.push('app must be claude, opencode, or codex (copilot is not supported in groups; commandcode neither)');
     } else {
       value.app = source.app;
     }

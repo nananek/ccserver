@@ -311,17 +311,17 @@ export default function App() {
       shell: !!session.shell,
       sessionId: session.id,
       attachSessionId: session.id,
-      app: session.app === 'opencode' ? 'opencode' : session.app === 'copilot' ? 'copilot' : session.app === 'codex' ? 'codex' : 'claude',
+      app: session.app === 'opencode' ? 'opencode' : session.app === 'copilot' ? 'copilot' : session.app === 'codex' ? 'codex' : session.app === 'commandcode' ? 'commandcode' : 'claude',
       model: session.model || null,
       sandbox: !!session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
       // Needed by the SESSION_NOT_FOUND re-init path (TerminalView) so a
       // re-launched meta agent keeps its privilege request.
       isMetaAgent: !!session.isMetaAgent,
-      // opencode/copilot re-launches resume the last session of the project
-      // (-c / --continue), so a continued conversation survives the dead pty
-      // like claude's does.
-      resume: session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex',
+      // opencode/copilot/codex/commandcode re-launches resume the last session of
+      // the project (-c / --continue / resume --last), so a continued
+      // conversation survives the dead pty like claude's does.
+      resume: session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex' || session.app === 'commandcode',
     });
   }, [tabs, openTerminalTab]);
 

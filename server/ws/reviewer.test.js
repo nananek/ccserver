@@ -671,6 +671,7 @@ test('completeReviewJob sends a ccserver-notify notification with the PR/focus/p
 test('shouldInjectReviewer excludes shells and copilot but allows any other app regardless of groupRole', () => {
   assert.equal(reviewer.shouldInjectReviewer({ shell: true, app: null, reviewerEnabled: true }), false);
   assert.equal(reviewer.shouldInjectReviewer({ shell: false, app: 'copilot', reviewerEnabled: true }), false);
+  assert.equal(reviewer.shouldInjectReviewer({ shell: false, app: 'commandcode', reviewerEnabled: true }), false);
   assert.equal(reviewer.shouldInjectReviewer({ shell: false, app: 'claude', reviewerEnabled: false }), false);
   assert.equal(reviewer.shouldInjectReviewer({ shell: false, app: 'claude', reviewerEnabled: true }), true);
 });

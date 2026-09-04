@@ -592,7 +592,7 @@ export function loadSandboxConfig() {
   // Which agent a new session launches when the client doesn't request one.
   // See appLaunch.js's APPS; anything else (including unset) falls back to
   // claude -- see sessionManager.js's defaultApp().
-  const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' || raw.defaultApp === 'codex' ? raw.defaultApp : 'claude';
+  const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' || raw.defaultApp === 'codex' || raw.defaultApp === 'commandcode' ? raw.defaultApp : 'claude';
   // Show the client's top-bar Usage button (Claude Code /usage spend). Off
   // for setups that don't want it; the client also hides the button on its
   // own when claude is not installed (the capture would never succeed).
@@ -748,6 +748,8 @@ function resolveAgentCommand(cmd, extraDirs = []) {
 //   is required for it to run inside the sandbox.
 // copilot: like claude, a bare name first (its ~/.local/bin install is on
 //   SANDBOX_PATH); falls back to an absolute path for installs PATH can't see.
+// codex: like copilot, a bare name first (~/.local/bin is searched as a
+//   fallback); falls back to an absolute path for installs PATH can't see.
 export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
   if (app === 'opencode') {
     const r = resolveAgentCommand('opencode', [join(HOME, '.opencode', 'bin')]);
@@ -768,6 +770,21 @@ export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
     if (r) return { command: r.command, installDir: appInstallDir(r.path), found: true };
     return { command: process.platform === 'win32' ? 'codex.exe' : 'codex', installDir: null, found: false };
   }
+  if (app === 'commandcode') {
+    const names = ['command-code', 'commandcode', 'cmdc', 'cmd'];
+    for (const name of names) {
+      const r = resolveAgentCommand(name, [join(process.cwd(), '.tools', 'bin')]);
+      if (r) {
+        let real = r.path;
+        try { real = realpathSync(r.path); } catch { /* keep as given */ }
+        // command-code is a Node package; expose its package root so its
+        // bundled node_modules remain available inside the sandbox.
+        const packageRoot = dirname(dirname(real));
+        return { command: real, installDir: packageRoot, found: true };
+      }
+    }
+    return { command: 'command-code', installDir: null, found: false };
+  }
   const command = configuredBin || (process.platform === 'win32' ? 'claude.exe' : 'claude');
   const r = resolveAgentCommand(command);
   // Keep the bare name when PATH resolves it (the sandbox PATH can too); use
@@ -787,6 +804,7 @@ export function installedApps() {
     opencode: resolveApp('opencode').found,
     copilot: resolveApp('copilot').found,
     codex: resolveApp('codex').found,
+    commandcode: resolveApp('commandcode').found,
   };
 }
 
@@ -806,14 +824,18 @@ export function resolveClaude(configuredBin = loadSandboxConfig().claudeBin) {
   return resolveApp('claude', configuredBin);
 }
 
-// Swap a leading bare `claude`/`opencode`/`copilot` in a target command for
-// the resolved launcher, leaving non-agent targets (e.g. a shell) untouched.
-// Absolute commands (e.g. resolved opencode paths) pass through as-is.
+// Swap a leading bare `claude`/`opencode`/`copilot`/`codex`/`commandcode` in a
+// target command for the resolved launcher, leaving non-agent targets (e.g. a
+// shell) untouched. Absolute commands (e.g. resolved opencode paths) pass
+// through as-is.
 function withClaude(targetCommand, command) {
   if (targetCommand[0] === 'claude' || targetCommand[0] === 'claude.exe'
     || targetCommand[0] === 'opencode' || targetCommand[0] === 'opencode.exe'
     || targetCommand[0] === 'copilot' || targetCommand[0] === 'copilot.exe'
     || targetCommand[0] === 'codex' || targetCommand[0] === 'codex.exe') {
+    return [command, ...targetCommand.slice(1)];
+  }
+  if (targetCommand[0] === 'command-code' || targetCommand[0] === 'commandcode' || targetCommand[0] === 'cmdc' || targetCommand[0] === 'cmd') {
     return [command, ...targetCommand.slice(1)];
   }
   return targetCommand;
@@ -917,7 +939,8 @@ export function sandboxAvailable() {
 // but not including the trailing `-- <cmd...>`).
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
 //             (see persistentHomeDir), or null for a fresh tmpfs HOME.
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null }) {
+//   app     - which agent is being launched (used to bind node for command-code's wrapper)
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1069,7 +1092,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
   }
 
-  // Agent CLI configuration + install dirs (claude + opencode + copilot + codex),
+  // Agent CLI configuration + install dirs (claude + opencode + copilot + codex + commandcode),
   // writable so sessions/auth state survive across sandbox launches and
   // conversations can be resumed. ~/.local/bin is exposed so the user's own
   // tools resolve. opencode's XDG state dir (~/.local/state/opencode) holds
@@ -1078,6 +1101,8 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // auth (~/.config/github-copilot/hosts.json) and config (~/.copilot) are
   // bound writable so a sandboxed session keeps its login and model/session
   // state (session history lives under ~/.copilot, so `--continue` works).
+  // commandcode stores its API key auth at ~/.commandcode/auth.json -- without
+  // this bind every sandboxed launch prompts for the key again.
   const opencodeState = join(HOME, '.local', 'state', 'opencode');
   mkdirSync(opencodeState, { recursive: true });
   const copilotConfig = join(HOME, '.config', 'github-copilot');
@@ -1085,6 +1110,8 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   const codexHome = join(HOME, '.codex');
   mkdirSync(copilotConfig, { recursive: true });
   mkdirSync(copilotHome, { recursive: true });
+  const commandcodeHome = join(HOME, '.commandcode');
+  mkdirSync(commandcodeHome, { recursive: true });
   const appBinds = [
     [join(HOME, '.claude'), 'rw'],
     [join(HOME, '.claude.json'), 'rw'],
@@ -1095,6 +1122,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     [copilotConfig, 'rw'],
     [copilotHome, 'rw'],
     [codexHome, 'rw'],
+    [commandcodeHome, 'rw'],
   ];
   for (const [src, mode] of appBinds) {
     if (existsSync(src)) {
@@ -1178,8 +1206,9 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // fixed path); bind the actual node binary here rather than assume
   // /usr/bin/node exists, mirroring how resolveApp follows the real
   // agent binary instead of assuming a host layout. Shared between the
-  // git-broker machinery and the MCP bridge wrapper.
-  if (gitBroker || mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath || reviewerSocketPath) {
+  // git-broker machinery and the MCP bridge wrapper. command-code's launcher
+  // is also a Node script (#!/usr/bin/env node), so it needs node too.
+  if (gitBroker || mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath || reviewerSocketPath || app === 'commandcode') {
     const nodeBin = realpathSync(process.execPath);
     args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
   }
@@ -1454,8 +1483,16 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir });
-  const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app });
+  // command-code's launcher is a Node script. Run it explicitly via the
+  // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
+  // otherwise require /usr/bin/node to be present inside the sandbox's PATH.
+  // targetCommand is already resolved to an absolute path (e.g.
+  // /.../command-code/dist/index.mjs), so withClaude returns that path + args;
+  // we prepend the in-sandbox node.
+  const innerCmd = app === 'commandcode'
+    ? [BASH, '/ccserver-sandbox-entrypoint.sh', SANDBOX_NODE_PATH, ...withClaude(targetCommand, command)]
+    : [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   const gitBrokerFields = {
     gitBrokerProc: gitBroker ? gitBroker.proc : null,

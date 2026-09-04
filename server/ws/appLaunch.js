@@ -6,7 +6,7 @@
 // The launchable agent CLIs. Any session launcher (WS init, combo groups,
 // scheduled prompts, orchestrator restarts) keys its behavior off these ids;
 // unknown ids are rejected / fall back to the configured default app.
-export const APPS = ['claude', 'opencode', 'copilot', 'codex'];
+export const APPS = ['claude', 'opencode', 'copilot', 'codex', 'commandcode'];
 
 // Which app new sessions launch when none is requested is configured, not
 // hardcoded here -- see sandbox.js's loadSandboxConfig() / sessionManager.js's
@@ -17,7 +17,11 @@ export function isValidApp(app) {
 }
 
 export function appDisplayName(app) {
-  return app === 'copilot' ? 'GitHub Copilot' : app === 'codex' ? 'OpenAI Codex' : app === 'opencode' ? 'opencode' : 'Claude Code';
+  if (app === 'copilot') return 'GitHub Copilot';
+  if (app === 'opencode') return 'opencode';
+  if (app === 'codex') return 'OpenAI Codex';
+  if (app === 'commandcode') return 'Command Code';
+  return 'Claude Code';
 }
 
 // CLI args to start `app` fresh, or to resume a conversation:
@@ -44,6 +48,11 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
     const args = resumeId ? ['resume', resumeId] : resumeLast ? ['resume', '--last'] : [];
     return args;
   }
+  if (app === 'commandcode') {
+    if (resumeId) return ['--resume', resumeId];
+    if (resumeLast) return ['-c'];
+    return [];
+  }
   if (resumeId) return ['--resume', resumeId];
   if (resumeLast) return ['--continue'];
   return [];
@@ -64,6 +73,7 @@ export function appSupportsModelFlag(app) {
   if (app === 'opencode') return true;
   if (app === 'copilot') return true;
   if (app === 'codex') return true;
+  if (app === 'commandcode') return true;
   if (app === 'claude') return process.env.CCSERVER_CLAUDE_MODEL === '1';
   return false;
 }
@@ -90,6 +100,7 @@ const APP_SUBMIT_KEYS = {
   opencode: '\r',
   copilot: '\r',
   codex: '\r',
+  commandcode: '\r',
 };
 
 export function appSubmitKey(app) {
@@ -100,12 +111,13 @@ export function appSubmitKey(app) {
 
 // Try to recover a conversation id from recent (ANSI-stripped) terminal
 // output, so an exiting session can be resumed later. claude prints
-// `claude --resume <id>`; opencode's and copilot's TUIs never expose their
-// session id in the byte stream, so their resume goes through
-// `opencode -c` / `copilot --continue` instead (null here).
+// `claude --resume <id>`; opencode's, copilot's, codex's and commandcode's
+// TUIs never expose their session id in the byte stream, so their resume goes
+// through `opencode -c` / `copilot --continue` / `codex resume --last` /
+// `commandcode -c` instead (null here).
 export function extractResumeSessionId(app, rawText) {
   const clean = rawText.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
-  if (app === 'opencode' || app === 'copilot' || app === 'codex') return null;
+  if (app === 'opencode' || app === 'copilot' || app === 'codex' || app === 'commandcode') return null;
 
   const matches = [...clean.matchAll(/claude\s+(?:--resume|-r)\s+([a-zA-Z0-9_-]+)/gi)];
   return matches.length > 0 ? matches[matches.length - 1][1] : null;
@@ -151,6 +163,9 @@ export function detectPermissionPrompt(app, bufNoSpace) {
     const mcpToolPrompt = /Allowthe\S+MCPserver(?:torun)?tool["“][^"”]+["”].*1\.Allow/i;
     return commandPrompt.test(bufNoSpace) || mcpToolPrompt.test(bufNoSpace);
   }
+  // commandcode approval rendering is not verified on this host either --
+  // same policy: never auto-approve an unverified frame.
+  if (app === 'commandcode') return false;
   return (
     /Doyouwantto(proceed|makethisedit|use)/i.test(bufNoSpace) ||
     /Yes,allow/i.test(bufNoSpace) ||

@@ -640,7 +640,7 @@ test('getRegisteredMemberSandboxOpts: dead session falls back to memberSaved (th
 // member is only destroyed AFTER the new channel + session exist, and a
 // failure anywhere leaves the old member fully usable.
 
-test('addMember refuses copilot explicitly and corrects a copilot fallback to claude', async () => {
+test('addMember refuses copilot/commandcode explicitly and corrects the fallback to claude', async () => {
   const gid = await makeGroup();
   let seenApp = null;
   const fake = {
@@ -655,6 +655,12 @@ test('addMember refuses copilot explicitly and corrects a copilot fallback to cl
     const res = await groupManager.addMember(gid, 'workerA', { app: 'copilot', cwd: '/srv/proj' });
     assert.equal(res.error, 'bad-request');
     assert.match(res.message, /not supported in groups/);
+    assert.equal(seenApp, null, 'no spawn attempt for the refused member');
+    // Same for commandcode (no verified MCP injection).
+    const resCc = await groupManager.addMember(gid, 'workerA', { app: 'commandcode', cwd: '/srv/proj' });
+    assert.equal(resCc.error, 'bad-request');
+    assert.match(resCc.message, /not supported in groups/);
+    assert.match(resCc.message, /commandcode/);
     assert.equal(seenApp, null, 'no spawn attempt for the refused member');
   } finally {
     groupManager.setSessionApiForTests(null);

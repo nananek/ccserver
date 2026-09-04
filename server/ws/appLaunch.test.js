@@ -41,7 +41,7 @@ function accumulateDetect(app, chunks) {
 const OPENCODE_PERMISSION_BOX_RAW = '                                                                   \x1b[0m\x1b[30;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[30;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m  \x1b[0m\x1b[30;6H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m△\x1b[0m\x1b[30;7H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m \x1b[0m\x1b[30;8H\x1b[38;2;238;238;238m\x1b[48;2;20;20;20mPermission required\x1b[0m\x1b[30;27H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                            \x1b[0m\x1b[31;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[31;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m    \x1b[0m\x1b[31;8H\x1b[38;2;128;128;128m\x1b[48;2;20;20;20m←\x1b[0m\x1b[31;9H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m \x1b[0m\x1b[31;10H\x1b[38;2;238;238;238m\x1b[48;2;20;20;20mAccess external directory /tmp\x1b[0m\x1b[31;40H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                               \x1b[0m\x1b[32;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[32;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                                   \x1b[0m\x1b[33;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[33;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m  \x1b[0m\x1b[33;6H\x1b[38;2;128;128;128m\x1b[48;2;20;20;20mPatterns\x1b[0m\x1b[33;14H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                         \x1b[0m\x1b[34;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[34;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                                   \x1b[0m\x1b[35;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[35;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m  \x1b[0m\x1b[35;6H\x1b[38;2;238;238;238m\x1b[48;2;20;20;20m- /tmp/*\x1b[0m\x1b[35;14H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                         \x1b[0m\x1b[36;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[36;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                                   \x1b[0m\x1b[37;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[37;6H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m     \x1b[0m\x1b[37;12H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m \x1b[0m\x1b[37;14H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m                            \x1b[0m\x1b[37;43H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m           \x1b[0m\x1b[37;55H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m \x1b[0m\x1b[37;57H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m   \x1b[0m\x1b[38;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[38;4H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m  \x1b[0m\x1b[38;6H\x1b[38;2;255;255;255m\x1b[48;2;245;167;66m \x1b[0m\x1b[38;7H\x1b[38;2;10;10;10m\x1b[48;2;245;167;66mAllow once\x1b[0m\x1b[38;17H\x1b[38;2;255;255;255m\x1b[48;2;245;167;66m \x1b[0m\x1b[38;18H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m  \x1b[0m\x1b[38;20H\x1b[38;2;128;128;128m\x1b[48;2;30;30;30mAllow always\x1b[0m\x1b[38;32H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m   \x1b[0m\x1b[38;35H\x1b[38;2;128;128;128m\x1b[48;2;30;30;30mReject\x1b[0m\x1b[38;41H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m             ';
 
 test('APPS covers all supported agents', () => {
-  assert.deepEqual(APPS, ['claude', 'opencode', 'copilot', 'codex']);
+  assert.deepEqual(APPS, ['claude', 'opencode', 'copilot', 'codex', 'commandcode']);
 });
 
 test('isValidApp accepts only known apps', () => {
@@ -49,6 +49,7 @@ test('isValidApp accepts only known apps', () => {
   assert.ok(isValidApp('opencode'));
   assert.ok(isValidApp('copilot'));
   assert.ok(isValidApp('codex'));
+  assert.ok(isValidApp('commandcode'));
   assert.ok(!isValidApp('bogus'));
   assert.ok(!isValidApp(undefined));
   assert.ok(!isValidApp(null));
@@ -59,6 +60,7 @@ test('appDisplayName maps apps to labels', () => {
   assert.equal(appDisplayName('copilot'), 'GitHub Copilot');
   assert.equal(appDisplayName('claude'), 'Claude Code');
   assert.equal(appDisplayName('codex'), 'OpenAI Codex');
+  assert.equal(appDisplayName('commandcode'), 'Command Code');
   assert.equal(appDisplayName('bogus'), 'Claude Code');
 });
 
@@ -92,6 +94,13 @@ test('appResumeArgs: codex resumes by id or --last', () => {
   assert.deepEqual(appResumeArgs('codex', 'session-1', { resumeLast: true }), ['resume', 'session-1']);
 });
 
+test('appResumeArgs: commandcode resumes by id or -c', () => {
+  assert.deepEqual(appResumeArgs('commandcode', null), []);
+  assert.deepEqual(appResumeArgs('commandcode', 'abc123'), ['--resume', 'abc123']);
+  assert.deepEqual(appResumeArgs('commandcode', null, { resumeLast: true }), ['-c']);
+  assert.deepEqual(appResumeArgs('commandcode', 'abc123', { resumeLast: true }), ['--resume', 'abc123']);
+});
+
 test('codex resume argv keeps the global model flag after the resume selector', () => {
   const launchArgs = (resumeId, resumeLast, model) => [
     ...appResumeArgs('codex', resumeId, { resumeLast }),
@@ -106,6 +115,7 @@ test('appSupportsModelFlag: opencode verified, copilot verified, claude opt-in o
   assert.equal(appSupportsModelFlag('opencode'), true, 'opencode --help confirms -m/--model');
   assert.equal(appSupportsModelFlag('copilot'), true, 'copilot --help confirms --model (real binary, Aug 2026)');
   assert.equal(appSupportsModelFlag('codex'), true, 'Codex documents --model');
+  assert.equal(appSupportsModelFlag('commandcode'), true, 'command-code accepts --model');
   // claude's --model support cannot be verified on this host (the local
   // wrapper resolves to a missing binary), so it must default to off and only
   // turn on via the documented opt-in env var.
@@ -221,6 +231,11 @@ test('extractResumeSessionId: copilot never exposes a stream id', () => {
 
 test('extractResumeSessionId: codex is intentionally not inferred from TUI output', () => {
   assert.equal(extractResumeSessionId('codex', 'codex resume session-1'), null);
+});
+
+test('extractResumeSessionId: commandcode never exposes a stream id', () => {
+  assert.equal(extractResumeSessionId('commandcode', 'command-code --resume abc123'), null);
+  assert.equal(extractResumeSessionId('commandcode', ''), null);
 });
 
 test('detectPermissionPrompt: claude Ink prompts', () => {
@@ -375,4 +390,16 @@ test('detectPermissionPrompt: opencode model prose is not a prompt', () => {
     assert.ok(!detectPermissionPrompt('opencode', noSpace(p)), p);
     assert.ok(!accumulateDetect('opencode', [p]), p);
   }
+});
+
+test('detectPermissionPrompt: commandcode is never auto-approved (unverified frame)', () => {
+  // Same policy as codex: the approval rendering is not verified on this
+  // host, so the detector must stay silent and let the user answer in the
+  // terminal -- even for claude-shaped prose that would match the generic
+  // fallback.
+  const buf = (s) => noSpace(s);
+  assert.ok(!detectPermissionPrompt('commandcode', buf('Do you want to proceed?')));
+  assert.ok(!detectPermissionPrompt('commandcode', buf('Yes, allow')));
+  assert.ok(!detectPermissionPrompt('commandcode', buf('Permission required')));
+  assert.ok(!accumulateDetect('commandcode', ['Do you want to ', 'proceed?']));
 });

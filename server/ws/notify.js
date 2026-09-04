@@ -93,11 +93,11 @@ export function notifyEnabled() {
 //   - shells (app null) never get it,
 //   - workers (groupRole !== 'orchestrator') never get it -- only the
 //     orchestrator of a combo and standalone agent sessions do,
-//   - copilot never gets it (no CLI-arg/env MCP injection; the notify server
-//     would be unreachable), even as a standalone agent,
+//   - copilot/commandcode never get it (no CLI-arg/env MCP injection; the
+//     notify server would be unreachable), even as a standalone agent,
 //   - nothing is injected when the feature is disabled.
 export function shouldInjectNotify({ shell, app, groupId, groupRole, notifyEnabled }) {
-  return !shell && app != null && app !== 'copilot' && !!notifyEnabled
+  return !shell && app != null && app !== 'copilot' && app !== 'commandcode' && !!notifyEnabled
     && (groupId == null || groupRole === 'orchestrator');
 }
 

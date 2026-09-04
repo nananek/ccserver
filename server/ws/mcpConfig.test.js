@@ -62,6 +62,25 @@ test('copilot + notify(host): nothing is assembled for either server', () => {
   assert.deepEqual(env, {}, 'no env injection');
 });
 
+// commandcode has no verified CLI-arg/env MCP injection either, so it shares
+// copilot's empty assembly -- otherwise an unknown-option flag would break
+// the launch.
+test('commandcode gets no injection at all: empty args and env, even with groupMcp', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('commandcode');
+  assert.deepEqual(args, [], 'no CLI args (--mcp-config must never appear)');
+  assert.deepEqual(env, {}, 'no env injection');
+  assert.ok(!args.join(' ').includes('--mcp-config'));
+});
+
+test('commandcode + notify(sandbox): nothing is assembled for either server', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('commandcode', {
+    groupMcp: true,
+    notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock', identity },
+  });
+  assert.deepEqual(args, [], 'no CLI args (--mcp-config must never appear)');
+  assert.deepEqual(env, {}, 'no env injection');
+});
+
 // ccserver-notify injection (see notify.js): the optional `{ notify }`
 // descriptor adds the notify server to the same registration, with the bridge
 // command switching on the session's sandbox mode. sessionManager always

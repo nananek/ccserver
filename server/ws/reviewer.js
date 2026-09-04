@@ -96,8 +96,8 @@ const GH_PR_VIEW_TIMEOUT_MS = 15 * 1000;
 const REF_FETCH_TIMEOUT_MS = 15 * 1000;
 
 // Soft cap on jobs accepted (worktree created / session launched) at once,
-// process-wide -- run_review is injected into every non-shell/non-copilot
-// session once reviewerMcp is on (see shouldInjectReviewer), including
+// process-wide -- run_review is injected into every non-shell/non-copilot/
+// non-commandcode session once reviewerMcp is on (see shouldInjectReviewer), including
 // workers, and each job spawns a real sandboxed agent CLI session, so an
 // agent looping on run_review with no cap would be free to exhaust host
 // resources. Overridable for local testing / larger hosts.
@@ -121,10 +121,10 @@ export function reviewerEnabled() {
 // Pure injection decision for createSession. Unlike notify (orchestrator
 // only), any session may ask for a review -- workers included (issue #102
 // consensus point 4: callable regardless of whether a group exists). Only
-// shells (no MCP at all) and copilot (no CLI-arg/env MCP injection) are
-// excluded.
+// shells (no MCP at all) and copilot/commandcode (no CLI-arg/env MCP
+// injection) are excluded.
 export function shouldInjectReviewer({ shell, app, reviewerEnabled }) {
-  return !shell && app != null && app !== 'copilot' && !!reviewerEnabled;
+  return !shell && app != null && app !== 'copilot' && app !== 'commandcode' && !!reviewerEnabled;
 }
 
 export function reviewerBrokerRunning() {

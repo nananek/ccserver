@@ -107,8 +107,8 @@ test('resolveApp reports found: false for a configured claudeBin that does not e
 // install-state-independent (it is a pure mirror of the per-app resolution).
 test('installedApps mirrors resolveApp found flags for all supported apps', () => {
   const installed = installedApps();
-  assert.deepEqual(Object.keys(installed).sort(), ['claude', 'codex', 'copilot', 'opencode']);
-  for (const app of ['claude', 'opencode', 'copilot', 'codex']) {
+  assert.deepEqual(Object.keys(installed).sort(), ['claude', 'codex', 'commandcode', 'copilot', 'opencode']);
+  for (const app of ['claude', 'opencode', 'copilot', 'codex', 'commandcode']) {
     assert.equal(installed[app], resolveApp(app).found, `${app} flag must match resolveApp`);
   }
 });

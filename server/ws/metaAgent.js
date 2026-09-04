@@ -65,13 +65,13 @@ export function metaAgentEnabled() {
 }
 
 // Pure injection decision for createSession. Only sessions explicitly
-// launched with isMetaAgent:true ever get this broker; shells and copilot
-// are excluded outright (no shell needs it; copilot has no CLI-arg/env MCP
-// injection at all). Group members can never qualify because createSession
-// additionally requires !groupId before even consulting this function --
-// stated here too so the invariant survives refactoring.
+// launched with isMetaAgent:true ever get this broker; shells and
+// copilot/commandcode are excluded outright (no shell needs it; neither has
+// CLI-arg/env MCP injection at all). Group members can never qualify because
+// createSession additionally requires !groupId before even consulting this
+// function -- stated here too so the invariant survives refactoring.
 export function shouldInjectMetaAgent({ shell, app, isMetaAgent, metaAgentEnabled }) {
-  return !shell && app != null && app !== 'copilot' && !!isMetaAgent && !!metaAgentEnabled;
+  return !shell && app != null && app !== 'copilot' && app !== 'commandcode' && !!isMetaAgent && !!metaAgentEnabled;
 }
 
 // Start (once) the global Unix-socket broker hosting ccserver-meta. Callers

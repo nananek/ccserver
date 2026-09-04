@@ -169,7 +169,7 @@ test('normalizeWorkers: duplicate roles and bad entries are refused with the ind
   assert.match(normalizeWorkers({ workers: [{ role: 'workerA' }, { role: 'workerA' }] }).error, /duplicate worker role: workerA/);
   assert.match(normalizeWorkers({ workers: [{ role: 'orchestrator' }] }).error, /workers\[0\]/);
   assert.match(normalizeWorkers({ workers: [{ role: 'workerOk' }, { name: '' }] }).error, /workers\[1\]/);
-  assert.match(normalizeWorkers({ workers: [{ role: 'workerX', app: 'copilot' }] }).error, /copilot is not supported in groups/);
+  assert.match(normalizeWorkers({ workers: [{ role: 'workerX', app: 'copilot' }] }).error, /not supported in groups/);
   assert.match(normalizeWorkers({ workers: [{ role: 'workerX', model: 5 }] }).error, /model must be a string or null/);
 });
 

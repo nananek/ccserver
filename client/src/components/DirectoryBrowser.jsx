@@ -20,12 +20,12 @@ const COMBO_DEFAULT_APPS = { workerA: 'claude', workerB: 'opencode', orchestrato
 // the server enforces for presets and workers[]).
 const COMBO_WORKER_APPS = ['claude', 'opencode', 'codex'];
 // Every launchable app id, in the order pickers list them.
-const ALL_APPS = ['claude', 'opencode', 'copilot', 'codex'];
+const ALL_APPS = ['claude', 'opencode', 'copilot', 'codex', 'commandcode'];
 // Hard cap mirrored from the server (MAX_GROUP_MEMBERS - 1 orchestrator).
 const MAX_COMBO_WORKERS = 7;
 
 // Same picker set + labels as single mode, so the two can't drift apart.
-const APP_LABELS = { claude: 'Claude Code', opencode: 'opencode', copilot: 'GitHub Copilot', codex: 'OpenAI Codex' };
+const APP_LABELS = { claude: 'Claude Code', opencode: 'opencode', copilot: 'GitHub Copilot', codex: 'OpenAI Codex', commandcode: 'Command Code' };
 
 // Combo-mode role app picks, remembered per browser like the single-launch
 // APP_KEY so the next combo launch reuses them instead of the claude/
@@ -97,8 +97,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // "通常起動" choice is disabled. Set from /api/dirs/home.
   const [forceSandbox, setForceSandbox] = useState(false);
   // Which agent CLIs the server can actually launch ({ claude, opencode,
-  // copilot } booleans), from /api/dirs/home. null until the fetch resolves;
-  // while null every picker entry stays enabled (old-server fallback).
+  // copilot, codex, commandcode } booleans), from /api/dirs/home. null until
+  // the fetch resolves; while null every picker entry stays enabled
+  // (old-server fallback).
   const [availableApps, setAvailableApps] = useState(null);
   // Apps hidden via sandbox.config.json's "hiddenApps" (issue #105 -- CLIs the
   // operator hasn't contracted for): removed from every picker below
@@ -109,9 +110,17 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // "defaultApp") arrives via /api/dirs/home, or the user picks explicitly.
   const [appDefault, setAppDefault] = useState(() => {
     const saved = localStorage.getItem(APP_KEY);
-    return saved === 'opencode' || saved === 'copilot' || saved === 'codex' || saved === 'claude' ? saved : 'claude';
+    return ['opencode', 'copilot', 'codex', 'commandcode', 'claude'].includes(saved) ? saved : 'claude';
   });
   const [codexModel, setCodexModel] = useState(() => localStorage.getItem('ccserver-codex-model') || '');
+  const [commandcodeModel, setCommandcodeModel] = useState(() => localStorage.getItem('ccserver-commandcode-model') || '');
+  // --model 対応アプリの判定はここに集約（対応アプリ追加時はここだけ変える）。
+  const modelForApp = (app) => {
+    if (app === 'codex') return codexModel.trim() || null;
+    if (app === 'commandcode') return commandcodeModel.trim() || null;
+    return null;
+  };
+  const modelInputForApp = (app) => app === 'codex' || app === 'commandcode';
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [launchMode, setLaunchMode] = useState('single'); // 'single' | 'combo'
   // Whether the privileged ccserver-meta feature is on (sandbox.config.json's
@@ -366,7 +375,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       }
       // Seed the app picker from the server's configured default, but only
       // if the user hasn't explicitly picked one on this browser yet.
-      if (!localStorage.getItem(APP_KEY) && (data.defaultApp === 'opencode' || data.defaultApp === 'copilot' || data.defaultApp === 'codex' || data.defaultApp === 'claude')) {
+      if (!localStorage.getItem(APP_KEY) && ['opencode', 'copilot', 'codex', 'commandcode', 'claude'].includes(data.defaultApp)) {
         setAppDefault(data.defaultApp);
       }
       // Server-enforced sandbox: force the toggle on and lock it.
@@ -775,10 +784,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
           <div className="open-split">
             <button
               className="btn btn-primary open-split-main"
-              onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: appDefault === 'codex' ? codexModel.trim() || null : null })}
+              onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault) })}
               title={sandboxDefault ? 'サンドボックスで起動' : '通常起動'}
             >
-              {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : appDefault === 'codex' ? 'OpenAI Codex' : 'opencode'}
+              {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : appDefault === 'codex' ? 'OpenAI Codex' : appDefault === 'commandcode' ? 'Command Code' : 'opencode'}
             </button>
             <button
               className="btn btn-primary open-split-caret"
@@ -840,14 +849,17 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                     {APP_LABELS[app]}
                   </div>
                 ))}
-                {appDefault === 'codex' && (
+                {modelInputForApp(appDefault) && (
                   <div className="open-menu-model-row">
                     <input
                       type="text"
                       className="open-menu-model-input"
-                      placeholder="Codexモデル (空=既定)"
-                      value={codexModel}
-                      onChange={(e) => { setCodexModel(e.target.value); localStorage.setItem('ccserver-codex-model', e.target.value); }}
+                      placeholder={appDefault === 'codex' ? 'Codexモデル (空=既定)' : 'Command Codeモデル (空=既定)'}
+                      value={appDefault === 'codex' ? codexModel : commandcodeModel}
+                      onChange={(e) => {
+                        if (appDefault === 'codex') { setCodexModel(e.target.value); localStorage.setItem('ccserver-codex-model', e.target.value); }
+                        else { setCommandcodeModel(e.target.value); localStorage.setItem('ccserver-commandcode-model', e.target.value); }
+                      }}
                       autoComplete="off"
                       autoCorrect="off"
                       spellCheck={false}
@@ -1183,7 +1195,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               ) : (
                 <button
                   className="btn btn-primary"
-                  onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: appDefault === 'codex' ? codexModel.trim() || null : null }); }}
+                  onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault) }); }}
                 >
                   起動
                 </button>
@@ -1375,7 +1387,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   <span className="session-status active">
                     {session.shell
                       ? 'shell'
-                      : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : session.app === 'codex' ? 'codex' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
+                      : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : session.app === 'codex' ? 'codex' : session.app === 'commandcode' ? 'command-code' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
                   </span>
                 </div>
                 <span className="session-cwd" title={session.cwd}>{displayPath(session.cwd, homeDir)}</span>
@@ -1438,7 +1450,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 sandbox: sandboxDefault,
                 sandboxOpts: loadSandboxOpts(dir.path),
                 app: appDefault,
-                model: appDefault === 'codex' ? codexModel.trim() || null : null,
+                model: modelForApp(appDefault),
               })}
               role="button"
               tabIndex={0}

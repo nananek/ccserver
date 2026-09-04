@@ -65,7 +65,9 @@ export function normalizePresetWorker(raw) {
   const n = normalizePresetInput(src, { allowMissingName: true });
   if (!n.ok) return n;
   if (!src.app || !PRESET_APPS.includes(src.app)) {
-    return { ok: false, errors: ['app must be claude, opencode, or codex (copilot is not supported in groups)'] };
+    // Same contract as workerPresets.js: keep the "copilot is not supported
+    // in groups" substring the E2E suite matches on.
+    return { ok: false, errors: ['app must be claude, opencode, or codex (copilot is not supported in groups; commandcode neither)'] };
   }
   const hasOwn = (k) => Object.prototype.hasOwnProperty.call(src, k);
   const opts = src.sandboxOpts && typeof src.sandboxOpts === 'object'

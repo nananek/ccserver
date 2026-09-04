@@ -173,7 +173,11 @@ const MAX_RECONNECT_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 30000;
 
 function appLabel(app) {
-  return app === 'claude' ? 'Claude Code' : app === 'copilot' ? 'GitHub Copilot' : app === 'codex' ? 'OpenAI Codex' : 'opencode';
+  if (app === 'claude') return 'Claude Code';
+  if (app === 'copilot') return 'GitHub Copilot';
+  if (app === 'codex') return 'OpenAI Codex';
+  if (app === 'commandcode') return 'Command Code';
+  return 'opencode';
 }
 
 // Format an absolute epoch as the zero-padded 24h "HH:MM" the scheduler
@@ -722,7 +726,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;
             claudeResumeIdRef.current = null;
-          } else if (!shellRef.current && (appRef.current === 'opencode' || appRef.current === 'copilot' || appRef.current === 'codex') && resumeRef.current) {
+          } else if (!shellRef.current && (appRef.current === 'opencode' || appRef.current === 'copilot' || appRef.current === 'codex' || appRef.current === 'commandcode') && resumeRef.current) {
             initMsg.resume = true;
           }
           requestedMetaRef.current = !!initMsg.isMetaAgent;
@@ -851,11 +855,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 if (savedClaudeId) {
                   initMsg.claudeSessionId = savedClaudeId;
                   claudeResumeIdRef.current = null;
-                } else if ((app === 'opencode' || app === 'copilot' || app === 'codex') && resumeRef.current) {
-                  // opencode/copilot have no conversation id in their byte
-                  // stream, so a re-launch continues via `-c` / `--continue`
-                  // (last session of the project) like the saved-session flow
-                  // does.
+                } else if ((app === 'opencode' || app === 'copilot' || app === 'codex' || app === 'commandcode') && resumeRef.current) {
+                  // opencode/copilot/codex/commandcode have no conversation id in
+                  // their byte stream, so a re-launch continues via `-c` /
+                  // `--continue` / `resume --last` (last session of the
+                  // project) like the saved-session flow does.
                   initMsg.resume = true;
                 }
               }
