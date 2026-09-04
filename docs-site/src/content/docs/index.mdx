@@ -1,0 +1,47 @@
+---
+title: ccserver
+description: Context & Coordination Server for browser-based AI CLI sessions
+template: splash
+hero:
+  tagline: ブラウザから Claude Code / opencode / GitHub Copilot CLI / OpenAI Codex CLI をセッションごとの隔離サンドボックスで起動・管理する Web サーバー。
+  actions:
+    - text: はじめに
+      link: /ccserver/getting-started/overview/
+      icon: right-arrow
+    - text: GitHub リポジトリ
+      link: https://github.com/nananek/ccserver
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## ドキュメント
+
+<CardGrid stagger>
+	<Card title="はじめに" icon="rocket">
+		アーキテクチャの概要、必要な環境、インストールと起動方法。
+
+		[概要を読む](/ccserver/getting-started/overview/)
+	</Card>
+	<Card title="ガイド" icon="open-book">
+		起動オプション、予約プロンプト、通知 (Vikunja 連携)、使用量表示、各種 MCP ツール、federation、コンボ起動。
+
+		[ガイドを見る](/ccserver/guides/launching/)
+	</Card>
+	<Card title="サンドボックス" icon="seti:lock">
+		bwrap + rootless docker によるサンドボックスの仕組み、永続 HOME、認証情報の受け渡し、既知の限界。
+
+		[サンドボックスの仕組みを読む](/ccserver/sandbox/overview/)
+	</Card>
+	<Card title="リファレンス" icon="document">
+		プロジェクト構成と REST / WebSocket API リファレンス。
+
+		[リファレンスを見る](/ccserver/reference/project-structure/)
+	</Card>
+	<Card title="デプロイ" icon="setting">
+		systemd での常駐化、Tailscale Serve での HTTPS 公開。
+
+		[デプロイガイドを見る](/ccserver/deployment/systemd/)
+	</Card>
+</CardGrid>
