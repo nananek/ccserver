@@ -642,9 +642,9 @@ test('reviewer broker: startReviewerBroker + stopBroker lifecycle on a supplied 
     const { tools } = await c.call('tools/list');
     assert.deepEqual(tools.map((t) => t.name).sort(), ['get_review', 'list_reviews', 'run_review']);
 
-    const runOut = await callTool(c, 'run_review', { cwd: '/srv/proj', headRef: 'feature' });
+    const runOut = await callTool(c, 'run_review', { cwd: '/srv/proj', headRef: 'feature', focus: 'security' });
     assert.equal(runOut.id, 'job-1');
-    assert.deepEqual(calls[0], ['runReview', { cwd: '/srv/proj', headRef: 'feature' }]);
+    assert.deepEqual(calls[0], ['runReview', { cwd: '/srv/proj', headRef: 'feature', focus: 'security' }]);
 
     await callTool(c, 'list_reviews', {});
     assert.deepEqual(calls[1], ['listReviews', {}]);

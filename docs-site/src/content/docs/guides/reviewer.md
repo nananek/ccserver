@@ -13,9 +13,13 @@ description: 使い捨てのヘッドレスセッションでローカルの ref
 
 | ツール | 説明 |
 |--------|------|
-| `run_review` | レビュージョブを起動し、即座に `{ id, status: "running", ... }` を返す (完了を待たずに返る非同期ツール)。`cwd` は必須。対象の指定は `number` (PR 番号、`gh pr checkout` 経由で取得し完了後 PR にコメント投稿)、`headRef` (ブランチ名/コミット指定)、`includeUncommitted` (未コミット差分) のいずれか 1 つ以上が必要 — 複数指定時は `number` > `headRef` > `includeUncommitted` の優先順位。`baseRef` 省略時はプロジェクトの既定ブランチを自動解決。 |
+| `run_review` | レビュージョブを起動し、即座に `{ id, status: "running", ... }` を返す (完了を待たずに返る非同期ツール)。`cwd` は必須。対象の指定は `number` (PR 番号、`gh pr checkout` 経由で取得し完了後 PR にコメント投稿)、`headRef` (ブランチ名/コミット指定)、`includeUncommitted` (未コミット差分) のいずれか 1 つ以上が必要 — 複数指定時は `number` > `headRef` > `includeUncommitted` の優先順位。`baseRef` 省略時はプロジェクトの既定ブランチを自動解決。`focus` (任意・自由記述の文字列) で「セキュリティ面を重点的に」のようなレビューの重点観点を指示できる。 |
 | `list_reviews` | プロジェクト単位 (`cwd` 省略可) でジョブ一覧を取得 (id・mode・status・作成/終了時刻など、結果本文は含まない)。 |
 | `get_review` | ジョブ 1 件の詳細を `id` で取得 (`resultSummary`・`postedToPr` を含む)。 |
+
+## 重点観点の指定 (`focus`)
+
+`run_review` の `focus` に自由記述の文字列を渡すと、実行される `/code-review` の指示に「特に次の観点を重点的に見てください: `<focus>`」という一文が追記されます (`number`/`headRef`/`includeUncommitted` のどのモードでも同様)。省略した場合は通常のレビュー (重点指定なし) になります。渡した値は `pr_reviews` テーブルにもそのまま保存されるため、`get_review`/`list_reviews` で後から「何を頼んだレビューだったか」を確認できます。
 
 ## 完了検知と結果の受け取り方
 

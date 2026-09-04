@@ -294,14 +294,53 @@ test('validateRunReviewArgs: app falls back to claude for an unrecognized value;
   assert.equal(res.value.requestedBy, 'reviewer');
 });
 
+test('validateRunReviewArgs: focus defaults to null and is trimmed when given', () => {
+  const absent = reviewer.validateRunReviewArgs({ cwd: repo, headRef: 'feature' });
+  assert.equal(absent.value.focus, null);
+
+  const trimmed = reviewer.validateRunReviewArgs({ cwd: repo, headRef: 'feature', focus: '  security please  ' });
+  assert.equal(trimmed.value.focus, 'security please');
+
+  // whitespace-only / non-string input is treated the same as omitting it
+  // (see baseRef/model's same "empty string -> null" normalization).
+  const blank = reviewer.validateRunReviewArgs({ cwd: repo, headRef: 'feature', focus: '   ' });
+  assert.equal(blank.value.focus, null);
+  const wrongType = reviewer.validateRunReviewArgs({ cwd: repo, headRef: 'feature', focus: 123 });
+  assert.equal(wrongType.value.focus, null);
+});
+
+// --- buildReviewPrompt -------------------------------------------------------
+
+test('buildReviewPrompt: no focus leaves each mode\'s base prompt untouched', () => {
+  assert.equal(reviewer.buildReviewPrompt({ mode: 'pr', number: 42 }), 'gh pr checkout 42 && /code-review --comment');
+  assert.equal(reviewer.buildReviewPrompt({ mode: 'dirty' }), '/code-review');
+  assert.equal(reviewer.buildReviewPrompt({ mode: 'branch', baseRef: 'origin/master' }), '/code-review origin/master');
+});
+
+test('buildReviewPrompt: a focus is appended to every mode\'s prompt', () => {
+  const focus = 'セキュリティ面を重点的に見てください';
+  assert.equal(
+    reviewer.buildReviewPrompt({ mode: 'pr', number: 42, focus }),
+    `gh pr checkout 42 && /code-review --comment\n\nFocus especially on: ${focus}`,
+  );
+  assert.equal(
+    reviewer.buildReviewPrompt({ mode: 'dirty', focus }),
+    `/code-review\n\nFocus especially on: ${focus}`,
+  );
+  assert.equal(
+    reviewer.buildReviewPrompt({ mode: 'branch', baseRef: 'origin/master', focus }),
+    `/code-review origin/master\n\nFocus especially on: ${focus}`,
+  );
+});
+
 // --- SQLite CRUD (pr_reviews, db.js v6) -------------------------------------
 
 test('getReview / listReviews read back what was inserted', () => {
   const db = dbMod.getDb();
   db.prepare(`INSERT INTO pr_reviews
-      (id, project_cwd, base_ref, head_ref, resolved_ref, mode, app, model, status, session_id, worktree_path, requested_by, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run('rev-1', repo, 'main', 'feature', 'deadbeef', 'branch', 'claude', null, 'running', 'sess-1', '/tmp/wt', 'tester', 1000);
+      (id, project_cwd, base_ref, head_ref, resolved_ref, mode, app, model, status, session_id, worktree_path, requested_by, focus, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run('rev-1', repo, 'main', 'feature', 'deadbeef', 'branch', 'claude', null, 'running', 'sess-1', '/tmp/wt', 'tester', 'security please', 1000);
 
   const got = reviewer.getReview({ id: 'rev-1' });
   assert.equal(got.ok, true);
@@ -309,6 +348,7 @@ test('getReview / listReviews read back what was inserted', () => {
   assert.equal(got.review.projectCwd, repo);
   assert.equal(got.review.mode, 'branch');
   assert.equal(got.review.postedToPr, false);
+  assert.equal(got.review.focus, 'security please');
 
   const missing = reviewer.getReview({ id: 'no-such-id' });
   assert.equal(missing.ok, false);
@@ -319,6 +359,18 @@ test('getReview / listReviews read back what was inserted', () => {
 
   const listedElsewhere = reviewer.listReviews({ cwd: '/nowhere' });
   assert.equal(listedElsewhere.reviews.length, 0);
+});
+
+test('getReview: focus is null when the job was created without one', () => {
+  const db = dbMod.getDb();
+  db.prepare(`INSERT INTO pr_reviews
+      (id, project_cwd, base_ref, head_ref, mode, app, status, created_at)
+      VALUES (?,?,?,?,?,?,?,?)`)
+    .run('rev-no-focus', repo, 'main', 'feature', 'branch', 'claude', 'running', 1000);
+
+  const got = reviewer.getReview({ id: 'rev-no-focus' });
+  assert.equal(got.ok, true);
+  assert.equal(got.review.focus, null);
 });
 
 // --- injection decision ------------------------------------------------------

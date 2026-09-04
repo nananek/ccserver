@@ -333,7 +333,7 @@ export function buildReviewerMcpServer({ reviewerApi }) {
 
   server.tool(
     'run_review',
-    'Launch a disposable headless review session against a local git ref/branch/PR/uncommitted diff and run /code-review on it. Does NOT require a GitHub PR to exist -- unlike PR-only reviewers, this uses a real local git worktree, so it can review an unpushed local branch, a pushed-but-PR-less branch, or even uncommitted (dirty) changes. If number is given, the target is checked out via `gh pr checkout` and results are posted as a PR comment; otherwise results are only recorded in ccserver (see list_reviews/get_review) and delivered via notify when configured. Returns immediately with the job id and status "running" -- poll get_review (or list_reviews) for completion, this tool never blocks until the review finishes.',
+    'Launch a disposable headless review session against a local git ref/branch/PR/uncommitted diff and run /code-review on it. Does NOT require a GitHub PR to exist -- unlike PR-only reviewers, this uses a real local git worktree, so it can review an unpushed local branch, a pushed-but-PR-less branch, or even uncommitted (dirty) changes. If number is given, the target is checked out via `gh pr checkout` and results are posted as a PR comment; otherwise results are only recorded in ccserver (see list_reviews/get_review) and delivered via notify when configured. Returns immediately with the job id and status "running" -- poll get_review (or list_reviews) for completion, this tool never blocks until the review finishes. focus is an optional free-form note on what to pay extra attention to (e.g. "focus on security"), appended to the /code-review prompt as-is.',
     {
       cwd: z.string(),
       headRef: z.string().optional(),
@@ -343,6 +343,7 @@ export function buildReviewerMcpServer({ reviewerApi }) {
       app: z.enum(['claude', 'opencode', 'codex']).optional(),
       model: z.string().nullable().optional(),
       requestedBy: z.string().optional(),
+      focus: z.string().optional(),
     },
     async (args) => text(await reviewerApi.runReview(args)),
   );

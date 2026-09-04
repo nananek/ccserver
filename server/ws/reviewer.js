@@ -350,6 +350,7 @@ function rowToReview(row) {
     resultSummary: row.result_summary,
     postedToPr: !!row.posted_to_pr,
     requestedBy: row.requested_by,
+    focus: row.focus,
     createdAt: row.created_at,
     finishedAt: row.finished_at,
   };
@@ -358,13 +359,13 @@ function rowToReview(row) {
 function insertReview(row) {
   getDb().prepare(`INSERT INTO pr_reviews
       (id, project_cwd, base_ref, head_ref, resolved_ref, pr_owner, pr_repo, pr_number,
-       mode, app, model, status, session_id, worktree_path, requested_by, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+       mode, app, model, status, session_id, worktree_path, requested_by, focus, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(
       row.id, row.projectCwd, row.baseRef, row.headRef ?? null, row.resolvedRef ?? null,
       row.prOwner ?? null, row.prRepo ?? null, row.prNumber ?? null, row.mode, row.app,
       row.model ?? null, row.status, row.sessionId ?? null, row.worktreePath ?? null,
-      row.requestedBy ?? null, row.createdAt,
+      row.requestedBy ?? null, row.focus ?? null, row.createdAt,
     );
 }
 
@@ -422,28 +423,42 @@ export function validateRunReviewArgs(args = {}) {
   const model = typeof args.model === 'string' && args.model ? args.model : null;
   const requestedBy = typeof args.requestedBy === 'string' && args.requestedBy ? args.requestedBy : 'reviewer';
   const baseRef = typeof args.baseRef === 'string' && args.baseRef ? args.baseRef : null;
+  // Free-form "pay extra attention to X" steer for the review (issue #103
+  // feedback: "セキュリティ面を重点的にレビューして" etc.) -- trimmed and
+  // normalized to null/absent the same way baseRef/model are, so callers
+  // that pass '' or whitespace-only get the same "no focus" behavior as
+  // omitting it entirely.
+  const focusRaw = typeof args.focus === 'string' ? args.focus.trim() : '';
+  const focus = focusRaw || null;
 
-  return { ok: true, value: { cwd, number, headRef, includeUncommitted, mode, app, model, requestedBy, baseRef } };
+  return { ok: true, value: { cwd, number, headRef, includeUncommitted, mode, app, model, requestedBy, baseRef, focus } };
 }
 
-function buildReviewPrompt({ mode, number, baseRef }) {
+// Exported (like validateRunReviewArgs) purely so it can be unit tested
+// without touching git or sessionManager.
+export function buildReviewPrompt({ mode, number, baseRef, focus }) {
+  let base;
   if (mode === 'pr') {
     // The session owns the gh credential bridge already (git-broker.js /
     // ghAllowlist.js), so it runs the checkout itself instead of the host
     // resolving the PR ref up front.
-    return `gh pr checkout ${number} && /code-review --comment`;
-  }
-  if (mode === 'dirty') {
+    base = `gh pr checkout ${number} && /code-review --comment`;
+  } else if (mode === 'dirty') {
     // The worktree's HEAD is untouched and the patch is applied as
     // uncommitted changes on top of it -- "the current diff" is exactly
     // what /code-review reviews with no target.
-    return '/code-review';
+    base = '/code-review';
+  } else {
+    // branch mode: the worktree's HEAD is a detached checkout of the
+    // resolved headRef commit, so an explicit baseRef target tells
+    // /code-review what to diff it against (a bare "current diff" would see
+    // nothing on a fresh, unmodified checkout).
+    base = `/code-review ${baseRef}`;
   }
-  // branch mode: the worktree's HEAD is a detached checkout of the resolved
-  // headRef commit, so an explicit baseRef target tells /code-review what to
-  // diff it against (a bare "current diff" would see nothing on a fresh,
-  // unmodified checkout).
-  return `/code-review ${baseRef}`;
+  // This is typed into the agent's chat input, not run as a shell command
+  // (see writeToSession) -- appending a plain-language instruction after the
+  // slash command works the same as a human typing a follow-up sentence.
+  return focus ? `${base}\n\nFocus especially on: ${focus}` : base;
 }
 
 let sessionManagerMod = null;
@@ -585,7 +600,7 @@ export async function runReview(args = {}) {
   activeReviewCount++;
   let slotHeld = true; // cleared once the job is handed off to checkCompletion, which releases it instead
 
-  const { cwd, number, headRef, mode, app, model, requestedBy } = v.value;
+  const { cwd, number, headRef, mode, app, model, requestedBy, focus } = v.value;
 
   // Everything from here on runs inside the try/finally below, so
   // releaseReviewSlot() is guaranteed to fire on ANY throw between the
@@ -632,7 +647,7 @@ export async function runReview(args = {}) {
     insertReview({
       id: jobId, projectCwd: cwd, baseRef, headRef: mode === 'pr' ? null : headRef, resolvedRef,
       prOwner, prRepo, prNumber: number, mode, app, model, status: 'running',
-      sessionId: null, worktreePath, requestedBy, createdAt: Date.now(),
+      sessionId: null, worktreePath, requestedBy, focus, createdAt: Date.now(),
     });
 
     const { sessionManager, sessionsRoute } = await loadSessionDeps();
@@ -653,7 +668,7 @@ export async function runReview(args = {}) {
     setReviewSessionId(jobId, sessionId);
 
     await sessionManager.waitUntilSettled(sessionId, { timeoutMs: SETTLE_TIMEOUT_MS });
-    sessionManager.writeToSession(sessionId, buildReviewPrompt({ mode, number, baseRef }), { submit: true });
+    sessionManager.writeToSession(sessionId, buildReviewPrompt({ mode, number, baseRef, focus }), { submit: true });
 
     startCompletionWatcher({ jobId, sessionId, projectCwd: cwd, number });
     slotHeld = false; // handed off -- checkCompletion releases the slot when the job finishes

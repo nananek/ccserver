@@ -288,6 +288,7 @@ export const MIGRATIONS = [
           result_summary TEXT,
           posted_to_pr   INTEGER NOT NULL DEFAULT 0,
           requested_by   TEXT,
+          focus          TEXT,
           created_at     INTEGER NOT NULL,
           finished_at    INTEGER
         );
