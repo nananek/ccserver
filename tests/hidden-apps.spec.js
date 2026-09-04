@@ -101,6 +101,33 @@ test('meta-agent launch dialog drops codex from the app picker', async ({ page }
   await expect(dialog.locator('.open-menu-item', { hasText: 'OpenAI Codex' })).toHaveCount(0);
 });
 
+test('meta-agent launch is disabled (not silently sent) when the remembered app was hidden after the fact', async ({ page }) => {
+  // Second self-review pass edge case: MetaLaunchDialog persists its app pick
+  // under its own localStorage key (independent of the single-launch
+  // ccserver-app-default key) and reloads it on every dialog open with no
+  // hiddenApps awareness at all. If the operator hides an app the user had
+  // previously chosen here, the picker correctly renders no checked button,
+  // but without a launch-time guard 統括エージェントを起動 would still
+  // silently launch that hidden app -- the same picker-vs-launch-value
+  // mismatch class the コンボ起動 guard above protects against.
+  await page.addInitScript(() => {
+    localStorage.setItem('ccserver-meta-app', 'codex');
+  });
+  // HOME_RESPONSE already hides codex (hiddenApps: ['copilot', 'codex']).
+  await stubDirsHome(page);
+  await page.goto('/');
+  const metaBtn = page.locator('.meta-launch-btn');
+  await expect(metaBtn).toBeEnabled();
+  await metaBtn.click();
+  const dialog = page.locator('.resume-dialog', { hasText: 'メタエージェントを起動' });
+  await expect(dialog).toBeVisible();
+  // No picker button shows as selected -- the remembered 'codex' pick isn't
+  // even offered any more.
+  await expect(dialog.locator('.open-menu-check:has-text("✓")')).toHaveCount(0);
+  const launchBtn = dialog.locator('.btn-primary', { hasText: 'メタエージェントを起動' });
+  await expect(launchBtn).toBeDisabled();
+});
+
 test('Usage button drops the codex tab entirely when codex is hidden', async ({ page }) => {
   await stubDirsHome(page);
   await page.route('**/api/usage**', async (route) => {

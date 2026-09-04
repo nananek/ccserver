@@ -49,6 +49,18 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
       window.alert('GitHub Copilot はMCP注入に対応していないため、メタエージェントでは起動できません。アプリを選択してください。');
       return;
     }
+    // Self-review (issue #105): metaApp is persisted under its own
+    // localStorage key (META_APP_KEY) and loaded on every dialog open
+    // regardless of hiddenApps -- if the operator hides an app the user had
+    // previously picked here, the picker correctly stops offering it (no
+    // button renders as active) but metaApp itself is never corrected. The
+    // launch button below is disabled for this same condition; this check is
+    // a defense-in-depth backstop so a hidden app can never actually launch
+    // even if that guard is somehow bypassed.
+    if (hiddenApps.includes(app)) {
+      window.alert('このアプリは非表示に設定されているため、メタエージェントでは起動できません。アプリを選び直してください。');
+      return;
+    }
     try {
       const res = await authFetch('/api/sessions');
       const data = await res.json();
@@ -67,6 +79,12 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
   if (!open) return null;
 
   const effectiveApp = metaApp || defaultApp;
+  // metaApp survives a hide (its own localStorage key isn't reconciled
+  // against hiddenApps anywhere -- see the handleLaunch comment above), so
+  // the picker can show no button checked at all when it holds a since-hidden
+  // value. Disable the launch button in that case rather than silently
+  // launching the hidden app it still points at.
+  const effectiveAppHidden = hiddenApps.includes(effectiveApp);
 
   return (
     <div className="resume-overlay" onClick={onClose}>
@@ -106,7 +124,12 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
         )}
         <div className="resume-actions">
           <button className="btn btn-secondary" onClick={onClose}>キャンセル</button>
-          <button className="btn btn-primary" onClick={handleLaunch}>
+          <button
+            className="btn btn-primary"
+            onClick={handleLaunch}
+            disabled={effectiveAppHidden}
+            title={effectiveAppHidden ? '非表示に設定されたアプリが選択されています。アプリを選び直してください。' : ''}
+          >
             メタエージェントを起動
           </button>
         </div>
