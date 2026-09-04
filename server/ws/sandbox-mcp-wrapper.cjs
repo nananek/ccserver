@@ -21,15 +21,18 @@
 // env set by mcpConfig.js; absent or unparseable it sends an empty object
 // (host-only attribution). Meta mode writes the same kind of frame from
 // CCSERVER_META_IDENTITY: the per-connection sessionId/groupId there power
-// the meta tools' self-target guards and approval attribution. Usage mode
-// carries no identity at all (get_usage answers the same regardless of
-// caller).
+// the meta tools' self-target guards and approval attribution. Reviewer mode
+// writes the same kind of frame from CCSERVER_REVIEWER_IDENTITY: the
+// per-connection sessionId there is how finish_review verifies the caller IS
+// the review job it claims to be (see reviewer.js). Usage mode carries no
+// identity at all (get_usage answers the same regardless of caller).
 'use strict';
 const net = require('net');
 const mode = process.argv[2];
 const IDENTITY_ENV = {
   notify: 'CCSERVER_NOTIFY_IDENTITY',
   meta: 'CCSERVER_META_IDENTITY',
+  reviewer: 'CCSERVER_REVIEWER_IDENTITY',
 };
 const wantsIdentityFrame = !!IDENTITY_ENV[mode];
 const MODE_SOCK_ENV = {

@@ -293,3 +293,66 @@ test('no meta descriptor -> unchanged registrations', () => {
   assert.equal(cfg.mcpServers['ccserver-meta'], undefined);
   assert.equal(env.CCSANDBOX_META_MCP_SOCK, undefined);
 });
+
+// ccserver-reviewer injection (see reviewer.js): the optional `{ reviewer }`
+// descriptor, same mode/sockPath/identity shape as meta -- but unlike meta's
+// richer identity, reviewer's only ever carries `{ sessionId }` (see
+// sessionManager.js), used by finish_review to verify its caller is the
+// review job's own session.
+
+const reviewerIdentity = { sessionId: 'review-job-session-01' };
+
+test('claude + reviewer(sandbox): ccserver-reviewer registered via the bridge, with the identity env set', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('claude', {
+    reviewer: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-reviewer.sock', identity: reviewerIdentity },
+  });
+  const cfg = JSON.parse(args[1]);
+  assert.deepEqual(cfg.mcpServers['ccserver-reviewer'], {
+    type: 'stdio',
+    command: '/ccserver-sandbox-mcp-bridge',
+    args: ['reviewer'],
+  });
+  assert.equal(env.CCSANDBOX_REVIEWER_MCP_SOCK, '/run/user/1000/ccserver-reviewer.sock');
+  assert.equal(env.CCSERVER_REVIEWER_IDENTITY, JSON.stringify(reviewerIdentity));
+});
+
+test('claude + reviewer(sandbox) with no identity: sock env set, no identity env at all', () => {
+  const { env } = buildMcpConfigArgsAndEnv('claude', {
+    reviewer: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-reviewer.sock' },
+  });
+  assert.equal(env.CCSANDBOX_REVIEWER_MCP_SOCK, '/run/user/1000/ccserver-reviewer.sock');
+  assert.equal(env.CCSERVER_REVIEWER_IDENTITY, undefined);
+});
+
+test('claude + reviewer(host): node <bridge script> reviewer on the host', () => {
+  const { args } = buildMcpConfigArgsAndEnv('claude', {
+    reviewer: { mode: 'host', sockPath: '/run/user/1000/ccserver-reviewer.sock' },
+  });
+  const r = JSON.parse(args[1]).mcpServers['ccserver-reviewer'];
+  assert.equal(r.command, process.execPath);
+  assert.ok(r.args[0].endsWith('sandbox-mcp-wrapper.cjs'));
+  assert.equal(r.args[1], 'reviewer');
+});
+
+test('opencode + codex assemble ccserver-reviewer too, identity env included', () => {
+  const oc = buildMcpConfigArgsAndEnv('opencode', {
+    reviewer: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-reviewer.sock', identity: reviewerIdentity },
+  });
+  const ocCfg = JSON.parse(oc.env.OPENCODE_CONFIG_CONTENT);
+  assert.deepEqual(ocCfg.mcp['ccserver-reviewer'].command, ['/ccserver-sandbox-mcp-bridge', 'reviewer']);
+  assert.equal(oc.env.CCSERVER_REVIEWER_IDENTITY, JSON.stringify(reviewerIdentity));
+
+  const cx = buildMcpConfigArgsAndEnv('codex', {
+    reviewer: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-reviewer.sock', identity: reviewerIdentity },
+  });
+  assert.ok(cx.args.some((a) => a.includes('mcp_servers.ccserver-reviewer=') && a.includes('CCSERVER_REVIEWER_IDENTITY')));
+  assert.equal(cx.env.CCSERVER_REVIEWER_IDENTITY, JSON.stringify(reviewerIdentity));
+});
+
+test('no reviewer descriptor -> unchanged registrations', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('claude');
+  const cfg = JSON.parse(args[1]);
+  assert.equal(cfg.mcpServers['ccserver-reviewer'], undefined);
+  assert.equal(env.CCSANDBOX_REVIEWER_MCP_SOCK, undefined);
+  assert.equal(env.CCSERVER_REVIEWER_IDENTITY, undefined);
+});

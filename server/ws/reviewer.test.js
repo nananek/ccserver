@@ -17,6 +17,7 @@ let runtimeDir;
 let repo;
 let reviewer;
 let dbMod;
+let sessionManagerMod;
 
 function git(cwd, args) {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf-8' });
@@ -30,6 +31,10 @@ before(async () => {
 
   reviewer = await import('./reviewer.js');
   dbMod = await import('../db.js');
+  // Only used by the fallback-poller test below, which needs a real (but
+  // shell -- no agent CLI required) session so checkCompletion's `exited`
+  // check has something live to look at.
+  sessionManagerMod = await import('./sessionManager.js');
 
   repo = join(runtimeDir, 'repo');
   mkdirSync(repo, { recursive: true });
@@ -311,26 +316,46 @@ test('validateRunReviewArgs: focus defaults to null and is trimmed when given', 
 
 // --- buildReviewPrompt -------------------------------------------------------
 
-test('buildReviewPrompt: no focus leaves each mode\'s base prompt untouched', () => {
-  assert.equal(reviewer.buildReviewPrompt({ mode: 'pr', number: 42 }), 'gh pr checkout 42 && /code-review --comment');
-  assert.equal(reviewer.buildReviewPrompt({ mode: 'dirty' }), '/code-review');
-  assert.equal(reviewer.buildReviewPrompt({ mode: 'branch', baseRef: 'origin/master' }), '/code-review origin/master');
+test('buildReviewPrompt: no focus leaves each mode\'s base prompt untouched, but the finish_review instruction is always appended', () => {
+  const pr = reviewer.buildReviewPrompt({ mode: 'pr', number: 42, jobId: 'job-1' });
+  assert.ok(pr.startsWith('gh pr checkout 42 && /code-review --comment\n\n'));
+  assert.doesNotMatch(pr, /Focus especially on/);
+  assert.match(pr, /mcp__ccserver-reviewer__finish_review tool with jobId="job-1"/);
+
+  const dirty = reviewer.buildReviewPrompt({ mode: 'dirty', jobId: 'job-2' });
+  assert.ok(dirty.startsWith('/code-review\n\n'));
+  assert.match(dirty, /mcp__ccserver-reviewer__finish_review tool with jobId="job-2"/);
+
+  const branch = reviewer.buildReviewPrompt({ mode: 'branch', baseRef: 'origin/master', jobId: 'job-3' });
+  assert.ok(branch.startsWith('/code-review origin/master\n\n'));
+  assert.match(branch, /mcp__ccserver-reviewer__finish_review tool with jobId="job-3"/);
 });
 
-test('buildReviewPrompt: a focus is appended to every mode\'s prompt', () => {
+test('buildReviewPrompt: a focus is appended to every mode\'s prompt, before the finish_review instruction', () => {
   const focus = 'セキュリティ面を重点的に見てください';
-  assert.equal(
-    reviewer.buildReviewPrompt({ mode: 'pr', number: 42, focus }),
-    `gh pr checkout 42 && /code-review --comment\n\nFocus especially on: ${focus}`,
-  );
-  assert.equal(
-    reviewer.buildReviewPrompt({ mode: 'dirty', focus }),
-    `/code-review\n\nFocus especially on: ${focus}`,
-  );
-  assert.equal(
-    reviewer.buildReviewPrompt({ mode: 'branch', baseRef: 'origin/master', focus }),
-    `/code-review origin/master\n\nFocus especially on: ${focus}`,
-  );
+  for (const args of [
+    { mode: 'pr', number: 42 },
+    { mode: 'dirty' },
+    { mode: 'branch', baseRef: 'origin/master' },
+  ]) {
+    const withoutFocus = reviewer.buildReviewPrompt({ ...args, jobId: 'job-x' });
+    const withFocus = reviewer.buildReviewPrompt({ ...args, focus, jobId: 'job-x' });
+    const focusLine = `Focus especially on: ${focus}`;
+    assert.ok(withFocus.includes(focusLine), `expected focus line in: ${withFocus}`);
+    // focus is inserted between the base command and the finish_review
+    // instruction, not appended after it.
+    assert.ok(
+      withFocus.indexOf(focusLine) < withFocus.indexOf('finish_review'),
+      'focus must come before the finish_review instruction',
+    );
+    // everything else about the prompt is unchanged by adding focus.
+    assert.equal(withFocus.replace(`\n\n${focusLine}`, ''), withoutFocus);
+  }
+});
+
+test('buildReviewPrompt: the finish_review instruction carries the exact jobId runReview generated', () => {
+  const prompt = reviewer.buildReviewPrompt({ mode: 'dirty', jobId: 'a1b2c3' });
+  assert.match(prompt, /jobId="a1b2c3"/);
 });
 
 // --- SQLite CRUD (pr_reviews, db.js v6) -------------------------------------
@@ -371,6 +396,127 @@ test('getReview: focus is null when the job was created without one', () => {
   const got = reviewer.getReview({ id: 'rev-no-focus' });
   assert.equal(got.ok, true);
   assert.equal(got.review.focus, null);
+});
+
+// --- finish_review / completion fallback (issue #103 follow-up) -------------
+
+// Inserts a fake "running" job row directly (bypassing runReview's whole
+// worktree/session-launch machinery, same as the SQLite CRUD tests above) so
+// finish_review/checkCompletion can be exercised against a known jobId +
+// sessionId without a real agent CLI. mode is always 'branch' with no PR
+// number, so completeReviewJob's checkPrCommentPosted step is a no-op (skips
+// needing a real `gh`).
+function insertRunningJob(id, { sessionId = 'sess-owner', createdAt = Date.now() } = {}) {
+  dbMod.getDb().prepare(`INSERT INTO pr_reviews
+      (id, project_cwd, base_ref, head_ref, mode, app, status, session_id, worktree_path, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, repo, 'main', 'feature', 'branch', 'claude', 'running', sessionId, reviewer.reviewWorktreePath(repo, id), createdAt);
+}
+
+test('finishReview: the job\'s own session can mark it done, with the caller\'s summary recorded', async () => {
+  insertRunningJob('job-finish-ok');
+  const res = await reviewer.finishReview({ jobId: 'job-finish-ok', status: 'done', summary: 'looks good', callerSessionId: 'sess-owner' });
+  assert.deepEqual(res, { ok: true, id: 'job-finish-ok', status: 'done' });
+
+  const got = reviewer.getReview({ id: 'job-finish-ok' });
+  assert.equal(got.review.status, 'done');
+  assert.equal(got.review.resultSummary, 'looks good');
+  assert.ok(got.review.finishedAt);
+});
+
+test('finishReview: rejects an unknown jobId', async () => {
+  const res = await reviewer.finishReview({ jobId: 'no-such-job', status: 'done', callerSessionId: 'anyone' });
+  assert.deepEqual(res, { ok: false, error: 'not-found' });
+});
+
+test('finishReview: rejects a caller whose sessionId does not match the job\'s own session', async () => {
+  insertRunningJob('job-finish-wrong-session', { sessionId: 'sess-owner-2' });
+  const res = await reviewer.finishReview({ jobId: 'job-finish-wrong-session', status: 'done', callerSessionId: 'sess-imposter' });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /not authorized/);
+
+  // the job is untouched -- still running, no DB update happened.
+  const got = reviewer.getReview({ id: 'job-finish-wrong-session' });
+  assert.equal(got.review.status, 'running');
+});
+
+test('finishReview: rejects a call with no identity frame at all (callerSessionId null)', async () => {
+  insertRunningJob('job-finish-no-identity', { sessionId: 'sess-owner-3' });
+  const res = await reviewer.finishReview({ jobId: 'job-finish-no-identity', status: 'done', callerSessionId: null });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /not authorized/);
+});
+
+test('finishReview: rejects a job that is already finished', async () => {
+  insertRunningJob('job-finish-twice', { sessionId: 'sess-owner-4' });
+  const first = await reviewer.finishReview({ jobId: 'job-finish-twice', status: 'done', callerSessionId: 'sess-owner-4' });
+  assert.equal(first.ok, true);
+
+  const second = await reviewer.finishReview({ jobId: 'job-finish-twice', status: 'failed', callerSessionId: 'sess-owner-4' });
+  assert.equal(second.ok, false);
+  assert.match(second.error, /already done, not running/);
+});
+
+test('finishReview: rejects an invalid status value', async () => {
+  insertRunningJob('job-finish-bad-status', { sessionId: 'sess-owner-5' });
+  const res = await reviewer.finishReview({ jobId: 'job-finish-bad-status', status: 'running', callerSessionId: 'sess-owner-5' });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /"done" or "failed"/);
+});
+
+test('checkCompletion fallback: a session that exited before calling finish_review is marked failed', async () => {
+  // No real session with this id was ever created -- sessionManager.getSession
+  // returns undefined for it, which checkCompletion treats the same as an
+  // exited session (see its `exited = !session || session.exited`).
+  insertRunningJob('job-fallback-exited', { sessionId: 'sess-never-existed' });
+  await reviewer.checkCompletion({
+    jobId: 'job-fallback-exited', sessionId: 'sess-never-existed', projectCwd: repo, number: null, startedAt: Date.now(),
+  });
+  const got = reviewer.getReview({ id: 'job-fallback-exited' });
+  assert.equal(got.review.status, 'failed');
+  assert.match(got.review.resultSummary, /exited before calling finish_review/);
+});
+
+test('checkCompletion fallback: a live session that never calls finish_review times out after ABSOLUTE_TIMEOUT_MS', async () => {
+  // A real (shell, no agent CLI needed) session so `exited` is false and the
+  // timeout branch specifically is what fires -- not the exited one above.
+  const shell = sessionManagerMod.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(shell.session, 'sanity: the shell session actually spawned');
+  insertRunningJob('job-fallback-timeout', { sessionId: shell.sessionId });
+  try {
+    await reviewer.checkCompletion({
+      jobId: 'job-fallback-timeout',
+      sessionId: shell.sessionId,
+      projectCwd: repo,
+      number: null,
+      // Far enough in the past that "elapsed >= ABSOLUTE_TIMEOUT_MS" is true
+      // without waiting 20 real minutes.
+      startedAt: Date.now() - reviewer.ABSOLUTE_TIMEOUT_MS - 1000,
+    });
+    const got = reviewer.getReview({ id: 'job-fallback-timeout' });
+    assert.equal(got.review.status, 'timeout');
+    assert.match(got.review.resultSummary, /timed out .* without calling finish_review/);
+    // completeReviewJob destroys the (still-live) session as part of cleanup.
+    assert.equal(sessionManagerMod.getSession(shell.sessionId), undefined);
+  } finally {
+    // best effort in case the assertion above is what failed
+    sessionManagerMod.destroySession(shell.sessionId, { keepSchedule: false });
+  }
+});
+
+test('checkCompletion fallback: does nothing while a job is neither exited nor past the timeout', async () => {
+  const shell = sessionManagerMod.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(shell.session);
+  insertRunningJob('job-fallback-still-running', { sessionId: shell.sessionId });
+  try {
+    await reviewer.checkCompletion({
+      jobId: 'job-fallback-still-running', sessionId: shell.sessionId, projectCwd: repo, number: null, startedAt: Date.now(),
+    });
+    const got = reviewer.getReview({ id: 'job-fallback-still-running' });
+    assert.equal(got.review.status, 'running', 'still running -- finish_review is the expected next step, not a fallback guess');
+  } finally {
+    sessionManagerMod.destroySession(shell.sessionId, { keepSchedule: false });
+  }
 });
 
 // --- injection decision ------------------------------------------------------

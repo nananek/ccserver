@@ -43,7 +43,7 @@ ccserver/
 │       ├── mcpTools.js             # control/handoff ツールの実装 (deps 注入)
 │       ├── metaTools.js            # メタエージェント用ツールの実装 (ワイヤ引数を信頼する、mcpTools とは別の信頼境界ファイル)
 │       ├── metaAgent.js            # ccserver-meta: metaAgentMcp ゲーティング + プロセスグローバル MCP ソケット
-│       ├── reviewer.js             # ccserver-reviewer: run_review/list_reviews/get_review、使い捨て worktree + SQLite (pr_reviews) 管理
+│       ├── reviewer.js             # ccserver-reviewer: run_review/list_reviews/get_review/finish_review、使い捨て worktree + SQLite (pr_reviews) 管理
 │       ├── screenModel.js          # read_output 用の軽量仮想画面 (ANSI 解釈 + 変化検知)
 │       ├── sandbox.js              # bwrap + rootless docker サンドボックス構築
 │       ├── sandbox-entrypoint.sh

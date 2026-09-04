@@ -876,6 +876,66 @@ test('createSession notify identity: explicit projectName wins, cwd basename is 
   }
 });
 
+// isReviewJob forces reviewer-MCP identity injection into a review job's OWN
+// session even while reviewerMcp is off in the live config (see
+// sessionManager.js's useReviewer comment, and reviewer.js's runReview, which
+// passes isReviewJob: true when launching a job's session). This matters
+// because the reviewer broker, once started, is never torn down on a config
+// edit (only at boot) -- without the bypass, flipping reviewerMcp off after
+// boot would silently strand every review job started afterward with no way
+// to reach finish_review, its authoritative completion signal. A NORMAL
+// (non-review-job) session must still be refused it under the same off
+// config, or the bypass would defeat the opt-in flag entirely.
+test('createSession isReviewJob bypasses a disabled reviewerMcp flag for the review job\'s own session only', async () => {
+  const binDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-agent-'));
+  const fakeBin = join(binDir, 'fake-claude');
+  writeFileSync(fakeBin, '#!/bin/bash\nprintf "%s\\n" "$CCSERVER_REVIEWER_IDENTITY"\n', { mode: 0o755 });
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, reviewerMcp: false }));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  const reviewer = await import('./reviewer.js');
+  // ensureReviewerBroker() itself does not gate on reviewerMcp (only
+  // index.js's boot code does) -- calling it directly here reproduces the
+  // "broker started while the flag was on, then the flag got edited off"
+  // scenario without needing an actual server restart.
+  await reviewer.ensureReviewerBroker();
+  const ids = [];
+  try {
+    assert.equal(reviewer.reviewerEnabled(), false, 'sanity: reviewerMcp really is off in this config');
+
+    const forced = sessionManager.createSession({
+      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude', isReviewJob: true,
+    });
+    assert.ok(forced.session, 'agent session should spawn');
+    ids.push(forced.sessionId);
+    await sleep(500);
+    const forcedIdentity = forced.session.outputBuffer.join('').trim();
+    assert.notEqual(forcedIdentity, '', 'isReviewJob:true must get the reviewer identity even with reviewerMcp off');
+    assert.deepEqual(JSON.parse(forcedIdentity), { sessionId: forced.sessionId });
+
+    const normal = sessionManager.createSession({
+      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
+    });
+    assert.ok(normal.session);
+    ids.push(normal.sessionId);
+    await sleep(500);
+    assert.equal(normal.session.outputBuffer.join('').trim(), '', 'a normal session must NOT get it while reviewerMcp is off');
+  } finally {
+    for (const id of ids) sessionManager.destroySession(id, { keepSchedule: false });
+    reviewer.stopReviewerBroker();
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(binDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
 // The reuse-dialog safety rule: a "new sandbox" (wipe of the previous
 // persistent HOME) is refused while another LIVE, SANDBOXED session of the
 // same project is still using that HOME. Unsandboxed sessions don't bind the

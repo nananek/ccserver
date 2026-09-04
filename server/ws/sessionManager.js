@@ -166,7 +166,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, sandboxHomeCreatedBy = null }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null }) {
   const id = randomUUID();
 
   // Invariant: meta-agent sessions (isMetaAgent:true, groupId-less) always
@@ -294,12 +294,30 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // outright (see shouldInjectReviewer); the feature is off by default
   // (sandbox.config.json's reviewerMcp) and requires the broker to actually be
   // listening, same gating as notify/usage/meta.
-  const useReviewer = reviewerBrokerRunning() && shouldInjectReviewer({
+  //
+  // isReviewJob (true ONLY for the one session runReview() itself launches
+  // for a given job, see reviewer.js) bypasses reviewerEnabled() specifically
+  // -- never the broker-running check, there being no live broker means there
+  // is genuinely no socket to bind. Without this override, a live edit to
+  // sandbox.config.json flipping reviewerMcp to false after the broker
+  // already started (the broker itself is never torn down on a config edit,
+  // only at boot) would silently leave a review job's OWN session unable to
+  // reach finish_review -- the tool that must be its authoritative completion
+  // signal (see completeReviewJob) -- breaking the design for every job
+  // started after that edit until a restart. shell/app are structurally
+  // guaranteed sane for a review job already (VALID_APPS in reviewer.js
+  // excludes copilot, and a review job is never a shell), so this never
+  // actually bypasses those two checks in practice.
+  const useReviewer = reviewerBrokerRunning() && (isReviewJob === true || shouldInjectReviewer({
     shell: !!shell,
     app: sessionApp,
     reviewerEnabled: reviewerEnabled(),
-  });
+  }));
   const reviewerSocketPath = useReviewer ? getReviewerSockPath() : null;
+  // Per-connection identity for finish_review's caller verification (see
+  // reviewer.js's finishReview): only the sessionId matters here, unlike
+  // notify/meta's richer identity objects.
+  const reviewerIdentity = useReviewer ? { sessionId: id } : null;
 
   // Server-only variables (NODE_ENV, PORT, CCSERVER_*, forwarded ssh-agent)
   // must not reach the session; see sessionEnv.js.
@@ -365,6 +383,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       reviewer: useReviewer ? {
         mode: sandboxRequested ? 'sandbox' : 'host',
         sockPath: reviewerSocketPath,
+        identity: reviewerIdentity,
       } : undefined,
     });
     mcpEnv = injected.env;

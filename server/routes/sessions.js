@@ -88,6 +88,10 @@ export async function createSessionViaApi(body) {
   // isMetaAgent is only meaningful through this REST boundary's meta callers;
   // a plain HTTP client may set it, but it has no effect unless the config
   // enables the feature AND the broker is listening (see shouldInjectMetaAgent).
+  // isReviewJob is the same kind of internal flag for reviewer.js's runReview
+  // (the only real caller): unlike isMetaAgent it DOES bypass the reviewerMcp
+  // config check (never the broker-running check) -- see sessionManager.js's
+  // useReviewer comment for why.
   const result = createSession({
     cwd,
     cols: 80,
@@ -101,6 +105,7 @@ export async function createSessionViaApi(body) {
     resumeLast: !!body.resume,
     reuseSandboxHome: body.reuseSandboxHome !== false,
     isMetaAgent: !!body.isMetaAgent,
+    isReviewJob: !!body.isReviewJob,
     // Attribution for the sandbox HOME bookkeeping row ('user' |
     // 'meta-agent:<sessionId>' | ...). Display only.
     sandboxHomeCreatedBy: typeof body.requestedBy === 'string' && body.requestedBy ? body.requestedBy : 'user',

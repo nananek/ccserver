@@ -263,15 +263,17 @@ export async function startMetaBroker({ metaDeps, sockPath }) {
 }
 
 // The process-global reviewer broker (ccserver-reviewer, see reviewer.js).
-// One per server process. NOT group-scoped, and NOT session-attributed
-// (unlike notify/meta) -- run_review/list_reviews/get_review carry no
-// per-connection identity frame; attribution rides in run_review's own
-// `requestedBy` argument instead.
+// One per server process. NOT group-scoped, but DOES carry a per-connection
+// identity frame (CCSERVER_REVIEWER_IDENTITY, same mechanism as notify/meta)
+// -- unlike run_review/list_reviews/get_review (whose attribution, if any,
+// rides in run_review's own `requestedBy` argument), finish_review needs to
+// verify the CALLER is the very session the job launched, and the identity
+// frame's sessionId is what it checks against.
 export async function startReviewerBroker({ reviewerApi, sockPath }) {
   return listenMcp({
     sockPath,
     tag: 'reviewer',
-    buildServer: () => buildReviewerMcpServer({ reviewerApi }),
+    buildServer: (identity) => buildReviewerMcpServer({ reviewerApi, identity }),
   });
 }
 

@@ -321,13 +321,16 @@ export function buildUsageMcpServer({ usageApi }) {
   return server;
 }
 
-// Process-global reviewer server (ccserver-reviewer, see reviewer.js): like
-// ccserver-usage it is not group-scoped (one socket for the whole server) and
-// carries no per-connection identity -- attribution, if wanted, travels as
-// the run_review tool's own `requestedBy` argument instead.
+// Process-global reviewer server (ccserver-reviewer, see reviewer.js): not
+// group-scoped (one socket for the whole server), but -- unlike
+// ccserver-usage -- DOES carry a per-connection identity (CCSERVER_REVIEWER_
+// IDENTITY, `{ sessionId }`), because finish_review needs to verify its
+// caller really is the session the job launched. run_review/list_reviews/
+// get_review ignore it; their attribution (if any) still rides in
+// run_review's own `requestedBy` argument.
 //
-// reviewerApi: { runReview, listReviews, getReview }
-export function buildReviewerMcpServer({ reviewerApi }) {
+// reviewerApi: { runReview, listReviews, getReview, finishReview }
+export function buildReviewerMcpServer({ reviewerApi, identity }) {
   const server = new McpServer({ name: 'ccserver-reviewer', version: '1.0.0' });
   const text = (result) => ({ content: [{ type: 'text', text: JSON.stringify(result) }] });
 
@@ -360,6 +363,17 @@ export function buildReviewerMcpServer({ reviewerApi }) {
     'Fetch one review job by id, including its result_summary and whether it was posted to the PR.',
     { id: z.string() },
     async (args) => text(reviewerApi.getReview(args)),
+  );
+
+  server.tool(
+    'finish_review',
+    'Called by the review session ITSELF, once it is done, to report the outcome and trigger cleanup (worktree/sandbox teardown, DB record) -- this is the authoritative way a run_review job completes; ccserver only falls back to an idle/absolute-timeout guess if this is never called (e.g. the session crashes). Only the session that IS the job (its own connection identity must match the job\'s sessionId) may call it, and jobId must still be "running" -- calling it twice, from the wrong session, or for an unknown/already-finished job is refused. status is "done" (review completed normally) or "failed" (could not complete the review); summary is an optional free-form note on what was found -- omit it to fall back to the session\'s own recent output.',
+    {
+      jobId: z.string(),
+      status: z.enum(['done', 'failed']),
+      summary: z.string().optional(),
+    },
+    async (args) => text(await reviewerApi.finishReview({ ...args, callerSessionId: identity?.sessionId ?? null })),
   );
 
   return server;

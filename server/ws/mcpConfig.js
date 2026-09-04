@@ -57,10 +57,14 @@
 // approval attribution.
 //
 // The optional `{ reviewer }` descriptor adds the ccserver-reviewer MCP
-// server (run_review/list_reviews/get_review, see reviewer.js): `{ mode,
-// sockPath }`, same mode/sockPath shape as usage -- no per-connection
-// identity (attribution, if any, travels as the run_review tool's own
-// `requestedBy` argument instead).
+// server (run_review/list_reviews/get_review/finish_review, see
+// reviewer.js): `{ mode, sockPath, identity? }`, same shape as notify/meta.
+// The identity here carries just `{ sessionId }` -- unlike notify/meta it is
+// only ever set for the ONE session a review job itself launches, and its
+// sole purpose is finish_review's caller-verification (the job's own
+// sessionId, recorded in pr_reviews, must match the calling connection's
+// identity). Injected as CCSERVER_REVIEWER_IDENTITY, same bridge-wrapper
+// mechanism as CCSERVER_NOTIFY_IDENTITY/CCSERVER_META_IDENTITY.
 //
 // Returns { args, env } for sessionManager to splice into the pty spawn.
 
@@ -118,6 +122,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
   const metaSockEnv = meta ? { CCSANDBOX_META_MCP_SOCK: meta.sockPath } : {};
   const metaIdentityEnv = meta?.identity ? { CCSERVER_META_IDENTITY: JSON.stringify(meta.identity) } : {};
   const reviewerSockEnv = reviewer ? { CCSANDBOX_REVIEWER_MCP_SOCK: reviewer.sockPath } : {};
+  const reviewerIdentityEnv = reviewer?.identity ? { CCSERVER_REVIEWER_IDENTITY: JSON.stringify(reviewer.identity) } : {};
 
   if (app === 'copilot') {
     return { args: [], env: {} };
@@ -166,7 +171,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
       servers['ccserver-reviewer'] = {
         command: inv.command,
         args: inv.args,
-        env_vars: ['CCSANDBOX_REVIEWER_MCP_SOCK'],
+        env_vars: ['CCSANDBOX_REVIEWER_MCP_SOCK', 'CCSERVER_REVIEWER_IDENTITY'],
       };
     }
     const args = [];
@@ -187,6 +192,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
         ...metaSockEnv,
         ...metaIdentityEnv,
         ...reviewerSockEnv,
+        ...reviewerIdentityEnv,
       },
     };
   }
@@ -223,6 +229,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
         ...metaSockEnv,
         ...metaIdentityEnv,
         ...reviewerSockEnv,
+        ...reviewerIdentityEnv,
       },
     };
   }
@@ -257,6 +264,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
       ...metaSockEnv,
       ...metaIdentityEnv,
       ...reviewerSockEnv,
+      ...reviewerIdentityEnv,
     },
   };
 }

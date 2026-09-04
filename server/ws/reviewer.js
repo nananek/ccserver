@@ -45,6 +45,19 @@
 // metaAgent.js: the static import graph stays acyclic (sessionManager.js
 // statically imports this module's injection-decision exports below, so
 // this module must never statically import sessionManager.js back).
+//
+// Completion detection (issue #103 follow-up): the review session ITSELF
+// calling the `finish_review` MCP tool is the AUTHORITATIVE way a job
+// completes -- buildReviewPrompt tells it to, with its own jobId, as part of
+// every prompt. finish_review verifies the caller really is that job's own
+// session (via the per-connection identity frame sessionManager.js attaches,
+// see shouldInjectReviewer/isReviewJob) before accepting it. The idle-poller
+// this used to rely on as its primary signal is now a pure FALLBACK safety
+// net -- it never guesses "done" from screen idleness any more, only
+// "exited" (the session's process died) or "timed out" (ABSOLUTE_TIMEOUT_MS
+// elapsed with no finish_review call at all, e.g. the agent hung or was
+// never going to call it). See completeReviewJob, the single cleanup path
+// both finish_review and the fallback poller funnel into.
 
 import { randomUUID } from 'node:crypto';
 import { execFileSync, execFile } from 'node:child_process';
@@ -61,14 +74,14 @@ const REVIEWER_SOCKET_NAME = 'ccserver-reviewer.sock';
 const VALID_APPS = ['claude', 'opencode', 'codex'];
 const DEFAULT_APP = 'claude';
 
-// Completion-detection thresholds (see the header comment / issue-#102 plan
-// section 8: these are starting values, not measured -- /code-review's real
-// runtime, especially with a slow model or a large diff, may need a longer
-// idle/absolute window than this).
+// Completion-detection thresholds (see the header comment: finish_review is
+// now the primary signal, these only govern the fallback poller). Not a
+// measured value -- /code-review's real runtime, especially with a slow
+// model or a large diff, may need a longer window than this.
 const SETTLE_TIMEOUT_MS = 15 * 1000; // waitUntilSettled cap before typing the prompt
-const MIN_RUNTIME_MS = 30 * 1000; // never call a job done before this, even if idle
-const IDLE_DONE_MS = 60 * 1000; // screen idle this long -> assume /code-review finished
-const ABSOLUTE_TIMEOUT_MS = 20 * 60 * 1000; // safety-net hard stop
+// Exported so tests can compute a deadline already past this without
+// duplicating the constant (see reviewer.test.js's timeout-fallback test).
+export const ABSOLUTE_TIMEOUT_MS = 20 * 60 * 1000; // fallback hard stop if finish_review never comes
 const POLL_INTERVAL_MS = 5 * 1000;
 const SUMMARY_MAX_CHARS = 4000;
 const GH_PR_VIEW_TIMEOUT_MS = 15 * 1000;
@@ -373,7 +386,12 @@ function setReviewSessionId(id, sessionId) {
   getDb().prepare('UPDATE pr_reviews SET session_id = ? WHERE id = ?').run(sessionId, id);
 }
 
-function finishReview(id, { status, resultSummary, postedToPr }) {
+// Named markReviewFinished (not finishReview) to leave that name free for
+// the exported finish_review MCP handler below -- this is only the raw DB
+// write, called from inside completeReviewJob (and once directly, for the
+// launch-failure path in runReview that has no watcher/completion-job to
+// route through).
+function markReviewFinished(id, { status, resultSummary, postedToPr }) {
   getDb().prepare(`UPDATE pr_reviews
       SET status = ?, result_summary = ?, posted_to_pr = ?, finished_at = ?
       WHERE id = ?`)
@@ -436,7 +454,7 @@ export function validateRunReviewArgs(args = {}) {
 
 // Exported (like validateRunReviewArgs) purely so it can be unit tested
 // without touching git or sessionManager.
-export function buildReviewPrompt({ mode, number, baseRef, focus }) {
+export function buildReviewPrompt({ mode, number, baseRef, focus, jobId }) {
   let base;
   if (mode === 'pr') {
     // The session owns the gh credential bridge already (git-broker.js /
@@ -456,9 +474,16 @@ export function buildReviewPrompt({ mode, number, baseRef, focus }) {
     base = `/code-review ${baseRef}`;
   }
   // This is typed into the agent's chat input, not run as a shell command
-  // (see writeToSession) -- appending a plain-language instruction after the
+  // (see writeToSession) -- appending plain-language instructions after the
   // slash command works the same as a human typing a follow-up sentence.
-  return focus ? `${base}\n\nFocus especially on: ${focus}` : base;
+  const parts = [base];
+  if (focus) parts.push(`Focus especially on: ${focus}`);
+  // finish_review is now the AUTHORITATIVE completion signal (see the module
+  // header comment) -- every mode gets this instruction, with the SAME jobId
+  // runReview already generated and recorded in pr_reviews, so finish_review
+  // can match the calling session's identity against it.
+  parts.push(`When you are finished, you MUST call the mcp__ccserver-reviewer__finish_review tool with jobId="${jobId}" (status: "done" or "failed", summary: a short note on what you found) before ending the session -- this is what marks the review complete. If you never call it, ccserver will eventually time the job out on its own, but that is a fallback, not the intended way to finish.`);
+  return parts.join('\n\n');
 }
 
 let sessionManagerMod = null;
@@ -503,16 +528,26 @@ function summarizeSessionOutput(session) {
   return text.length > SUMMARY_MAX_CHARS ? text.slice(-SUMMARY_MAX_CHARS) : text;
 }
 
-// jobId -> interval handle, so a job's watcher can be torn down exactly once
-// and tests can assert none are left dangling.
+// jobId -> interval handle, so a job's fallback watcher can be torn down
+// exactly once and tests can assert none are left dangling.
 const watchers = new Map();
 // jobIds whose watcher tick is currently awaiting the (async) completion
 // check -- guards against overlapping ticks when a gh call runs long.
 const checksInFlight = new Set();
+// jobIds already handed to (or currently inside) completeReviewJob. Unlike
+// checksInFlight (which only serializes the fallback POLLER's own ticks
+// against each other), this guards the race the poller now shares with
+// finish_review: an MCP finish_review call and an overdue poller tick can
+// each independently decide "this job is done" and reach completeReviewJob
+// at effectively the same moment. Checked-and-added synchronously as the
+// very first thing completeReviewJob does (no `await` before the add), the
+// same single-threaded-JS guarantee activeReviewCount's comment below relies
+// on -- so exactly one of the two ever actually runs the cleanup.
+const completingJobs = new Set();
 
 // Count of jobs currently occupying a concurrency slot (see
 // MAX_CONCURRENT_REVIEWS): held from the moment runReview accepts a job
-// until checkCompletion reaches a terminal state for it. Checked and
+// until completeReviewJob reaches a terminal state for it. Checked and
 // incremented synchronously with no `await` in between (see runReview), so
 // two overlapping run_review calls can never both slip past a full cap --
 // ordinary JS single-threadedness makes that a correctness guarantee here,
@@ -535,54 +570,115 @@ function startCompletionWatcher({ jobId, sessionId, projectCwd, number }) {
   watchers.set(jobId, timer);
 }
 
-// Need-driven, self-stopping poller (mirrors routes/system.js's
-// startIpmiPolling/refreshIpmiCache): ticks until THIS job reaches a
-// terminal state, then clears its own interval. `screenLastChangeAt` (see
-// sessionManager.js's screenModel-backed idle tracking) is the busy/idle
-// signal -- a spinner keeps it fresh, a finished /code-review run leaves the
-// screen static.
-async function checkCompletion({ jobId, sessionId, projectCwd, number, startedAt }) {
-  const { sessionManager } = await loadSessionDeps();
-  const session = sessionManager.getSession(sessionId);
-  const elapsed = Date.now() - startedAt;
-  const exited = !session || session.exited;
-  const idleMs = session?.screenLastChangeAt ? Date.now() - session.screenLastChangeAt : 0;
-  const timedOut = elapsed >= ABSOLUTE_TIMEOUT_MS;
-  const idleSettled = elapsed >= MIN_RUNTIME_MS && idleMs >= IDLE_DONE_MS;
-  if (!exited && !timedOut && !idleSettled) return; // still working -- check again next tick
+// The single cleanup path for a finished review job, reached from TWO
+// places (see the module header comment):
+//   - finishReview() (the finish_review MCP tool): the review session's own
+//     explicit "I'm done" signal -- the PRIMARY, expected way a job ends.
+//   - checkCompletion()'s fallback poller: only for a session that exited
+//     (crashed/was killed) or ran past ABSOLUTE_TIMEOUT_MS without ever
+//     calling finish_review.
+// completingJobs (see above) makes sure whichever of the two gets here
+// first is the only one that actually runs; the other becomes a no-op
+// (return false) instead of double-tearing-down the same worktree/session.
+async function completeReviewJob({ jobId, sessionId, projectCwd, number, startedAt, status, resultSummary }) {
+  if (completingJobs.has(jobId)) return false;
+  completingJobs.add(jobId);
 
   const timer = watchers.get(jobId);
   if (timer) clearInterval(timer);
   watchers.delete(jobId);
 
-  let status;
-  let resultSummary;
-  if (exited) {
-    status = 'failed';
-    resultSummary = 'session exited before the review could be confirmed complete';
-  } else if (timedOut) {
-    status = 'timeout';
-    resultSummary = `review timed out after ${Math.round(ABSOLUTE_TIMEOUT_MS / 60000)} minutes`;
-  } else {
-    status = 'done';
-    resultSummary = summarizeSessionOutput(session);
-  }
-
-  // The timer/watchers-map bookkeeping above already happened, so this job
-  // gets exactly one shot at cleanup -- wrap it in try/finally so a throw
-  // anywhere in here (most plausibly finishReview's DB write; destroySession/
-  // removeReviewWorktree/cleanupSandboxHome are already internally
-  // best-effort and never throw) still releases the concurrency slot instead
-  // of leaking it forever, since nothing will ever retry this jobId again.
+  // Wrapped in try/finally so a throw anywhere in here (most plausibly
+  // markReviewFinished's DB write; destroySession/removeReviewWorktree/
+  // cleanupSandboxHome are already internally best-effort and never throw)
+  // still releases the concurrency slot instead of leaking it forever, since
+  // nothing will ever retry this jobId again (completingJobs already claimed
+  // it above).
   try {
+    const { sessionManager } = await loadSessionDeps();
+    const session = sessionManager.getSession(sessionId);
+    // A caller-supplied resultSummary (finish_review's `summary`, or the
+    // fallback poller's own diagnostic string) always wins; only fall back
+    // to the session's raw recent output when neither was given (finish_review
+    // called with no summary at all).
+    const summary = resultSummary || (session ? summarizeSessionOutput(session) : `review ${status}`);
     const postedToPr = number ? await checkPrCommentPosted(projectCwd, number, startedAt) : false;
-    if (!exited) sessionManager.destroySession(sessionId, { keepSchedule: false });
+    if (session && !session.exited) sessionManager.destroySession(sessionId, { keepSchedule: false });
     removeReviewWorktree(projectCwd, jobId);
     await cleanupSandboxHome(reviewWorktreePath(projectCwd, jobId));
-    finishReview(jobId, { status, resultSummary, postedToPr });
+    markReviewFinished(jobId, { status, resultSummary: summary, postedToPr });
   } finally {
     releaseReviewSlot();
   }
+  return true;
+}
+
+// Need-driven, self-stopping FALLBACK poller (mirrors routes/system.js's
+// startIpmiPolling/refreshIpmiCache): ticks until THIS job reaches a
+// terminal state, then clears its own interval. Unlike before, this never
+// guesses "done" from idle screen output -- finish_review is the
+// authoritative signal for that now (see the module header comment). This
+// only catches the two cases finish_review can't: the session's process
+// already died (exited), or nobody ever called finish_review at all within
+// ABSOLUTE_TIMEOUT_MS (timedOut).
+//
+// Exported (like buildReviewPrompt) so tests can invoke one fallback tick
+// directly with a fabricated `startedAt`, instead of waiting real minutes
+// for ABSOLUTE_TIMEOUT_MS or driving a real setInterval.
+export async function checkCompletion({ jobId, sessionId, projectCwd, number, startedAt }) {
+  const { sessionManager } = await loadSessionDeps();
+  const session = sessionManager.getSession(sessionId);
+  const exited = !session || session.exited;
+  const timedOut = Date.now() - startedAt >= ABSOLUTE_TIMEOUT_MS;
+  if (!exited && !timedOut) return; // still working -- finish_review is expected; check again next tick
+
+  const status = exited ? 'failed' : 'timeout';
+  const resultSummary = exited
+    ? 'session exited before calling finish_review'
+    : `review timed out after ${Math.round(ABSOLUTE_TIMEOUT_MS / 60000)} minutes without calling finish_review`;
+  await completeReviewJob({ jobId, sessionId, projectCwd, number, startedAt, status, resultSummary });
+}
+
+// The finish_review MCP tool's implementation: the review session's own
+// authoritative "I'm done" signal (see the module header comment).
+// callerSessionId comes from the MCP connection's identity frame
+// (CCSERVER_REVIEWER_IDENTITY, see sessionManager.js/mcpServer.js) -- ONLY
+// the session the job itself launched may call this for that job, verified
+// by matching it against the job's own recorded session_id.
+export async function finishReview({ jobId, status, summary, callerSessionId } = {}) {
+  if (typeof jobId !== 'string' || !jobId) return { ok: false, error: 'jobId is required' };
+  if (status !== 'done' && status !== 'failed') return { ok: false, error: 'status must be "done" or "failed"' };
+
+  const found = getReview({ id: jobId });
+  if (!found.ok) return { ok: false, error: 'not-found' };
+  const review = found.review;
+  if (review.status !== 'running') {
+    return { ok: false, error: `job ${jobId} is already ${review.status}, not running` };
+  }
+  // review.sessionId is null in the brief window between insertReview and
+  // setReviewSessionId (see runReview) -- no caller can legitimately match
+  // that, so treat it the same as any other mismatch: reject.
+  if (!callerSessionId || callerSessionId !== review.sessionId) {
+    return { ok: false, error: "not authorized: finish_review may only be called by the review job's own session" };
+  }
+
+  // completeReviewJob's own return value (false = lost the race with the
+  // fallback poller, which already claimed this job via completingJobs) is
+  // not surfaced as an error: the job IS finished (or about to be) either
+  // way, from the caller's point of view. A re-read here to report the
+  // "real" outcome would risk a stale 'running' row if the winner's own
+  // async cleanup hasn't finished writing yet, so this just acknowledges
+  // what the caller itself asked for instead of claiming false precision.
+  await completeReviewJob({
+    jobId,
+    sessionId: review.sessionId,
+    projectCwd: review.projectCwd,
+    number: review.prNumber,
+    startedAt: review.createdAt,
+    status,
+    resultSummary: typeof summary === 'string' && summary.trim() ? summary.trim() : null,
+  });
+  return { ok: true, id: jobId, status };
 }
 
 // Launches one review job and returns immediately with its id/status --
@@ -598,13 +694,13 @@ export async function runReview(args = {}) {
     return { ok: false, error: `too many review jobs running (max ${MAX_CONCURRENT_REVIEWS}); wait for one to finish or check list_reviews` };
   }
   activeReviewCount++;
-  let slotHeld = true; // cleared once the job is handed off to checkCompletion, which releases it instead
+  let slotHeld = true; // cleared once the job is handed off to completeReviewJob, which releases it instead
 
   const { cwd, number, headRef, mode, app, model, requestedBy, focus } = v.value;
 
   // Everything from here on runs inside the try/finally below, so
   // releaseReviewSlot() is guaranteed to fire on ANY throw between the
-  // increment above and the handoff to checkCompletion -- resolveDefaultBaseRef
+  // increment above and the handoff to completeReviewJob -- resolveDefaultBaseRef
   // and randomUUID() don't throw today, but nothing should have to keep being
   // true forever for the slot count to stay correct.
   try {
@@ -657,9 +753,14 @@ export async function runReview(args = {}) {
       model,
       sandbox: true,
       requestedBy: `reviewer:${jobId}`,
+      // Forces reviewer MCP injection into THIS session regardless of the
+      // live reviewerMcp config value (see sessionManager.js's useReviewer
+      // comment) -- without it, finish_review would be unreachable for this
+      // job if the flag was flipped off after the broker started.
+      isReviewJob: true,
     });
     if (!launch.ok) {
-      finishReview(jobId, { status: 'failed', resultSummary: launch.message, postedToPr: false });
+      markReviewFinished(jobId, { status: 'failed', resultSummary: launch.message, postedToPr: false });
       removeReviewWorktree(cwd, jobId);
       return { ok: false, error: launch.message };
     }
@@ -668,7 +769,7 @@ export async function runReview(args = {}) {
     setReviewSessionId(jobId, sessionId);
 
     await sessionManager.waitUntilSettled(sessionId, { timeoutMs: SETTLE_TIMEOUT_MS });
-    sessionManager.writeToSession(sessionId, buildReviewPrompt({ mode, number, baseRef, focus }), { submit: true });
+    sessionManager.writeToSession(sessionId, buildReviewPrompt({ mode, number, baseRef, focus, jobId }), { submit: true });
 
     startCompletionWatcher({ jobId, sessionId, projectCwd: cwd, number });
     slotHeld = false; // handed off -- checkCompletion releases the slot when the job finishes
@@ -684,6 +785,7 @@ export const reviewerApi = {
   runReview,
   listReviews,
   getReview,
+  finishReview,
 };
 
 // Start (once) the global Unix-socket broker hosting ccserver-reviewer.
