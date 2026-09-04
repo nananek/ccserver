@@ -4,6 +4,7 @@ import { displayPath } from '../displayPath.js';
 import TabIcon from './TabIcon.jsx';
 
 const TerminalView = lazy(() => import('./TerminalView.jsx'));
+const DocPreview = lazy(() => import('./DocPreview.jsx'));
 
 function formatSize(bytes) {
   if (bytes === 0) return '0 B';
@@ -89,6 +90,37 @@ export default function GroupTabView({
     return () => document.removeEventListener('keydown', onKey);
   }, [isFilesOpen, visible, closeFiles]);
 
+  // Group document board state: a read-only browser view of the
+  // publish_doc/fetch_doc/list_docs MCP tools (server/ws/groupManager.js's
+  // group-scoped document sharing). No upload/delete UI -- publishing stays
+  // an agent-only action.
+  const [docs, setDocs] = useState([]);
+  const [docsError, setDocsError] = useState(null);
+  const [isDocsOpen, setIsDocsOpen] = useState(false);
+  const [previewDocKey, setPreviewDocKey] = useState(null);
+
+  const openDocs = useCallback(() => setIsDocsOpen(true), []);
+  const closeDocs = useCallback(() => {
+    setIsDocsOpen(false);
+    setPreviewDocKey(null);
+  }, []);
+
+  useEffect(() => {
+    if (!visible && isDocsOpen) closeDocs();
+  }, [visible, isDocsOpen, closeDocs]);
+
+  useEffect(() => {
+    // Skip while a DocPreview is open on top: its native <dialog> handles its
+    // own Escape/close first, so this listener would otherwise also close
+    // the list behind it on the same keypress.
+    if (!isDocsOpen || !visible || previewDocKey) return;
+    const onKey = (e) => {
+      if (e.key === 'Escape') closeDocs();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [isDocsOpen, visible, previewDocKey, closeDocs]);
+
   useEffect(() => { membersRef.current = members; }, [members]);
 
   // $HOME from /api/dirs/home, only for display: displayPath turns the prefix
@@ -172,6 +204,28 @@ export default function GroupTabView({
     const timer = setInterval(fetchFiles, interval);
     return () => clearInterval(timer);
   }, [visible, fetchFiles, isFilesOpen]);
+
+  // Docs polling (same badge cadence as Files: 10s closed / 3s open)
+  const fetchDocs = useCallback(async () => {
+    try {
+      const res = await authFetch(`/api/groups/${groupId}/docs`);
+      if (res.status === 404) { setDocs([]); return; }
+      if (!res.ok) { setDocsError(`HTTP ${res.status}`); return; }
+      const data = await res.json();
+      setDocs(data.docs || []);
+      setDocsError(null);
+    } catch (err) {
+      setDocsError(err.message);
+    }
+  }, [groupId]);
+
+  useEffect(() => {
+    if (!visible) return;
+    fetchDocs();
+    const interval = isDocsOpen ? 3000 : 10000;
+    const timer = setInterval(fetchDocs, interval);
+    return () => clearInterval(timer);
+  }, [visible, fetchDocs, isDocsOpen]);
 
   const uploadFiles = useCallback(async (fileList) => {
     if (!fileList || fileList.length === 0) return;
@@ -346,6 +400,17 @@ export default function GroupTabView({
           <span aria-hidden="true">📎</span> Files
           {files.length > 0 && <span className="group-files-badge">{files.length}</span>}
         </button>
+        <button
+          className="group-docs-trigger-btn"
+          onClick={openDocs}
+          aria-label="Docs"
+          aria-haspopup="dialog"
+          aria-expanded={isDocsOpen}
+          title="Docs"
+        >
+          <span aria-hidden="true">📄</span> Docs
+          {docs.length > 0 && <span className="group-docs-badge">{docs.length}</span>}
+        </button>
         {orchestrator?.exited && (
           <button
             className="btn btn-secondary group-restart-orch-btn"
@@ -470,6 +535,47 @@ export default function GroupTabView({
             </div>
           </div>
         </div>
+      )}
+      {isDocsOpen && (
+        <div className="resume-overlay group-docs-overlay" onClick={closeDocs}>
+          <div
+            className="resume-dialog group-docs-dialog"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Docs"
+          >
+            <div className="group-docs-dialog-header">
+              <h3>Docs</h3>
+              <button className="btn btn-secondary" onClick={closeDocs} aria-label="Close">✕</button>
+            </div>
+            <div className="group-docs-header">
+              <span className="group-docs-count">{docs.length} doc(s)</span>
+            </div>
+            {docsError && <div className="group-docs-error">Error: {docsError}</div>}
+            {docs.length === 0 ? (
+              <div className="group-docs-empty">No documents published yet.</div>
+            ) : (
+              <div className="group-docs-list">
+                {docs.map((d) => (
+                  <div key={d.key} className="group-docs-item">
+                    <span className="group-docs-name" title={d.key}>{d.key}</span>
+                    <span className="group-docs-meta">{formatSize(d.size)} · {d.publishedBy} · {formatTime(d.publishedAt)}</span>
+                    <button className="btn btn-secondary group-docs-view-btn" onClick={() => setPreviewDocKey(d.key)} title="View">View</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="resume-actions" style={{ marginTop: '12px' }}>
+              <button className="btn btn-secondary" onClick={closeDocs}>閉じる</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {previewDocKey && (
+        <Suspense fallback={null}>
+          <DocPreview groupId={groupId} docKey={previewDocKey} onClose={() => setPreviewDocKey(null)} />
+        </Suspense>
       )}
     </div>
   );

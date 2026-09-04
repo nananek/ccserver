@@ -527,6 +527,137 @@ body {
   pointer-events: none;
 }
 
+/* Group document board: trigger + read-only modal for publish_doc/fetch_doc/
+   list_docs. Same structure as .group-files-* above, minus every
+   upload/delete/drag affordance -- this panel never writes. */
+.group-docs-trigger-btn {
+  margin: 3px 0 3px 0;
+  padding: 3px 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.group-docs-trigger-btn:hover {
+  background: var(--border);
+}
+
+.group-docs-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg-primary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.group-docs-dialog {
+  position: relative;
+  max-width: 560px;
+  max-height: 75vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-size: 12px;
+}
+
+.group-docs-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+/* Two-class selector for the same reason as .group-files-dialog
+   .group-files-dialog-header h3 above: avoid losing to .resume-dialog h3. */
+.group-docs-dialog .group-docs-dialog-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.group-docs-dialog .group-docs-list {
+  max-height: 50vh;
+}
+.group-docs-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.group-docs-count {
+  color: var(--text-muted);
+}
+.group-docs-error {
+  margin-top: 6px;
+  color: var(--error);
+}
+.group-docs-empty {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.group-docs-list {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.group-docs-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  min-width: 0;
+}
+.group-docs-name {
+  font-weight: 500;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.group-docs-meta {
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+@media (max-width: 600px) {
+  .group-docs-meta {
+    max-width: 120px;
+  }
+}
+.group-docs-view-btn {
+  padding: 2px 6px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
 .theme-picker {
   position: relative;
   flex-shrink: 0;
