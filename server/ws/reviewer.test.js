@@ -521,6 +521,46 @@ test('checkCompletion fallback: does nothing while a job is neither exited nor p
 
 // --- completion notification (issue #102 plan section 3.6.1) ----------------
 
+// Regression for the self-review fix closing completingJobs' unbounded
+// growth (it used to never be deleted once added -- one leaked UUID per
+// completed job, forever, for the life of the process). Racing finish_review
+// against an overdue fallback tick for the SAME job also exercises
+// completingJobs' actual purpose (only one of the two may run the real
+// cleanup) -- finish_review's explicit result is structurally guaranteed to
+// win: it reaches completeReviewJob's synchronous completingJobs.add() with
+// no `await` in between, while checkCompletion must await loadSessionDeps()
+// first, so finish_review's claim always lands before checkCompletion's own
+// completeReviewJob call can even check the Set.
+test('completeReviewJob: a finish_review vs fallback-poller race is won by finish_review, and completingJobs is not leaked', async () => {
+  const shell = sessionManagerMod.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(shell.session);
+  insertRunningJob('job-race', { sessionId: shell.sessionId });
+  const before = reviewer._completingJobsSizeForTests();
+  try {
+    const [finishRes] = await Promise.all([
+      reviewer.finishReview({ jobId: 'job-race', status: 'done', summary: 'race winner', callerSessionId: shell.sessionId }),
+      reviewer.checkCompletion({
+        jobId: 'job-race',
+        sessionId: shell.sessionId,
+        projectCwd: repo,
+        number: null,
+        startedAt: Date.now() - reviewer.ABSOLUTE_TIMEOUT_MS - 1000,
+      }),
+    ]);
+    assert.equal(finishRes.ok, true);
+    const got = reviewer.getReview({ id: 'job-race' });
+    assert.equal(got.review.status, 'done', "finish_review's explicit result must win, not the fallback poller's timeout guess");
+    assert.equal(got.review.resultSummary, 'race winner');
+    assert.equal(
+      reviewer._completingJobsSizeForTests(),
+      before,
+      'the job\'s completingJobs entry must be reclaimed after cleanup, not leaked for the life of the process',
+    );
+  } finally {
+    sessionManagerMod.destroySession(shell.sessionId, { keepSchedule: false });
+  }
+});
+
 test('reviewNotificationTitle: PR mode uses owner/repo#number, prefixed by status', () => {
   const review = { mode: 'pr', prOwner: 'acme', prRepo: 'widgets', prNumber: 42 };
   assert.equal(reviewer.reviewNotificationTitle(review, 'done'), 'Review done: acme/widgets#42');

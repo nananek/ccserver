@@ -118,6 +118,12 @@ async function rpcSessionsList(_params) {
 async function rpcSessionsCreate(params, ctx) {
   const { sessionsMod } = await loadRouteDeps();
   const requestedBy = `federation:${ctx.existingRow.label || ctx.peerFingerprint.slice(0, 8)}`;
+  // `params` comes straight from a remote (if paired/active) peer, same
+  // trust level as an HTTP body. It is spread into createSessionViaApi's
+  // BODY argument only -- isReviewJob is that function's separate, trusted
+  // 2nd parameter (never read from body), so a peer setting params.isReviewJob
+  // cannot force reviewer MCP injection here even though this line does not
+  // filter params itself. See createSessionViaApi's header comment.
   const res = await sessionsMod.createSessionViaApi({ ...(params || {}), requestedBy });
   if (!res.ok) return { ok: false, error: res.message };
   return { ok: true, session: res.body };

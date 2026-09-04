@@ -817,18 +817,19 @@ export async function runReview(args = {}) {
     });
 
     const { sessionManager, sessionsRoute } = await loadSessionDeps();
+    // isReviewJob is passed as createSessionViaApi's trusted 2nd parameter
+    // (never inside the body object) -- forces reviewer MCP injection into
+    // THIS session regardless of the live reviewerMcp config value (see
+    // sessionManager.js's useReviewer comment) -- without it, finish_review
+    // would be unreachable for this job if the flag was flipped off after
+    // the broker started.
     const launch = await sessionsRoute.createSessionViaApi({
       cwd: worktreePath,
       app,
       model,
       sandbox: true,
       requestedBy: `reviewer:${jobId}`,
-      // Forces reviewer MCP injection into THIS session regardless of the
-      // live reviewerMcp config value (see sessionManager.js's useReviewer
-      // comment) -- without it, finish_review would be unreachable for this
-      // job if the flag was flipped off after the broker started.
-      isReviewJob: true,
-    });
+    }, { isReviewJob: true });
     if (!launch.ok) {
       markReviewFinished(jobId, { status: 'failed', resultSummary: launch.message, postedToPr: false });
       removeReviewWorktree(cwd, jobId);
@@ -890,4 +891,13 @@ export function stopReviewerBroker() {
     // best effort
   }
   reviewerBroker = null;
+}
+
+// Test seam: completingJobs (see its header comment) has no other externally
+// observable state -- a leaked entry costs one UUID in memory forever, not a
+// wrong answer to any query, so nothing but reading the Set's size directly
+// can prove completeReviewJob's finally block actually reclaims it instead
+// of accumulating one per completed job for the process's lifetime.
+export function _completingJobsSizeForTests() {
+  return completingJobs.size;
 }

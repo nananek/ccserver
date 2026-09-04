@@ -14,7 +14,9 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { connect as tlsConnect } from 'node:tls';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync, mkdirSync } from 'node:fs';
+import {
+  mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -139,6 +141,10 @@ async function rpc(socket, method, params) {
   return readOneLine(socket);
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 function peerFingerprint() {
   return execFileSync('openssl', ['x509', '-in', join(tmpRoot, 'peer', 'peer.crt'), '-noout', '-fingerprint', '-sha256'])
     .toString()
@@ -194,6 +200,58 @@ test('sessions.list stays refused until BOTH decisions are approved, then works'
   assert.equal(resp.ok, true);
   assert.ok(Array.isArray(resp.sessions));
   socket.destroy();
+});
+
+// Regression for the gap the REST-only fix (routes/sessions.js stripping
+// body.isReviewJob) missed: rpcSessionsCreate spreads the peer's `params`
+// straight into createSessionViaApi's body, so a paired/active peer is just
+// as capable of trying to set isReviewJob as an HTTP client is. The bypass
+// only stays closed because createSessionViaApi now takes isReviewJob as a
+// separate, trusted 2nd parameter that no caller here ever forwards from
+// untrusted input (see createSessionViaApi's header comment in
+// routes/sessions.js) -- this test exercises that boundary over the actual
+// federation RPC path, not just the REST one.
+test('sessions.create over federation ignores a peer-supplied isReviewJob', { skip }, async () => {
+  const binDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-agent-'));
+  const fakeBin = join(binDir, 'fake-claude');
+  writeFileSync(fakeBin, '#!/bin/bash\nprintf "%s\\n" "$CCSERVER_REVIEWER_IDENTITY"\n', { mode: 0o755 });
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, reviewerMcp: false }));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  const reviewer = await import('./reviewer.js');
+  const sessionManager = await import('./sessionManager.js');
+  await reviewer.ensureReviewerBroker();
+  let sessionId = null;
+  try {
+    assert.equal(reviewer.reviewerEnabled(), false, 'sanity: reviewerMcp really is off in this config');
+    const socket = await dial();
+    const resp = await rpc(socket, 'sessions.create', {
+      cwd: tmpRoot, shell: false, sandbox: false, app: 'claude', isReviewJob: true,
+    });
+    assert.equal(resp.ok, true, JSON.stringify(resp));
+    sessionId = resp.session.sessionId;
+    socket.destroy();
+    await sleep(500);
+    const session = sessionManager.getSession(sessionId);
+    assert.equal(
+      session.outputBuffer.join('').trim(),
+      '',
+      'isReviewJob sent over federation sessions.create must be ignored',
+    );
+  } finally {
+    if (sessionId) sessionManager.destroySession(sessionId, { keepSchedule: false });
+    reviewer.stopReviewerBroker();
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(binDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 });
 
 test('a terminal-open relay on an active pair answers a plain ping/pong without spawning a session', { skip }, async () => {
