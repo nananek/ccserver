@@ -44,14 +44,19 @@ function runServer(env) {
   });
 }
 
-test('server refuses to start when hiddenApps hides every known app id', async () => {
+test('server refuses to start when hiddenApps hides every installed app id', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-startup-hidden-apps-'));
   try {
     const cfgPath = join(dir, 'sandbox.config.json');
     writeFileSync(cfgPath, JSON.stringify({ hiddenApps: [...APP_IDS] }));
 
+    // Pin claude as "installed" (same trick as the boots-fine test below) so
+    // this exercises the hiddenApps-caused-the-emptiness case specifically,
+    // not the unrelated "nothing is installed at all" case index.js now lets
+    // boot regardless of hiddenApps.
     const result = await runServer({
       CCSERVER_SANDBOX_CONFIG: cfgPath,
+      CCSERVER_CLAUDE_BIN: process.execPath,
       CCSERVER_DB_PATH: join(dir, 'db.sqlite3'),
       CCSERVER_GROUPS_PATH: join(dir, 'groups.json'),
       CCSERVER_SAVED_SESSIONS_PATH: join(dir, 'sessions.json'),

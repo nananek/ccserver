@@ -33,7 +33,7 @@ import { sweepExpiredPending } from './ws/federationPairing.js';
 import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
 import { initDb, dbPath } from './db.js';
-import { selectableAppIds } from './ws/sandbox.js';
+import { selectableAppIds, installedApps } from './ws/sandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
@@ -121,23 +121,32 @@ try {
   process.exit(1);
 }
 
-// Refuse to boot if sandbox.config.json's hiddenApps (issue #105) has hidden
-// every agent CLI actually installed on this host: every one of the 5 launch
-// screens would silently offer nothing to start. Checked here -- after
-// installedApps() filesystem detection, not at config-parse time -- because
-// the emptiness only exists once "installed" and "not hidden" are
-// intersected (see selectableAppIds()).
+// Refuse to boot only if sandbox.config.json's hiddenApps (issue #105) has
+// hidden every agent CLI actually installed on this host: every one of the 5
+// launch screens would silently offer nothing to start. A host with nothing
+// installed at all (shell-only use, CI) never had a boot-time check before
+// this feature and must keep booting -- that's a separate, pre-existing
+// situation hiddenApps did not create. Checked here -- after installedApps()
+// filesystem detection, not at config-parse time -- because the emptiness
+// only exists once "installed" and "not hidden" are intersected (see
+// selectableAppIds()).
 try {
+  const anyInstalled = Object.values(installedApps()).some(Boolean);
   const selectable = selectableAppIds();
-  if (selectable.length === 0) {
-    throw new Error(
-      'sandbox.config.json\'s "hiddenApps" hides every agent CLI installed on this host, leaving nothing launchable. '
-      + 'Remove at least one entry from hiddenApps, or install one of the hidden CLIs.'
+  if (anyInstalled && selectable.length === 0) {
+    fastify.log.error(
+      'Refusing to start: sandbox.config.json\'s "hiddenApps" hides every agent CLI installed on this host, '
+      + 'leaving nothing launchable. Remove at least one entry from hiddenApps, or install one of the hidden CLIs.'
     );
+    process.exit(1);
   }
-  fastify.log.info(`Selectable agent CLIs: ${selectable.join(', ')}`);
+  if (selectable.length > 0) {
+    fastify.log.info(`Selectable agent CLIs: ${selectable.join(', ')}`);
+  } else {
+    fastify.log.warn('No agent CLI is installed on this host; only shell sessions will be launchable.');
+  }
 } catch (err) {
-  fastify.log.error({ err }, 'Refusing to start: no agent CLI is selectable');
+  fastify.log.error({ err }, 'Refusing to start: failed to determine selectable agent CLIs');
   process.exit(1);
 }
 
