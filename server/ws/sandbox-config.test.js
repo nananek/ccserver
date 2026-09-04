@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadSandboxConfig } from './sandbox.js';
+import { loadSandboxConfig, installedApps, selectableAppIds, APP_IDS } from './sandbox.js';
 
 // loadSandboxConfig reads the file at CCSERVER_SANDBOX_CONFIG (else the
 // default server/sandbox.config.json). Point it at a temp file to exercise the
@@ -211,6 +211,81 @@ test('notify.vikunja.apiToken/projectId are read from config, env overrides both
       delete process.env.CCSERVER_VIKUNJA_PROJECT_ID;
     }
   });
+});
+
+// hiddenApps (issue #105): apps the operator hasn't contracted for, removed
+// from every launch picker regardless of install status. Unlike the other
+// flags above this is an array of app ids, so it needs its own validation:
+// unknown entries dropped, duplicates collapsed, non-array falls back to [].
+test('hiddenApps defaults to [] when the key is absent', () => {
+  withConfig({}, () => {
+    assert.deepEqual(loadSandboxConfig().hiddenApps, []);
+  });
+});
+
+test('hiddenApps keeps only known app ids and dedupes them', () => {
+  withConfig({ hiddenApps: ['copilot', 'codex', 'copilot', 'bogus', 42, null] }, () => {
+    assert.deepEqual(loadSandboxConfig().hiddenApps, ['copilot', 'codex']);
+  });
+});
+
+test('hiddenApps falls back to [] for a non-array value', () => {
+  withConfig({ hiddenApps: 'copilot' }, () => {
+    assert.deepEqual(loadSandboxConfig().hiddenApps, []);
+  });
+  withConfig({ hiddenApps: { copilot: true } }, () => {
+    assert.deepEqual(loadSandboxConfig().hiddenApps, []);
+  });
+});
+
+test('hiddenApps can hide every known app', () => {
+  withConfig({ hiddenApps: [...APP_IDS] }, () => {
+    assert.deepEqual(loadSandboxConfig().hiddenApps, APP_IDS);
+  });
+});
+
+// selectableAppIds() = installedApps() ∩ !hiddenApps -- the "actually
+// selectable" set the server-startup guard in index.js refuses to boot on
+// when empty. installedApps() itself depends on the real host, so these
+// assert the INTERSECTION logic against whatever installedApps() reports,
+// rather than hardcoding which apps are installed.
+test('selectableAppIds mirrors installedApps when hiddenApps is empty', () => {
+  withConfig({}, () => {
+    const installed = installedApps();
+    assert.deepEqual(selectableAppIds(), APP_IDS.filter((a) => installed[a]));
+  });
+});
+
+test('selectableAppIds drops a hidden app even when it is installed', () => {
+  withConfig({ hiddenApps: ['claude'] }, () => {
+    const installed = installedApps();
+    const expected = APP_IDS.filter((a) => a !== 'claude' && installed[a]);
+    assert.deepEqual(selectableAppIds(), expected);
+    assert.ok(!selectableAppIds().includes('claude'), 'claude never appears once hidden');
+  });
+});
+
+test('selectableAppIds is empty once every app id is hidden, regardless of install state', () => {
+  withConfig({ hiddenApps: [...APP_IDS] }, () => {
+    assert.deepEqual(selectableAppIds(), [], 'this is exactly the condition index.js refuses to boot on');
+  });
+});
+
+// Deterministic positive case (mirrors usageMcp.test.js's withUsageConfig
+// pattern): CCSERVER_CLAUDE_BIN pinned at a real, always-executable file
+// (the running node binary) makes resolveApp('claude') -- and therefore
+// installedApps().claude -- report true regardless of this host's PATH.
+test('selectableAppIds keeps claude selectable when only the other apps are hidden', () => {
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  process.env.CCSERVER_CLAUDE_BIN = process.execPath;
+  try {
+    withConfig({ hiddenApps: ['opencode', 'copilot', 'codex'] }, () => {
+      assert.deepEqual(selectableAppIds(), ['claude']);
+    });
+  } finally {
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+  }
 });
 
 test('notify.vikunja defaults: timeoutSeconds=15, verifyTls=true, statusLabelPrefix=status-', () => {

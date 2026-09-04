@@ -13,7 +13,7 @@ function loadMetaApp() {
   return null;
 }
 
-export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApps, defaultApp, metaAgentDir }) {
+export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApps, hiddenApps = [], defaultApp, metaAgentDir }) {
   const [metaApp, setMetaApp] = useState(loadMetaApp);
   const [metaModel, setMetaModel] = useState('');
 
@@ -23,10 +23,16 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
   }, [open]);
 
   const chooseMetaApp = (val) => {
+    if (hiddenApps.includes(val)) return; // operator hid this app
     if (availableApps && !availableApps[val]) return;
     setMetaApp(val);
     try { localStorage.setItem(META_APP_KEY, val); } catch { /* ignore */ }
   };
+
+  // Apps hidden via sandbox.config.json's hiddenApps (issue #105): removed
+  // from this picker entirely, unlike a not-installed app (still shown
+  // greyed out below).
+  const visibleMetaApps = META_APPS.filter((app) => !hiddenApps.includes(app));
 
   const handleLaunch = async () => {
     let enabled = false;
@@ -73,7 +79,7 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
           {metaAgentDir ? ` プロジェクト外の専用ディレクトリ (${metaAgentDir}) で起動されます。` : ''}
         </p>
         <div className="open-menu-label">アプリ</div>
-        {META_APPS.map((appKey) => (
+        {visibleMetaApps.map((appKey) => (
           <div
             key={appKey}
             className={`open-menu-item${availableApps && !availableApps[appKey] ? ' open-menu-item-disabled' : ''}`}

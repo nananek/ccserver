@@ -120,7 +120,7 @@ export async function createDirectory({ parent, name, gitInit }) {
 
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
-    const { defaultApp, forceSandbox, showUsage } = loadSandboxConfig();
+    const { defaultApp, forceSandbox, showUsage, hiddenApps } = loadSandboxConfig();
     // hostname for the browser tab title ("<host> ccserver"): the same
     // resolution the notify footer uses, so the tab matches _from: <host>.
     // Extra field, so existing clients are unaffected.
@@ -128,10 +128,13 @@ export async function dirsRoute(fastify, opts) {
     // launch modal's app picker both need server-side facts -- whether the
     // Usage button is enabled in config, and which agent CLIs are installed
     // here. Both are extra fields, so existing clients are unaffected.
+    // hiddenApps (issue #105): apps the operator hasn't contracted for --
+    // every launch picker removes them entirely, unlike availableApps=false
+    // (not installed), which still shows greyed out with a tooltip.
     // metaAgentEnabled: the launch modal's メタエージェント mode is disabled
     // (with an explanation) unless the privileged ccserver-meta feature is
     // explicitly opted into via sandbox.config.json. Extra field as well.
-    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: installedApps(), metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir() };
+    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: installedApps(), hiddenApps, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir() };
   });
 
   fastify.get('/dirs', async (request, reply) => {

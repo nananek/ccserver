@@ -45,7 +45,7 @@ export default function App() {
   // enabled (sandbox.config.json's "showUsage") and which agent CLIs are
   // installed here (availableApps). Usage is only meaningful when claude
   // exists, so a missing claude hides the button regardless of showUsage.
-  const [usagePrefs, setUsagePrefs] = useState({ showUsage: true, availableApps: null });
+  const [usagePrefs, setUsagePrefs] = useState({ showUsage: true, availableApps: null, hiddenApps: [] });
   const [metaAgentDir, setMetaAgentDir] = useState(null);
 
   useEffect(() => {
@@ -69,6 +69,7 @@ export default function App() {
         setUsagePrefs({
           showUsage: data.showUsage !== false,
           availableApps: data.availableApps || null,
+          hiddenApps: Array.isArray(data.hiddenApps) ? data.hiddenApps : [],
         });
         if (data.metaAgentDir) setMetaAgentDir(data.metaAgentDir);
       })
@@ -452,8 +453,8 @@ export default function App() {
   // neither CLI installed at all (the capture would never succeed for either).
   // `availableApps` null/absent (fetch pending or failed, older server) means
   // "unknown" -- both apps are assumed available in that case.
-  const claudeAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.claude !== false;
-  const codexAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.codex !== false;
+  const claudeAvailable = (!usagePrefs.availableApps || usagePrefs.availableApps.claude !== false) && !usagePrefs.hiddenApps.includes('claude');
+  const codexAvailable = (!usagePrefs.availableApps || usagePrefs.availableApps.codex !== false) && !usagePrefs.hiddenApps.includes('codex');
   const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable);
   // First-run seed only: UsageButton remembers the app the user last picked
   // (localStorage), so this active-tab-derived default is used just when
@@ -507,7 +508,7 @@ export default function App() {
         ))}
         <div className="tab-bar-spacer" />
         </div>
-        <UsageButton hidden={usageHidden} defaultApp={usageDefaultApp} availableApps={usagePrefs.availableApps} />
+        <UsageButton hidden={usageHidden} defaultApp={usageDefaultApp} availableApps={usagePrefs.availableApps} hiddenApps={usagePrefs.hiddenApps} />
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>

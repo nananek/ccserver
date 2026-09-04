@@ -46,24 +46,30 @@ function saveUsageApp(app) {
   }
 }
 
-export default function UsageButton({ hidden = false, defaultApp = 'claude', availableApps = null }) {
+export default function UsageButton({ hidden = false, defaultApp = 'claude', availableApps = null, hiddenApps = [] }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null);   // { usage, updatedAt, error, ... }
   const [loading, setLoading] = useState(false);
   const [, setTick] = useState(0);   // re-render so pace/age stay live while open
+  // Selectable = installed (availableApps !== false) AND not hidden via
+  // sandbox.config.json's hiddenApps (issue #105).
+  const isSelectable = useCallback(
+    (app) => (!availableApps || availableApps[app] !== false) && !hiddenApps.includes(app),
+    [availableApps, hiddenApps]
+  );
   // Which app the popover is currently showing. The persisted choice wins:
   // defaultApp (the active terminal tab's app) only seeds the very first view
   // when nothing valid has been saved yet. Availability is still respected --
-  // a saved app that isn't installed falls back below.
+  // a saved app that isn't installed or is hidden falls back below.
   const [tab, setTab] = useState(() => {
     const saved = loadSavedUsageApp();
-    if (saved && (!availableApps || availableApps[saved] !== false)) return saved;
+    if (saved && isSelectable(saved)) return saved;
     return defaultApp === 'codex' ? 'codex' : 'claude';
   });
   const wrapRef = useRef(null);
 
-  const claudeAvailable = !availableApps || availableApps.claude !== false;
-  const codexAvailable = !availableApps || availableApps.codex !== false;
+  const claudeAvailable = isSelectable('claude');
+  const codexAvailable = isSelectable('codex');
 
   const load = useCallback(async (force = false) => {
     setLoading(true);
@@ -90,16 +96,16 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
     if (!availableApps) return;
     const saved = loadSavedUsageApp();
     setTab((cur) => {
-      if (saved && saved !== cur && availableApps[saved] !== false) return saved;
-      if (availableApps[cur] !== false) return cur;
+      if (saved && saved !== cur && isSelectable(saved)) return saved;
+      if (isSelectable(cur)) return cur;
       const other = cur === 'codex' ? 'claude' : 'codex';
-      if (availableApps[other] !== false) {
+      if (isSelectable(other)) {
         saveUsageApp(other);
         return other;
       }
       return cur;
     });
-  }, [availableApps]);
+  }, [availableApps, isSelectable]);
 
   // Prime the button (session % badge) once on mount, using the cache, and
   // again whenever the viewed app changes -- reset first so a tab switch

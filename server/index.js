@@ -33,6 +33,7 @@ import { sweepExpiredPending } from './ws/federationPairing.js';
 import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
 import { initDb, dbPath } from './db.js';
+import { selectableAppIds } from './ws/sandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
@@ -117,6 +118,26 @@ try {
   if (expiredPairings > 0) fastify.log.info(`Expired ${expiredPairings} stale federation pairing request(s)`);
 } catch (err) {
   fastify.log.error({ err }, `Failed to initialize SQLite database (${dbPath()}): ${err.message}`);
+  process.exit(1);
+}
+
+// Refuse to boot if sandbox.config.json's hiddenApps (issue #105) has hidden
+// every agent CLI actually installed on this host: every one of the 5 launch
+// screens would silently offer nothing to start. Checked here -- after
+// installedApps() filesystem detection, not at config-parse time -- because
+// the emptiness only exists once "installed" and "not hidden" are
+// intersected (see selectableAppIds()).
+try {
+  const selectable = selectableAppIds();
+  if (selectable.length === 0) {
+    throw new Error(
+      'sandbox.config.json\'s "hiddenApps" hides every agent CLI installed on this host, leaving nothing launchable. '
+      + 'Remove at least one entry from hiddenApps, or install one of the hidden CLIs.'
+    );
+  }
+  fastify.log.info(`Selectable agent CLIs: ${selectable.join(', ')}`);
+} catch (err) {
+  fastify.log.error({ err }, 'Refusing to start: no agent CLI is selectable');
   process.exit(1);
 }
 
