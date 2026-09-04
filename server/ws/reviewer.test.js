@@ -80,6 +80,45 @@ test('createReviewWorktree throws for an unresolvable ref', () => {
   assert.throws(() => reviewer.createReviewWorktree(repo, 'job-bad-ref', 'no-such-branch'));
 });
 
+test('createReviewWorktree fetches a branch that was pushed to origin after the local clone was made', () => {
+  // Simulates the "pushed-but-PR-less branch" case from run_review's tool
+  // description: headRef exists on origin but was never fetched into the
+  // caller's local clone (repo.js's origin/master case, not something rev-parse
+  // can see without a fetch first -- see resolveRefForWorktree).
+  const remote = join(runtimeDir, 'remote.git');
+  mkdirSync(remote, { recursive: true });
+  git(remote, ['init', '-q', '--bare']);
+
+  const seed = join(runtimeDir, 'fetch-seed');
+  mkdirSync(seed, { recursive: true });
+  git(seed, ['init', '-q']);
+  git(seed, ['-c', 'user.name=t', '-c', 'user.email=t@t.com', 'commit', '-q', '--allow-empty', '-m', 'init']);
+  git(seed, ['remote', 'add', 'origin', remote]);
+  const seedBranch = git(seed, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim();
+  git(seed, ['push', '-q', 'origin', seedBranch]);
+
+  const clone = join(runtimeDir, 'fetch-clone');
+  git(runtimeDir, ['clone', '-q', remote, clone]);
+
+  // Pushed to origin only AFTER the clone above -- `clone` has no local ref
+  // and no origin/far-branch remote-tracking ref for it yet.
+  git(seed, ['checkout', '-q', '-b', 'far-branch']);
+  writeFileSync(join(seed, 'far.txt'), 'far content\n');
+  git(seed, ['add', 'far.txt']);
+  git(seed, ['-c', 'user.name=t', '-c', 'user.email=t@t.com', 'commit', '-q', '-m', 'far commit']);
+  git(seed, ['push', '-q', 'origin', 'far-branch']);
+
+  assert.throws(() => git(clone, ['rev-parse', 'far-branch']), 'sanity: not resolvable before the fetch fallback kicks in');
+
+  const { path, resolvedRef } = reviewer.createReviewWorktree(clone, 'job-fetch', 'far-branch');
+  try {
+    assert.equal(readFileSync(join(path, 'far.txt'), 'utf-8'), 'far content\n');
+    assert.equal(resolvedRef, git(seed, ['rev-parse', 'far-branch']).trim());
+  } finally {
+    reviewer.removeReviewWorktree(clone, 'job-fetch');
+  }
+});
+
 // --- dirty-diff snapshot / apply --------------------------------------------
 
 test('snapshotDirtyChanges captures tracked + untracked changes, applyPatchToWorktree replays them', () => {

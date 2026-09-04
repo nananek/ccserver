@@ -72,6 +72,15 @@ const ABSOLUTE_TIMEOUT_MS = 20 * 60 * 1000; // safety-net hard stop
 const POLL_INTERVAL_MS = 5 * 1000;
 const SUMMARY_MAX_CHARS = 4000;
 const GH_PR_VIEW_TIMEOUT_MS = 15 * 1000;
+const REF_FETCH_TIMEOUT_MS = 15 * 1000;
+
+// Soft cap on jobs accepted (worktree created / session launched) at once,
+// process-wide -- run_review is injected into every non-shell/non-copilot
+// session once reviewerMcp is on (see shouldInjectReviewer), including
+// workers, and each job spawns a real sandboxed agent CLI session, so an
+// agent looping on run_review with no cap would be free to exhaust host
+// resources. Overridable for local testing / larger hosts.
+const MAX_CONCURRENT_REVIEWS = Number(process.env.CCSERVER_REVIEWER_MAX_CONCURRENT) || 4;
 
 let reviewerBroker = null; // { server, sockPath, dir, connections } | null
 let stopBrokerFn = null;
@@ -162,15 +171,50 @@ function resolveRepoOwnerRepo(cwd) {
   return m ? { owner: m[1], repo: m[2] } : null;
 }
 
+// Resolves `ref` to a commit on the PROJECT repo, fetching it from origin
+// first if it isn't already known locally. Plain rev-parse is tried first
+// (the common case -- no network at all) so this only pays for a fetch when
+// actually needed: a branch mode job's headRef may be a "pushed-but-PR-less
+// branch" (see run_review's tool description) that was never fetched into
+// the caller's local clone. The fetch is bounded (REF_FETCH_TIMEOUT_MS) --
+// execFileSync is synchronous and blocks this whole process, so an
+// unreachable/slow origin must not be allowed to hang indefinitely -- and
+// swallowed on failure (offline, no origin remote, ref genuinely doesn't
+// exist anywhere): the rev-parse retry right after is what actually decides
+// success/failure, surfacing the same error as before this fell back to
+// fetching.
+function resolveRefForWorktree(projectCwd, ref) {
+  if (ref === 'HEAD') return git(projectCwd, ['rev-parse', ref]).trim();
+  try {
+    return git(projectCwd, ['rev-parse', ref]).trim();
+  } catch (localErr) {
+    try {
+      execFileSync('git', ['-C', projectCwd, 'fetch', '--quiet', 'origin', ref], {
+        encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: REF_FETCH_TIMEOUT_MS,
+      });
+      // A bare `<ref>` fetch refspec only ever updates FETCH_HEAD, never a
+      // remote-tracking ref (that needs an explicit `ref:refs/remotes/...`
+      // destination) -- resolve through FETCH_HEAD rather than retrying
+      // `ref` itself, which would still be unresolvable.
+      return git(projectCwd, ['rev-parse', 'FETCH_HEAD']).trim();
+    } catch {
+      // best effort -- surface the original local rev-parse failure (an
+      // unreachable/absent-origin fetch failure is a less useful message
+      // than "unknown revision <ref>")
+      throw localErr;
+    }
+  }
+}
+
 // Creates a disposable detached worktree for one review job, checked out at
-// `ref` (resolved on the PROJECT repo, so it must already exist there). PR
+// `ref` (resolved on the PROJECT repo via resolveRefForWorktree above). PR
 // mode checks out the actual PR branch itself (see buildReviewPrompt) --
 // this is only ever called with 'HEAD' for that mode, giving the session a
 // clean starting point to run `gh pr checkout` from.
 export function createReviewWorktree(projectCwd, jobId, ref) {
   const path = reviewWorktreePath(projectCwd, jobId);
   mkdirSync(dirname(path), { recursive: true });
-  const resolvedRef = git(projectCwd, ['rev-parse', ref]).trim();
+  const resolvedRef = resolveRefForWorktree(projectCwd, ref);
   git(projectCwd, ['worktree', 'add', '--detach', path, resolvedRef]);
   return { path, resolvedRef };
 }
@@ -421,6 +465,19 @@ const watchers = new Map();
 // check -- guards against overlapping ticks when a gh call runs long.
 const checksInFlight = new Set();
 
+// Count of jobs currently occupying a concurrency slot (see
+// MAX_CONCURRENT_REVIEWS): held from the moment runReview accepts a job
+// until checkCompletion reaches a terminal state for it. Checked and
+// incremented synchronously with no `await` in between (see runReview), so
+// two overlapping run_review calls can never both slip past a full cap --
+// ordinary JS single-threadedness makes that a correctness guarantee here,
+// not just best-effort.
+let activeReviewCount = 0;
+
+function releaseReviewSlot() {
+  activeReviewCount = Math.max(0, activeReviewCount - 1);
+}
+
 function startCompletionWatcher({ jobId, sessionId, projectCwd, number }) {
   const startedAt = Date.now();
   const timer = setInterval(() => {
@@ -472,6 +529,7 @@ async function checkCompletion({ jobId, sessionId, projectCwd, number, startedAt
   removeReviewWorktree(projectCwd, jobId);
   await cleanupSandboxHome(reviewWorktreePath(projectCwd, jobId));
   finishReview(jobId, { status, resultSummary, postedToPr });
+  releaseReviewSlot();
 }
 
 // Launches one review job and returns immediately with its id/status --
@@ -480,65 +538,79 @@ async function checkCompletion({ jobId, sessionId, projectCwd, number, startedAt
 export async function runReview(args = {}) {
   const v = validateRunReviewArgs(args);
   if (!v.ok) return v;
+  // Cap check-and-increment is synchronous (no `await` between them), so
+  // this can't race with another concurrent runReview call -- see
+  // activeReviewCount's comment.
+  if (activeReviewCount >= MAX_CONCURRENT_REVIEWS) {
+    return { ok: false, error: `too many review jobs running (max ${MAX_CONCURRENT_REVIEWS}); wait for one to finish or check list_reviews` };
+  }
+  activeReviewCount++;
+  let slotHeld = true; // cleared once the job is handed off to checkCompletion, which releases it instead
+
   const { cwd, number, headRef, mode, app, model, requestedBy } = v.value;
   const baseRef = v.value.baseRef || resolveDefaultBaseRef(cwd);
   const jobId = randomUUID();
 
-  let worktreePath;
-  let resolvedRef;
-  let prOwner = null;
-  let prRepo = null;
   try {
-    if (mode === 'pr') {
-      ({ path: worktreePath, resolvedRef } = createReviewWorktree(cwd, jobId, 'HEAD'));
-      const remote = resolveRepoOwnerRepo(cwd);
-      prOwner = remote?.owner ?? null;
-      prRepo = remote?.repo ?? null;
-    } else if (mode === 'branch') {
-      ({ path: worktreePath, resolvedRef } = createReviewWorktree(cwd, jobId, headRef));
-    } else {
-      ({ path: worktreePath, resolvedRef } = createReviewWorktree(cwd, jobId, 'HEAD'));
-      const patch = snapshotDirtyChanges(cwd);
-      try {
-        applyPatchToWorktree(worktreePath, patch);
-      } catch (err) {
-        removeReviewWorktree(cwd, jobId);
-        return { ok: false, error: `failed to apply uncommitted changes to the review worktree: ${err.message}` };
+    let worktreePath;
+    let resolvedRef;
+    let prOwner = null;
+    let prRepo = null;
+    try {
+      if (mode === 'pr') {
+        ({ path: worktreePath, resolvedRef } = createReviewWorktree(cwd, jobId, 'HEAD'));
+        const remote = resolveRepoOwnerRepo(cwd);
+        prOwner = remote?.owner ?? null;
+        prRepo = remote?.repo ?? null;
+      } else if (mode === 'branch') {
+        ({ path: worktreePath, resolvedRef } = createReviewWorktree(cwd, jobId, headRef));
+      } else {
+        ({ path: worktreePath, resolvedRef } = createReviewWorktree(cwd, jobId, 'HEAD'));
+        const patch = snapshotDirtyChanges(cwd);
+        try {
+          applyPatchToWorktree(worktreePath, patch);
+        } catch (err) {
+          removeReviewWorktree(cwd, jobId);
+          return { ok: false, error: `failed to apply uncommitted changes to the review worktree: ${err.message}` };
+        }
       }
+    } catch (err) {
+      return { ok: false, error: `failed to prepare the review worktree: ${err.message}` };
     }
-  } catch (err) {
-    return { ok: false, error: `failed to prepare the review worktree: ${err.message}` };
+
+    insertReview({
+      id: jobId, projectCwd: cwd, baseRef, headRef: mode === 'pr' ? null : headRef, resolvedRef,
+      prOwner, prRepo, prNumber: number, mode, app, model, status: 'running',
+      sessionId: null, worktreePath, requestedBy, createdAt: Date.now(),
+    });
+
+    const { sessionManager, sessionsRoute } = await loadSessionDeps();
+    const launch = await sessionsRoute.createSessionViaApi({
+      cwd: worktreePath,
+      app,
+      model,
+      sandbox: true,
+      requestedBy: `reviewer:${jobId}`,
+    });
+    if (!launch.ok) {
+      finishReview(jobId, { status: 'failed', resultSummary: launch.message, postedToPr: false });
+      removeReviewWorktree(cwd, jobId);
+      return { ok: false, error: launch.message };
+    }
+
+    const sessionId = launch.body.sessionId;
+    setReviewSessionId(jobId, sessionId);
+
+    await sessionManager.waitUntilSettled(sessionId, { timeoutMs: SETTLE_TIMEOUT_MS });
+    sessionManager.writeToSession(sessionId, buildReviewPrompt({ mode, number, baseRef }), { submit: true });
+
+    startCompletionWatcher({ jobId, sessionId, projectCwd: cwd, number });
+    slotHeld = false; // handed off -- checkCompletion releases the slot when the job finishes
+
+    return { ok: true, id: jobId, status: 'running', sessionId, worktreePath, mode, resolvedRef };
+  } finally {
+    if (slotHeld) releaseReviewSlot();
   }
-
-  insertReview({
-    id: jobId, projectCwd: cwd, baseRef, headRef: mode === 'pr' ? null : headRef, resolvedRef,
-    prOwner, prRepo, prNumber: number, mode, app, model, status: 'running',
-    sessionId: null, worktreePath, requestedBy, createdAt: Date.now(),
-  });
-
-  const { sessionManager, sessionsRoute } = await loadSessionDeps();
-  const launch = await sessionsRoute.createSessionViaApi({
-    cwd: worktreePath,
-    app,
-    model,
-    sandbox: true,
-    requestedBy: `reviewer:${jobId}`,
-  });
-  if (!launch.ok) {
-    finishReview(jobId, { status: 'failed', resultSummary: launch.message, postedToPr: false });
-    removeReviewWorktree(cwd, jobId);
-    return { ok: false, error: launch.message };
-  }
-
-  const sessionId = launch.body.sessionId;
-  setReviewSessionId(jobId, sessionId);
-
-  await sessionManager.waitUntilSettled(sessionId, { timeoutMs: SETTLE_TIMEOUT_MS });
-  sessionManager.writeToSession(sessionId, buildReviewPrompt({ mode, number, baseRef }), { submit: true });
-
-  startCompletionWatcher({ jobId, sessionId, projectCwd: cwd, number });
-
-  return { ok: true, id: jobId, status: 'running', sessionId, worktreePath, mode, resolvedRef };
 }
 
 // The reviewerApi facade handed to buildReviewerMcpServer (see mcpServer.js).
