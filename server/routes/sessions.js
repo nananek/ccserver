@@ -20,7 +20,16 @@ export async function sessionsRoute(fastify, opts) {
   });
 
   fastify.post('/sessions', async (request, reply) => {
-    const res = await createSessionViaApi(request.body || {});
+    // isReviewJob is an internal-only flag (see createSessionViaApi's
+    // comment): it bypasses the reviewerMcp opt-in gate, unlike every other
+    // field here, which is why -- unlike isMetaAgent -- it must never be
+    // settable over this network-facing boundary. reviewer.js's runReview is
+    // the only legitimate setter, and it calls createSessionViaApi directly
+    // in-process (see reviewer.js's loadSessionDeps), never through this
+    // route, so stripping it from the HTTP body cannot affect that caller.
+    const body = { ...(request.body || {}) };
+    delete body.isReviewJob;
+    const res = await createSessionViaApi(body);
     if (!res.ok) {
       const status = res.code === 'validation' ? 400 : 500;
       return reply.code(status).send({ error: res.message });
@@ -91,7 +100,10 @@ export async function createSessionViaApi(body) {
   // isReviewJob is the same kind of internal flag for reviewer.js's runReview
   // (the only real caller): unlike isMetaAgent it DOES bypass the reviewerMcp
   // config check (never the broker-running check) -- see sessionManager.js's
-  // useReviewer comment for why.
+  // useReviewer comment for why. Because that bypass is real (not inert like
+  // isMetaAgent's), the fastify POST /sessions handler above strips
+  // body.isReviewJob before it ever reaches here -- only an in-process caller
+  // (runReview) can set it.
   const result = createSession({
     cwd,
     cols: 80,

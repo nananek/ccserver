@@ -550,7 +550,9 @@ const checksInFlight = new Set();
 // at effectively the same moment. Checked-and-added synchronously as the
 // very first thing completeReviewJob does (no `await` before the add), the
 // same single-threaded-JS guarantee activeReviewCount's comment below relies
-// on -- so exactly one of the two ever actually runs the cleanup.
+// on -- so exactly one of the two ever actually runs the cleanup. Entries are
+// removed again once that one run finishes (see completeReviewJob's finally)
+// -- this only needs to cover the in-flight race window, not live forever.
 const completingJobs = new Set();
 
 // Count of jobs currently occupying a concurrency slot (see
@@ -669,6 +671,14 @@ async function completeReviewJob({ jobId, sessionId, projectCwd, number, started
     if (finished.ok) notifyReviewComplete(finished.review, { status, postedToPr });
   } finally {
     releaseReviewSlot();
+    // Safe to reclaim now: watchers.delete(jobId) above already forecloses
+    // any further poller tick for this job, and finish_review's own
+    // review.status !== 'running' check (the row was just written above)
+    // forecloses any further finish_review call -- nothing will look this
+    // jobId up in completingJobs again, so leaving the entry in place would
+    // just grow the Set by one UUID per completed job for the life of the
+    // process, forever.
+    completingJobs.delete(jobId);
   }
   return true;
 }

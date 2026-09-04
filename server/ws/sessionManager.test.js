@@ -19,6 +19,8 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn as spawnProcess } from 'node:child_process';
+import Fastify from 'fastify';
+import { sessionsRoute } from '../routes/sessions.js';
 import { persistentHomeDir } from './sandbox.js';
 import { metaAgentDir } from './metaAgent.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
@@ -926,6 +928,61 @@ test('createSession isReviewJob bypasses a disabled reviewerMcp flag for the rev
     assert.equal(normal.session.outputBuffer.join('').trim(), '', 'a normal session must NOT get it while reviewerMcp is off');
   } finally {
     for (const id of ids) sessionManager.destroySession(id, { keepSchedule: false });
+    reviewer.stopReviewerBroker();
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(binDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// The bypass above is deliberately only safe because isReviewJob can never
+// arrive from a network caller: reviewer.js's runReview sets it on a direct,
+// in-process call to createSessionViaApi (see reviewer.js's loadSessionDeps),
+// but POST /api/sessions is the SAME createSessionViaApi wired up to accept
+// an arbitrary request body from anyone holding CCSERVER_TOKEN. Unlike
+// isMetaAgent (harmless if a plain HTTP client sets it -- see
+// createSessionViaApi's comment), isReviewJob has a real effect, so
+// routes/sessions.js's POST handler must strip it from request.body before
+// it ever reaches createSession. This exercises that boundary specifically
+// (the test above only covers the safe, trusted, in-process call shape).
+test('POST /api/sessions ignores a client-supplied isReviewJob -- reviewerMcp stays off for it', async () => {
+  const binDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-agent-'));
+  const fakeBin = join(binDir, 'fake-claude');
+  writeFileSync(fakeBin, '#!/bin/bash\nprintf "%s\\n" "$CCSERVER_REVIEWER_IDENTITY"\n', { mode: 0o755 });
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, reviewerMcp: false }));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  const reviewer = await import('./reviewer.js');
+  await reviewer.ensureReviewerBroker();
+  const app = Fastify();
+  await app.register(sessionsRoute, { prefix: '/api' });
+  let sessionId = null;
+  try {
+    assert.equal(reviewer.reviewerEnabled(), false, 'sanity: reviewerMcp really is off in this config');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      payload: { cwd: '/tmp', shell: false, sandbox: false, app: 'claude', isReviewJob: true },
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    sessionId = res.json().sessionId;
+    await sleep(500);
+    const session = sessionManager.getSession(sessionId);
+    assert.equal(
+      session.outputBuffer.join('').trim(),
+      '',
+      'isReviewJob in an HTTP request body must be ignored -- only reviewer.js\'s own in-process call may set it',
+    );
+  } finally {
+    await app.close();
+    if (sessionId) sessionManager.destroySession(sessionId, { keepSchedule: false });
     reviewer.stopReviewerBroker();
     if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
     else process.env.CCSERVER_CLAUDE_BIN = prevBin;
