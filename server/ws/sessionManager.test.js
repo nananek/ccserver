@@ -183,6 +183,40 @@ test('createSession refuses an uninstalled agent with a clear error', () => {
   }
 });
 
+// Self-review (issue #105): sandbox.config.json's hiddenApps must not be
+// purely cosmetic. Every launch picker (single, combo, meta-agent, worker/
+// launch-preset expansion) funnels its choice through createSession -- if
+// this function doesn't itself refuse a hidden app, any direct WS/API call
+// (or a preset saved before the app was hidden) can still start a real
+// session for an app the operator hasn't contracted for, regardless of what
+// the client-side pickers show. Pin CCSERVER_CLAUDE_BIN at a real,
+// always-executable file (the running node binary) so claude reads as
+// INSTALLED -- the hidden check must fire even when the app is present,
+// unlike the "not installed" case above.
+test('createSession refuses a hidden (but installed) agent with a clear error', () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, hiddenApps: ['claude'] }));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = process.execPath;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = sessionManager.createSession({
+      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
+    });
+    assert.equal(res.session, null, 'no session may be created for a hidden app, even one that is installed');
+    assert.match(res.error, /claude is hidden on this server/);
+    assert.match(res.error, /hiddenApps/, 'the error names the config key responsible');
+  } finally {
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
 // setScheduledPrompt captures the session's launch model into the persisted
 // schedule entry so the auto-resume path replays it (persistSchedules).
 test('setScheduledPrompt persists the session model into the schedule file', async () => {

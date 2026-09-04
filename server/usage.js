@@ -170,6 +170,17 @@ function capture() {
       resolve({ error: 'claude is not installed on this server' });
       return;
     }
+    // Self-review (issue #105): sandbox.config.json's hiddenApps hides claude
+    // from every launch picker, but GET /api/usage has no launch picker to
+    // guard -- a direct call (any authenticated client, or warmUsage() at
+    // boot) would otherwise still spawn a real `claude` process even when the
+    // operator listed it in hiddenApps specifically because they haven't
+    // contracted for it. Refuse the same way the not-installed check above
+    // does, mirroring createSession's hiddenApps guard (sessionManager.js).
+    if (loadSandboxConfig().hiddenApps.includes('claude')) {
+      resolve({ error: 'claude is hidden on this server (sandbox.config.json\'s "hiddenApps")' });
+      return;
+    }
     let command = resolvedClaude.command;
     let args = ['--ax-screen-reader'];
     let spawnCwd = homedir();
