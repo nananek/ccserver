@@ -25,6 +25,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker } from './git-broker.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
+import { APPS } from './appLaunch.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -475,8 +476,12 @@ function slugify(p) {
 }
 
 // Every agent CLI the launch pickers know about (see resolveApp/installedApps
-// below, and issue #105's hiddenApps).
-export const APP_IDS = ['claude', 'opencode', 'copilot', 'codex'];
+// below, and issue #105's hiddenApps). Self-review: this used to redefine the
+// same literal appLaunch.js's APPS already exports, risking drift the next
+// time an app is added -- re-exported under this module's existing name
+// instead, so existing importers (sandbox-config.test.js,
+// startup-hidden-apps.test.js) don't need to change.
+export const APP_IDS = APPS;
 
 // Load the optional sandbox config. Path from CCSERVER_SANDBOX_CONFIG, else
 // server/sandbox.config.json (next to this module's parent). Shape:

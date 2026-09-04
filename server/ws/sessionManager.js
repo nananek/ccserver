@@ -198,6 +198,26 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
   // Which agent CLI this session runs. Shell sessions have no app.
   const sessionApp = shell ? null : (isValidApp(app) ? app : defaultApp());
+
+  // Self-review (issue #105): sandbox.config.json's hiddenApps removes an app
+  // from every launch picker client-side, but every picker ultimately funnels
+  // its choice through this same createSession() (single launches, combo
+  // workers/orchestrator, worker/launch-preset expansion, meta-agent). Without
+  // a check here, hiding an app is purely cosmetic -- any client that sends
+  // `app` directly (a hand-crafted WS/API call, a stale MCP preset, a worker
+  // preset saved before the app was hidden) would still start a real session
+  // for an app the operator hasn't contracted for. Refuse the same way the
+  // not-installed check below does, rather than trusting every caller to have
+  // re-checked hiddenApps itself. Checked BEFORE resolveApp() below: once an
+  // app is hidden, whether it happens to be installed is irrelevant, and this
+  // ordering means the refusal never depends on install detection.
+  if (sessionApp && loadSandboxConfig().hiddenApps.includes(sessionApp)) {
+    return {
+      sessionId: id,
+      session: null,
+      error: `Cannot launch: ${sessionApp} is hidden on this server (sandbox.config.json's "hiddenApps"). Remove it from hiddenApps to allow launches.`,
+    };
+  }
   const resolved = sessionApp ? resolveApp(sessionApp) : null;
 
   // Refuse launches of an agent that doesn't exist on this host, instead of
@@ -219,23 +239,6 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       sessionId: id,
       session: null,
       error: `Cannot launch: ${sessionApp} is not installed on this server (searched ${searched}).`,
-    };
-  }
-  // Self-review (issue #105): sandbox.config.json's hiddenApps removes an app
-  // from every launch picker client-side, but every picker ultimately funnels
-  // its choice through this same createSession() (single launches, combo
-  // workers/orchestrator, worker/launch-preset expansion, meta-agent). Without
-  // a check here, hiding an app is purely cosmetic -- any client that sends
-  // `app` directly (a hand-crafted WS/API call, a stale MCP preset, a worker
-  // preset saved before the app was hidden) would still start a real session
-  // for an app the operator hasn't contracted for. Refuse the same way the
-  // not-installed check above does, rather than trusting every caller to have
-  // re-checked hiddenApps itself.
-  if (sessionApp && loadSandboxConfig().hiddenApps.includes(sessionApp)) {
-    return {
-      sessionId: id,
-      session: null,
-      error: `Cannot launch: ${sessionApp} is hidden on this server (sandbox.config.json's "hiddenApps"). Remove it from hiddenApps to allow launches.`,
     };
   }
   // Which model this session launches with. Explicit null / absent means "use

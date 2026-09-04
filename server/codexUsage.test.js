@@ -1,12 +1,19 @@
 // Unit tests for the pure GetAccountRateLimitsResponse -> UsageButton shape
-// mapping. Does NOT cover getCodexUsage()/capture() itself -- that spawns the
-// real `codex` binary, which isn't something a unit test should trigger (see
-// server/routes/usage.test.js's header comment for the same reasoning about
-// Claude's /api/usage).
+// mapping. Does NOT cover getCodexUsage()/capture()'s actual capture path --
+// that spawns the real `codex` binary, which isn't something a unit test
+// should trigger (see server/routes/usage.test.js's header comment for the
+// same reasoning about Claude's /api/usage). The hiddenApps refusal below is
+// an exception: it's checked before resolveApp('codex') even runs (see
+// capture()'s comment), so it never reaches a spawn and needs no real
+// install -- unlike claude, codex has no CCSERVER_*_BIN override to fake one
+// with (see sandbox-resolve.test.js's header comment).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mapRateLimits } from './codexUsage.js';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { mapRateLimits, getCodexUsage } from './codexUsage.js';
 
 test('mapRateLimits: primary + secondary windows both present', () => {
   const result = mapRateLimits({
@@ -82,4 +89,31 @@ test('mapRateLimits: non-weekly day-multiple gets a day label', () => {
   });
   assert.equal(result.limits.length, 1);
   assert.equal(result.limits[0].label, '2日');
+});
+
+// Self-review (issue #105): sandbox.config.json's hiddenApps must not be a
+// purely cosmetic picker-hiding feature. GET /api/usage?app=codex (and the
+// warmCodexUsage() background job that calls it once at boot) would
+// otherwise still spawn a real `codex` process even when the operator listed
+// it in hiddenApps specifically because they haven't contracted for it --
+// there is no launch picker on this endpoint for the client-side hide to
+// protect. capture() checks hiddenApps before resolveApp('codex') even runs,
+// so this assertion holds regardless of whether codex happens to be
+// installed on the machine running this suite.
+test('getCodexUsage refuses when codex is hidden, without ever spawning it', async () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-codex-usage-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ hiddenApps: ['codex'] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = await getCodexUsage({ force: true });
+    assert.equal(res.usage, null, 'no usage may be captured for a hidden app');
+    assert.match(res.error, /codex is hidden on this server/);
+    assert.match(res.error, /hiddenApps/, 'the error names the config key responsible');
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 });
