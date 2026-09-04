@@ -259,6 +259,43 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    // v6: ccserver-reviewer job history (see ws/reviewer.js). One row per
+    // run_review call -- a disposable headless session running /code-review
+    // against a local git ref/branch/PR/uncommitted diff. Unlike the
+    // in-memory-mirrored JSON stores (.scheduled-prompts.json,
+    // .saved-notifications.json), this data is meant to accumulate and be
+    // queried by id/status/project (list_reviews/get_review), so it goes
+    // straight into SQLite like every other post-v1 store.
+    version: 6,
+    up(db) {
+      db.exec(`
+        CREATE TABLE pr_reviews (
+          id             TEXT PRIMARY KEY,
+          project_cwd    TEXT NOT NULL,
+          base_ref       TEXT NOT NULL,
+          head_ref       TEXT,
+          resolved_ref   TEXT,
+          pr_owner       TEXT,
+          pr_repo        TEXT,
+          pr_number      INTEGER,
+          mode           TEXT NOT NULL,
+          app            TEXT NOT NULL,
+          model          TEXT,
+          status         TEXT NOT NULL DEFAULT 'running',
+          session_id     TEXT,
+          worktree_path  TEXT,
+          result_summary TEXT,
+          posted_to_pr   INTEGER NOT NULL DEFAULT 0,
+          requested_by   TEXT,
+          created_at     INTEGER NOT NULL,
+          finished_at    INTEGER
+        );
+        CREATE INDEX idx_pr_reviews_project_cwd ON pr_reviews(project_cwd);
+        CREATE INDEX idx_pr_reviews_status ON pr_reviews(status);
+      `);
+    },
+  },
 ];
 
 // Runs pending migrations in order. Each one executes inside BEGIN IMMEDIATE

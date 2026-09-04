@@ -38,6 +38,9 @@
   "//metaAgentMcp": "false (default): do not host the ccserver-meta MCP broker. Set true to opt in. ccserver-meta is a PRIVILEGED server-management toolset (list/launch/close sessions, launch/destroy groups, delete sandboxes, manage presets and project labels); destructive calls additionally require human approval through a browser banner dialog before they run. When enabled, the toolset is injected ONLY into a session explicitly launched with isMetaAgent:true (e.g. POST /api/sessions with isMetaAgent:true) -- never into regular sessions or group members. Such sessions are always forced into the fixed project-outside directory ~/.local/share/ccserver-sandbox/meta-agent (client cwd is ignored) and started via the dedicated \"⌘ メタエージェント\" button.",
   "metaAgentMcp": false,
 
+  "//reviewerMcp": "false (default): do not host the ccserver-reviewer MCP broker. Set true to opt in. run_review launches a disposable headless session against a fresh, throwaway git worktree (never the caller's own cwd) and drives it through /code-review, for a local ref/branch/PR/uncommitted diff. Unlike ccserver-meta, it is injected into ANY session -- shells and copilot excluded, groups/workers included -- since reviewing code needs no special privilege beyond spawning a sandboxed session. Job status/results are queryable via list_reviews/get_review and persist in the SQLite pr_reviews table across a restart.",
+  "reviewerMcp": false,
+
   "//notify": "ccserver-notify MCP (通知用, 下記 README)。discordWebhook: https:// の Discord webhook URL (空文字で無効)。設定するとエージェントの notify ツールが Discord へ通知を送れる。CCSERVER_DISCORD_WEBHOOK 環境変数で上書き可。subscriptions: 初期購読 (bootstrap)。https:// の webhook URL の配列。購読ゼロかつ discordWebhook 未設定かつ vikunja 未設定なら MCP は注入されない。hostname: 通知フッターのホスト名を固定したい場合のみ (未設定なら OS の hostname、CCSERVER_HOSTNAME 環境変数が最優先)。attribution: false にすると通知ペイロード末尾の \"_from: host · project · group · session\" フッターを丸ごと無効化 (既定 true)。",
   "notify": {
     "discordWebhook": "",

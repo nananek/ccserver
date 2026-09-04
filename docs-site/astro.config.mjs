@@ -36,6 +36,7 @@ export default defineConfig({
 						{ label: '通知 (ccserver-notify) と Vikunja 連携', slug: 'guides/notify' },
 						{ label: '使用量 (Usage)', slug: 'guides/usage' },
 						{ label: 'メタエージェント (ccserver-meta)', slug: 'guides/meta-agent' },
+						{ label: 'コードレビュー (ccserver-reviewer)', slug: 'guides/reviewer' },
 						{ label: '拠点間 (federation) ペアリング', slug: 'guides/federation' },
 						{ label: 'コンボ起動', slug: 'guides/combo-launch' },
 					],

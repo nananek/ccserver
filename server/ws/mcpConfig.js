@@ -56,6 +56,12 @@
 // socket frame so the meta tools can run their self-target guards and stamp
 // approval attribution.
 //
+// The optional `{ reviewer }` descriptor adds the ccserver-reviewer MCP
+// server (run_review/list_reviews/get_review, see reviewer.js): `{ mode,
+// sockPath }`, same mode/sockPath shape as usage -- no per-connection
+// identity (attribution, if any, travels as the run_review tool's own
+// `requestedBy` argument instead).
+//
 // Returns { args, env } for sessionManager to splice into the pty spawn.
 
 import { dirname, join } from 'node:path';
@@ -67,6 +73,7 @@ const MCP_BRIDGE_COMMAND = '/ccserver-sandbox-mcp-bridge';
 const NOTIFY_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
 const USAGE_BRIDGE_ARG = ['usage'];
 const META_BRIDGE_ARG = ['meta'];
+const REVIEWER_BRIDGE_ARG = ['reviewer'];
 
 // The { base, args } invocation for the notify server: the in-sandbox bridge
 // when the session is sandboxed, else the host node binary running the bridge
@@ -96,12 +103,21 @@ function metaInvocation(meta) {
   return { command: MCP_BRIDGE_COMMAND, args: META_BRIDGE_ARG };
 }
 
-export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, meta } = {}) {
+// Same shape again, for the ccserver-reviewer bridge (wrapper arg 'reviewer').
+function reviewerInvocation(reviewer) {
+  if (reviewer.mode === 'host') {
+    return { command: process.execPath, args: [NOTIFY_BRIDGE_SCRIPT, ...REVIEWER_BRIDGE_ARG] };
+  }
+  return { command: MCP_BRIDGE_COMMAND, args: REVIEWER_BRIDGE_ARG };
+}
+
+export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, meta, reviewer } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
   const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
   const usageSockEnv = usage ? { CCSANDBOX_USAGE_MCP_SOCK: usage.sockPath } : {};
   const metaSockEnv = meta ? { CCSANDBOX_META_MCP_SOCK: meta.sockPath } : {};
   const metaIdentityEnv = meta?.identity ? { CCSERVER_META_IDENTITY: JSON.stringify(meta.identity) } : {};
+  const reviewerSockEnv = reviewer ? { CCSANDBOX_REVIEWER_MCP_SOCK: reviewer.sockPath } : {};
 
   if (app === 'copilot') {
     return { args: [], env: {} };
@@ -145,6 +161,14 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
         env_vars: ['CCSANDBOX_META_MCP_SOCK', 'CCSERVER_META_IDENTITY'],
       };
     }
+    if (reviewer) {
+      const inv = reviewerInvocation(reviewer);
+      servers['ccserver-reviewer'] = {
+        command: inv.command,
+        args: inv.args,
+        env_vars: ['CCSANDBOX_REVIEWER_MCP_SOCK'],
+      };
+    }
     const args = [];
     for (const [name, server] of Object.entries(servers)) {
       // JSON strings/arrays are valid TOML basic strings/arrays, which keeps
@@ -162,6 +186,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
         ...usageSockEnv,
         ...metaSockEnv,
         ...metaIdentityEnv,
+        ...reviewerSockEnv,
       },
     };
   }
@@ -181,6 +206,10 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
       const inv = metaInvocation(meta);
       mcp['ccserver-meta'] = { type: 'local', command: [inv.command, ...inv.args] };
     }
+    if (reviewer) {
+      const inv = reviewerInvocation(reviewer);
+      mcp['ccserver-reviewer'] = { type: 'local', command: [inv.command, ...inv.args] };
+    }
     return {
       args: [],
       env: {
@@ -193,6 +222,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
         ...usageSockEnv,
         ...metaSockEnv,
         ...metaIdentityEnv,
+        ...reviewerSockEnv,
       },
     };
   }
@@ -211,6 +241,10 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
     const inv = metaInvocation(meta);
     mcpServers['ccserver-meta'] = { type: 'stdio', command: inv.command, args: inv.args };
   }
+  if (reviewer) {
+    const inv = reviewerInvocation(reviewer);
+    mcpServers['ccserver-reviewer'] = { type: 'stdio', command: inv.command, args: inv.args };
+  }
   return {
     args: [
       '--mcp-config',
@@ -222,6 +256,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
       ...usageSockEnv,
       ...metaSockEnv,
       ...metaIdentityEnv,
+      ...reviewerSockEnv,
     },
   };
 }

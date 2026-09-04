@@ -37,12 +37,13 @@ ccserver/
 │       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook/Vikunja 配送 + MCP ソケット
 │       ├── vikunjaClient.js        # notify.js から呼ばれる Vikunja タスク作成/更新クライアント
 │       ├── usageMcp.js             # ccserver-usage: get_usage MCP ツール (server/usage.js の getUsage を直接呼ぶ)
-│       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify / ccserver-usage / ccserver-meta、sandbox/host 両モード)
-│       ├── mcpServer.js            # control / handoff / notify / usage / meta 各 MCP サーバー (SocketTransport 含む)
-│       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify/usage/meta はプロセス毎 1 つ)
+│       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify / ccserver-usage / ccserver-meta / ccserver-reviewer、sandbox/host 両モード)
+│       ├── mcpServer.js            # control / handoff / notify / usage / meta / reviewer 各 MCP サーバー (SocketTransport 含む)
+│       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify/usage/meta/reviewer はプロセス毎 1 つ)
 │       ├── mcpTools.js             # control/handoff ツールの実装 (deps 注入)
 │       ├── metaTools.js            # メタエージェント用ツールの実装 (ワイヤ引数を信頼する、mcpTools とは別の信頼境界ファイル)
 │       ├── metaAgent.js            # ccserver-meta: metaAgentMcp ゲーティング + プロセスグローバル MCP ソケット
+│       ├── reviewer.js             # ccserver-reviewer: run_review/list_reviews/get_review、使い捨て worktree + SQLite (pr_reviews) 管理
 │       ├── screenModel.js          # read_output 用の軽量仮想画面 (ANSI 解釈 + 変化検知)
 │       ├── sandbox.js              # bwrap + rootless docker サンドボックス構築
 │       ├── sandbox-entrypoint.sh

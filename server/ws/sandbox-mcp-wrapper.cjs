@@ -6,11 +6,12 @@
 // byte pipe with no protocol logic.
 //
 // Which broker this reaches is decided by argv + which host socket was bound
-// in (see mcpBroker.js / notify.js / usageMcp.js / metaAgent.js):
-//   plain    -> CCSANDBOX_MCP_SOCK  (the group's control / handoff socket)
-//   'notify' -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
-//   'usage'  -> CCSANDBOX_USAGE_MCP_SOCK (the process-global usage socket)
-//   'meta'   -> CCSANDBOX_META_MCP_SOCK (the process-global meta-agent socket)
+// in (see mcpBroker.js / notify.js / usageMcp.js / metaAgent.js / reviewer.js):
+//   plain      -> CCSANDBOX_MCP_SOCK  (the group's control / handoff socket)
+//   'notify'   -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
+//   'usage'    -> CCSANDBOX_USAGE_MCP_SOCK (the process-global usage socket)
+//   'meta'     -> CCSANDBOX_META_MCP_SOCK (the process-global meta-agent socket)
+//   'reviewer' -> CCSANDBOX_REVIEWER_MCP_SOCK (the process-global reviewer socket)
 // The wrapper itself is role-agnostic.
 //
 // In notify mode the wrapper additionally writes a single JSON line
@@ -35,6 +36,7 @@ const MODE_SOCK_ENV = {
   notify: 'CCSANDBOX_NOTIFY_MCP_SOCK',
   usage: 'CCSANDBOX_USAGE_MCP_SOCK',
   meta: 'CCSANDBOX_META_MCP_SOCK',
+  reviewer: 'CCSANDBOX_REVIEWER_MCP_SOCK',
 };
 const sockPath = process.env[MODE_SOCK_ENV[mode] || 'CCSANDBOX_MCP_SOCK'];
 if (!sockPath) {

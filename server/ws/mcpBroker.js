@@ -17,7 +17,7 @@
 import { createServer } from 'node:net';
 import { rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildMetaMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
+import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildMetaMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
 const RUNTIME_BASE = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
@@ -259,6 +259,19 @@ export async function startMetaBroker({ metaDeps, sockPath }) {
     // the server is built with a connection-specific deps object (the shared
     // metaDeps carry only process-global managers).
     buildServer: (identity, connectionIsAlive) => buildMetaMcpServer({ ...metaDeps, identity, connectionIsAlive }),
+  });
+}
+
+// The process-global reviewer broker (ccserver-reviewer, see reviewer.js).
+// One per server process. NOT group-scoped, and NOT session-attributed
+// (unlike notify/meta) -- run_review/list_reviews/get_review carry no
+// per-connection identity frame; attribution rides in run_review's own
+// `requestedBy` argument instead.
+export async function startReviewerBroker({ reviewerApi, sockPath }) {
+  return listenMcp({
+    sockPath,
+    tag: 'reviewer',
+    buildServer: () => buildReviewerMcpServer({ reviewerApi }),
   });
 }
 

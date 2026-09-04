@@ -56,6 +56,12 @@ test('fresh open runs migrations to the latest version', () => {
         VALUES (?,?,?,?,?,?,?,?,?)`)
       .run('pi2', null, 'FP:X', 'PEM2', 'host-b', '10.0.0.2:3210', 'outbound_initiated', 'pending_local_approval', 2);
   }, /UNIQUE/, 'remote_fingerprint is the sole trust anchor -- a duplicate must be impossible at the schema level');
+  // v6 table exists and is usable (see ws/reviewer.js).
+  db.prepare(`INSERT INTO pr_reviews
+      (id, project_cwd, base_ref, head_ref, mode, app, status, created_at)
+      VALUES (?,?,?,?,?,?,?,?)`)
+    .run('r1', '/srv/proj', 'origin/master', 'feature/x', 'branch', 'claude', 'running', 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM pr_reviews').get().c, 1);
 });
 
 test('reopening is idempotent (migrations do not re-apply) and data survives', () => {

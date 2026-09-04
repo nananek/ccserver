@@ -26,6 +26,7 @@ import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { ensureMetaAgentBroker, stopMetaAgentBroker, metaAgentEnabled } from './ws/metaAgent.js';
+import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/reviewer.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
 import { ensureFederationServer, stopFederationServer, federationEnabled } from './ws/federationServer.js';
 import { sweepExpiredPending } from './ws/federationPairing.js';
@@ -90,6 +91,7 @@ const cleanup = () => {
   stopNotifyBroker();
   stopUsageBroker();
   stopMetaAgentBroker();
+  stopReviewerBroker();
   stopFederationServer();
   gracefulShutdown().then(() => process.exit(0));
 };
@@ -158,6 +160,19 @@ try {
   }
 } catch (err) {
   fastify.log.error({ err }, 'Failed to start ccserver-meta broker');
+}
+
+// ccserver-reviewer: host the process-global run_review/list_reviews/
+// get_review MCP socket when explicitly enabled (reviewerMcp in
+// sandbox.config.json). Same bind-before-listen ordering requirement as
+// notify/usage/meta above.
+try {
+  if (reviewerEnabled()) {
+    await ensureReviewerBroker();
+    fastify.log.info('ccserver-reviewer MCP broker started');
+  }
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to start ccserver-reviewer broker');
 }
 
 // Federation (plan Phase 1): a dedicated mTLS listener on

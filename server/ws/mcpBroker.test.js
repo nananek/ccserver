@@ -605,6 +605,60 @@ test('usage broker: startUsageBroker + stopBroker lifecycle on a supplied socket
   }
 });
 
+// The process-global reviewer broker (ccserver-reviewer, see reviewer.js /
+// mcpServer.js's buildReviewerMcpServer): startReviewerBroker hosts it at the
+// caller-supplied socket, exposes run_review/list_reviews/get_review, and
+// carries no identity frame either (attribution rides in run_review's own
+// requestedBy argument instead).
+test('reviewer broker: startReviewerBroker + stopBroker lifecycle on a supplied socket path', async () => {
+  const calls = [];
+  const reviewerApi = {
+    runReview: async (args) => {
+      calls.push(['runReview', args]);
+      return { ok: true, id: 'job-1', status: 'running', sessionId: 'sess-1', worktreePath: '/tmp/wt', mode: 'branch', resolvedRef: 'deadbeef' };
+    },
+    listReviews: (args) => {
+      calls.push(['listReviews', args]);
+      return { ok: true, reviews: [] };
+    },
+    getReview: (args) => {
+      calls.push(['getReview', args]);
+      return { ok: true, review: { id: args.id, status: 'done' } };
+    },
+  };
+  const reviewer = await broker.startReviewerBroker({
+    reviewerApi,
+    sockPath: join(runtimeDir, 'ccserver-reviewer.sock'),
+  });
+  try {
+    const c = mcpClient(reviewer.sockPath);
+    await c.connected;
+    const init = await c.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'wire-test', version: '1' },
+    });
+    assert.equal(init.serverInfo.name, 'ccserver-reviewer');
+    const { tools } = await c.call('tools/list');
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['get_review', 'list_reviews', 'run_review']);
+
+    const runOut = await callTool(c, 'run_review', { cwd: '/srv/proj', headRef: 'feature' });
+    assert.equal(runOut.id, 'job-1');
+    assert.deepEqual(calls[0], ['runReview', { cwd: '/srv/proj', headRef: 'feature' }]);
+
+    await callTool(c, 'list_reviews', {});
+    assert.deepEqual(calls[1], ['listReviews', {}]);
+
+    const getOut = await callTool(c, 'get_review', { id: 'job-1' });
+    assert.equal(getOut.review.status, 'done');
+    assert.deepEqual(calls[2], ['getReview', { id: 'job-1' }]);
+    c.close();
+  } finally {
+    broker.stopBroker(reviewer);
+    assert.equal(existsSync(reviewer.sockPath), false, 'stopBroker removes the socket file');
+  }
+});
+
 // --- handoff reliability: events survive a dead wait (Issue: handoff loss)
 // ---------------------------------------------------------------------------
 
