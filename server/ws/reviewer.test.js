@@ -57,8 +57,8 @@ test('reviewWorktreePath is deterministic per (cwd, jobId) and lives under a ded
   assert.ok(path.startsWith(reviewer.reviewWorktreeRoot()));
 });
 
-test('createReviewWorktree checks out the resolved ref detached, removeReviewWorktree cleans it up', () => {
-  const { path, resolvedRef } = reviewer.createReviewWorktree(repo, 'job-branch', 'feature');
+test('createReviewWorktree checks out the resolved ref detached, removeReviewWorktree cleans it up', async () => {
+  const { path, resolvedRef } = await reviewer.createReviewWorktree(repo, 'job-branch', 'feature');
   assert.ok(existsSync(path));
   assert.equal(readFileSync(join(path, 'a.txt'), 'utf-8'), 'feature content\n');
   assert.equal(resolvedRef, git(repo, ['rev-parse', 'feature']).trim());
@@ -76,11 +76,11 @@ test('removeReviewWorktree is a no-op for a job that was never created', () => {
   assert.doesNotThrow(() => reviewer.removeReviewWorktree(repo, 'never-existed'));
 });
 
-test('createReviewWorktree throws for an unresolvable ref', () => {
-  assert.throws(() => reviewer.createReviewWorktree(repo, 'job-bad-ref', 'no-such-branch'));
+test('createReviewWorktree rejects for an unresolvable ref', async () => {
+  await assert.rejects(() => reviewer.createReviewWorktree(repo, 'job-bad-ref', 'no-such-branch'));
 });
 
-test('createReviewWorktree fetches a branch that was pushed to origin after the local clone was made', () => {
+test('createReviewWorktree fetches a branch that was pushed to origin after the local clone was made', async () => {
   // Simulates the "pushed-but-PR-less branch" case from run_review's tool
   // description: headRef exists on origin but was never fetched into the
   // caller's local clone (repo.js's origin/master case, not something rev-parse
@@ -110,18 +110,72 @@ test('createReviewWorktree fetches a branch that was pushed to origin after the 
 
   assert.throws(() => git(clone, ['rev-parse', 'far-branch']), 'sanity: not resolvable before the fetch fallback kicks in');
 
-  const { path, resolvedRef } = reviewer.createReviewWorktree(clone, 'job-fetch', 'far-branch');
+  const { path, resolvedRef } = await reviewer.createReviewWorktree(clone, 'job-fetch', 'far-branch');
   try {
     assert.equal(readFileSync(join(path, 'far.txt'), 'utf-8'), 'far content\n');
     assert.equal(resolvedRef, git(seed, ['rev-parse', 'far-branch']).trim());
+    // resolveRefForWorktree fetches into a job-private ref, not the shared
+    // FETCH_HEAD, and deletes it once it has the resolved SHA (see the race
+    // this avoids when two jobs on the same project fetch concurrently).
+    assert.throws(() => git(clone, ['rev-parse', '--verify', 'refs/ccserver-reviewer/job-fetch']));
   } finally {
     reviewer.removeReviewWorktree(clone, 'job-fetch');
   }
 });
 
+test('createReviewWorktree resolves the right ref for two concurrent jobs fetching different unfetched branches on the same project', async () => {
+  // Regression test: resolveRefForWorktree's fetch step is async (does not
+  // block the event loop, see its comment), so two run_review calls against
+  // the SAME project (allowed -- MAX_CONCURRENT_REVIEWS is process-wide, not
+  // per-project) really can have their fetches interleave. Fetching into the
+  // shared FETCH_HEAD would let one job resolve the OTHER job's ref with no
+  // error at all; fetching into a job-private ref (refs/ccserver-reviewer/
+  // <jobId>) must keep them independent no matter the interleaving.
+  const remote = join(runtimeDir, 'remote-concurrent.git');
+  mkdirSync(remote, { recursive: true });
+  git(remote, ['init', '-q', '--bare']);
+
+  const seed = join(runtimeDir, 'concurrent-seed');
+  mkdirSync(seed, { recursive: true });
+  git(seed, ['init', '-q']);
+  git(seed, ['-c', 'user.name=t', '-c', 'user.email=t@t.com', 'commit', '-q', '--allow-empty', '-m', 'init']);
+  git(seed, ['remote', 'add', 'origin', remote]);
+  const seedBranch = git(seed, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim();
+  git(seed, ['push', '-q', 'origin', seedBranch]);
+
+  const clone = join(runtimeDir, 'concurrent-clone');
+  git(runtimeDir, ['clone', '-q', remote, clone]);
+
+  for (const name of ['branch-x', 'branch-y']) {
+    git(seed, ['checkout', '-q', seedBranch]);
+    git(seed, ['checkout', '-q', '-b', name]);
+    writeFileSync(join(seed, `${name}.txt`), `${name} content\n`);
+    git(seed, ['add', `${name}.txt`]);
+    git(seed, ['-c', 'user.name=t', '-c', 'user.email=t@t.com', 'commit', '-q', '-m', `${name} commit`]);
+    git(seed, ['push', '-q', 'origin', name]);
+  }
+  const shaX = git(seed, ['rev-parse', 'branch-x']).trim();
+  const shaY = git(seed, ['rev-parse', 'branch-y']).trim();
+  assert.notEqual(shaX, shaY);
+
+  const [resultX, resultY] = await Promise.all([
+    reviewer.createReviewWorktree(clone, 'job-x', 'branch-x'),
+    reviewer.createReviewWorktree(clone, 'job-y', 'branch-y'),
+  ]);
+  try {
+    assert.equal(resultX.resolvedRef, shaX);
+    assert.equal(resultY.resolvedRef, shaY);
+    assert.equal(readFileSync(join(resultX.path, 'branch-x.txt'), 'utf-8'), 'branch-x content\n');
+    assert.equal(readFileSync(join(resultY.path, 'branch-y.txt'), 'utf-8'), 'branch-y content\n');
+  } finally {
+    reviewer.removeReviewWorktree(clone, 'job-x');
+    reviewer.removeReviewWorktree(clone, 'job-y');
+  }
+});
+
 // --- dirty-diff snapshot / apply --------------------------------------------
 
-test('snapshotDirtyChanges captures tracked + untracked changes, applyPatchToWorktree replays them', () => {
+test('snapshotDirtyChanges captures tracked + untracked changes, applyPatchToWorktree replays them', async () => {
   const scratch = join(runtimeDir, 'scratch-repo');
   mkdirSync(scratch, { recursive: true });
   git(scratch, ['init', '-q']);
@@ -137,7 +191,7 @@ test('snapshotDirtyChanges captures tracked + untracked changes, applyPatchToWor
   assert.ok(patch.includes('tracked.txt'));
   assert.ok(patch.includes('untracked.txt'));
 
-  const { path: worktreePath } = reviewer.createReviewWorktree(scratch, 'job-dirty', 'HEAD');
+  const { path: worktreePath } = await reviewer.createReviewWorktree(scratch, 'job-dirty', 'HEAD');
   try {
     reviewer.applyPatchToWorktree(worktreePath, patch);
     assert.equal(readFileSync(join(worktreePath, 'tracked.txt'), 'utf-8'), 'edited\n');

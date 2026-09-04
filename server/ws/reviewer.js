@@ -47,7 +47,7 @@
 // this module must never statically import sessionManager.js back).
 
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execFile } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -171,37 +171,67 @@ function resolveRepoOwnerRepo(cwd) {
   return m ? { owner: m[1], repo: m[2] } : null;
 }
 
+// Runs one command WITHOUT blocking the event loop, unlike the sync git()
+// helper above. Reserved for the two calls in this module that can involve
+// real network I/O and a multi-second timeout (the fetch fallback below, and
+// checkPrCommentPosted's `gh pr view`) -- every other call here (rev-parse,
+// worktree add/remove, diff, apply) is local-only and finishes in
+// milliseconds, so it's fine to leave those synchronous, matching
+// worktree.js's existing execFileSync convention. A *synchronous* multi-
+// second call would instead freeze the whole ccserver process (every
+// session's pty I/O, every other MCP call, all of it -- Node has one JS
+// thread and execFileSync doesn't yield to the event loop) each time it runs,
+// defeating the point of MAX_CONCURRENT_REVIEWS letting several jobs run at
+// once.
+function execFileAsync(cmd, args, opts) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, opts, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout);
+    });
+  });
+}
+
+function gitFetchAsync(cwd, args) {
+  return execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf-8', timeout: REF_FETCH_TIMEOUT_MS });
+}
+
 // Resolves `ref` to a commit on the PROJECT repo, fetching it from origin
 // first if it isn't already known locally. Plain rev-parse is tried first
 // (the common case -- no network at all) so this only pays for a fetch when
 // actually needed: a branch mode job's headRef may be a "pushed-but-PR-less
 // branch" (see run_review's tool description) that was never fetched into
-// the caller's local clone. The fetch is bounded (REF_FETCH_TIMEOUT_MS) --
-// execFileSync is synchronous and blocks this whole process, so an
-// unreachable/slow origin must not be allowed to hang indefinitely -- and
-// swallowed on failure (offline, no origin remote, ref genuinely doesn't
-// exist anywhere): the rev-parse retry right after is what actually decides
-// success/failure, surfacing the same error as before this fell back to
-// fetching.
-function resolveRefForWorktree(projectCwd, ref) {
+// the caller's local clone. Swallowed on failure (offline, no origin remote,
+// ref genuinely doesn't exist anywhere): the rev-parse retry right after is
+// what actually decides success/failure, surfacing the same error as before
+// this fell back to fetching.
+async function resolveRefForWorktree(projectCwd, ref, jobId) {
   if (ref === 'HEAD') return git(projectCwd, ['rev-parse', ref]).trim();
   try {
     return git(projectCwd, ['rev-parse', ref]).trim();
   } catch (localErr) {
+    // Fetch into a job-private ref, never a bare `fetch origin <ref>` (which
+    // only ever writes the single FETCH_HEAD file). projectCwd is the SAME
+    // directory for every concurrent run_review job against this project
+    // (MAX_CONCURRENT_REVIEWS allows several at once, and gitFetchAsync above
+    // deliberately no longer blocks the event loop, so their fetches really
+    // can interleave now) -- two jobs resolving different unfetched refs at
+    // once would otherwise race on FETCH_HEAD, and one could silently check
+    // out the OTHER job's ref with no error at all.
+    const tmpRef = `refs/ccserver-reviewer/${jobId}`;
     try {
-      execFileSync('git', ['-C', projectCwd, 'fetch', '--quiet', 'origin', ref], {
-        encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: REF_FETCH_TIMEOUT_MS,
-      });
-      // A bare `<ref>` fetch refspec only ever updates FETCH_HEAD, never a
-      // remote-tracking ref (that needs an explicit `ref:refs/remotes/...`
-      // destination) -- resolve through FETCH_HEAD rather than retrying
-      // `ref` itself, which would still be unresolvable.
-      return git(projectCwd, ['rev-parse', 'FETCH_HEAD']).trim();
+      await gitFetchAsync(projectCwd, ['fetch', '--quiet', 'origin', `${ref}:${tmpRef}`]);
+      return git(projectCwd, ['rev-parse', tmpRef]).trim();
     } catch {
       // best effort -- surface the original local rev-parse failure (an
       // unreachable/absent-origin fetch failure is a less useful message
       // than "unknown revision <ref>")
       throw localErr;
+    } finally {
+      // The SHA is already captured above (or we're failing anyway) -- the
+      // ref itself served its purpose. Best effort: leaving it behind would
+      // grow refs/ccserver-reviewer/ forever, but a failed delete is harmless.
+      try { git(projectCwd, ['update-ref', '-d', tmpRef]); } catch { /* nothing to delete */ }
     }
   }
 }
@@ -211,10 +241,10 @@ function resolveRefForWorktree(projectCwd, ref) {
 // mode checks out the actual PR branch itself (see buildReviewPrompt) --
 // this is only ever called with 'HEAD' for that mode, giving the session a
 // clean starting point to run `gh pr checkout` from.
-export function createReviewWorktree(projectCwd, jobId, ref) {
+export async function createReviewWorktree(projectCwd, jobId, ref) {
   const path = reviewWorktreePath(projectCwd, jobId);
   mkdirSync(dirname(path), { recursive: true });
-  const resolvedRef = resolveRefForWorktree(projectCwd, ref);
+  const resolvedRef = await resolveRefForWorktree(projectCwd, ref, jobId);
   git(projectCwd, ['worktree', 'add', '--detach', path, resolvedRef]);
   return { path, resolvedRef };
 }
@@ -438,8 +468,8 @@ async function loadSessionDeps() {
 // (gh missing, no PR, network) just leaves posted_to_pr false.
 async function checkPrCommentPosted(projectCwd, number, sinceMs) {
   try {
-    const out = execFileSync('gh', ['pr', 'view', String(number), '--json', 'comments'], {
-      cwd: projectCwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: GH_PR_VIEW_TIMEOUT_MS,
+    const out = await execFileAsync('gh', ['pr', 'view', String(number), '--json', 'comments'], {
+      cwd: projectCwd, encoding: 'utf-8', timeout: GH_PR_VIEW_TIMEOUT_MS,
     });
     const parsed = JSON.parse(out);
     if (!Array.isArray(parsed?.comments)) return false;
@@ -523,13 +553,21 @@ async function checkCompletion({ jobId, sessionId, projectCwd, number, startedAt
     resultSummary = summarizeSessionOutput(session);
   }
 
-  const postedToPr = number ? await checkPrCommentPosted(projectCwd, number, startedAt) : false;
-
-  if (!exited) sessionManager.destroySession(sessionId, { keepSchedule: false });
-  removeReviewWorktree(projectCwd, jobId);
-  await cleanupSandboxHome(reviewWorktreePath(projectCwd, jobId));
-  finishReview(jobId, { status, resultSummary, postedToPr });
-  releaseReviewSlot();
+  // The timer/watchers-map bookkeeping above already happened, so this job
+  // gets exactly one shot at cleanup -- wrap it in try/finally so a throw
+  // anywhere in here (most plausibly finishReview's DB write; destroySession/
+  // removeReviewWorktree/cleanupSandboxHome are already internally
+  // best-effort and never throw) still releases the concurrency slot instead
+  // of leaking it forever, since nothing will ever retry this jobId again.
+  try {
+    const postedToPr = number ? await checkPrCommentPosted(projectCwd, number, startedAt) : false;
+    if (!exited) sessionManager.destroySession(sessionId, { keepSchedule: false });
+    removeReviewWorktree(projectCwd, jobId);
+    await cleanupSandboxHome(reviewWorktreePath(projectCwd, jobId));
+    finishReview(jobId, { status, resultSummary, postedToPr });
+  } finally {
+    releaseReviewSlot();
+  }
 }
 
 // Launches one review job and returns immediately with its id/status --
@@ -548,24 +586,30 @@ export async function runReview(args = {}) {
   let slotHeld = true; // cleared once the job is handed off to checkCompletion, which releases it instead
 
   const { cwd, number, headRef, mode, app, model, requestedBy } = v.value;
-  const baseRef = v.value.baseRef || resolveDefaultBaseRef(cwd);
-  const jobId = randomUUID();
 
+  // Everything from here on runs inside the try/finally below, so
+  // releaseReviewSlot() is guaranteed to fire on ANY throw between the
+  // increment above and the handoff to checkCompletion -- resolveDefaultBaseRef
+  // and randomUUID() don't throw today, but nothing should have to keep being
+  // true forever for the slot count to stay correct.
   try {
+    const baseRef = v.value.baseRef || resolveDefaultBaseRef(cwd);
+    const jobId = randomUUID();
+
     let worktreePath;
     let resolvedRef;
     let prOwner = null;
     let prRepo = null;
     try {
       if (mode === 'pr') {
-        ({ path: worktreePath, resolvedRef } = createReviewWorktree(cwd, jobId, 'HEAD'));
+        ({ path: worktreePath, resolvedRef } = await createReviewWorktree(cwd, jobId, 'HEAD'));
         const remote = resolveRepoOwnerRepo(cwd);
         prOwner = remote?.owner ?? null;
         prRepo = remote?.repo ?? null;
       } else if (mode === 'branch') {
-        ({ path: worktreePath, resolvedRef } = createReviewWorktree(cwd, jobId, headRef));
+        ({ path: worktreePath, resolvedRef } = await createReviewWorktree(cwd, jobId, headRef));
       } else {
-        ({ path: worktreePath, resolvedRef } = createReviewWorktree(cwd, jobId, 'HEAD'));
+        ({ path: worktreePath, resolvedRef } = await createReviewWorktree(cwd, jobId, 'HEAD'));
         const patch = snapshotDirtyChanges(cwd);
         try {
           applyPatchToWorktree(worktreePath, patch);
