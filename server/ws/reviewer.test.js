@@ -201,6 +201,41 @@ test('snapshotDirtyChanges captures tracked + untracked changes, applyPatchToWor
   }
 });
 
+test('snapshotDirtyChanges throwing after a successful createReviewWorktree does not orphan the worktree', async () => {
+  // Regression test for the mode === 'dirty' branch in runReview: it used to
+  // call snapshotDirtyChanges() OUTSIDE the try/catch that cleans up via
+  // removeReviewWorktree() on failure (that catch only wrapped
+  // applyPatchToWorktree), so a snapshot failure after the worktree was
+  // already created leaked it. A bare repo reproduces this deterministically:
+  // `git worktree add` against a bare repo succeeds (bare repos are a normal
+  // worktree base), but `git diff HEAD` fails immediately after ("this
+  // operation must be run in a work tree") since a bare repo's own directory
+  // has no work tree to diff -- unlike createReviewWorktree's HEAD resolution
+  // (git rev-parse HEAD), which needs no work tree and succeeds fine.
+  const bareRemote = join(runtimeDir, 'dirty-bare-remote.git');
+  mkdirSync(bareRemote, { recursive: true });
+  git(bareRemote, ['init', '-q', '--bare']);
+
+  const seed = join(runtimeDir, 'dirty-bare-seed');
+  mkdirSync(seed, { recursive: true });
+  git(seed, ['init', '-q']);
+  git(seed, ['-c', 'user.name=t', '-c', 'user.email=t@t.com', 'commit', '-q', '--allow-empty', '-m', 'init']);
+  git(seed, ['remote', 'add', 'origin', bareRemote]);
+  git(seed, ['push', '-q', 'origin', 'HEAD:refs/heads/master']);
+
+  const { path } = await reviewer.createReviewWorktree(bareRemote, 'job-dirty-bare', 'HEAD');
+  assert.ok(existsSync(path), 'sanity: worktree add against a bare repo succeeds');
+
+  assert.throws(() => reviewer.snapshotDirtyChanges(bareRemote), /work tree/);
+
+  // This is the exact recovery runReview's mode === 'dirty' branch now takes
+  // when the snapshot step throws (see the try/catch around it in runReview).
+  reviewer.removeReviewWorktree(bareRemote, 'job-dirty-bare');
+  assert.equal(existsSync(path), false);
+  const list = git(bareRemote, ['worktree', 'list', '--porcelain']);
+  assert.ok(!list.includes(path));
+});
+
 test('snapshotDirtyChanges returns an empty patch for a clean tree', () => {
   const clean = join(runtimeDir, 'clean-repo');
   mkdirSync(clean, { recursive: true });

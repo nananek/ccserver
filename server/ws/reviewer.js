@@ -610,12 +610,19 @@ export async function runReview(args = {}) {
         ({ path: worktreePath, resolvedRef } = await createReviewWorktree(cwd, jobId, headRef));
       } else {
         ({ path: worktreePath, resolvedRef } = await createReviewWorktree(cwd, jobId, 'HEAD'));
-        const patch = snapshotDirtyChanges(cwd);
+        // Both the snapshot (git diff HEAD -- fails e.g. if cwd is a bare
+        // repo, which has no work tree to diff) and the apply step run AFTER
+        // the worktree above already exists, so both must go through the
+        // same cleanup-on-failure path -- snapshotDirtyChanges throwing here
+        // used to fall through to the outer catch below, which returns an
+        // error WITHOUT calling removeReviewWorktree, orphaning the worktree
+        // (with no DB row yet to even list it via list_reviews).
         try {
+          const patch = snapshotDirtyChanges(cwd);
           applyPatchToWorktree(worktreePath, patch);
         } catch (err) {
           removeReviewWorktree(cwd, jobId);
-          return { ok: false, error: `failed to apply uncommitted changes to the review worktree: ${err.message}` };
+          return { ok: false, error: `failed to capture/apply uncommitted changes to the review worktree: ${err.message}` };
         }
       }
     } catch (err) {
