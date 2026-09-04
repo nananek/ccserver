@@ -519,6 +519,113 @@ test('checkCompletion fallback: does nothing while a job is neither exited nor p
   }
 });
 
+// --- completion notification (issue #102 plan section 3.6.1) ----------------
+
+test('reviewNotificationTitle: PR mode uses owner/repo#number, prefixed by status', () => {
+  const review = { mode: 'pr', prOwner: 'acme', prRepo: 'widgets', prNumber: 42 };
+  assert.equal(reviewer.reviewNotificationTitle(review, 'done'), 'Review done: acme/widgets#42');
+  assert.equal(reviewer.reviewNotificationTitle(review, 'failed'), 'Review failed: acme/widgets#42');
+  assert.equal(reviewer.reviewNotificationTitle(review, 'timeout'), 'Review timed out: acme/widgets#42');
+});
+
+test('reviewNotificationTitle: PR mode falls back to "PR #N" when owner/repo could not be resolved', () => {
+  const review = { mode: 'pr', prOwner: null, prRepo: null, prNumber: 7 };
+  assert.equal(reviewer.reviewNotificationTitle(review, 'done'), 'Review done: PR #7');
+});
+
+test('reviewNotificationTitle: branch mode names the headRef, with the project basename in parens', () => {
+  const review = { mode: 'branch', headRef: 'feature/x', projectCwd: '/srv/my-repo' };
+  assert.equal(reviewer.reviewNotificationTitle(review, 'done'), 'Review done: feature/x (my-repo)');
+});
+
+test('reviewNotificationTitle: dirty mode names "uncommitted changes"', () => {
+  const review = { mode: 'dirty', headRef: null, projectCwd: '/srv/my-repo' };
+  assert.equal(reviewer.reviewNotificationTitle(review, 'failed'), 'Review failed: uncommitted changes (my-repo)');
+});
+
+test('reviewNotificationTitle: no projectCwd -> no trailing parens', () => {
+  const review = { mode: 'branch', headRef: 'feature/x', projectCwd: null };
+  assert.equal(reviewer.reviewNotificationTitle(review, 'done'), 'Review done: feature/x');
+});
+
+test('reviewNotificationBody: includes status, an optional focus line, and mode-specific PR/get_review guidance', () => {
+  const withFocus = reviewer.reviewNotificationBody(
+    { id: 'job-1', mode: 'pr', focus: 'security' },
+    { status: 'done', postedToPr: true },
+  );
+  assert.match(withFocus, /^status: done$/m);
+  assert.match(withFocus, /^focus: security$/m);
+  assert.match(withFocus, /Posted as a PR comment\./);
+
+  const noFocusNotPosted = reviewer.reviewNotificationBody(
+    { id: 'job-2', mode: 'pr', focus: null },
+    { status: 'failed', postedToPr: false },
+  );
+  assert.doesNotMatch(noFocusNotPosted, /^focus:/m);
+  assert.match(noFocusNotPosted, /Not posted as a PR comment/);
+
+  const branchMode = reviewer.reviewNotificationBody(
+    { id: 'job-3', mode: 'branch', focus: null },
+    { status: 'timeout', postedToPr: false },
+  );
+  assert.match(branchMode, /get_review\(\{ id: "job-3" \}\)/);
+});
+
+// End-to-end: completeReviewJob (reached here via finish_review) actually
+// calls notify.js's sendNotification -- not just that the pure title/body
+// builders above produce the right text. Mocks global.fetch the same way
+// notify.test.js does (an ESM static-import binding for sendNotification
+// itself can't be swapped from outside the module, but fetch is a plain
+// global). This is exactly the wiring the original issue-#102 plan called
+// for and that went unimplemented (and unnoticed across three self-review
+// rounds) until this follow-up.
+test('completeReviewJob sends a ccserver-notify notification with the PR/focus/postedToPr details baked in', async () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-reviewer-notify-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ notify: { discordWebhook: 'https://discord.example/hook' } }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  const prevWebhook = process.env.CCSERVER_DISCORD_WEBHOOK;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  delete process.env.CCSERVER_DISCORD_WEBHOOK;
+
+  const notify = await import('./notify.js');
+  notify.restoreNotify();
+
+  const calls = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), opts });
+    return { ok: true };
+  };
+
+  dbMod.getDb().prepare(`INSERT INTO pr_reviews
+      (id, project_cwd, base_ref, mode, pr_owner, pr_repo, pr_number, app, status, session_id, worktree_path, focus, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(
+      'job-notify-pr', repo, 'main', 'pr', 'acme', 'widgets', 42, 'claude', 'running',
+      'sess-notify-1', reviewer.reviewWorktreePath(repo, 'job-notify-pr'), 'security', Date.now(),
+    );
+
+  try {
+    const res = await reviewer.finishReview({ jobId: 'job-notify-pr', status: 'done', callerSessionId: 'sess-notify-1' });
+    assert.equal(res.ok, true);
+    assert.equal(calls.length, 1, 'exactly one notification delivery attempt (the discord webhook)');
+    const payload = JSON.parse(calls[0].opts.body);
+    assert.ok(payload.content.startsWith('✅ Review done: acme/widgets#42'), payload.content);
+    assert.ok(payload.content.includes('focus: security'), payload.content);
+    // no real gh CLI session/auth for this fake "acme/widgets" repo in the
+    // test env -> checkPrCommentPosted fails closed to false either way.
+    assert.ok(payload.content.includes('Not posted as a PR comment'), payload.content);
+  } finally {
+    global.fetch = realFetch;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    if (prevWebhook === undefined) delete process.env.CCSERVER_DISCORD_WEBHOOK;
+    else process.env.CCSERVER_DISCORD_WEBHOOK = prevWebhook;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
 // --- injection decision ------------------------------------------------------
 
 test('shouldInjectReviewer excludes shells and copilot but allows any other app regardless of groupRole', () => {

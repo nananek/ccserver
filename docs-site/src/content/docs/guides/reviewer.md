@@ -37,6 +37,16 @@ description: 使い捨てのヘッドレスセッションでローカルの ref
 
 ジョブ結果は SQLite (`pr_reviews` テーブル) に永続化されるため、サーバー再起動後も `list_reviews`/`get_review` で参照できます (ただし再起動時点で `running` のままだったジョブは自動再開されず、そのまま `running` 表示で残ります)。
 
+### 完了時の通知
+
+ジョブが完了する (`finish_review` 経由・フォールバックの `failed`/`timeout` 経由のいずれでも) たびに、`ccserver-notify` ([通知](/ccserver/guides/notify/) 参照) を使ってベストエフォートで人間へ通知します。新たな opt-in フラグは無く、`ccserver-notify` 自体が「チャンネル未設定なら実質 no-op」という性質を持つため、Discord webhook / 購読 webhook / Vikunja のいずれかが設定されていれば自動的に届きます。
+
+- **title**: PR モードは `Review done: <owner>/<repo>#<number>` 形式 (`status` が `failed`/`timeout` なら先頭が `Review failed:`/`Review timed out:` に変わる)。PR 無しモード (ブランチ/dirty) は `Review done: <headRef または "uncommitted changes"> (<プロジェクトの basename>)`。
+- **body**: `status`、`focus` (指定されていれば)、PR モードなら PR へのコメント投稿有無、非 PR モードなら `get_review(jobId)` で結果を見られる旨。
+- **level**: `status: 'done'` → `success`、`'failed'` → `error`、`'timeout'` → `warning`。
+
+配信自体は non-blocking (webhook 送信の遅延・失敗が `finish_review` の応答やジョブ完了処理を妨げることはありません)。
+
 ### `reviewerMcp` が無効な環境での挙動
 
 `run_review` が起動するレビュージョブ自身のセッションには、`sandbox.config.json` の `reviewerMcp` フラグの値によらず `ccserver-reviewer` (と `finish_review` を呼ぶために必要な識別情報) が強制的に注入されます。これは、ブローカー起動後に `reviewerMcp` がライブ編集で無効化された場合でも (ブローカー自体は再起動しない限り止まらない)、実行中のレビュージョブが `finish_review` を呼べなくなって完了検知が壊れる、という事態を避けるための安全策です。通常のセッション (レビュージョブ以外) には、これまで通り `reviewerMcp` が有効な場合のみ注入されます。

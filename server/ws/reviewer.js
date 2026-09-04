@@ -57,7 +57,10 @@
 // "exited" (the session's process died) or "timed out" (ABSOLUTE_TIMEOUT_MS
 // elapsed with no finish_review call at all, e.g. the agent hung or was
 // never going to call it). See completeReviewJob, the single cleanup path
-// both finish_review and the fallback poller funnel into.
+// both finish_review and the fallback poller funnel into -- it also fires a
+// best-effort ccserver-notify notification (issue #102 plan section 3.6.1;
+// see notifyReviewComplete) once the DB row is written, regardless of which
+// of the two paths reached it.
 
 import { randomUUID } from 'node:crypto';
 import { execFileSync, execFile } from 'node:child_process';
@@ -68,6 +71,11 @@ import { getDb } from '../db.js';
 import { projectHashForCwd } from './projectHash.js';
 import { loadSandboxConfig, persistentHomeDir, deleteSandboxHome } from './sandbox.js';
 import { stripAnsi } from './mcpTools.js';
+// A plain in-process call, not the MCP path -- mirrors groupManager.js's
+// notifyWorktreeDataLoss (same "call sendNotification() directly on a
+// server-side completion event" pattern). Safe as a static import: notify.js
+// imports neither this module nor sessionManager.js, so no cycle.
+import { sendNotification } from './notify.js';
 
 const REVIEWER_SOCKET_NAME = 'ccserver-reviewer.sock';
 
@@ -570,6 +578,52 @@ function startCompletionWatcher({ jobId, sessionId, projectCwd, number }) {
   watchers.set(jobId, timer);
 }
 
+// Notification title for a finished job (issue #102 plan section 3.6.1:
+// "call notify.js's sendNotification() in-process on completion" -- the part
+// missed by the original implementation and all three self-review rounds).
+// Exported (like buildReviewPrompt) purely for unit testing.
+export function reviewNotificationTitle(review, status) {
+  const prefix = status === 'done' ? 'Review done' : status === 'failed' ? 'Review failed' : 'Review timed out';
+  if (review.mode === 'pr') {
+    const target = (review.prOwner && review.prRepo) ? `${review.prOwner}/${review.prRepo}#${review.prNumber}` : `PR #${review.prNumber}`;
+    return `${prefix}: ${target}`;
+  }
+  // branch mode always has a headRef (validateRunReviewArgs requires it);
+  // dirty mode never does -- "uncommitted changes" names it instead.
+  const target = review.mode === 'branch' && review.headRef ? review.headRef : 'uncommitted changes';
+  const project = review.projectCwd ? basename(review.projectCwd) : null;
+  return project ? `${prefix}: ${target} (${project})` : `${prefix}: ${target}`;
+}
+
+// Exported alongside reviewNotificationTitle for the same reason.
+export function reviewNotificationBody(review, { status, postedToPr }) {
+  const lines = [`status: ${status}`];
+  if (review.focus) lines.push(`focus: ${review.focus}`);
+  if (review.mode === 'pr') {
+    lines.push(postedToPr ? 'Posted as a PR comment.' : 'Not posted as a PR comment -- see the result via get_review.');
+  } else {
+    lines.push(`See the full result via get_review({ id: "${review.id}" }).`);
+  }
+  return lines.join('\n');
+}
+
+// Best-effort, fire-and-forget -- mirrors groupManager.js's
+// notifyWorktreeDataLoss exactly (never awaited by the caller, a delivery
+// failure must never affect job completion). sendNotification degrades to a
+// no-op with no channel configured, so no new opt-in flag is needed here.
+function notifyReviewComplete(review, { status, postedToPr }) {
+  const level = status === 'done' ? 'success' : status === 'failed' ? 'error' : 'warning';
+  sendNotification({
+    title: reviewNotificationTitle(review, status),
+    body: reviewNotificationBody(review, { status, postedToPr }),
+    level,
+  }, {
+    sessionId: review.sessionId,
+    cwd: review.projectCwd,
+    projectName: review.projectCwd ? basename(review.projectCwd) : null,
+  }).catch(() => { /* best effort, see notify.js */ });
+}
+
 // The single cleanup path for a finished review job, reached from TWO
 // places (see the module header comment):
 //   - finishReview() (the finish_review MCP tool): the review session's own
@@ -607,6 +661,12 @@ async function completeReviewJob({ jobId, sessionId, projectCwd, number, started
     removeReviewWorktree(projectCwd, jobId);
     await cleanupSandboxHome(reviewWorktreePath(projectCwd, jobId));
     markReviewFinished(jobId, { status, resultSummary: summary, postedToPr });
+    // Read the row back rather than threading mode/prOwner/prRepo/headRef/
+    // focus through every completeReviewJob caller -- it was just written,
+    // so a single extra SQLite read here is cheap and keeps both call sites
+    // (checkCompletion, finishReview) simple.
+    const finished = getReview({ id: jobId });
+    if (finished.ok) notifyReviewComplete(finished.review, { status, postedToPr });
   } finally {
     releaseReviewSlot();
   }
