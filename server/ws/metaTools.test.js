@@ -267,6 +267,32 @@ test('launch_session omits sandboxOpts entirely when none requested; failures un
   assert.deepEqual(err, { error: 'validation', message: 'cwd must be an existing directory' });
 });
 
+// Regression, same bypass class as sessionManager.test.js's REST-path test
+// and federationServer.test.js's federation-RPC-path test (self-review round
+// 3 on the pr-reviewer-mcp branch): launchSession builds createSessionViaApi's
+// body from an explicit allowlist (cwd/app/model/sandbox/sandboxOpts/
+// requestedBy) and never passes a 2nd argument at all, so a compromised or
+// merely obedient-to-a-prompt-injection meta-agent LLM passing
+// isReviewJob:true in launch_session's args can neither smuggle it into the
+// body nor reach createSessionViaApi's trusted 2nd-parameter path (see
+// routes/sessions.js's header comment -- only reviewer.js's runReview may set
+// that). Exercises the meta-agent launch_session call site specifically.
+test('launch_session ignores a caller-supplied isReviewJob -- it never reaches createSessionViaApi\'s body or 2nd argument', async () => {
+  const deps = makeDeps();
+  let sawExtraArg = false;
+  deps.sessionsApi.createSessionViaApi = async (body, ...rest) => {
+    if (rest.length > 0) sawExtraArg = true;
+    deps.calls.createdViaApi.push(body);
+    return {
+      ok: true,
+      body: { sessionId: 'new-session-1', cwd: body.cwd, app: 'claude', model: null, shell: false, sandbox: false, sandboxOpts: null, isMetaAgent: false },
+    };
+  };
+  await tools.launchSession(deps, { cwd: '/srv/proj', isReviewJob: true });
+  assert.equal(sawExtraArg, false, 'launchSession must never pass a 2nd argument to createSessionViaApi');
+  assert.ok(!('isReviewJob' in deps.calls.createdViaApi[0]), 'isReviewJob must never appear in the body either');
+});
+
 test('launch_group caps the group flags and each worker spec\'s sandboxOpts', async () => {
   const deps = makeDeps({ mySandboxOpts: { gpg: false, sshAgent: true } });
   const out = await tools.launchGroup(deps, {
