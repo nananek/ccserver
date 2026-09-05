@@ -449,7 +449,11 @@ export async function groupsRoute(fastify, opts) {
 
     const res = createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, orchestratorClaudeMdSrc }));
     if (res.error || !res.session) {
-      return reply.code(500).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
+      // createSession()'s error is always a rejection of the request as given
+      // (hiddenApps, not-installed, invalid cwd, ...), never an internal
+      // server fault -- matching POST /groups' fail() helper, which maps the
+      // identical createSession() rejection to 400, not 500.
+      return reply.code(400).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
     }
     groupManager.registerMember(group.id, 'orchestrator', res.sessionId);
     groupManager.setMemberPrefs(group.id, 'orchestrator', { app, model: res.session.model, sandboxOpts });
