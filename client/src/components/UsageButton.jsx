@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { authFetch } from '../auth.js';
+import { isAppSelectable } from '../appAvailability.js';
 
 function pctClass(pct) {
   if (pct >= 80) return 'usage-bar-fill high';
@@ -54,7 +55,7 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   // Selectable = installed (availableApps !== false) AND not hidden via
   // sandbox.config.json's hiddenApps (issue #105).
   const isSelectable = useCallback(
-    (app) => (!availableApps || availableApps[app] !== false) && !hiddenApps.includes(app),
+    (app) => isAppSelectable(app, availableApps, hiddenApps),
     [availableApps, hiddenApps]
   );
   // Which app the popover is currently showing. The persisted choice wins:

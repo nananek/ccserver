@@ -3,6 +3,7 @@ import { authFetch, getToken } from '../auth.js';
 import { displayPath } from '../displayPath.js';
 import { formatSize } from '../formatSize.js';
 import { isPreviewable } from '../previewExts.js';
+import { isAppSelectable } from '../appAvailability.js';
 import MetaLaunchDialog from './MetaLaunchDialog.jsx';
 
 // marked + DOMPurify only matter once someone opens a preview, so keep them
@@ -286,9 +287,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
 
   const startEditPreset = useCallback((p) => {
     setEditingPresetId(p.id);
-    setPresetForm({ name: p.name, role: p.role, app: p.app, model: p.model || '' });
+    // A preset saved before its app was hidden must not silently carry the
+    // hidden id back into the form (see openPresetManage's identical
+    // fallback) -- otherwise saving without touching the app row would
+    // re-persist a hidden app indefinitely, even though no button for it
+    // renders in this same form.
+    const visibleComboAppsNow = COMBO_WORKER_APPS.filter((a) => !hiddenApps.includes(a));
+    const app = visibleComboAppsNow.includes(p.app) ? p.app : (visibleComboAppsNow[0] || '');
+    setPresetForm({ name: p.name, role: p.role, app, model: p.model || '' });
     setPresetFormError(null);
-  }, []);
+  }, [hiddenApps]);
 
   const savePreset = useCallback(async () => {
     setPresetFormError(null);
@@ -402,7 +410,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       // shown.
       if (data.availableApps) {
         setAvailableApps(data.availableApps);
-        const isPickable = (a) => data.availableApps[a] && !hidden.includes(a);
+        const isPickable = (a) => isAppSelectable(a, data.availableApps, hidden);
         const avail = ALL_APPS.filter(isPickable);
         // The server's defaultApp seeding above runs in the same effect tick,
         // so appDefault is still the stale pre-seeding value here -- evaluate
@@ -623,6 +631,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // app never renders at all.
   const visibleApps = ALL_APPS.filter((a) => !hiddenApps.includes(a));
   const visibleComboApps = COMBO_WORKER_APPS.filter((a) => !hiddenApps.includes(a));
+  // Guards the toolbar's quick-launch button and the in-modal single-launch
+  // "起動" button (issue #105): unlike the picker items, which block their
+  // own onClick via chooseApp, these two fire onOpen directly with whatever
+  // appDefault currently holds -- if it's stale (hidden after being saved,
+  // or still mid-flight before the /api/dirs/home reconciliation effect
+  // above corrects it) they'd launch a hidden or uninstalled app with no
+  // guard at all, unlike every other launch affordance this feature added.
+  const effectiveAppHidden = hiddenApps.includes(appDefault) || (availableApps && !availableApps[appDefault]);
   // Safety net for issue #105's combo-mode edge case: when every combo-
   // eligible app is hidden (e.g. an operator who only contracted GitHub
   // Copilot, which can't join combos), the reconciliation effect above has
@@ -785,7 +801,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
             <button
               className="btn btn-primary open-split-main"
               onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault) })}
-              title={sandboxDefault ? 'サンドボックスで起動' : '通常起動'}
+              disabled={effectiveAppHidden}
+              title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)。起動方法を選択してください。` : (sandboxDefault ? 'サンドボックスで起動' : '通常起動')}
             >
               {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : appDefault === 'codex' ? 'OpenAI Codex' : appDefault === 'commandcode' ? 'Command Code' : 'opencode'}
             </button>
@@ -886,10 +903,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                         className="open-menu-preset-select"
                         value=""
                         onChange={(e) => { if (e.target.value) addSelectedWorker(e.target.value); }}
-                        disabled={selectedWorkers.length >= MAX_COMBO_WORKERS}
+                        disabled={selectedWorkers.length >= MAX_COMBO_WORKERS || visibleComboApps.length === 0}
+                        title={visibleComboApps.length === 0 ? 'コンボに参加できるアプリ (claude/opencode/codex) がすべて非表示に設定されています' : ''}
                       >
                         <option value="">
-                          {selectedWorkers.length >= MAX_COMBO_WORKERS ? `上限 (${MAX_COMBO_WORKERS})` : 'プリセットを追加…'}
+                          {visibleComboApps.length === 0
+                            ? 'コンボ対応アプリが非表示です'
+                            : selectedWorkers.length >= MAX_COMBO_WORKERS ? `上限 (${MAX_COMBO_WORKERS})` : 'プリセットを追加…'}
                         </option>
                         {presets.map((p) => (
                           <option key={p.id} value={p.id} disabled={selectedWorkers.some((r) => r.role === p.role)}>
@@ -1196,6 +1216,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 <button
                   className="btn btn-primary"
                   onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault) }); }}
+                  disabled={effectiveAppHidden}
+                  title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)` : ''}
                 >
                   起動
                 </button>

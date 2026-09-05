@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { authFetch } from '../auth.js';
+import { isAppSelectable } from '../appAvailability.js';
 
 const META_APP_KEY = 'ccserver-meta-app';
 const META_APPS = ['claude', 'opencode', 'codex'];
@@ -23,8 +24,7 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
   }, [open]);
 
   const chooseMetaApp = (val) => {
-    if (hiddenApps.includes(val)) return; // operator hid this app
-    if (availableApps && !availableApps[val]) return;
+    if (!isAppSelectable(val, availableApps, hiddenApps)) return;
     setMetaApp(val);
     try { localStorage.setItem(META_APP_KEY, val); } catch { /* ignore */ }
   };
@@ -36,9 +36,18 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
 
   const handleLaunch = async () => {
     let enabled = false;
+    // Fetch fresh hiddenApps here rather than trusting the hiddenApps prop
+    // (fetched once when DirectoryBrowser mounted, and not necessarily
+    // current if the operator edited sandbox.config.json since): otherwise
+    // the backstop check below would re-check the exact same possibly-stale
+    // value the picker's disabled state already checked, protecting against
+    // nothing new. Falls back to the prop only if this fetch fails.
+    let freshHiddenApps = hiddenApps;
     try {
       const res = await authFetch('/api/dirs/home');
-      enabled = (await res.json()).metaAgentEnabled === true;
+      const data = await res.json();
+      enabled = data.metaAgentEnabled === true;
+      if (Array.isArray(data.hiddenApps)) freshHiddenApps = data.hiddenApps;
     } catch { /* unreachable -> disabled */ }
     if (!enabled) {
       window.alert('メタエージェントは現在サーバー設定で無効です (sandbox.config.json の "metaAgentMcp": true で有効化できます)。');
@@ -54,10 +63,10 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
     // regardless of hiddenApps -- if the operator hides an app the user had
     // previously picked here, the picker correctly stops offering it (no
     // button renders as active) but metaApp itself is never corrected. The
-    // launch button below is disabled for this same condition; this check is
-    // a defense-in-depth backstop so a hidden app can never actually launch
-    // even if that guard is somehow bypassed.
-    if (hiddenApps.includes(app)) {
+    // launch button below is disabled for this same condition using the
+    // (possibly stale) prop; this check uses the config just fetched above
+    // so it actually catches a hide that happened after the picker rendered.
+    if (freshHiddenApps.includes(app)) {
       window.alert('このアプリは非表示に設定されているため、メタエージェントでは起動できません。アプリを選び直してください。');
       return;
     }

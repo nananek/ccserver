@@ -11,6 +11,7 @@ import RemoteInstanceView from './components/RemoteInstanceView.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
+import { isAppSelectable } from './appAvailability.js';
 
 const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
 
@@ -453,8 +454,8 @@ export default function App() {
   // neither CLI installed at all (the capture would never succeed for either).
   // `availableApps` null/absent (fetch pending or failed, older server) means
   // "unknown" -- both apps are assumed available in that case.
-  const claudeAvailable = (!usagePrefs.availableApps || usagePrefs.availableApps.claude !== false) && !usagePrefs.hiddenApps.includes('claude');
-  const codexAvailable = (!usagePrefs.availableApps || usagePrefs.availableApps.codex !== false) && !usagePrefs.hiddenApps.includes('codex');
+  const claudeAvailable = isAppSelectable('claude', usagePrefs.availableApps, usagePrefs.hiddenApps);
+  const codexAvailable = isAppSelectable('codex', usagePrefs.availableApps, usagePrefs.hiddenApps);
   const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable);
   // First-run seed only: UsageButton remembers the app the user last picked
   // (localStorage), so this active-tab-derived default is used just when

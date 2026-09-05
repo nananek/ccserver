@@ -71,6 +71,35 @@ test('combo launch is disabled (not silently sent) when every combo-eligible app
   await expect(launchBtn).toBeDisabled();
 });
 
+test('toolbar quick-launch button is disabled (not silently sent) when the remembered default app is hidden with nothing to fall back to', async ({ page }) => {
+  // Second self-review pass edge case: unlike the picker items (which block
+  // their own click via chooseApp), the toolbar's quick-launch button and
+  // the in-modal single-launch 起動 button fire onOpen directly with
+  // whatever appDefault currently holds. The reconciliation effect corrects
+  // a stale/hidden default to the first available app -- but only when one
+  // exists; hiding every app at once leaves it stuck on the hidden value,
+  // and without a launch-time guard this button would silently launch it.
+  await page.addInitScript(() => {
+    localStorage.setItem('ccserver-app-default', 'claude');
+  });
+  await stubDirsHome(page, { ...HOME_RESPONSE, hiddenApps: ['claude', 'opencode', 'copilot', 'codex', 'commandcode'] });
+  await page.goto('/');
+  await expect(page.locator('.open-split-main')).toBeDisabled();
+});
+
+test('preset-add select is disabled (not a silent no-op) when every combo-eligible app is hidden', async ({ page }) => {
+  // Same edge case as the コンボ起動 button guard above, applied to the
+  // preset picker itself: picking a preset when nothing is combo-eligible
+  // used to just do nothing at all, with no error or tooltip.
+  await stubDirsHome(page, { ...HOME_RESPONSE, hiddenApps: ['claude', 'opencode', 'codex'] });
+  await page.goto('/');
+  await page.getByRole('button', { name: '起動方法を選択' }).click();
+  await page.locator('.resume-dialog .launch-mode-btn', { hasText: 'コンボ起動' }).click();
+  const select = page.locator('.open-menu-preset-select');
+  await expect(select).toBeVisible();
+  await expect(select).toBeDisabled();
+});
+
 test('worker preset management dialog drops codex from the app picker', async ({ page }) => {
   await stubDirsHome(page);
   await page.goto('/');
