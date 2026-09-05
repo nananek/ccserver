@@ -9,6 +9,7 @@ import {
   appSupportsModelFlag,
   PERMISSION_MODES,
   normalizePermissionMode,
+  appSupportsPermissionModeFlag,
   appPermissionArgs,
   appLaunchArgs,
   appSubmitKey,
@@ -201,6 +202,14 @@ test('normalizePermissionMode: known modes pass through, everything else is stan
   assert.equal(normalizePermissionMode('YOLO'), 'standard', 'matching is case-sensitive');
   assert.equal(normalizePermissionMode('plan'), 'standard', 'plan is not a ccserver permission mode');
   assert.equal(normalizePermissionMode(42), 'standard');
+});
+
+test('appSupportsPermissionModeFlag: commandcode only (PR#107 review self-review)', () => {
+  assert.equal(appSupportsPermissionModeFlag('commandcode'), true);
+  for (const app of APPS.filter((a) => a !== 'commandcode')) {
+    assert.equal(appSupportsPermissionModeFlag(app), false, `${app} must not claim permission-flag support`);
+  }
+  assert.equal(appSupportsPermissionModeFlag('bogus'), false);
 });
 
 test('appPermissionArgs: commandcode maps each mode to its CLI flag', () => {

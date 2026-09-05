@@ -683,6 +683,30 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       containerEl.addEventListener('touchend', handleTouchEnd);
     }
 
+    // Shared by the initial connect and the SESSION_NOT_FOUND re-init below
+    // so the two launch paths can't drift on how shell/permission/group state
+    // gets translated into the wire message.
+    function buildInitMsg(dims) {
+      return {
+        type: 'init',
+        cwd,
+        cols: dims?.cols || 80,
+        rows: dims?.rows || 24,
+        shell: !!shellRef.current,
+        sandbox: !!sandboxRef.current,
+        sandboxOpts: sandboxOptsRef.current || null,
+        reuseSandboxHome: reuseSandboxHomeRef.current !== false,
+        app: appRef.current,
+        model: shellRef.current ? null : modelRef.current,
+        permissionMode: shellRef.current ? 'standard' : (permissionModeRef.current || 'standard'),
+        isMetaAgent: !!isMetaAgentRef.current,
+        // Group membership is carried into a re-launch so the server can
+        // re-create the member's MCP channel and register it to the role.
+        groupId: groupId || null,
+        groupRole: groupRole || null,
+      };
+    }
+
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       // A remote (federated) tab talks to /ws/remote-terminal instead, which
@@ -710,25 +734,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             })
           );
         } else {
-          const initMsg = {
-            type: 'init',
-            cwd,
-            cols: dims?.cols || 80,
-            rows: dims?.rows || 24,
-            shell: !!shellRef.current,
-            sandbox: !!sandboxRef.current,
-            sandboxOpts: sandboxOptsRef.current || null,
-            reuseSandboxHome: reuseSandboxHomeRef.current !== false,
-            app: appRef.current,
-            model: shellRef.current ? null : modelRef.current,
-            permissionMode: shellRef.current ? 'standard' : (permissionModeRef.current || 'standard'),
-            isMetaAgent: !!isMetaAgentRef.current,
-            // Group membership is carried into a re-launch so the server can
-            // re-create the member's MCP channel and register it to the role.
-            groupId: groupId || null,
-            groupRole: groupRole || null,
-            instanceId: remoteInstanceIdRef.current || undefined,
-          };
+          const initMsg = buildInitMsg(dims);
+          initMsg.instanceId = remoteInstanceIdRef.current || undefined;
           if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;
             claudeResumeIdRef.current = null;
@@ -836,22 +843,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               sessionIdRef.current = null;
               sessionStorage.removeItem(storageKey);
               const dims = fitAddon.proposeDimensions();
-              const initMsg = {
-                type: 'init',
-                cwd,
-                cols: dims?.cols || 80,
-                rows: dims?.rows || 24,
-                shell: !!shellRef.current,
-                sandbox: !!sandboxRef.current,
-                sandboxOpts: sandboxOptsRef.current || null,
-                reuseSandboxHome: reuseSandboxHomeRef.current !== false,
-                app: appRef.current,
-                model: shellRef.current ? null : modelRef.current,
-                permissionMode: shellRef.current ? 'standard' : (permissionModeRef.current || 'standard'),
-                isMetaAgent: !!isMetaAgentRef.current,
-                groupId: groupId || null,
-                groupRole: groupRole || null,
-              };
+              const initMsg = buildInitMsg(dims);
               if (!shellRef.current) {
                 const app = appRef.current;
                 const savedClaudeId = claudeResumeIdRef.current

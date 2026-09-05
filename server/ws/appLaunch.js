@@ -103,10 +103,18 @@ export function normalizePermissionMode(mode) {
   return PERMISSION_MODES.includes(mode) ? mode : 'standard';
 }
 
+// Per-app capability table, mirroring appSupportsModelFlag: a future app
+// gaining its own elevated-permission flag adds a row here instead of
+// appPermissionArgs growing more special cases.
+export function appSupportsPermissionModeFlag(app) {
+  return app === 'commandcode';
+}
+
 export function appPermissionArgs(app, mode) {
-  if (app !== 'commandcode') return [];
-  if (mode === 'yolo') return ['--yolo'];
-  if (mode === 'auto-accept') return ['--auto-accept'];
+  if (!appSupportsPermissionModeFlag(app)) return [];
+  const normalized = normalizePermissionMode(mode);
+  if (normalized === 'yolo') return ['--yolo'];
+  if (normalized === 'auto-accept') return ['--auto-accept'];
   return [];
 }
 
