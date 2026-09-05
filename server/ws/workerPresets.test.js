@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -12,6 +12,27 @@ import {
   getPreset,
 } from './workerPresets.js';
 import { closeDb } from '../db.js';
+
+// Same withConfig helper as sandbox-config.test.js: point loadSandboxConfig
+// at a temp sandbox.config.json for the duration of fn(), so hiddenApps can
+// be exercised without touching a real deployment config.
+function withConfig(json, fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-worker-presets-config-'));
+  const path = join(dir, 'sandbox.config.json');
+  try {
+    writeFileSync(path, JSON.stringify(json));
+    const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+    process.env.CCSERVER_SANDBOX_CONFIG = path;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+      else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 let tmpRoot;
 const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
@@ -163,6 +184,29 @@ test('delete removes the preset; the freed role is reusable', () => {
   assert.equal(deletePreset(p.id).ok, true);
   assert.equal(listPresets().presets.some((x) => x.id === p.id), false);
   assert.equal(createPreset({ name: 'reuse', role: 'workerGone', app: 'claude' }).ok, true, 'UNIQUE slot freed');
+});
+
+test('createPreset/updatePreset refuse an app hidden via sandbox.config.json\'s hiddenApps (issue #105)', () => {
+  withConfig({ hiddenApps: ['codex'] }, () => {
+    const res = createPreset({ name: 'hidden app', role: 'workerHiddenCreate', app: 'codex' });
+    assert.equal(res.ok, false);
+    assert.equal(res.code, 'validation');
+    assert.match(res.message, /codex.*hidden/);
+    assert.equal(listPresets().presets.some((p) => p.role === 'workerHiddenCreate'), false, 'nothing inserted');
+  });
+
+  // A preset created while codex was still visible must not be silently
+  // re-savable with the same now-hidden app either.
+  const p = createPreset({ name: 'was visible', role: 'workerHiddenUpdate', app: 'codex' }).preset;
+  withConfig({ hiddenApps: ['codex'] }, () => {
+    const res = updatePreset(p.id, { name: 'still codex', role: 'workerHiddenUpdate', app: 'codex' });
+    assert.equal(res.ok, false);
+    assert.equal(res.code, 'validation');
+    // The stored row must be untouched by the rejected update.
+    assert.equal(getPreset(p.id).preset.name, 'was visible');
+  });
+  // Same preset, same app -- once codex is visible again, saving succeeds.
+  assert.equal(updatePreset(p.id, { name: 'still codex', role: 'workerHiddenUpdate', app: 'codex' }).ok, true);
 });
 
 test('presets survive closeDb + reopen (restart simulation)', () => {

@@ -10,6 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db.js';
 import { WORKER_ROLE_RE } from './groupManager.js';
+import { loadSandboxConfig } from './sandbox.js';
 
 // Presets can only contain CLIs that can join a group's MCP broker:
 // copilot/commandcode have no CLI-arg/env MCP injection (config-file only /
@@ -130,9 +131,23 @@ export function listPresets() {
   }
 }
 
+// Beyond PRESET_APPS (copilot/commandcode structurally excluded), a preset's
+// app must also not be one the operator hid via sandbox.config.json's
+// hiddenApps (issue #105): otherwise a hidden app could be saved into the
+// shared preset library even though no picker anywhere renders a button for
+// it, breaking "hidden means invisible everywhere" for this one surface.
+function checkAppNotHidden(app) {
+  if (app && loadSandboxConfig().hiddenApps.includes(app)) {
+    return { ok: false, code: 'validation', message: `app "${app}" is hidden on this server (sandbox.config.json's "hiddenApps")`, errors: [`app "${app}" is hidden`] };
+  }
+  return null;
+}
+
 export function createPreset(input) {
   const n = normalizePresetInput(input);
   if (!n.ok) return { ok: false, code: 'validation', message: n.errors.join('; '), errors: n.errors };
+  const hiddenErr = checkAppNotHidden(n.value.app);
+  if (hiddenErr) return hiddenErr;
   const id = randomUUID();
   const now = Date.now();
   try {
@@ -154,6 +169,8 @@ export function updatePreset(id, input) {
   if (!existing.ok) return { ok: false, code: 'not-found', message: 'preset not found' };
   const n = normalizePresetInput(input);
   if (!n.ok) return { ok: false, code: 'validation', message: n.errors.join('; '), errors: n.errors };
+  const hiddenErr = checkAppNotHidden(n.value.app);
+  if (hiddenErr) return hiddenErr;
   const now = Date.now();
   try {
     getDb()
