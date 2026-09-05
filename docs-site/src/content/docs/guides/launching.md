@@ -7,8 +7,9 @@ description: セッションの起動方法、アプリ選択、Worker プリセ
 
 | 項目 | 選択肢 | 記憶される場所 |
 |------|--------|----------------|
-| アプリ | Claude Code / opencode / GitHub Copilot / OpenAI Codex | ブラウザの `localStorage` (次回以降の既定) |
+| アプリ | Claude Code / opencode / GitHub Copilot / OpenAI Codex / Command Code | ブラウザの `localStorage` (次回以降の既定) |
 | 起動モード | 通常起動 / 🔒 サンドボックスで起動 | 同上 |
+| 許可モード (Command Code のみ) | 標準 / 自動承認 (`--auto-accept`) / yolo (`--yolo`) | 同上 (標準の選択も含めて記憶) |
 | GPG署名を使う | on/off (既定 off) | `localStorage` に**ディレクトリ単位**で |
 | ssh-agentを転送する | on/off (既定 off) | 同上 |
 
@@ -42,3 +43,10 @@ description: セッションの起動方法、アプリ選択、Worker プリセ
 - 単体起動でモデル入力と `codex resume` / `codex resume --last` を利用できます。Codex の TUI 出力からセッション ID は推測しません。
 - Codex の永続 `codex mcp add` は自動実行しません。ccserver は起動単位の `-c mcp_servers.<name>=...` で MCP を注入するため、`~/.codex/config.toml` を変更せずにコンボ起動でも利用できます。
 - サンドボックスではプロジェクト単位の永続 HOME 内に `~/.codex` を保持します。Codex 自身の sandbox/approval policy は ccserver 側から無条件に緩和しません。
+
+## Command Code について
+
+- 単体起動でモデル入力 (`--model <model>`) と `command-code --resume <id>` / `-c` (最後の会話への再開) を利用できます。TUI 出力からセッション ID は推測しません。
+- **許可モード** (Command Code 選択時のみ表示): `標準` (既定、フラグなし) / `自動承認` (`--auto-accept` 付きで開始) / `yolo` (`--yolo` 付きで開始し、全ての許可プロンプトを回避)。選択は標準も含めてブラウザに記憶されます。yolo モードのセッションはセッション一覧とターミナルヘッダに `yolo` バッジが付きます。予約プロンプトの自動再開・サーバー再起動後の復元でもモードは維持されます。
+- **コンボ起動では選択できません** (グループメンバーに必要な MCP 注入が CLI 引数/環境変数でできないため)。
+- 認証情報 (ホストの `~/.commandcode/auth.json`) はサンドボックスにも rw-bind されるため、サンドボックス起動でも再ログインは不要です。

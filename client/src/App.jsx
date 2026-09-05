@@ -27,8 +27,8 @@ export default function App() {
   const [lastDir, setLastDir] = useState(() => localStorage.getItem('ccserver-last-dir'));
   const [resumePrompt, setResumePrompt] = useState(null);
   // Reuse dialog for a sandboxed launch when a previous persistent sandbox
-  // exists for the project: { cwd, sandbox, sandboxOpts, app, model, resume,
-  // skipResumePrompt, reuseSandboxHome, inUse }.
+  // exists for the project: { cwd, sandbox, sandboxOpts, app, model,
+  // permissionMode, resume, skipResumePrompt, reuseSandboxHome, inUse }.
   const [sandboxPrompt, setSandboxPrompt] = useState(null);
   const [themeId, setThemeId] = useState(loadThemeId);
   const [closeConfirm, setCloseConfirm] = useState(null);
@@ -77,7 +77,7 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, reuseSandboxHome = true, isMetaAgent = false } = {}) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, permissionMode = 'standard', resume = false, reuseSandboxHome = true, isMetaAgent = false } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
     // Meta-agent tabs carry a ⌘ prefix (plus their own tab icon): the
@@ -85,7 +85,7 @@ export default function App() {
     const label = shell ? `$ ${dirName}` : isMetaAgent ? `⌘ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, isMetaAgent, exited: false },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, permissionMode, resume, reuseSandboxHome, isMetaAgent, exited: false },
     ]);
     setActiveTabId(id);
     if (!isMetaAgent) setLastDir(dirPath);
@@ -118,7 +118,7 @@ export default function App() {
   // The post-sandbox-dialog open flow: claude's resume prompt (if a saved
   // conversation exists), else a plain tab open. Carries the chosen
   // reuseSandboxHome through so a resumed conversation keeps the same HOME.
-  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, skipResumePrompt = false, reuseSandboxHome = true, isMetaAgent = false } = {}) => {
+  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, permissionMode = 'standard', resume = false, skipResumePrompt = false, reuseSandboxHome = true, isMetaAgent = false } = {}) => {
     // Only claude sessions carry a resumable conversation id (opencode resumes
     // the last session of the project itself via -c). Meta-agent opens skip
     // the prompt and always start fresh: the user just confirmed a privileged
@@ -130,11 +130,11 @@ export default function App() {
       const savedSessionId = localStorage.getItem(`ccserver-resume:claude:${dirPath}`);
       if (savedSessionId) {
         pendingOpenRef.current = dirPath;
-        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app, model, reuseSandboxHome, isMetaAgent });
+        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app, model, permissionMode, reuseSandboxHome, isMetaAgent });
         return;
       }
     }
-    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, isMetaAgent });
+    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, permissionMode, resume, reuseSandboxHome, isMetaAgent });
   }, [openTerminalTab]);
 
   // Sandboxed agent launch: before opening, ask the server whether a previous
@@ -314,6 +314,7 @@ export default function App() {
       attachSessionId: session.id,
       app: session.app === 'opencode' ? 'opencode' : session.app === 'copilot' ? 'copilot' : session.app === 'codex' ? 'codex' : session.app === 'commandcode' ? 'commandcode' : 'claude',
       model: session.model || null,
+      permissionMode: session.permissionMode || 'standard',
       sandbox: !!session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
       // Needed by the SESSION_NOT_FOUND re-init path (TerminalView) so a
@@ -328,7 +329,7 @@ export default function App() {
 
   const handleResume = useCallback(() => {
     if (resumePrompt) {
-      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, reuseSandboxHome: resumePrompt.reuseSandboxHome !== false, isMetaAgent: !!resumePrompt.isMetaAgent });
+      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, permissionMode: resumePrompt.permissionMode || 'standard', reuseSandboxHome: resumePrompt.reuseSandboxHome !== false, isMetaAgent: !!resumePrompt.isMetaAgent });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -337,7 +338,7 @@ export default function App() {
   const handleNewSession = useCallback(() => {
     if (resumePrompt) {
       localStorage.removeItem(`ccserver-resume:claude:${resumePrompt.cwd}`);
-      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, reuseSandboxHome: resumePrompt.reuseSandboxHome !== false, isMetaAgent: !!resumePrompt.isMetaAgent });
+      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, permissionMode: resumePrompt.permissionMode || 'standard', reuseSandboxHome: resumePrompt.reuseSandboxHome !== false, isMetaAgent: !!resumePrompt.isMetaAgent });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -553,6 +554,7 @@ export default function App() {
                   reuseSandboxHome={tab.reuseSandboxHome !== false}
                   app={tab.app || 'claude'}
                   model={tab.model || null}
+                  permissionMode={tab.permissionMode || 'standard'}
                   resume={!!tab.resume}
                   isMetaAgent={!!tab.isMetaAgent}
                   notify={notify}

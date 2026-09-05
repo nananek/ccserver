@@ -7,6 +7,10 @@ import {
   appResumeArgs,
   appModelArgs,
   appSupportsModelFlag,
+  PERMISSION_MODES,
+  normalizePermissionMode,
+  appPermissionArgs,
+  appLaunchArgs,
   appSubmitKey,
   extractResumeSessionId,
   detectPermissionPrompt,
@@ -184,6 +188,46 @@ test('appModelArgs: claude never emits --model unless the capability is enabled'
     if (before === undefined) delete process.env.CCSERVER_CLAUDE_MODEL;
     else process.env.CCSERVER_CLAUDE_MODEL = before;
   }
+});
+
+test('normalizePermissionMode: known modes pass through, everything else is standard', () => {
+  assert.deepEqual(PERMISSION_MODES, ['standard', 'auto-accept', 'yolo']);
+  assert.equal(normalizePermissionMode('standard'), 'standard');
+  assert.equal(normalizePermissionMode('auto-accept'), 'auto-accept');
+  assert.equal(normalizePermissionMode('yolo'), 'yolo');
+  assert.equal(normalizePermissionMode(null), 'standard');
+  assert.equal(normalizePermissionMode(undefined), 'standard');
+  assert.equal(normalizePermissionMode(''), 'standard');
+  assert.equal(normalizePermissionMode('YOLO'), 'standard', 'matching is case-sensitive');
+  assert.equal(normalizePermissionMode('plan'), 'standard', 'plan is not a ccserver permission mode');
+  assert.equal(normalizePermissionMode(42), 'standard');
+});
+
+test('appPermissionArgs: commandcode maps each mode to its CLI flag', () => {
+  assert.deepEqual(appPermissionArgs('commandcode', 'standard'), []);
+  assert.deepEqual(appPermissionArgs('commandcode', 'auto-accept'), ['--auto-accept']);
+  assert.deepEqual(appPermissionArgs('commandcode', 'yolo'), ['--yolo']);
+  assert.deepEqual(appPermissionArgs('commandcode', null), [], 'null must be omitted');
+  assert.deepEqual(appPermissionArgs('commandcode', undefined), [], 'absent must be omitted');
+  assert.deepEqual(appPermissionArgs('commandcode', 'bogus'), [], 'unknown modes must never become a flag');
+});
+
+test('appPermissionArgs: every other app ignores the mode (commandcode-only flag)', () => {
+  for (const app of ['claude', 'opencode', 'copilot', 'codex', 'bogus', null, undefined]) {
+    assert.deepEqual(appPermissionArgs(app, 'yolo'), [], `${app} must never receive --yolo`);
+    assert.deepEqual(appPermissionArgs(app, 'auto-accept'), [], `${app} must never receive --auto-accept`);
+  }
+});
+
+// Exercises appLaunchArgs directly -- the same function sessionManager.js's
+// createSession calls to build its argv -- instead of re-synthesizing the
+// resume+model+permission chain locally, so a push-order regression in the
+// real launch path is caught here too (see PR#108 review).
+test('appLaunchArgs: commandcode launch argv keeps resume + model + permission flags together', () => {
+  assert.deepEqual(appLaunchArgs('commandcode', { model: null, permissionMode: 'standard' }), []);
+  assert.deepEqual(appLaunchArgs('commandcode', { model: 'gpt-5', permissionMode: 'yolo' }), ['--model', 'gpt-5', '--yolo']);
+  assert.deepEqual(appLaunchArgs('commandcode', { resumeId: 'abc123', permissionMode: 'auto-accept' }), ['--resume', 'abc123', '--auto-accept']);
+  assert.deepEqual(appLaunchArgs('commandcode', { resumeLast: true, permissionMode: 'yolo' }), ['-c', '--yolo']);
 });
 
 test('appSubmitKey: every agent CLI submits with CR, Codex included (regression lock)', () => {

@@ -88,6 +88,41 @@ export function appModelArgs(app, model) {
   return ['--model', model];
 }
 
+// Permission mode for commandcode launches: 'standard' (default, no flag),
+// 'auto-accept' (--auto-accept), or 'yolo' (--yolo, alias for
+// --dangerously-skip-permissions). Verified against `command-code --help`
+// (bundled v1.47.0 and latest v1.49.1, Sep 2026): both flags exist in both
+// versions. Only commandcode honors it -- every other app (and shells, which
+// carry no app id) always yields no flag, so a stale or mismatched value can
+// never break another CLI's launch. Unknown/absent values normalize to
+// 'standard' (no flag), mirroring how model normalization coerces invalid
+// values to null instead of emitting a broken flag.
+export const PERMISSION_MODES = ['standard', 'auto-accept', 'yolo'];
+
+export function normalizePermissionMode(mode) {
+  return PERMISSION_MODES.includes(mode) ? mode : 'standard';
+}
+
+export function appPermissionArgs(app, mode) {
+  if (app !== 'commandcode') return [];
+  if (mode === 'yolo') return ['--yolo'];
+  if (mode === 'auto-accept') return ['--auto-accept'];
+  return [];
+}
+
+// Combines the three launch-arg helpers above in the exact order
+// sessionManager.createSession pushes them (resume, then model, then
+// permission). Shared by sessionManager and this file's own tests so a
+// reordering in the real launch path can't drift away from what's tested --
+// see PR#108 review.
+export function appLaunchArgs(app, { resumeId, resumeLast, model, permissionMode } = {}) {
+  return [
+    ...appResumeArgs(app, resumeId, { resumeLast }),
+    ...appModelArgs(app, model),
+    ...appPermissionArgs(app, permissionMode),
+  ];
+}
+
 // The keystroke that submits the current prompt in each app's TUI, sent by
 // sessionManager.writeToSession({ submit: true }) after the typed text.
 // Every supported CLI accepts CR today (verified against all four TUIs; CR

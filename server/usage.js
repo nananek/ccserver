@@ -118,7 +118,7 @@ export function parseUsage(raw) {
 
   const limits = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(\d+)%\s+\d+%\s+used$/) || lines[i].match(/^(\d+)%\s+used$/);
+    const m = lines[i].match(/(\d+)%\s+\d+%\s+used$/) || lines[i].match(/(\d+)%\s+used$/);
     if (!m) continue;
     const pct = Number(m[1]);
 
@@ -126,7 +126,7 @@ export function parseUsage(raw) {
     let label = null;
     for (let j = i - 1; j >= Math.max(0, i - 4); j--) {
       const t = lines[j];
-      if (!t || /used$/.test(t) || /^Resets/.test(t)) continue;
+      if (!t || /used$/.test(t) || /Resets\s+/.test(t)) continue;
       label = t;
       break;
     }
@@ -135,7 +135,8 @@ export function parseUsage(raw) {
     // Reset time: the next "Resets ..." line before the next limit block.
     let resets = null;
     for (let k = i + 1; k < Math.min(lines.length, i + 4); k++) {
-      if (/^Resets/.test(lines[k])) { resets = lines[k].replace(/^Resets\s*/, '').trim(); break; }
+      const rm = lines[k].match(/Resets\s+(.+)$/);
+      if (rm) { resets = rm[1].trim(); break; }
       if (/used$/.test(lines[k])) break;
     }
 

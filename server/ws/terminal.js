@@ -98,6 +98,10 @@ export function attachTerminalHandler(chan) {
           sandboxOpts: msg.sandboxOpts || null,
           app: msg.app || null,
           model: typeof msg.model === 'string' ? msg.model : null,
+          // Permission mode for commandcode launches ('standard' when
+          // absent/invalid -- createSession normalizes it; other apps and
+          // shells never emit a flag from it).
+          permissionMode: typeof msg.permissionMode === 'string' ? msg.permissionMode : 'standard',
           // Meta-agent launch from the browser UI (same flag REST
           // POST /api/sessions already accepts). The server still gates the
           // actual MCP injection on metaAgentMcp + broker state, so a stale

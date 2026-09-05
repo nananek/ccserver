@@ -1743,6 +1743,18 @@ body {
   border: 1px solid rgba(243, 139, 168, 0.35);
 }
 
+.session-badge.permission-yolo {
+  color: var(--error, #f38ba8);
+  background: rgba(243, 139, 168, 0.12);
+  border: 1px solid rgba(243, 139, 168, 0.35);
+}
+
+.session-badge.permission-auto-accept {
+  color: var(--warning, #f9e2af);
+  background: rgba(249, 226, 175, 0.12);
+  border: 1px solid rgba(249, 226, 175, 0.35);
+}
+
 .session-delete-btn {
   padding: 2px 8px;
   font-size: 12px;

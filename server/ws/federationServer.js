@@ -124,6 +124,11 @@ async function rpcSessionsCreate(params, ctx) {
   // 2nd parameter (never read from body), so a peer setting params.isReviewJob
   // cannot force reviewer MCP injection here even though this line does not
   // filter params itself. See createSessionViaApi's header comment.
+  // permissionMode is intentionally NOT capped here either -- federation
+  // peers are already fully trusted for equally/more dangerous fields
+  // (isMetaAgent, sandboxOpts, app) pre-existing this path; singling out
+  // permissionMode for capping would not meaningfully raise the trust
+  // boundary. See PR#108 review.
   const res = await sessionsMod.createSessionViaApi({ ...(params || {}), requestedBy });
   if (!res.ok) return { ok: false, error: res.message };
   return { ok: true, session: res.body };

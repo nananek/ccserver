@@ -16,8 +16,8 @@ import { bunTmpdirEnv } from './bunTmpdir.js';
 import { buildSessionEnv } from './sessionEnv.js';
 import {
   isValidApp,
-  appResumeArgs,
-  appModelArgs,
+  appLaunchArgs,
+  normalizePermissionMode,
   appSubmitKey,
   extractResumeSessionId,
   detectPermissionPrompt,
@@ -166,7 +166,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
@@ -251,6 +251,17 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // the app's persisted-or-default model" (no --model flag is emitted); only a
   // non-empty string becomes a CLI model selection. Shells never carry one.
   const sessionModel = shell ? null : normalizeModel(model);
+  // Permission mode for commandcode launches ('standard' by default -- no
+  // flag; 'auto-accept' / 'yolo' add the corresponding CLI flag, see
+  // appLaunch.js's appPermissionArgs). Unknown values normalize to
+  // 'standard'. Shells and non-commandcode apps are forced to 'standard'
+  // here too, not just left un-flagged by appPermissionArgs -- otherwise a
+  // caller-supplied 'yolo'/'auto-accept' would sit in session.permissionMode
+  // (surfaced via listSessions/savedSessionPublic/federation) and could
+  // mislead a consumer that treats that field as an actual bypass signal.
+  const sessionPermissionMode = (shell || sessionApp !== 'commandcode')
+    ? 'standard'
+    : normalizePermissionMode(permissionMode);
 
   // ccserver-notify injection (see notify.js): standalone agent sessions and
   // combo orchestrators get the process-global notify MCP server when the
@@ -355,10 +366,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     args = [];
   } else {
     command = resolved.command;
-    args = appResumeArgs(sessionApp, claudeSessionId, { resumeLast });
-    // Model selection must accompany fresh launches and resume alike; the
-    // helper only emits the flag for apps whose CLI is verified to accept it.
-    args.push(...appModelArgs(sessionApp, sessionModel));
+    // appLaunchArgs combines resume + model + permission-mode args in this
+    // exact order; appLaunch.test.js exercises the same function so a
+    // reordering here can't drift away from what's tested (see PR#108 review).
+    args = appLaunchArgs(sessionApp, {
+      resumeId: claudeSessionId,
+      resumeLast,
+      model: sessionModel,
+      permissionMode: sessionPermissionMode,
+    });
   }
   command = resolveCommand(command);
 
@@ -520,6 +536,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     shell: !!shell,
     app: sessionApp,
     model: sessionModel,
+    permissionMode: sessionPermissionMode,
     groupId,
     groupRole,
     // True only for sessions launched with the explicit isMetaAgent flag (the
@@ -960,6 +977,7 @@ function persistSchedules() {
         shell: !!s.shell,
         app: s.app || 'claude',
         model: normalizeModel(s.model) || null,
+        permissionMode: normalizePermissionMode(s.permissionMode),
         claudeSessionId: s.claudeSessionId || null,
         groupId: s.groupId || null,
         groupRole: s.groupRole || null,
@@ -1159,13 +1177,17 @@ function notifyFired(session, info, delivered) {
 // with each other, so a cwd+app match alone could inject into the wrong
 // worker. A model-annotated schedule must likewise only inject into a
 // session launched with the SAME model; unmodeled entries (both null) keep
-// the original cwd+shell+app semantics. Exported for direct unit testing.
+// the original cwd+shell+app semantics. The same rule applies to the
+// permission mode: a yolo/auto-accept schedule must not inject into a
+// standard session (legacy entries without the field count as 'standard').
+// Exported for direct unit testing.
 export function matchesScheduleTarget(session, entry) {
   return !!session && !session.exited && !!session.ptyProcess
     && session.cwd === entry.cwd
     && session.shell === entry.shell
     && session.app === entry.app
     && (session.model ?? null) === (entry.model ?? null)
+    && (session.permissionMode ?? 'standard') === (entry.permissionMode ?? 'standard')
     && (session.groupId ?? null) === (entry.groupId ?? null)
     && (session.groupRole ?? null) === (entry.groupRole ?? null);
 }
@@ -1261,6 +1283,7 @@ async function fireSchedule(scheduleId) {
     sandboxOpts: entry.sandboxOpts,
     app: entry.app,
     model: entry.model,
+    permissionMode: entry.permissionMode,
     resumeLast: entry.app === 'opencode' || entry.app === 'copilot' || entry.app === 'codex' || entry.app === 'commandcode',
     // A group member keeps its membership across the resume: groupManager's
     // session-create listener re-binds the role to the new sessionId.
@@ -1324,6 +1347,7 @@ export function setScheduledPrompt(id, at, text, { source = 'manual' } = {}) {
     shell: !!session.shell,
     app: session.app || 'claude',
     model: normalizeModel(session.model) || null,
+    permissionMode: normalizePermissionMode(session.permissionMode),
     claudeSessionId: resumeIdForSession(session),
     sessionId: id,
     groupId: session.groupId || null,
@@ -1382,6 +1406,9 @@ export function restoreSchedules() {
       app: isValidApp(e.app) ? e.app : 'claude',
       // Legacy schedules predate the model field; null means the app default.
       model: normalizeModel(e.model) || null,
+      // Legacy schedules predate the permissionMode field; 'standard' (no
+      // flag) is the safe direction.
+      permissionMode: normalizePermissionMode(e.permissionMode),
       claudeSessionId: e.claudeSessionId || null,
       // Group membership survives a restart: an auto-resume re-binds the
       // role (see fireSchedule), so a member isn't orphaned by a reboot.
@@ -1420,6 +1447,7 @@ export function listSessions() {
       sandboxOpts: session.sandboxOpts || null,
       app: session.app,
       model: session.model || null,
+      permissionMode: normalizePermissionMode(session.permissionMode),
       groupId: session.groupId || null,
       groupRole: session.groupRole || null,
       isMetaAgent: !!session.isMetaAgent,
@@ -1581,6 +1609,7 @@ export function savedSessionPublic(session, claudeId) {
     sandboxOpts: session.sandboxOpts || null,
     app: session.app || 'claude',
     model: normalizeModel(session.model) || null,
+    permissionMode: normalizePermissionMode(session.permissionMode),
     groupId: session.groupId || null,
     groupRole: session.groupRole || null,
   };

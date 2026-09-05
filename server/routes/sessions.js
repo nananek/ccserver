@@ -55,8 +55,12 @@ export async function sessionsRoute(fastify, opts) {
 
 // Shared implementation for POST /api/sessions, the meta agent's
 // launch_session tool, and the federation "sessions.create" RPC. body:
-//   { cwd?, app?, model?, shell?, sandbox?, sandboxOpts?, resume?,
-//     reuseSandboxHome?, isMetaAgent?, requestedBy? }
+//   { cwd?, app?, model?, permissionMode?, shell?, sandbox?, sandboxOpts?,
+//     resume?, reuseSandboxHome?, isMetaAgent?, requestedBy? }
+// `permissionMode` ('standard' | 'auto-accept' | 'yolo', default 'standard')
+// selects the commandcode permission-bypass flag (--auto-accept / --yolo);
+// any other value is coerced to 'standard' downstream, and other apps ignore
+// it entirely.
 // `cwd` is required for normal launches, but when `isMetaAgent:true` it is
 // optional/ignored: createSession forces the fixed meta-agent directory
 // server-side (see sessionManager.createSession), so a client-supplied cwd
@@ -94,7 +98,7 @@ export async function createSessionViaApi(body, { isReviewJob = false } = {}) {
     }
   }
   if (body.app !== undefined && body.app !== null && !isValidApp(body.app)) {
-    return { ok: false, code: 'validation', message: 'app must be one of claude, opencode, copilot, codex' };
+    return { ok: false, code: 'validation', message: 'app must be one of claude, opencode, copilot, codex, commandcode' };
   }
   if (body.sandboxOpts !== undefined && body.sandboxOpts !== null
     && (typeof body.sandboxOpts !== 'object' || Array.isArray(body.sandboxOpts))) {
@@ -115,6 +119,7 @@ export async function createSessionViaApi(body, { isReviewJob = false } = {}) {
     sandboxOpts: body.sandboxOpts || null,
     app: body.app || null,
     model: typeof body.model === 'string' ? body.model : null,
+    permissionMode: typeof body.permissionMode === 'string' ? body.permissionMode : 'standard',
     resumeLast: !!body.resume,
     reuseSandboxHome: body.reuseSandboxHome !== false,
     isMetaAgent: !!body.isMetaAgent,
@@ -133,6 +138,7 @@ export async function createSessionViaApi(body, { isReviewJob = false } = {}) {
       cwd: result.session.cwd,
       app: result.session.app,
       model: result.session.model,
+      permissionMode: result.session.permissionMode,
       shell: result.session.shell,
       sandbox: result.session.sandbox,
       sandboxOpts: result.session.sandboxOpts,
