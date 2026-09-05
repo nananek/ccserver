@@ -1731,28 +1731,18 @@ body {
   font-weight: 500;
 }
 
-.session-badge.sandbox {
-  color: var(--warning, #f9e2af);
-  background: rgba(249, 226, 175, 0.12);
-  border: 1px solid rgba(249, 226, 175, 0.35);
-}
-
-.session-badge.no-sandbox {
-  color: var(--error, #f38ba8);
-  background: rgba(243, 139, 168, 0.12);
-  border: 1px solid rgba(243, 139, 168, 0.35);
-}
-
-.session-badge.permission-yolo {
-  color: var(--error, #f38ba8);
-  background: rgba(243, 139, 168, 0.12);
-  border: 1px solid rgba(243, 139, 168, 0.35);
-}
-
+.session-badge.sandbox,
 .session-badge.permission-auto-accept {
   color: var(--warning, #f9e2af);
   background: rgba(249, 226, 175, 0.12);
   border: 1px solid rgba(249, 226, 175, 0.35);
+}
+
+.session-badge.no-sandbox,
+.session-badge.permission-yolo {
+  color: var(--error, #f38ba8);
+  background: rgba(243, 139, 168, 0.12);
+  border: 1px solid rgba(243, 139, 168, 0.35);
 }
 
 .session-delete-btn {

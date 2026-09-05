@@ -104,3 +104,72 @@ test('parseUsage: mid-line prefix on the percent line still keeps the block', ()
   assert.equal(parsed.limits.length, 1, 'the block must not vanish from limits');
   assert.equal(parsed.limits[0].pct, 87);
 });
+
+// Self-review of the #109 fix above (PR #107 review): dropping the `^`
+// anchor to tolerate an arbitrary prefix opened new contamination shapes
+// that the three tests above didn't cover. Each of these pins a fix for one.
+
+test('parseUsage: two blocks glued onto one line drop rather than cross-contaminate', () => {
+  const raw = [
+    'Current session',
+    '87% 87% used46% 46% used',
+    'Resets 5:40pm (Asia/Tokyo)',
+    'Current week (all models)',
+    'Resets Jul 10, 2am (Asia/Tokyo)',
+  ].join('\n');
+
+  const parsed = parseUsage(raw);
+  const session = parsed.limits.find((l) => l.label === 'Current session');
+  assert.equal(session, undefined, 'an ambiguous line must not synthesize a mismatched pct/label pair');
+});
+
+test('parseUsage: a bare "Resets" line (no value) does not steal the next block\'s reset time', () => {
+  const raw = [
+    'Current session',
+    '87% 87% used',
+    'Resets',
+    'Current week (all models)',
+    '46% 46% used',
+    'Resets Jul 10, 2am (Asia/Tokyo)',
+  ].join('\n');
+
+  const parsed = parseUsage(raw);
+  const session = parsed.limits.find((l) => l.label === 'Current session');
+  assert.equal(session?.pct, 87);
+  assert.equal(session?.resets, null, 'the malformed Resets line must not be skipped over');
+});
+
+test('parseUsage: a bare "Resets" line does not get promoted to the block\'s label', () => {
+  const raw = [
+    'Current session',
+    'Resets',
+    '87% 87% used',
+    'Resets 5:40pm (Asia/Tokyo)',
+  ].join('\n');
+
+  const parsed = parseUsage(raw);
+  assert.equal(parsed.limits.length, 1);
+  assert.equal(parsed.limits[0].label, 'Current session', 'label must not be the "Resets" line itself');
+});
+
+test('parseUsage: "Resets" glued directly onto its value (no space) still extracts it', () => {
+  const raw = [
+    'Current session',
+    '87% 87% used',
+    'Resets5:40pm (Asia/Tokyo)',
+  ].join('\n');
+
+  const parsed = parseUsage(raw);
+  assert.equal(parsed.limits[0].resets, '5:40pm (Asia/Tokyo)');
+});
+
+test('parseUsage: a digit-ending prefix merged into the percentage is rejected as out of range', () => {
+  const raw = [
+    'Current session',
+    '4287% 87% used',
+    'Resets 5:40pm (Asia/Tokyo)',
+  ].join('\n');
+
+  const parsed = parseUsage(raw);
+  assert.equal(parsed.limits.length, 0, 'an impossible >100% value must be dropped, not shown');
+});

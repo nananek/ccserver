@@ -118,15 +118,26 @@ export function parseUsage(raw) {
 
   const limits = [];
   for (let i = 0; i < lines.length; i++) {
+    // A redraw race can glue two whole blocks onto the same physical line
+    // with no newline between them (e.g. "87% 87% used46% 46% used"). Since
+    // the percent match below is no longer anchored at line-start, matching
+    // it anyway would silently bind the LAST block's percentage to the
+    // FIRST block's label -- bail out on the whole line instead.
+    if ((lines[i].match(/\d+%\s+(?:\d+%\s+)?used/g) || []).length > 1) continue;
     const m = lines[i].match(/(\d+)%\s+\d+%\s+used$/) || lines[i].match(/(\d+)%\s+used$/);
     if (!m) continue;
     const pct = Number(m[1]);
+    // A leftover UI prefix ending in a digit (e.g. a stray "42" glued onto
+    // "87% 87% used") merges into the digit run above. Usage percentages
+    // are bounded by definition, so an out-of-range value is corruption --
+    // drop the block rather than show an impossible number.
+    if (pct > 100) continue;
 
     // Label: nearest preceding real line that isn't a percentage / reset line.
     let label = null;
     for (let j = i - 1; j >= Math.max(0, i - 4); j--) {
       const t = lines[j];
-      if (!t || /used$/.test(t) || /Resets\s+/.test(t)) continue;
+      if (!t || /used$/.test(t) || /Resets(\s|$)/.test(t)) continue;
       label = t;
       break;
     }
@@ -135,9 +146,9 @@ export function parseUsage(raw) {
     // Reset time: the next "Resets ..." line before the next limit block.
     let resets = null;
     for (let k = i + 1; k < Math.min(lines.length, i + 4); k++) {
-      const rm = lines[k].match(/Resets\s+(.+)$/);
+      const rm = lines[k].match(/Resets\s*(.+)$/);
       if (rm) { resets = rm[1].trim(); break; }
-      if (/used$/.test(lines[k])) break;
+      if (/Resets(\s|$)/.test(lines[k]) || /used$/.test(lines[k])) break;
     }
 
     limits.push({ label, pct, resets, resetAt: parseResetTime(resets, Date.now()), windowMs: windowFor(label) });
