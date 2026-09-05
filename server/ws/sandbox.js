@@ -480,8 +480,12 @@ function slugify(p) {
 // same literal appLaunch.js's APPS already exports, risking drift the next
 // time an app is added -- re-exported under this module's existing name
 // instead, so existing importers (sandbox-config.test.js,
-// startup-hidden-apps.test.js) don't need to change.
-export const APP_IDS = APPS;
+// startup-hidden-apps.test.js) don't need to change. A defensive copy, not
+// the same array object: appLaunch.js's dispatch tables (isValidApp/
+// resolveApp) hold the original APPS binding, and an in-place mutation of
+// one (e.g. re-sorting APP_IDS for picker display order) must never corrupt
+// the other's shared state.
+export const APP_IDS = [...APPS];
 
 // Load the optional sandbox config. Path from CCSERVER_SANDBOX_CONFIG, else
 // server/sandbox.config.json (next to this module's parent). Shape:
@@ -817,6 +821,16 @@ export function selectableAppIds() {
   const installed = installedApps();
   const { hiddenApps } = loadSandboxConfig();
   return APP_IDS.filter((app) => installed[app] && !hiddenApps.includes(app));
+}
+
+// Whether `app` has been hidden via sandbox.config.json's hiddenApps (issue
+// #105). Every enforcement site that guards a real spawn against a hidden
+// app (createSession, the claude/codex usage captures) shares this instead
+// of re-deriving `loadSandboxConfig().hiddenApps.includes(...)` separately,
+// so the check itself can't drift between them even though each site's
+// error message and return shape stays its own.
+export function isAppHidden(app) {
+  return !!app && loadSandboxConfig().hiddenApps.includes(app);
 }
 
 // Backwards-compatible alias used by the claude-only /usage capture.

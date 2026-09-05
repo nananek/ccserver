@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './ws/sandbox.js';
+import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, isAppHidden } from './ws/sandbox.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
@@ -94,7 +94,7 @@ function capture() {
     // happens to be installed is irrelevant -- and unlike claude, codex has no
     // CCSERVER_*_BIN override to deterministically fake an install with in
     // tests, so this ordering is what makes the guard testable at all.
-    if (loadSandboxConfig().hiddenApps.includes('codex')) {
+    if (isAppHidden('codex')) {
       resolve({ error: 'codex is hidden on this server (sandbox.config.json\'s "hiddenApps")' });
       return;
     }

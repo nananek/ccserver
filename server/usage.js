@@ -15,7 +15,7 @@ import * as pty from 'node-pty';
 import { homedir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig } from './ws/sandbox.js';
+import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig, isAppHidden } from './ws/sandbox.js';
 import { recordSessionLimitReset } from './sessionLimitState.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
 
@@ -170,7 +170,7 @@ function capture() {
     // does, mirroring createSession's hiddenApps guard (sessionManager.js).
     // Checked BEFORE resolveClaude() below: once claude is hidden, whether it
     // happens to be installed is irrelevant.
-    if (loadSandboxConfig().hiddenApps.includes('claude')) {
+    if (isAppHidden('claude')) {
       resolve({ error: 'claude is hidden on this server (sandbox.config.json\'s "hiddenApps")' });
       return;
     }

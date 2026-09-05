@@ -168,6 +168,11 @@ function normalizeModel(model) {
 
 export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null }) {
   const id = randomUUID();
+  // Read once and thread through: this hot path (every session launch) was
+  // otherwise re-reading + re-parsing sandbox.config.json up to four times
+  // (defaultApp, hiddenApps, forceSandbox, persistentHome) via separate
+  // loadSandboxConfig() calls below.
+  const cfg = loadSandboxConfig();
 
   // Invariant: meta-agent sessions (isMetaAgent:true, groupId-less) always
   // run in the fixed project-outside directory ~/.local/share/ccserver-
@@ -197,7 +202,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   }
 
   // Which agent CLI this session runs. Shell sessions have no app.
-  const sessionApp = shell ? null : (isValidApp(app) ? app : defaultApp());
+  const sessionApp = shell ? null : (isValidApp(app) ? app : cfg.defaultApp);
 
   // Self-review (issue #105): sandbox.config.json's hiddenApps removes an app
   // from every launch picker client-side, but every picker ultimately funnels
@@ -211,7 +216,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // re-checked hiddenApps itself. Checked BEFORE resolveApp() below: once an
   // app is hidden, whether it happens to be installed is irrelevant, and this
   // ordering means the refusal never depends on install detection.
-  if (sessionApp && loadSandboxConfig().hiddenApps.includes(sessionApp)) {
+  if (sessionApp && cfg.hiddenApps.includes(sessionApp)) {
     return {
       sessionId: id,
       session: null,
@@ -364,7 +369,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // the MCP bridge config below: a requested sandbox either builds (mode
   // 'sandbox') or errors out (the config is then never used), so 'host' is
   // only ever reached when the session genuinely runs unsandboxed.
-  const forceSandbox = loadSandboxConfig().forceSandbox;
+  const forceSandbox = cfg.forceSandbox;
   const sandboxRequested = (forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable();
 
   // MCP config injection -- never written to a file (see mcpConfig.js). Combo
@@ -425,7 +430,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     // under a live bind mount would corrupt that session. The client disables
     // the "new" option in the same situation (GET /api/sandbox/status), so
     // this is the authoritative backstop.
-    if (loadSandboxConfig().persistentHome && !reuseSandboxHome) {
+    if (cfg.persistentHome && !reuseSandboxHome) {
       const targetPath = persistentHomeDir(cwd);
       if (sandboxHomeConflict(targetPath, [...sessions.values()])) {
         return {
@@ -1265,7 +1270,15 @@ async function fireSchedule(scheduleId) {
     orchestratorClaudeMdSrc,
     gitCommonDir,
   });
-  if (!res?.session) return;
+  if (!res?.session) {
+    // Same "explain every drop" policy as the mcpSocketPath/
+    // orchestratorClaudeMdSrc/cwd guards above: a hiddenApps rejection (or
+    // any other createSession() failure -- not-installed, invalid cwd) must
+    // not disappear silently just because this is the auto-resume path
+    // rather than a live launch request with a client to report the error to.
+    console.warn(`[scheduler] dropping prompt for schedule ${scheduleId}: ${res?.error || 'createSession failed'}`);
+    return;
+  }
   const session = res.session;
   session.pendingInjection = { text: entry.text, at: entry.at };
   // Safety net: deliver even if the session never emits an idle gap (e.g. a
