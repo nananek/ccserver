@@ -10,8 +10,14 @@ export function moveMenuFocus(container, key) {
   const idx = buttons.indexOf(document.activeElement);
   if (key === 'Home') { buttons[0].focus(); return true; }
   if (key === 'End') { buttons[buttons.length - 1].focus(); return true; }
+  // フォーカスがボタン外にある場合 (idx === -1): Down は先頭、Up は末尾へ。
+  // 正規化しないと Up が buttons[(idx - 1 + len) % len] で末尾から2番目に飛ぶ。
+  if (idx < 0) {
+    buttons[key === 'ArrowDown' ? 0 : buttons.length - 1].focus();
+    return true;
+  }
   const next = key === 'ArrowDown'
-    ? buttons[(idx + 1 + buttons.length) % buttons.length]
+    ? buttons[(idx + 1) % buttons.length]
     : buttons[(idx - 1 + buttons.length) % buttons.length];
   next.focus();
   return true;
