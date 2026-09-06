@@ -805,6 +805,80 @@ test('openTab: a genuinely new member (never registered) is still capped even if
   }
 });
 
+// --- capSandboxOpts (direct unit tests) -------------------------------------
+// No direct coverage existed before PR#114's review (gpg/sshAgent capping was
+// only exercised indirectly through openTab above); tools support was added
+// without any unit test at all, which is exactly how it went missing from
+// mcpTools.js's own capSandboxOpts in the first place.
+
+test('capSandboxOpts: a falsy requested value passes through unchanged', () => {
+  assert.equal(tools.capSandboxOpts(null, { gpg: true }), null);
+  assert.equal(tools.capSandboxOpts(undefined, { gpg: true }), undefined);
+});
+
+test('capSandboxOpts: gpg/sshAgent are capped independently against the holder\'s own grant', () => {
+  const res = tools.capSandboxOpts({ gpg: true, sshAgent: true }, { gpg: true, sshAgent: false });
+  assert.deepEqual(res, { gpg: true, sshAgent: false });
+});
+
+test('capSandboxOpts: missing cap denies everything by default', () => {
+  const res = tools.capSandboxOpts({ gpg: true, sshAgent: true }, null);
+  assert.deepEqual(res, { gpg: false, sshAgent: false });
+});
+
+test('capSandboxOpts: requested.tools is omitted from the output entirely when not requested', () => {
+  const res = tools.capSandboxOpts({ gpg: true, sshAgent: true }, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } });
+  assert.deepEqual(res, { gpg: true, sshAgent: true });
+  assert.equal('tools' in res, false, 'no tools key must appear when the caller never asked for tools');
+});
+
+test('capSandboxOpts: tools cannot exceed what the cap holder itself currently holds (regression: PR#114 review, tools was silently dropped)', () => {
+  const res = tools.capSandboxOpts(
+    { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } },
+    { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } },
+  );
+  assert.deepEqual(res, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } });
+});
+
+test('capSandboxOpts: a cap with no tools grant at all denies both tools flags', () => {
+  const res = tools.capSandboxOpts(
+    { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } },
+    { gpg: true, sshAgent: true },
+  );
+  assert.deepEqual(res, { gpg: true, sshAgent: true, tools: { rtk: false, codeReviewGraph: false } });
+});
+
+test('capSandboxOpts: requested.tools of the wrong type is treated as absent (no tools key output)', () => {
+  const res = tools.capSandboxOpts({ gpg: true, tools: 'nope' }, { gpg: true, tools: { rtk: true, codeReviewGraph: true } });
+  assert.deepEqual(res, { gpg: true, sshAgent: false });
+});
+
+test('openTab: tools cannot exceed what the orchestrator itself currently holds (privilege escalation guard, mirrors gpg/sshAgent)', async () => {
+  const g = await makeGroupAsync();
+  let seenOpts = null;
+  const fake = {
+    getSession: (id) => (id === 'orch-sess' ? { sandboxOpts: { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } } } : null),
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-c', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(g, 'orchestrator', 'orch-sess');
+    const res = await tools.openTab(controlDeps(g), {
+      role: 'workerC',
+      cwd: `/srv/project-${g}`,
+      sandboxOpts: { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } },
+    });
+    assert.equal(res.error, undefined, res.message || '');
+    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } });
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } }, 'the spawned session never actually gets the escalated codeReviewGraph tool');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
 test('readOutput: authorized live member returns raw + stripped text (tail 0 clamps to 1 chunk, not 4000)', async () => {
   const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');

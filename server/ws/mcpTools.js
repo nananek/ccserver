@@ -212,10 +212,17 @@ export async function sendInput(deps, { sessionId, text, submit = true }) {
 // the meta agent's own current sandboxOpts as the cap (plan section 4.1).
 export function capSandboxOpts(requested, cap) {
   if (!requested) return requested;
-  return {
+  const out = {
     gpg: !!requested.gpg && !!cap?.gpg,
     sshAgent: !!requested.sshAgent && !!cap?.sshAgent,
   };
+  if (requested.tools && typeof requested.tools === 'object') {
+    out.tools = {
+      rtk: !!requested.tools.rtk && !!cap?.tools?.rtk,
+      codeReviewGraph: !!requested.tools.codeReviewGraph && !!cap?.tools?.codeReviewGraph,
+    };
+  }
+  return out;
 }
 
 // Open a new member session (worker role) inside the group, with its own

@@ -209,6 +209,20 @@ test('normalizeWorkers: legacy payloads without workers[] keep the workerA/worke
   assert.deepEqual(empty.workers[0].spec, {});
 });
 
+test('normalizeWorkers: legacy adapter carries sandboxOpts.tools through (regression: PR#114 review)', () => {
+  const legacy = normalizeWorkers({
+    workerA: { sandboxOpts: { gpg: true, tools: { rtk: true, codeReviewGraph: false } } },
+    workerB: { sandboxOpts: { gpg: false } },
+  });
+  assert.deepEqual(legacy.workers[0].spec.sandboxOpts, {
+    gpg: true,
+    sshAgent: false,
+    tools: { rtk: true, codeReviewGraph: false },
+  });
+  // No tools provided -> no tools key (mirrors groupManager.normalizeSandboxOpts).
+  assert.deepEqual(legacy.workers[1].spec.sandboxOpts, { gpg: false, sshAgent: false });
+});
+
 test('normalizeWorkers: a valid workers[] snapshot passes through normalized', () => {
   const res = normalizeWorkers({
     workers: [
@@ -251,6 +265,29 @@ test('normalizeWorkers: per-entry sandboxOpts mirror memberSpecFromBody semantic
   ]});
   assert.deepEqual(res.workers[0].spec.sandboxOpts, { gpg: true, sshAgent: true });
   assert.deepEqual(res.workers[1].spec.sandboxOpts, null);
+});
+
+test('normalizeWorkers: workers[] sandboxOpts.tools survives normalization (regression: PR#114 review, groups.js was dropping tools)', () => {
+  const res = normalizeWorkers({ workers: [
+    { role: 'workerRtk', sandboxOpts: { gpg: true, sshAgent: false, tools: { rtk: true, codeReviewGraph: true } } },
+    { role: 'workerMixed', sandboxOpts: { tools: { rtk: 1, codeReviewGraph: 0 } } },
+    { role: 'workerBadTools', sandboxOpts: { gpg: true, tools: 'nope' } },
+    { role: 'workerNoTools', sandboxOpts: { gpg: true } },
+  ]});
+  assert.deepEqual(res.workers[0].spec.sandboxOpts, {
+    gpg: true,
+    sshAgent: false,
+    tools: { rtk: true, codeReviewGraph: true },
+  });
+  assert.deepEqual(res.workers[1].spec.sandboxOpts, {
+    gpg: false,
+    sshAgent: false,
+    tools: { rtk: true, codeReviewGraph: false },
+  });
+  // Non-object tools is treated as absent, same as normalizeSandboxOpts.
+  assert.deepEqual(res.workers[2].spec.sandboxOpts, { gpg: true, sshAgent: false });
+  // No tools key at all -> no tools key in the output.
+  assert.deepEqual(res.workers[3].spec.sandboxOpts, { gpg: true, sshAgent: false });
 });
 
 test('normalizeWorkers: workers explicitly null falls back to the legacy adapter', () => {

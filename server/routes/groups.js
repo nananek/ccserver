@@ -77,9 +77,7 @@ function memberSpecFromBody(spec) {
     else result.model = source.model;
   }
   if (Object.prototype.hasOwnProperty.call(source, 'sandboxOpts')) {
-    result.sandboxOpts = source.sandboxOpts && typeof source.sandboxOpts === 'object'
-      ? { gpg: !!source.sandboxOpts.gpg, sshAgent: !!source.sandboxOpts.sshAgent }
-      : null;
+    result.sandboxOpts = groupManager.normalizeSandboxOpts(source.sandboxOpts);
   }
   return result;
 }
@@ -127,9 +125,7 @@ export function normalizeWorkers(body) {
       if (hasOwn(src, 'app')) spec.app = n.value.app;
       if (hasOwn(src, 'model')) spec.model = n.value.model;
       if (hasOwn(src, 'sandboxOpts')) {
-        spec.sandboxOpts = src.sandboxOpts && typeof src.sandboxOpts === 'object'
-          ? { gpg: !!src.sandboxOpts.gpg, sshAgent: !!src.sandboxOpts.sshAgent }
-          : null;
+        spec.sandboxOpts = groupManager.normalizeSandboxOpts(src.sandboxOpts);
       }
       out.push({ role: n.value.role, spec });
     }
@@ -259,9 +255,7 @@ export async function launchGroupFromSpec(body) {
   if (workers.some(({ spec }) => badModel(spec)) || badModel(orchestrator)) {
     return { ok: false, code: 'validation', message: 'member model must be a string or null' };
   }
-  const sandboxOpts = (input.sandboxOpts && typeof input.sandboxOpts === 'object')
-    ? { gpg: !!input.sandboxOpts.gpg, sshAgent: !!input.sandboxOpts.sshAgent }
-    : null;
+  const sandboxOpts = groupManager.normalizeSandboxOpts(input.sandboxOpts);
 
   const groupId = randomUUID();
   const orchestratorDir = orchestratorDirForCwd(cwd);

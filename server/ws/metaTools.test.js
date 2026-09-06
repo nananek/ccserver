@@ -256,6 +256,16 @@ test('launch_session caps sandboxOpts against the meta agent\'s own grant and at
   assert.deepEqual(out.sandboxOpts, { gpg: true, sshAgent: false }, 'result shows the EFFECTIVE grant');
 });
 
+test('launch_session caps sandboxOpts.tools against the meta agent\'s own grant (regression: PR#114 review, capSandboxOpts used to drop tools)', async () => {
+  const deps = makeDeps({ mySandboxOpts: { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } } });
+  const out = await tools.launchSession(deps, {
+    cwd: '/srv/p',
+    sandboxOpts: { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } },
+  });
+  assert.deepEqual(deps.calls.createdViaApi[0].sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } });
+  assert.deepEqual(out.sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } }, 'result shows the EFFECTIVE grant');
+});
+
 test('launch_session omits sandboxOpts entirely when none requested; failures unwrap', async () => {
   const deps = makeDeps({ mySandboxOpts: { gpg: true, sshAgent: true } });
   await tools.launchSession(deps, { cwd: '/srv/p' });
@@ -321,6 +331,20 @@ test('launch_group caps the group flags and each worker spec\'s sandboxOpts', as
   deps.groupLaunchApi.launchGroupFromSpec = async () => ({ ok: false, code: 'conflict', message: 'a group already exists' });
   const err = await tools.launchGroup(deps, { cwd: '/srv/g', workers: [{ role: 'workerA', app: 'claude' }] });
   assert.deepEqual(err, { error: 'conflict', message: 'a group already exists' });
+});
+
+test('launch_group caps sandboxOpts.tools on the group flags and each worker spec (regression: PR#114 review, capSandboxOpts used to drop tools)', async () => {
+  const deps = makeDeps({ mySandboxOpts: { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } } });
+  await tools.launchGroup(deps, {
+    cwd: '/srv/g',
+    workers: [
+      { role: 'workerA', app: 'claude', sandboxOpts: { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } } },
+    ],
+    sandboxOpts: { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } },
+  });
+  const body = deps.calls.launchedGroups[0];
+  assert.deepEqual(body.sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } });
+  assert.deepEqual(body.workers[0].sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } });
 });
 
 test('launch_from_preset expands a snapshot NOW and caps expanded grants', async () => {

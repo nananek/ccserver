@@ -124,7 +124,7 @@ function normalizeDisplayName(name) {
   return t && t.length <= 80 && !/[\u0000-\u001f\u007f]/.test(t) ? t : null;
 }
 
-function normalizeSandboxOpts(opts) {
+export function normalizeSandboxOpts(opts) {
   if (!opts || typeof opts !== 'object') return null;
   const out = { gpg: !!opts.gpg, sshAgent: !!opts.sshAgent };
   // Opt-in tool provisioning (rtk / code-review-graph) -- carried only when the
