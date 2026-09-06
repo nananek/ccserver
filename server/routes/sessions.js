@@ -35,7 +35,7 @@ export async function sessionsRoute(fastify, opts) {
       return reply.code(404).send({ error: 'Session not found' });
     }
     // Explicit teardown: also cancel any scheduled prompt for this session.
-    destroySession(id, { keepSchedule: false });
+    destroySession(id, { keepSchedule: false, reason: 'request' });
     return { success: true, id };
   });
 

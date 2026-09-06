@@ -30,10 +30,59 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
 const SCHEDULES_PATH = join(__dirname, '..', '..', '.scheduled-prompts.json');
 
-const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours for active sessions
-const SESSION_EXITED_TIMEOUT_MS = 30 * 1000;
+const DEFAULT_SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours for active sessions
+// Raised from 30s: a pty that dies while nobody is attached used to take the
+// whole session with it half a minute later, so reopening the tab found
+// SESSION_NOT_FOUND and had to relaunch+resume with no way to see why the
+// process had gone. Five minutes is long enough to come back and read the
+// exit code.
+const DEFAULT_SESSION_EXITED_TIMEOUT_MS = 5 * 60 * 1000;
+const MIN_SESSION_EXITED_TIMEOUT_MS = 1000;
 const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 const IDLE_TIMEOUT_MS = 3000;
+// PTY size negotiation floor. The pty is sized to the SMALLEST viewport among
+// the attached clients, so a single client reporting a degenerate size would
+// otherwise collapse the pty for everyone.
+const MIN_PTY_COLS = 2;
+const MIN_PTY_ROWS = 1;
+
+// Both timeouts are operator-tunable. Parsed once at module load (env changes
+// mid-process are not a supported scenario) but exported as functions so the
+// parsing rules themselves stay directly testable.
+function parseTimeoutEnv(raw, { name, fallback, min }) {
+  if (raw == null || String(raw).trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    console.warn(`[session] ignoring invalid ${name}=${raw} (not a number); using ${fallback}ms`);
+    return fallback;
+  }
+  return Math.max(min, Math.trunc(n));
+}
+
+// Idle (no viewer attached) destroy timeout. 0 or negative disables it
+// entirely -- the session then lives until the pty exits or someone tears it
+// down explicitly.
+export function resolveSessionTimeoutMs(env = process.env) {
+  return parseTimeoutEnv(env.CCSERVER_SESSION_TIMEOUT_MS, {
+    name: 'CCSERVER_SESSION_TIMEOUT_MS',
+    fallback: DEFAULT_SESSION_TIMEOUT_MS,
+    min: 0,
+  });
+}
+
+// Cleanup delay after the pty has exited. Never disabled: an exited session
+// has no process left, and keeping it forever would fill the session list
+// with rows that can never be attached to again.
+export function resolveExitedTimeoutMs(env = process.env) {
+  return parseTimeoutEnv(env.CCSERVER_SESSION_EXITED_TIMEOUT_MS, {
+    name: 'CCSERVER_SESSION_EXITED_TIMEOUT_MS',
+    fallback: DEFAULT_SESSION_EXITED_TIMEOUT_MS,
+    min: MIN_SESSION_EXITED_TIMEOUT_MS,
+  });
+}
+
+const SESSION_TIMEOUT_MS = resolveSessionTimeoutMs();
+const SESSION_EXITED_TIMEOUT_MS = resolveExitedTimeoutMs();
 
 const sessions = new Map();
 
@@ -577,11 +626,16 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     sandboxGitBrokerDir, // its runtime dir (socket + allow-list), removed on teardown
     reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
     ptyProcess,
-    socket: null,
+    // Every attached viewer, mapped to the viewport it last reported. A
+    // session is shared: opening it from a second device adds a socket here
+    // instead of evicting the first (see attachSocket). The viewport values
+    // feed negotiateSize -- the pty is sized to the smallest of them.
+    sockets: new Map(),
     outputBuffer: [],
     bufferSize: 0,
     cols,
     rows,
+    createdAt: Date.now(), // for the uptime figure in the teardown log
     exited: false,
     exitCode: null,
     exitSignal: null,
@@ -687,13 +741,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       session.screenLastChangeAt = Date.now();
     }
 
-    if (session.socket && session.socket.readyState === 1) {
-      try {
-        session.socket.send(JSON.stringify({ type: 'output', data }));
-      } catch {
-        // Prevent output serialization errors from crashing the PTY handler
-      }
-    }
+    broadcast(session, { type: 'output', data });
 
     // Idle detection: reset timer on every output chunk (Claude sessions only)
     if (!session.shell) {
@@ -783,9 +831,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
             session.autoYesBuf = '';
             // Send Enter key — default-focused option is "Yes"
             session.ptyProcess.write('\r');
-            if (session.socket && session.socket.readyState === 1) {
-              session.socket.send(JSON.stringify({ type: 'auto_yes', entry }));
-            }
+            broadcast(session, { type: 'auto_yes', entry });
           }, 500);
         }
       }
@@ -815,16 +861,24 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       }
     }
 
-    if (session.socket && session.socket.readyState === 1) {
-      session.socket.send(JSON.stringify({
-        type: 'exit',
-        exitCode,
-        signal,
-        claudeSessionId: session.claudeSessionId,
-      }));
-    }
+    // Until this landed nothing recorded WHY a session went away, so a pty
+    // that died while the tab was closed was indistinguishable from a
+    // server restart -- both just surfaced as SESSION_NOT_FOUND on the next
+    // open. Log the exit itself, and see destroySession for the teardown.
+    console.log(
+      `[session] ${session.id} pty exited (code=${exitCode}, signal=${signal ?? 'none'}, `
+      + `app=${session.app || (session.shell ? 'shell' : 'unknown')}, cwd=${session.cwd}, `
+      + `viewers=${session.sockets.size}, uptime=${Date.now() - session.createdAt}ms)`
+    );
 
-    if (!session.socket && sessions.has(session.id)) {
+    broadcast(session, {
+      type: 'exit',
+      exitCode,
+      signal,
+      claudeSessionId: session.claudeSessionId,
+    });
+
+    if (session.sockets.size === 0 && sessions.has(session.id)) {
       startTimeout(session, SESSION_EXITED_TIMEOUT_MS);
     }
   });
@@ -1205,27 +1259,25 @@ export function buildScheduleStateMsg(scheduled, error) {
   });
 }
 
-// Push the current schedule state to a session's socket. Needed by any
+// Push the current schedule state to every attached viewer. Needed by any
 // server-internal path that arms/changes a schedule without a client request
 // to respond to (e.g. the auto-session-limit detector in onData) -- unlike
 // schedule_prompt/cancel_schedule/get_schedule, those paths have no
 // request/response leg to piggyback the push on.
 function notifyScheduleState(session) {
-  if (session?.socket && session.socket.readyState === 1) {
-    session.socket.send(buildScheduleStateMsg(scheduledPromptPublic(session)));
-  }
+  if (!session) return;
+  broadcast(session, buildScheduleStateMsg(scheduledPromptPublic(session)));
 }
 
 function notifyFired(session, info, delivered) {
-  if (session?.socket && session.socket.readyState === 1) {
-    session.socket.send(JSON.stringify({
-      type: 'schedule_fired',
-      at: info.at,
-      text: info.text,
-      delivered,
-    }));
-    session.socket.send(JSON.stringify({ type: 'schedule_state', scheduled: null }));
-  }
+  if (!session) return;
+  broadcast(session, {
+    type: 'schedule_fired',
+    at: info.at,
+    text: info.text,
+    delivered,
+  });
+  broadcast(session, { type: 'schedule_state', scheduled: null });
 }
 
 // Schedule-entry matching for the "same project" live-session substitution
@@ -1498,7 +1550,8 @@ export function listSessions() {
     result.push({
       id,
       cwd: session.cwd,
-      connected: session.socket !== null,
+      connected: session.sockets.size > 0,
+      viewers: session.sockets.size,
       shell: session.shell,
       sandbox: session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
@@ -1530,7 +1583,105 @@ export function getSessionManagerApi() {
   return sessionManagerApi;
 }
 
-export function attachSocket(id, socket) {
+// Send one message to every viewer attached to a session. A viewer whose
+// socket has gone away (or throws on send) must never break the pty data
+// path or starve the other viewers, so each send is isolated.
+//
+// Dead sockets are also dropped here. With a single socket per session a
+// stale one was simply overwritten by the next attach, but a SET of viewers
+// keeps anything nobody removed -- and a session whose set never empties is
+// a session whose destroy timer never arms, i.e. a pty that outlives its
+// last real viewer forever. detachSocket is still the normal path (the ws
+// 'close' handler); this is the backstop for a socket that dies without one.
+function broadcast(session, payload) {
+  if (!session?.sockets?.size) return;
+  const str = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  let dead = null;
+  for (const chan of session.sockets.keys()) {
+    if (chan.readyState !== 1) {
+      (dead ??= []).push(chan);
+      continue;
+    }
+    try {
+      chan.send(str);
+    } catch {
+      (dead ??= []).push(chan);
+    }
+  }
+  // Pruning re-runs the size negotiation and can broadcast a `size` of its
+  // own; that recursion terminates because these sockets are gone from the
+  // map by then, so the nested call finds nothing left to prune.
+  if (dead) for (const chan of dead) removeViewer(session, chan);
+}
+
+// The pty has ONE size but a shared session can have several viewers with
+// different window sizes, so the pty runs at the smallest of them (the same
+// choice tmux makes by default): every viewer then sees the full screen,
+// with the roomier ones showing unused margin. Returns null when no viewer
+// has reported a usable viewport, meaning "leave the pty size alone".
+function negotiateSize(session) {
+  let cols = null;
+  let rows = null;
+  for (const viewport of session.sockets.values()) {
+    if (!viewport) continue;
+    const c = Number(viewport.cols);
+    const r = Number(viewport.rows);
+    if (Number.isFinite(c) && c > 0) cols = cols === null ? c : Math.min(cols, c);
+    if (Number.isFinite(r) && r > 0) rows = rows === null ? r : Math.min(rows, r);
+  }
+  if (cols === null || rows === null) return null;
+  return {
+    cols: Math.max(MIN_PTY_COLS, Math.trunc(cols)),
+    rows: Math.max(MIN_PTY_ROWS, Math.trunc(rows)),
+  };
+}
+
+// Resize the pty to the negotiated size and tell every viewer what the
+// agreed size is, so a client whose own request lost the negotiation can
+// render at the size the pty actually uses instead of its own.
+// Returns the size in force (negotiated, or the unchanged current one).
+export function applyNegotiatedSize(session) {
+  const target = negotiateSize(session);
+  const current = { cols: session.cols, rows: session.rows };
+  if (!target) return current;
+  if (target.cols === session.cols && target.rows === session.rows) return current;
+
+  if (!session.exited && session.ptyProcess) {
+    try {
+      session.ptyProcess.resize(target.cols, target.rows);
+    } catch {
+      // pty may have died between the exited check and here
+      return current;
+    }
+  }
+  session.cols = target.cols;
+  session.rows = target.rows;
+  broadcast(session, { type: 'size', cols: target.cols, rows: target.rows });
+  return target;
+}
+
+// Record one viewer's requested window size and re-run the negotiation.
+// Returns the size actually in force so the caller can answer the requester
+// even when its request did not win.
+export function setSocketViewport(id, socket, cols, rows) {
+  const session = sessions.get(id);
+  if (!session || !session.sockets.has(socket)) return null;
+  session.sockets.set(socket, normalizeViewport(cols, rows));
+  return applyNegotiatedSize(session);
+}
+
+function normalizeViewport(cols, rows) {
+  const c = Number(cols);
+  const r = Number(rows);
+  if (!Number.isFinite(c) || !Number.isFinite(r) || c <= 0 || r <= 0) return null;
+  return { cols: Math.trunc(c), rows: Math.trunc(r) };
+}
+
+// Attaching is additive: a second device joins the session instead of
+// evicting the first. (Before this, a new client closed the incumbent with
+// code 4001 and the incumbent's UI gave up reconnecting -- opening a session
+// from a phone kicked the desktop off it.)
+export function attachSocket(id, socket, viewport = null) {
   const session = sessions.get(id);
   if (!session) return false;
 
@@ -1539,38 +1690,59 @@ export function attachSocket(id, socket) {
     session.timeoutTimer = null;
   }
 
-  if (session.socket && session.socket !== socket) {
-    try {
-      session.socket.send(
-        JSON.stringify({ type: 'detached', reason: 'replaced' })
-      );
-      session.socket.close(4001, 'Replaced by new client');
-    } catch {
-      // old socket may already be closed
-    }
+  session.sockets.set(socket, normalizeViewport(viewport?.cols, viewport?.rows));
+  applyNegotiatedSize(session);
+  broadcast(session, { type: 'viewers', count: session.sockets.size });
+  return true;
+}
+
+// Drop one viewer and settle the consequences: a wider negotiated size for
+// whoever is left, or the destroy timer once the session has no viewers at
+// all. No-op if this socket was not attached, so a duplicate detach (or a
+// prune racing the ws 'close' handler) cannot fire spurious viewer events.
+function removeViewer(session, socket) {
+  if (!session.sockets.delete(socket)) return;
+
+  if (session.sockets.size > 0) {
+    // A viewer leaving can widen the negotiated size (it may have been the
+    // smallest one), so re-run it for those still attached.
+    applyNegotiatedSize(session);
+    broadcast(session, { type: 'viewers', count: session.sockets.size });
+    return;
   }
 
-  session.socket = socket;
-  return true;
+  const timeout = session.exited
+    ? SESSION_EXITED_TIMEOUT_MS
+    : SESSION_TIMEOUT_MS;
+  if (timeout > 0) {
+    console.log(
+      `[session] ${session.id} last viewer left; destroying in ${timeout}ms`
+      + `${session.exited ? ' (pty already exited)' : ''}`
+    );
+  }
+  startTimeout(session, timeout);
 }
 
 export function detachSocket(id, socketToDetach) {
   const session = sessions.get(id);
   if (!session) return;
-
-  if (socketToDetach && session.socket !== socketToDetach) return;
-
-  session.socket = null;
-
-  const timeout = session.exited
-    ? SESSION_EXITED_TIMEOUT_MS
-    : SESSION_TIMEOUT_MS;
-  startTimeout(session, timeout);
+  removeViewer(session, socketToDetach);
 }
 
-export function destroySession(id, { keepSchedule = true } = {}) {
+// `reason` is for the teardown log only -- it has no effect on behavior. It
+// exists because sessions used to vanish with no record of which path took
+// them (idle timeout? pty exit cleanup? an explicit teardown? a restart?),
+// which made "my session died early" impossible to diagnose after the fact.
+export function destroySession(id, { keepSchedule = true, reason = 'request' } = {}) {
   const session = sessions.get(id);
   if (!session) return;
+
+  console.log(
+    `[session] ${id} destroyed (reason=${reason}, `
+    + `app=${session.app || (session.shell ? 'shell' : 'unknown')}, cwd=${session.cwd}, `
+    + `uptime=${Date.now() - session.createdAt}ms, ptyExited=${session.exited}, `
+    + `viewers=${session.sockets.size})`
+  );
 
   if (session.timeoutTimer) {
     clearTimeout(session.timeoutTimer);
@@ -1649,7 +1821,7 @@ export function destroySession(id, { keepSchedule = true } = {}) {
 
 export function destroyAllSessions() {
   for (const [id] of sessions) {
-    destroySession(id);
+    destroySession(id, { reason: 'shutdown' });
   }
 }
 
@@ -1765,9 +1937,19 @@ function appendToBuffer(session, data) {
 function startTimeout(session, ms) {
   if (session.timeoutTimer) {
     clearTimeout(session.timeoutTimer);
+    session.timeoutTimer = null;
   }
 
+  // Non-positive = the operator disabled idle destruction
+  // (CCSERVER_SESSION_TIMEOUT_MS=0); the session then survives until its pty
+  // exits or someone tears it down explicitly. The exited-session cleanup
+  // never reaches here with a non-positive value (resolveExitedTimeoutMs
+  // clamps to >= 1s), so an exited session is always eventually reaped.
+  if (!(ms > 0)) return;
+
   session.timeoutTimer = setTimeout(() => {
-    destroySession(session.id);
+    destroySession(session.id, {
+      reason: session.exited ? 'exited-timeout' : 'idle-timeout',
+    });
   }, ms);
 }

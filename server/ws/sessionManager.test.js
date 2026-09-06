@@ -1035,7 +1035,7 @@ test('idle timer no longer sends input_needed, but still advances the settle gat
     id = res.sessionId;
     const s = res.session;
     const sent = [];
-    s.socket = { readyState: 1, send: (m) => sent.push(m) };
+    sessionManager.attachSocket(id, { readyState: 1, send: (m) => sent.push(m) });
     await sleep(3600); // > IDLE_TIMEOUT_MS (3000): the idle timer fires
     assert.equal(s.settled, true, 'settle gate still advances on the first idle gap');
     const types = sent.map((m) => {
@@ -1449,7 +1449,7 @@ test('onData session-limit detection: auto-arm pushes schedule_state to the sock
   const { sessionId, session } = res;
   assert.ok(session, 'shell session should spawn');
   const sent = [];
-  session.socket = { readyState: 1, send: (m) => sent.push(m) };
+  sessionManager.attachSocket(sessionId, { readyState: 1, send: (m) => sent.push(m) });
   try {
     await sleep(400);
     const line = sessionLimitLine(Date.now() + 60 * 60 * 1000);
@@ -1480,7 +1480,7 @@ test('onData session-limit detection: no schedule_state push when a manual sched
     // schedule_prompt WS handler in production, not through this helper) is
     // excluded from `sent` -- this test only cares about the auto-detect path.
     const sent = [];
-    session.socket = { readyState: 1, send: (m) => sent.push(m) };
+    sessionManager.attachSocket(sessionId, { readyState: 1, send: (m) => sent.push(m) });
 
     const line = sessionLimitLine(Date.now() + 60 * 60 * 1000);
     sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
@@ -1550,7 +1550,7 @@ test('onData session-limit detection: a redraw of the same reset time does not r
   const { sessionId, session } = res;
   assert.ok(session, 'shell session should spawn');
   const sent = [];
-  session.socket = { readyState: 1, send: (m) => sent.push(m) };
+  sessionManager.attachSocket(sessionId, { readyState: 1, send: (m) => sent.push(m) });
   try {
     await sleep(400);
     const line = sessionLimitLine(Date.now() + 60 * 60 * 1000);

@@ -139,7 +139,7 @@ async function rpcSessionsDestroy(params) {
   const id = params?.id;
   const session = id ? smMod.getSession(id) : null;
   if (!session) return { ok: false, error: 'session not found' };
-  smMod.destroySession(id, { keepSchedule: false });
+  smMod.destroySession(id, { keepSchedule: false, reason: 'federation' });
   return { ok: true };
 }
 

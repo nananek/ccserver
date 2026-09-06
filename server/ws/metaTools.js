@@ -355,7 +355,12 @@ export async function closeSession(deps, { sessionId, reason } = {}) {
     ),
     payload: { sessionId },
   }, () => {
-    deps.sessionManager.destroySession(sessionId, { keepSchedule: false });
+    // Note the two unrelated `reason`s: this tool's own `reason` argument is
+    // the agent's free-text justification shown in the approval prompt, while
+    // destroySession's is a fixed identifier for the teardown log. The agent's
+    // text is deliberately NOT forwarded there -- a free-form string (newlines
+    // included) has no business inside a structured log line.
+    deps.sessionManager.destroySession(sessionId, { keepSchedule: false, reason: 'meta-agent' });
     return { approved: true, closed: true, sessionId };
   });
 }

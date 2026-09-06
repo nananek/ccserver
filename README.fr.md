@@ -74,6 +74,8 @@ L'application et les options de lancement sont mémorisées dans le `localStorag
 
 Le bouton représentant une horloge permet de programmer des prompts. Ceux-ci sont conservés dans `.scheduled-prompts.json` et peuvent être exécutés après la fermeture du navigateur ou un redémarrage du serveur. L'heure est interprétée dans le fuseau horaire du serveur.
 
+**Partage de session** : une session peut être ouverte simultanément sur plusieurs appareils -- l'ouvrir depuis un téléphone ne déconnecte pas le poste de travail, et les entrées comme les sorties sont partagées par tous (comme une session tmux partagée). Un pty n'a qu'une seule taille : il adopte donc la plus petite fenêtre parmi les clients connectés ; les écrans plus larges affichent une marge inutilisée et chaque client reste lisible. Une session sans aucun client connecté est détruite après `CCSERVER_SESSION_TIMEOUT_MS` (2 heures par défaut ; `0` désactive complètement la destruction), et une session dont le pty s'est terminé est conservée pendant `CCSERVER_SESSION_EXITED_TIMEOUT_MS` (5 minutes par défaut) afin que son code de sortie reste consultable. Chaque destruction de session est journalisée avec son motif -- `journalctl -u ccserver | grep '[session]'` répond à la question « pourquoi ma session s'est-elle terminée ? ». Voir le [guide du partage de session](https://nananek.github.io/ccserver/guides/session-sharing/).
+
 ## Outils MCP
 
 - `ccserver-notify` fournit `notify`, `subscribe`, `unsubscribe` et `list_subscriptions`. Les notifications peuvent être envoyées vers Discord et vers des webhooks abonnés. Configurez-les avec `notify.discordWebhook`, `notify.subscriptions`, `CCSERVER_DISCORD_WEBHOOK` ou `CCSERVER_HOSTNAME`.

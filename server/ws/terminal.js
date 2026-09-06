@@ -6,6 +6,7 @@ import {
   getSession,
   attachSocket,
   detachSocket,
+  setSocketViewport,
   writeToSession,
   setScheduledPrompt,
   cancelScheduledPrompt,
@@ -21,9 +22,9 @@ import {
 // adapter object backed by a federation TLS connection instead of a browser
 // WebSocket (see federationServer.js's header comment for why). `chan` only
 // needs to satisfy the same minimal interface sessionManager.js already
-// expects of `session.socket` everywhere: `.send(jsonString)`, `.close(code,
-// reason)`, and a numeric `.readyState` (1 === open, matching the WebSocket
-// convention `session.socket.readyState === 1` checks already rely on).
+// expects of every entry in `session.sockets`: `.send(jsonString)`,
+// `.close(code, reason)`, and a numeric `.readyState` (1 === open, matching
+// the WebSocket convention the broadcast path relies on).
 //
 // Behavior is unchanged from before this refactor -- every case body below is
 // the same logic that used to close over the route handler's local `socket`
@@ -128,7 +129,7 @@ export function attachTerminalHandler(chan) {
 
         const { sessionId, session } = result;
         currentSessionId = sessionId;
-        attachSocket(sessionId, chan);
+        attachSocket(sessionId, chan, { cols: msg.cols, rows: msg.rows });
 
         chan.send(
           JSON.stringify({
@@ -142,6 +143,8 @@ export function attachTerminalHandler(chan) {
             // can surface a silent downgrade (flag requested but the broker
             // is off) instead of leaving it invisible.
             isMetaAgent: !!session.isMetaAgent,
+            // How many clients (this one included) are watching the session.
+            viewers: session.sockets.size,
           })
         );
         chan.send(scheduleStateMsg(scheduledPromptPublic(session)));
@@ -184,7 +187,10 @@ export function attachTerminalHandler(chan) {
         }
 
         currentSessionId = msg.sessionId;
-        attachSocket(msg.sessionId, chan);
+        // Joining, not taking over: any client already watching this session
+        // stays attached. The viewport rides along so the pty can be sized to
+        // the smallest window among everyone now watching.
+        attachSocket(msg.sessionId, chan, { cols: msg.cols, rows: msg.rows });
 
         chan.send(
           JSON.stringify({
@@ -195,6 +201,7 @@ export function attachTerminalHandler(chan) {
             rows: session.rows,
             isReconnect: true,
             isMetaAgent: !!session.isMetaAgent,
+            viewers: session.sockets.size,
           })
         );
 
@@ -215,11 +222,9 @@ export function attachTerminalHandler(chan) {
           );
         }
 
-        if (msg.cols && msg.rows && !session.exited) {
-          session.ptyProcess.resize(msg.cols, msg.rows);
-          session.cols = msg.cols;
-          session.rows = msg.rows;
-        }
+        // (No direct pty resize here: attachSocket above already registered
+        // this client's viewport and re-ran the negotiation, which resizes
+        // the pty and tells every viewer the agreed size.)
 
         // Send auto-yes state on attach
         if (!session.shell) {
@@ -249,11 +254,15 @@ export function attachTerminalHandler(chan) {
 
       case 'resize': {
         if (currentSessionId && msg.cols && msg.rows) {
-          const session = getSession(currentSessionId);
-          if (session?.ptyProcess && !session.exited) {
-            session.ptyProcess.resize(msg.cols, msg.rows);
-            session.cols = msg.cols;
-            session.rows = msg.rows;
+          // The pty runs at the smallest viewport among the attached
+          // clients, so this request does not necessarily win. Reply with
+          // the size actually in force either way, so a client that lost the
+          // negotiation renders at the pty's size instead of its own (a
+          // change only it would see, since applyNegotiatedSize broadcasts
+          // solely when the agreed size actually moves).
+          const inForce = setSocketViewport(currentSessionId, chan, msg.cols, msg.rows);
+          if (inForce) {
+            chan.send(JSON.stringify({ type: 'size', cols: inForce.cols, rows: inForce.rows }));
           }
         }
         break;

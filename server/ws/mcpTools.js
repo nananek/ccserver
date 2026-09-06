@@ -362,7 +362,7 @@ export function getTabStatus(deps, { sessionId }) {
     app: session.app,
     exited: !!session.exited,
     exitCode: session.exitCode ?? null,
-    connected: !!session.socket,
+    connected: (session.sockets?.size ?? 0) > 0,
     autoYes: !!session.autoYes,
     lastOutputAt: session.lastOutputAt,
     idleForMs: session.lastOutputAt != null ? Date.now() - session.lastOutputAt : null,

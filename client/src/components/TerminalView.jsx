@@ -271,6 +271,16 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // What the last init requested (true/false), so the 'session' response can
   // be checked for a silent downgrade; null once consumed.
   const requestedMetaRef = useRef(null);
+  // Size the server confirmed for the (possibly shared) pty. With a second
+  // device attached the pty runs at the smallest viewport among the clients,
+  // so our own fit() result is only a *request* -- this is what actually
+  // applies. null until the first `size`/`session` message.
+  const serverSizeRef = useRef(null);
+  // Number of clients attached to this session, as last reported by the
+  // server. Kept so the terminal can tell the user why the screen suddenly
+  // shrank (someone joined from a narrower device).
+  const viewerCountRef = useRef(null);
+  const applyServerSizeRef = useRef(null);
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
   const [showAutoYesLog, setShowAutoYesLog] = useState(false);
@@ -426,6 +436,31 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     const pinToBottom = () => {
       if (appRef.current === 'opencode') term.scrollToBottom();
     };
+
+    // A session can be open on several devices at once, and one pty has one
+    // size, so the server runs it at the smallest viewport among the attached
+    // clients and tells everyone the agreed size. Our own fit() is therefore
+    // only a request, and this re-applies the server's answer on top of it.
+    //
+    // `afterFit` marks the call that follows our own fit(): it applies only
+    // while the session is actually shared. Alone, our fit() result is what
+    // the server will agree to anyway, so forcing the previously agreed size
+    // in between would make every resize flicker through the old geometry --
+    // which is why single-client behavior is completely unchanged.
+    const applyServerSize = ({ afterFit = false } = {}) => {
+      if (afterFit && (viewerCountRef.current ?? 1) <= 1) return;
+      const size = serverSizeRef.current;
+      if (!size) return;
+      if (term.cols === size.cols && term.rows === size.rows) return;
+      try {
+        term.resize(size.cols, size.rows);
+      } catch {
+        // terminal disposed mid-resize
+      }
+    };
+    // Exposed for the tab-visibility effect below, which re-fits from its own
+    // scope after the tab is shown again.
+    applyServerSizeRef.current = applyServerSize;
 
     // Re-fit after the font size is corrected so the pty gets the adjusted
     // column count.
@@ -744,6 +779,13 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             sessionIdRef.current = msg.sessionId;
             sessionStorage.setItem(storageKey, msg.sessionId);
             if (onSessionIdRef.current) onSessionIdRef.current(msg.sessionId);
+            // The size the server settled on for this session (it may already
+            // be constrained by another device that was attached first).
+            if (msg.cols && msg.rows) {
+              serverSizeRef.current = { cols: msg.cols, rows: msg.rows };
+              applyServerSize();
+            }
+            if (typeof msg.viewers === 'number') viewerCountRef.current = msg.viewers;
             // 再接続などで同一タブに新しいセッションが始まるケースがあるため、
             // セッション確立のたびにexitedフラグを戻す。
             if (onExitedRef.current) onExitedRef.current(false);
@@ -760,6 +802,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 term.writeln('\r\n[警告: ccserver-meta は注入されませんでした (metaAgentMcp 無効またはブローカー未起動)]');
               }
               requestedMetaRef.current = null;
+            }
+            // Also after the reconnect clear(), for the same reason. Attaching
+            // to a session another device is already on shrinks the screen to
+            // that device's size, which looks like a bug without a word here.
+            if (typeof msg.viewers === 'number' && msg.viewers > 1) {
+              term.writeln(`\r\n[このセッションは他${msg.viewers - 1}台の端末でも開いています。画面は最も小さい端末に合わせて${term.cols}x${term.rows}になります]`);
             }
             if (!selectionModeRef.current) term.focus();
             break;
@@ -857,10 +905,44 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             }
             break;
           }
+          // The pty's agreed size changed -- either our own resize request
+          // was accepted, or another client joined/left and moved the
+          // negotiated minimum. Follow it; applyServerSize is a no-op when we
+          // are already at that size.
+          case 'size':
+            if (msg.cols && msg.rows) {
+              serverSizeRef.current = { cols: msg.cols, rows: msg.rows };
+              applyServerSize();
+              pinToBottom();
+            }
+            break;
+          // Compatibility with a ccserver older than session sharing (most
+          // realistically reached over federation, where the peer instance
+          // upgrades on its own schedule): that server still evicts the
+          // incumbent on attach. Without this the reconnect logic would
+          // fight it -- reconnect, get evicted, reconnect -- so honor the
+          // eviction exactly as before and say why.
           case 'detached':
-            term.writeln('\r\n[Session taken over by another client]');
+            term.writeln('\r\n[Session taken over by another client (server too old to share sessions)]');
             intentionalCloseRef.current = true;
             break;
+          // Another device attached to or left this session. Announced
+          // because it is the reason the screen size can move on its own.
+          case 'viewers': {
+            const count = Number(msg.count);
+            if (Number.isFinite(count)) {
+              const before = viewerCountRef.current;
+              if (before != null && count !== before) {
+                if (count > 1) {
+                  term.writeln(`\r\n[他の端末が接続しました (計${count}台)。画面は最も小さい端末に合わせて${term.cols}x${term.rows}になります]`);
+                } else if (count === 1) {
+                  term.writeln(`\r\n[他の端末が切断しました。画面は${term.cols}x${term.rows}に戻ります]`);
+                }
+              }
+              viewerCountRef.current = count;
+            }
+            break;
+          }
         }
       };
 
@@ -935,6 +1017,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           })
         );
       }
+      // fit() just sized us to this window; on a shared session the pty runs
+      // at the smallest window instead, so snap back to the agreed size. The
+      // server's reply to the resize above confirms or updates it.
+      applyServerSize({ afterFit: true });
     };
 
     const resizeObserver = new ResizeObserver(() => {
@@ -986,6 +1072,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         if (dims && ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
         }
+        // Same as handleResize: on a shared session the pty size is the
+        // negotiated minimum, not whatever this window just fit to.
+        applyServerSizeRef.current?.({ afterFit: true });
       }, 50);
       return () => clearTimeout(timer);
     }

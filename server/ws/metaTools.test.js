@@ -433,7 +433,7 @@ test('close_session: approval outcomes control execution', async () => {
   };
   const ok = await tools.closeSession(deps, { sessionId: 'victim', reason: 'stuck' });
   assert.deepEqual(ok, { approved: true, closed: true, sessionId: 'victim' });
-  assert.deepEqual(deps.calls.destroyedSessions, [['victim', { keepSchedule: false }]]);
+  assert.deepEqual(deps.calls.destroyedSessions, [['victim', { keepSchedule: false, reason: 'meta-agent' }]]);
   const req = deps.calls.approvals.at(-1);
   assert.equal(req.kind, 'close_session');
   assert.deepEqual(req.payload, { sessionId: 'victim' });

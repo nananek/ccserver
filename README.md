@@ -18,6 +18,7 @@
 - `ccserver-notify` MCP による Discord / webhook / Vikunja 通知 — [詳細](https://nananek.github.io/ccserver/guides/notify/)
 - 使用量 (Usage) 表示 (Claude Code `/usage` / Codex レート制限) — [詳細](https://nananek.github.io/ccserver/guides/usage/)
 - 拠点間 (federation) ペアリングによる複数インスタンスのリモート操作 — [詳細](https://nananek.github.io/ccserver/guides/federation/)
+- 複数端末からのセッション共有 (PC とスマートフォンで同じセッションを同時操作) — [詳細](https://nananek.github.io/ccserver/guides/session-sharing/)
 - オーケストレーター + 複数ワーカーの「コンボ起動」(ロール別 git worktree で並行作業) — [詳細](https://nananek.github.io/ccserver/guides/combo-launch/)
 
 ## アーキテクチャ

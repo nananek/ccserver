@@ -74,6 +74,8 @@ The selected application and launch options are remembered in the browser's `loc
 
 Scheduled prompts can be created with the clock button in the terminal header. They are persisted on disk in `.scheduled-prompts.json` and can fire after the browser is closed or the server restarts. The time is interpreted in the server's timezone.
 
+**Session sharing**: a session can be open on several devices at once -- opening it from a phone does not disconnect the desktop, and input and output are shared by all of them (like a shared tmux session). A pty has a single size, so it runs at the smallest viewport among the attached clients; roomier screens show unused margin and every client stays readable. A session with no client attached is destroyed after `CCSERVER_SESSION_TIMEOUT_MS` (default 2 hours; `0` disables destruction entirely), and one whose pty has exited is kept for `CCSERVER_SESSION_EXITED_TIMEOUT_MS` (default 5 minutes) so its exit code can still be read. Session teardown is logged with its reason -- `journalctl -u ccserver | grep '[session]'` answers "why did my session end?". See the [session sharing guide](https://nananek.github.io/ccserver/guides/session-sharing/).
+
 ## MCP Tools
 
 - `ccserver-notify` provides `notify`, `subscribe`, `unsubscribe`, and `list_subscriptions`. Notifications can be delivered to a Discord webhook and runtime webhook subscriptions. Configure them with `notify.discordWebhook`, `notify.subscriptions`, `CCSERVER_DISCORD_WEBHOOK`, or `CCSERVER_HOSTNAME`.

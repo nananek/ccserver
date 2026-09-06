@@ -38,6 +38,7 @@ export default defineConfig({
 						{ label: 'メタエージェント (ccserver-meta)', slug: 'guides/meta-agent' },
 						{ label: 'コードレビュー (ccserver-reviewer)', slug: 'guides/reviewer' },
 						{ label: '拠点間 (federation) ペアリング', slug: 'guides/federation' },
+						{ label: 'セッション共有と寿命', slug: 'guides/session-sharing' },
 						{ label: 'コンボ起動', slug: 'guides/combo-launch' },
 					],
 				},

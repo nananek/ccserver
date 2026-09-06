@@ -359,7 +359,7 @@ export function listGroupMembers(groupId) {
       model: session?.model ?? saved?.model ?? group.memberPrefs[role]?.model ?? null,
       cwd: session?.cwd ?? saved?.cwd ?? null,
       exited: session ? !!session.exited : true,
-      connected: !!(session?.socket),
+      connected: (session?.sockets?.size ?? 0) > 0,
       // Activity: ms since the member last produced output (null when there
       // is no live session to timestamp, e.g. a restored member).
       lastOutputAt: session?.lastOutputAt ?? null,
@@ -933,7 +933,7 @@ export async function addMember(groupId, role, options = {}) {
   }
 
   // New member is fully in place -- only now retire the previous occupant.
-  if (prevSessionId) sessionApi.destroySession(prevSessionId, { keepSchedule: false });
+  if (prevSessionId) sessionApi.destroySession(prevSessionId, { keepSchedule: false, reason: 'group-replace' });
   registerMember(groupId, role, res.sessionId);
   // normalizeMemberPref's fallback merge keeps a display name across open_tab
   // replacements unless the call explicitly passes a new one.
@@ -976,7 +976,7 @@ async function ensureHandoffChannel(group, role) {
 export function removeMember(groupId, sessionId) {
   const group = groups.get(groupId);
   if (!group) return;
-  sessionApi.destroySession(sessionId, { keepSchedule: false });
+  sessionApi.destroySession(sessionId, { keepSchedule: false, reason: 'group-remove-member' });
   cleanupMemberChannels(group, sessionId);
   let removedRole = null;
   for (const [role, sid] of group.members) {
@@ -1156,7 +1156,7 @@ export function destroyGroup(groupId) {
   group.pendingTakes.clear();
   for (const sessionId of [...group.members.values()]) {
     try {
-      sessionApi.destroySession(sessionId, { keepSchedule: false });
+      sessionApi.destroySession(sessionId, { keepSchedule: false, reason: 'group-destroy' });
     } catch {
       // best effort
     }

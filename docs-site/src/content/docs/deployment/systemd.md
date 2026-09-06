@@ -52,7 +52,11 @@ systemctl --user enable ccserver
 sudo loginctl enable-linger "$USER"
 ```
 
-## 4. 動作確認
+## 4. セッションの寿命 (任意)
+
+接続が無いセッションを破棄するまでの時間や、PTY 終了後の保持時間は環境変数で調整できます。既定のままでも動作しますが、`CCSERVER_SESSION_TIMEOUT_MS=0` で「接続が無くてもセッションを維持し続ける」設定にできます。詳細と、セッションが終了した理由の調べ方は[セッション共有と寿命](/ccserver/guides/session-sharing/)を参照してください。
+
+## 5. 動作確認
 
 ```bash
 # ステータス確認

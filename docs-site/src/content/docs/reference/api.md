@@ -63,17 +63,21 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 
 JSON メッセージでターミナル I/O とセッション管理 (アタッチ・予約プロンプト・自動承認) を中継。
 
+1 つのセッションには**複数のクライアントが同時に接続できます**。後から `attach` したクライアントが既存の接続を切ることはなく、`output` などのサーバー発メッセージは接続中の全クライアントへ配信されます。PTY のサイズは 1 つしか持てないため、接続中の全クライアントが申告した `cols`/`rows` の**最小値**が採用され、確定サイズが `size` で通知されます。
+
 | 方向 | type | フィールド | 説明 |
 |------|------|-----------|------|
 | → | `init` | `cwd`, `cols`, `rows`, `claudeSessionId?`, `shell?`, `sandbox?`, `sandboxOpts?`, `app?`, `resume?` | 新規セッションを起動 (`app`: `"claude"` (既定)、`"opencode"`、`"copilot"`、`shell: true` で素のシェル、`resume: true` で opencode/copilot の最終セッションに再開) |
-| → | `attach` | `sessionId`, `cols?`, `rows?` | 既存セッションに再接続 (出力バッファを `replay` で再送) |
+| → | `attach` | `sessionId`, `cols?`, `rows?` | 既存セッションに接続 (出力バッファを `replay` で再送)。既に他のクライアントが接続していても切断されず、共有になる |
 | → | `input` | `data` | キーボード入力 |
-| → | `resize` | `cols`, `rows` | ターミナルリサイズ |
+| → | `resize` | `cols`, `rows` | 希望サイズの申告。共有中は最小値が採用されるため要求どおりとは限らず、確定サイズが `size` で返る |
 | → | `ping` | – | 疎通確認 (`pong` が返る) |
 | → | `set_auto_yes` / `get_auto_yes` | `enabled?` | 確認プロンプトの自動承認 ON/OFF・状態取得 |
 | → | `schedule_prompt` | `time` (`"HH:MM"`) か `at` (epoch ms), `text` | 予約プロンプトを設定 |
 | → | `cancel_schedule` / `get_schedule` | – | 予約の解除・現在状態の取得 |
-| ← | `session` | `sessionId`, `cwd`, `cols`, `rows`, `isReconnect` | スポーン/再接続完了 |
+| ← | `session` | `sessionId`, `cwd`, `cols`, `rows`, `isReconnect`, `isMetaAgent`, `viewers` | スポーン/接続完了 (`viewers`: 自分を含む接続クライアント数) |
+| ← | `size` | `cols`, `rows` | PTY の確定サイズ。自分の `resize` への応答、および他クライアントの接続・切断で最小値が変わった時に全クライアントへ配信 |
+| ← | `viewers` | `count` | 接続クライアント数の変化 (接続・切断時) |
 | ← | `output` | `data` | ターミナル出力 |
 | ← | `replay` | `data` | `attach` 時、切断中に貯まった出力バッファを再送 (複数回届く) |
 | ← | `exit` | `exitCode`, `signal`, `claudeSessionId` | プロセス終了 |

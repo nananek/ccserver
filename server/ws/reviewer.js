@@ -659,7 +659,7 @@ async function completeReviewJob({ jobId, sessionId, projectCwd, number, started
     // called with no summary at all).
     const summary = resultSummary || (session ? summarizeSessionOutput(session) : `review ${status}`);
     const postedToPr = number ? await checkPrCommentPosted(projectCwd, number, startedAt) : false;
-    if (session && !session.exited) sessionManager.destroySession(sessionId, { keepSchedule: false });
+    if (session && !session.exited) sessionManager.destroySession(sessionId, { keepSchedule: false, reason: 'reviewer' });
     removeReviewWorktree(projectCwd, jobId);
     await cleanupSandboxHome(reviewWorktreePath(projectCwd, jobId));
     markReviewFinished(jobId, { status, resultSummary: summary, postedToPr });
