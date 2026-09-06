@@ -103,8 +103,12 @@ test('two failures in a row explain the connection problem instead of showing th
   await expect(retryBtn(menu)).toBeVisible();
   // The old raw-message wording is gone from the UI...
   await expect(menu.locator('.usage-empty')).not.toContainText('取得できませんでした');
-  // ...but stays reachable on hover, which is how this bug got diagnosed.
-  await expect(menu.locator('.usage-error-hint')).toHaveAttribute('title', /fetch/i);
+  // ...but stays reachable behind a tap, which is how this bug got diagnosed.
+  // Not behind a hover: the phone on the flaky tunnel has none.
+  const raw = menu.locator('.usage-error-raw');
+  await expect(raw).toBeHidden();
+  await menu.locator('.usage-error-detail summary').click();
+  await expect(raw).toContainText(/fetch/i);
 });
 
 test('the 再試行 button recovers once the connection is back', async ({ page }) => {

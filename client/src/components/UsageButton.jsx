@@ -298,11 +298,17 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
               {loading ? '読み込み中…' : data?.transient ? (
                 <div className="usage-error">
                   <div className="usage-error-title">サーバーに接続できませんでした</div>
-                  {/* The raw message stays reachable on hover: it is what let the
-                      original report pin this on the transport layer. */}
-                  <div className="usage-error-hint" title={data.error}>
+                  <div className="usage-error-hint">
                     ネットワークが不安定な可能性があります (Tailscale 経由の場合は接続の切り替わり中など)。自動再試行も失敗しました。
                   </div>
+                  {/* The raw message is what let the original report pin this on
+                      the transport layer, so it stays -- behind a tap rather
+                      than a hover, since the phone on the flaky tunnel is
+                      exactly the device that has no hover. */}
+                  <details className="usage-error-detail">
+                    <summary>詳細</summary>
+                    <div className="usage-error-raw">{data.error}</div>
+                  </details>
                   <button
                     className="btn btn-secondary btn-sm"
                     onClick={() => load(false)}

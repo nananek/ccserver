@@ -3305,6 +3305,18 @@ body {
   line-height: 1.5;
 }
 
+.usage-error-detail summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.usage-error-raw {
+  margin-top: 4px;
+  word-break: break-word;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+}
+
 .usage-cost {
   margin-top: 10px;
   font-size: 11px;
