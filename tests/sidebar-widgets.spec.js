@@ -581,28 +581,17 @@ test('temperatures with only missing values make no widget', async ({ page }) =>
   })).toBeVisible();
 });
 
-test('usage tab selection syncs between the sidebar widget and the header popover', async ({ page }) => {
+test('usage tab selection in the sidebar widget switches the displayed app', async ({ page }) => {
   mockRoutes(page);
   await page.goto('/');
 
   const widget = page.locator('.usage-widget');
-  const badge = page.locator('.usage-btn .usage-btn-app');
   await expect(widget.locator('.usage-tab.active')).toHaveText('Claude');
-  await expect(badge).toHaveText('(claude)');
+  await expect(widget.locator('.usage-limit-pct').first()).toHaveText('10%');
 
-  // ウィジェット側の切替がヘッダーバッジに即時反映される
   await widget.locator('.usage-tab', { hasText: 'Codex' }).click();
   await expect(widget.locator('.usage-tab.active')).toHaveText('Codex');
-  await expect(badge).toHaveText('(codex)');
-
-  // 逆方向: ポップオーバー側の切替がウィジェットに反映される
-  await page.locator('.usage-btn').click();
-  const menu = page.locator('.usage-menu');
-  await expect(menu).toBeVisible();
-  await expect(menu.locator('.usage-tab.active')).toHaveText('Codex');
-  await menu.locator('.usage-tab', { hasText: 'Claude' }).click();
-  await expect(widget.locator('.usage-tab.active')).toHaveText('Claude');
-  await expect(badge).toHaveText('(claude)');
+  await expect(widget.locator('.usage-limit-pct').first()).toHaveText('55%');
 });
 
 test('usage api error shows the error state instead of bogus data', async ({ page }) => {

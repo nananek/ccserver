@@ -27,6 +27,9 @@ export default function SettingsView({
   onSandboxDefaultsChange,
   navGuardMode,
   onNavGuardModeChange,
+  notifyEnabled,
+  notifyPermission,
+  onToggleNotify,
 }) {
   const [activeKey, setActiveKey] = useState('general');
 
@@ -77,6 +80,9 @@ export default function SettingsView({
               onSandboxDefaultsChange={onSandboxDefaultsChange}
               navGuardMode={navGuardMode}
               onNavGuardModeChange={onNavGuardModeChange}
+              notifyEnabled={notifyEnabled}
+              notifyPermission={notifyPermission}
+              onToggleNotify={onToggleNotify}
             />
           )}
           {activeKey === 'sandboxes' && <SandboxSection />}

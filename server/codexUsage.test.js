@@ -1,4 +1,4 @@
-// Unit tests for the pure GetAccountRateLimitsResponse -> UsageButton shape
+// Unit tests for the pure GetAccountRateLimitsResponse -> UsageWidget shape
 // mapping. Does NOT cover getCodexUsage()/capture()'s actual capture path --
 // that spawns the real `codex` binary, which isn't something a unit test
 // should trigger (see server/routes/usage.test.js's header comment for the

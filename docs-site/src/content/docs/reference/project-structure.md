@@ -68,7 +68,7 @@ ccserver/
         ├── components/
         │   ├── DirectoryBrowser.jsx
         │   ├── TerminalView.jsx    # 遅延ロード (初期バンドル削減)
-        │   ├── UsageButton.jsx
+        │   ├── widgets/UsageWidget.jsx  # 右サイドバーの使用量表示
         │   └── ApprovalBanner.jsx  # メタエージェント承認待ちグローバルバナー (ポーリング)
         └── styles/
             └── app.css

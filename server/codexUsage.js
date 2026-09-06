@@ -60,7 +60,7 @@ function mapWindow(win, mins) {
 }
 
 // Turn a GetAccountRateLimitsResponse's `rateLimits` (RateLimitSnapshot) into
-// the same shape server/usage.js's parseUsage() produces, so UsageButton.jsx
+// the same shape server/usage.js's parseUsage() produces, so UsageWidget.jsx
 // needs no app-specific rendering logic. rateLimitsByLimitId, credits and
 // rateLimitResetCredits are intentionally not surfaced (v1 scope).
 export function mapRateLimits(rateLimits) {

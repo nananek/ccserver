@@ -85,11 +85,11 @@ test.describe('Settings general section', () => {
     await expect(page.locator('.main-row')).toHaveClass(/sidebar-overlay/);
     // 重ね表示中もタブバーのトグルボタンはサイドバーに覆われず、
     // クリックで閉じられる (サイドバー自体に閉じるボタンはないため)。
-    const toggle = page.getByRole('button', { name: 'サイドバーを閉じる' });
+    const toggle = page.getByRole('button', { name: 'Widgetsパネルを閉じる' });
     await expect(toggle).toBeVisible();
     await toggle.click();
     await expect(page.locator('.right-sidebar')).toBeHidden();
-    await page.getByRole('button', { name: 'サイドバーを開く' }).click();
+    await page.getByRole('button', { name: 'Widgetsパネルを開く' }).click();
     await expect(page.locator('.right-sidebar')).toBeVisible();
     await check.uncheck();
     await expect(page.locator('.main-row')).not.toHaveClass(/sidebar-overlay/);

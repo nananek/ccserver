@@ -958,11 +958,12 @@ body {
 .sidebar-toggle-btn {
   align-self: center;
   margin-right: 8px;
-  padding: 4px 8px;
-  font-size: 12px;
+  padding: 6px 8px;
   line-height: 1;
   flex-shrink: 0;
-  /* 隣のUsageボタンと揃えたゴースト表示 (.usage-btnと同一方針) */
+  display: flex;
+  align-items: center;
+  /* 隣のSettingsボタンと揃えたゴースト表示 (.settings-tab-btnと同一方針) */
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-secondary);
@@ -1287,24 +1288,6 @@ body {
 .browser-header h1 {
   font-size: 24px;
   font-weight: 600;
-}
-
-.settings-icon-btn {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  padding: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: color 0.15s, border-color 0.15s;
-}
-
-.settings-icon-btn:hover {
-  color: var(--accent);
-  border-color: var(--accent);
 }
 
 /* Settings page */
@@ -3525,21 +3508,13 @@ body {
   }
 }
 
-/* ── Usage button + popover (top bar) ───────────────────────────── */
+/* ── Tab bar trailing controls (Settings / Widgets toggle) ───────── */
 .tab-bar-spacer {
   flex: 1 1 auto;
   min-width: 12px;
 }
 
-.usage-picker {
-  position: relative;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  padding: 0 8px;
-}
-
-.usage-btn {
+.settings-tab-btn {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3550,54 +3525,17 @@ body {
   padding: 6px 10px;
   border-radius: 6px;
   line-height: 1;
-  font-size: 12px;
+  margin-right: 4px;
 }
 
-.usage-btn:hover {
+.settings-tab-btn:hover {
   background: var(--bg-surface);
   border-color: var(--border);
 }
 
-.usage-btn-label {
-  font-weight: 500;
-}
-
-.usage-btn-pct {
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 10px;
-  background: var(--bg-surface);
-  color: var(--text-muted);
-  border: 1px solid var(--border);
-}
-
-.usage-btn-pct.high {
-  color: var(--error);
-  border-color: var(--error);
-}
-
-.usage-btn-app {
-  font-size: 11px;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.usage-menu {
-  position: absolute;
-  top: 100%;
-  right: 8px;
-  margin-top: 6px;
-  width: 300px;
-  max-width: calc(100vw - 24px);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  padding: 12px;
-  z-index: 50;
-}
-
+/* Usage popover panel body (shared with the sidebar UsageWidget via
+   UsagePanel.jsx -- keep selectors here even though the tab-bar popover
+   that used to open it has been removed). */
 .usage-menu-header {
   display: flex;
   align-items: center;

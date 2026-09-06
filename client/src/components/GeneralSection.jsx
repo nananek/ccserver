@@ -1,6 +1,7 @@
 import { getThemeIds, getTheme } from '../themes.js';
 
-// "一般" メニュー: テーマ・終了確認・戻る/進むガード・セッション表示・ウィジェット表示・サンドボックス既定値。
+// "一般" メニュー: テーマ・終了確認・戻る/進むガード・セッション表示・ウィジェット表示・
+// デスクトップ通知・サンドボックス既定値。
 // いずれも即時反映し、localStorage に永続化される (保存先の詳細は
 // 各 setter 側 = App.jsx / useWidgetPrefs.js / useSessionSidebarPrefs.js / themes.js / sandboxDefaults.js を参照)。
 export default function GeneralSection({
@@ -18,6 +19,9 @@ export default function GeneralSection({
   onSandboxDefaultsChange,
   navGuardMode,
   onNavGuardModeChange,
+  notifyEnabled,
+  notifyPermission,
+  onToggleNotify,
 }) {
   const updateSandboxDefault = (key, value) => {
     onSandboxDefaultsChange({ ...sandboxDefaults, [key]: value });
@@ -106,6 +110,22 @@ export default function GeneralSection({
       <p className="settings-hint">
         オンにすると、デスクトップ幅でも右サイドバーがCLIのサイズを変更せず
         前面に重ねて表示されます (左セッションとは独立した設定です)。
+      </p>
+      <label className="general-setting-check">
+        <input
+          type="checkbox"
+          checked={!!notifyEnabled}
+          disabled={notifyPermission === 'denied' || notifyPermission === 'unsupported'}
+          onChange={onToggleNotify}
+        />
+        デスクトップ通知を有効にする
+      </label>
+      <p className="settings-hint">
+        {notifyPermission === 'denied'
+          ? 'ブラウザの通知権限がブロックされています。ブラウザ側の設定から許可してください。'
+          : notifyPermission === 'unsupported'
+            ? 'このブラウザは通知に対応していません。'
+            : 'セッションの入力待ちなどをブラウザ通知でお知らせします。'}
       </p>
       <h4 className="general-setting-subhead">サンドボックス起動の既定値</h4>
       <label className="general-setting-check">

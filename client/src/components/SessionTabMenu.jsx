@@ -5,7 +5,7 @@ import { moveMenuFocus } from './sessionMenuNav.js';
 // セッションタブ用ハンバーガーメニュー: 開いている terminal タブと group
 // (コンボ) タブを上段、サーバー上で稼働中だが未オープンのセッションを下段に
 // 縦並びで表示する。
-// 開閉はウィジェット系 (RightSidebar / UsageButton) と同じ方式:
+// 開閉はウィジェット系 (RightSidebar) と同じ方式:
 // ラッパー ref による外側 mousedown で閉じる + Escape で閉じる。
 //
 // 一覧の実体は SessionList.jsx (左サイドバーと共用)。ここは popup ラッパー

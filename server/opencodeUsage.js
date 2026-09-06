@@ -18,11 +18,11 @@
 //      ~/.local/share/opencode/auth.json (or OPENCODE_AUTH_CONTENT).
 //      Synchronous and network-free, so GET /api/dirs/home can report it.
 //   3. subscription validity: a 403 from the endpoint means "no Go
-//      subscription on this key" and surfaces as an in-popover message
+//      subscription on this key" and surfaces as an in-widget message
 //      (not a silent hide) so the cause is visible.
 //
 // The mapped result uses the same shape parseUsage()/mapRateLimits()
-// produce, so UsageButton.jsx needs no app-specific rendering logic.
+// produce, so UsageWidget.jsx needs no app-specific rendering logic.
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -128,7 +128,7 @@ export function opencodeGoAvailable(cfg = loadSandboxConfig()) {
 
 // Window descriptors: rolling = the 5-hour limit, weekly = 7d. monthly
 // anchors on the subscription anniversary (not a fixed span), so it
-// deliberately carries no windowMs -- UsageButton's pace marker then
+// deliberately carries no windowMs -- UsageWidget's pace marker then
 // hides itself for that row (same as a null resetAt).
 const WINDOWS = [
   { key: 'rolling', label: '5時間', windowMs: 5 * 3600 * 1000 },
@@ -143,7 +143,7 @@ function mapWindow(raw, { label, windowMs }) {
   // (e.g. 104%), and that's a normal state to surface, not a malformed
   // payload -- rejecting it here used to discard the whole fetch (see
   // getOpencodeUsage's WINDOWS.length check), hiding two otherwise-valid
-  // windows along with it. UsageButton.jsx already clamps the bar width.
+  // windows along with it. UsageWidget.jsx already clamps the bar width.
   if (typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0) return null;
   if (status !== 'ok' && status !== 'rate-limited') return null;
   const resetAt = typeof resetsAt === 'string' ? Date.parse(resetsAt) : NaN;

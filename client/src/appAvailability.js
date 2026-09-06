@@ -2,8 +2,8 @@
 // (or availableApps not fetched yet, in which case nothing is disabled --
 // the old-server / not-yet-loaded fallback) AND not hidden via
 // sandbox.config.json's hiddenApps (issue #105). Shared by every
-// picker/predicate that needs this definition (App.jsx's Usage-button
-// visibility, UsageButton's own tab picker, DirectoryBrowser's launch
+// picker/predicate that needs this definition (App.jsx's UsageWidget
+// visibility, UsageWidget's own tab picker, DirectoryBrowser's launch
 // pickers, MetaLaunchDialog's app picker) so "installed AND not hidden"
 // can't drift between them.
 export function isAppSelectable(app, availableApps, hiddenApps) {
@@ -13,7 +13,7 @@ export function isAppSelectable(app, availableApps, hiddenApps) {
 
 // Whether `app` should show up in a picker/tab list, covering opencode Go's
 // special rule on top of isAppSelectable's claude/codex rule. Shared by
-// App.jsx's Usage-button visibility and UsageButton's own tab picker so the
+// App.jsx's UsageWidget visibility and UsageWidget's own tab picker so the
 // two definitions can't drift (previously duplicated in each file).
 //
 // opencode Go is NOT the opencode CLI install flag (a Go subscription needs

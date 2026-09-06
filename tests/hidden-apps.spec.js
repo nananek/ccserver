@@ -6,7 +6,7 @@ import { test, expect } from '@playwright/test';
 // must be removed ENTIRELY -- no partial/greyed hide mode -- from all 5
 // launch surfaces: the single-launch modal, the combo role pickers (workerA/
 // workerB/orchestrator), the worker preset management dialog, the
-// meta-agent launch dialog, and the Usage button's app tabs.
+// meta-agent launch dialog, and the Usage widget's app tabs.
 //
 // /api/dirs/home is fully stubbed (metaAgentEnabled included) so this suite
 // is independent of what's actually installed/configured on the machine
@@ -157,7 +157,7 @@ test('meta-agent launch is disabled (not silently sent) when the remembered app 
   await expect(launchBtn).toBeDisabled();
 });
 
-test('Usage button drops the codex tab entirely when codex is hidden', async ({ page }) => {
+test('Usage widget drops the codex tab entirely when codex is hidden', async ({ page }) => {
   await stubDirsHome(page);
   await page.route('**/api/usage**', async (route) => {
     await route.fulfill({
@@ -167,14 +167,12 @@ test('Usage button drops the codex tab entirely when codex is hidden', async ({ 
     });
   });
   await page.goto('/');
-  const btn = page.locator('.usage-btn');
-  await expect(btn).toBeVisible();
-  await expect(btn.locator('.usage-btn-app')).toHaveText('(claude)');
-  await btn.click();
-  await expect(page.locator('.usage-menu')).toBeVisible();
-  // The tab switcher only renders when BOTH claude and codex are selectable
-  // (see UsageButton's claudeAvailable && codexAvailable) -- with codex
-  // hidden, only one app is left, so it must be entirely absent.
-  await expect(page.locator('.usage-tabs')).toHaveCount(0);
-  await expect(page.locator('.usage-tab', { hasText: 'Codex' })).toHaveCount(0);
+  const widget = page.locator('.usage-widget');
+  await expect(widget).toBeVisible();
+  // The tab switcher only renders when more than one app is selectable -- with
+  // codex hidden, only claude is left, so it must be entirely absent (and the
+  // header label is the only way to tell which app is showing).
+  await expect(widget.locator('.usage-menu-header span')).toHaveText('Claude 使用量');
+  await expect(widget.locator('.usage-tabs')).toHaveCount(0);
+  await expect(widget.locator('.usage-tab', { hasText: 'Codex' })).toHaveCount(0);
 });
