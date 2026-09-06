@@ -715,7 +715,7 @@ export function loadSandboxConfig() {
 // Which tools to provision into the sandbox HOME, and their pinned specs.
 // sandbox.config.json's "tools" supplies the server-wide fallback (off unless
 // enabled there); the client's per-session sandboxOpts.tools -- which the launch
-// menu defaults to ON for rtk / code-review-graph, remembered per directory
+// menu defaults to OFF (opt-in), remembered per directory
 // (see DirectoryBrowser) -- overrides it. Returns { rtk, codeReviewGraph,
 // rtkSpec, crgSpec } where rtkSpec/crgSpec are the { version, url, sha256, ... }
 // payloads for sandbox-provision.sh (null when the tool is disabled).

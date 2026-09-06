@@ -8,13 +8,13 @@ export const SANDBOX_DEFAULT_SSH_AGENT_KEY = 'ccserver-default-sandbox-ssh-agent
 export const SANDBOX_DEFAULT_RTK_KEY = 'ccserver-default-sandbox-rtk';
 export const SANDBOX_DEFAULT_CRG_KEY = 'ccserver-default-sandbox-code-review-graph';
 
-// 現行の起動メニューと同一 (gpg/sshAgent=オフ、ツール導入=オン) にして、
-// 既存ユーザーの挙動を変えない。
+// すべて既定オフ。ツール導入は初回コスト (ダウンロード・pip) がかかるため
+// 明示のオプトインとする。
 export const SANDBOX_DEFAULTS = {
   gpg: false,
   sshAgent: false,
-  rtk: true,
-  codeReviewGraph: true,
+  rtk: false,
+  codeReviewGraph: false,
 };
 
 function loadFlag(key, defaultValue) {

@@ -95,7 +95,7 @@ test.describe('Settings general section', () => {
     await expect(page.locator('.main-row')).not.toHaveClass(/sidebar-overlay/);
   });
 
-  test('sandbox defaults default to off/off/on/on and persist', async ({ page }) => {
+  test('sandbox defaults default to off/off/off/off and persist', async ({ page }) => {
     const panel = page.locator('[role="tabpanel"]');
     const gpg = panel.getByLabel('GPG署名を使う');
     const ssh = panel.getByLabel('ssh-agentを転送する');
@@ -103,13 +103,13 @@ test.describe('Settings general section', () => {
     const crg = panel.getByLabel('code-review-graph MCP を導入する');
     await expect(gpg).not.toBeChecked();
     await expect(ssh).not.toBeChecked();
-    await expect(rtk).toBeChecked();
-    await expect(crg).toBeChecked();
+    await expect(rtk).not.toBeChecked();
+    await expect(crg).not.toBeChecked();
     // 変更が localStorage に永続化される。
     await gpg.check();
     await ssh.check();
-    await rtk.uncheck();
-    await crg.uncheck();
+    await rtk.check();
+    await crg.check();
     await expect
       .poll(() => page.evaluate(() => localStorage.getItem('ccserver-default-sandbox-gpg')))
       .toBe('1');
@@ -118,10 +118,10 @@ test.describe('Settings general section', () => {
       .toBe('1');
     await expect
       .poll(() => page.evaluate(() => localStorage.getItem('ccserver-default-sandbox-rtk')))
-      .toBe('0');
+      .toBe('1');
     await expect
       .poll(() => page.evaluate(() => localStorage.getItem('ccserver-default-sandbox-code-review-graph')))
-      .toBe('0');
+      .toBe('1');
     // リロード後も復元される。
     await page.reload();
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
@@ -129,8 +129,8 @@ test.describe('Settings general section', () => {
     const panel2 = page.locator('[role="tabpanel"]');
     await expect(panel2.getByLabel('GPG署名を使う')).toBeChecked();
     await expect(panel2.getByLabel('ssh-agentを転送する')).toBeChecked();
-    await expect(panel2.getByLabel('rtk を導入する')).not.toBeChecked();
-    await expect(panel2.getByLabel('code-review-graph MCP を導入する')).not.toBeChecked();
+    await expect(panel2.getByLabel('rtk を導入する')).toBeChecked();
+    await expect(panel2.getByLabel('code-review-graph MCP を導入する')).toBeChecked();
   });
 
   test('nav guard select defaults to confirm and persists', async ({ page }) => {
