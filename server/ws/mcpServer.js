@@ -88,6 +88,23 @@ export class SocketTransport {
   }
 }
 
+// Shared sandboxOpts shape for open_tab/launch_session/launch_group -- mirrors
+// groupManager.normalizeSandboxOpts's tools sub-object (rtk / codeReviewGraph).
+// Without the `tools` field here, the MCP SDK's zod parse (mcp.js's
+// safeParseAsync -> parseResult.data passed to the handler) silently strips
+// any sandboxOpts.tools the caller sent, before capSandboxOpts ever runs.
+// launchPresetWorkersSchema below deliberately does NOT reuse this: presets
+// have no sandbox_tools DB column yet, so accepting the field here would
+// silently vanish it on save either way.
+export const sandboxOptsSchema = z.object({
+  gpg: z.boolean().optional(),
+  sshAgent: z.boolean().optional(),
+  tools: z.object({
+    rtk: z.boolean().optional(),
+    codeReviewGraph: z.boolean().optional(),
+  }).optional(),
+}).optional();
+
 // deps: { groupId, groupManager, sessionManager }
 export function buildControlMcpServer(deps) {
   const server = new McpServer({ name: 'ccserver-control', version: '1.0.0' });
@@ -135,7 +152,7 @@ export function buildControlMcpServer(deps) {
       app: z.enum(['claude', 'opencode', 'codex']).optional(),
       model: z.string().nullable().optional(),
       cwd: z.string(),
-      sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
+      sandboxOpts: sandboxOptsSchema,
     },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await tools.openTab(deps, args)) }] }),
   );
@@ -530,7 +547,7 @@ export function buildMetaMcpServer(deps) {
       app: z.enum(['claude', 'opencode', 'codex']).optional(),
       model: z.string().nullable().optional(),
       sandbox: z.boolean().optional(),
-      sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
+      sandboxOpts: sandboxOptsSchema,
     },
     async (args) => text(await metaTools.launchSession(deps, args)),
   );
@@ -544,12 +561,12 @@ export function buildMetaMcpServer(deps) {
         app: z.enum(['claude', 'opencode', 'codex']).optional(),
         model: z.string().nullable().optional(),
         name: z.string().nullable().optional(),
-        sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
+        sandboxOpts: sandboxOptsSchema,
       })).min(1).max(7),
       instructions: z.string().nullable().optional(),
       orchestratorApp: z.enum(['claude', 'opencode', 'codex']).optional(),
       orchestratorModel: z.string().nullable().optional(),
-      sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
+      sandboxOpts: sandboxOptsSchema,
     },
     async (args) => text(await metaTools.launchGroup(deps, args)),
   );

@@ -212,6 +212,12 @@ test('open_tab schema: optional model/app, required cwd, no identity inputs', as
   assert.deepEqual(props.app.enum, ['claude', 'opencode', 'codex']);
   assert.ok(openTab.inputSchema.required.includes('role'), 'role stays required (never defaulted)');
   assert.ok(openTab.inputSchema.required.includes('cwd'), 'cwd stays required');
+  // Regression: mcpTools.js's capSandboxOpts learned to cap sandboxOpts.tools
+  // (PR#114 review), but that only matters if the wire schema actually lets
+  // tools through -- a bare { gpg, sshAgent } shape here would have the SDK's
+  // own zod parse silently strip it before capSandboxOpts ever runs.
+  assert.ok('tools' in props.sandboxOpts.properties, 'sandboxOpts.tools must be a declared input, not stripped by the wire schema');
+  assert.deepEqual(Object.keys(props.sandboxOpts.properties.tools.properties).sort(), ['codeReviewGraph', 'rtk']);
   for (const forbidden of ['groupId', 'sessionId']) {
     assert.ok(!(forbidden in props), `open_tab must never take ${forbidden} from the wire`);
   }
