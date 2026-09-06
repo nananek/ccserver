@@ -16,6 +16,15 @@ async function gotoApp(page) {
   await expect(openTerminalBtn(page)).toBeVisible();
 }
 
+// pty確立 (サーバー側セッション生成) を待つ。タブ行・バッジはクリック直後に
+// 同期描画されるが、確立メッセージは非同期で遅れて届き、TerminalView が
+// その際に term.focus() でフォーカスを奪う。メニュー操作の前に消化させる
+// ことでフォーカス系アサーションのフレークを避ける
+// (session-sidebar.spec.js の openShellTab と同一手法)。
+async function waitForShellPrompt(page) {
+  await expect(page.locator('.terminal-container .xterm-rows')).toContainText(/[$#%>]/, { timeout: 15_000 });
+}
+
 // Terminate every session in the lower ("unopened") section. The shared e2e
 // server keeps sessions across tests in this file, so each test cleans up
 // after itself to stay isolated.
@@ -75,6 +84,7 @@ test('hamburger is always at the left end; shell tabs go to the vertical menu, n
   // The horizontal bar must not gain a terminal tab; Files/Remote stay.
   await expect(barTabs(page)).toHaveCount(barCountBefore);
   await expect(page.locator('.session-menu-count')).toHaveText('1');
+  await waitForShellPrompt(page);
 
   // Menu lists the opened session vertically with a running (green) state line.
   // 状態文字(connected/idle/exited)は左線の色で表現するため表示しない。下段右端はCLI名のみ。
@@ -102,6 +112,7 @@ test('menu supports keyboard operation: Enter selects, arrows move focus, Escape
   await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
   await openTerminalBtn(page).click();
   await expect(page.locator('.session-menu-count')).toHaveText('1');
+  await waitForShellPrompt(page);
 
   await hamburger(page).click();
   const select = sessionMenu(page).locator('[data-section="opened"] .session-menu-select').first();
@@ -137,6 +148,7 @@ test('menu X closes the tab; unopened running session appears below and X termin
   await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
   await openTerminalBtn(page).click();
   await expect(page.locator('.session-menu-count')).toHaveText('1');
+  await waitForShellPrompt(page);
 
   // X on the upper item closes the tab (session keeps running server-side).
   await hamburger(page).click();
