@@ -22,7 +22,7 @@ export default function SessionRenameDialog({ initialName, onSubmit, onClose }) 
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    const trimmed = value.replace(/[\u0000-\u001F\u007F]/g, '').trim();
+    const trimmed = value.replace(/[\u0000-\u001F\u007F\u0080-\u009F\u2028\u2029]/g, '').trim();
     if ([...trimmed].length > 64) {
       setError('名前は64文字以内で入力してください');
       return;

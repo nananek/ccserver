@@ -854,9 +854,10 @@ export const MAX_CUSTOM_LABEL_LENGTH = 64;
 export function normalizeCustomLabel(value) {
   if (value === null || value === undefined) return null;
   if (typeof value !== 'string') return null;
-  // Strip ASCII control characters (including newlines/tabs) -- the label is
-  // rendered in single-line UI slots (session rows, terminal header).
-  const cleaned = value.replace(/[\u0000-\u001F\u007F]/g, '').trim();
+  // Strip ASCII + C1 control characters and U+2028/U+2029 line separators --
+  // the label is rendered in single-line UI slots (session rows, terminal
+  // header), where they would split lines or break layout.
+  const cleaned = value.replace(/[\u0000-\u001F\u007F\u0080-\u009F\u2028\u2029]/g, '').trim();
   if (!cleaned) return null;
   return cleaned;
 }
