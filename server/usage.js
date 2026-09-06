@@ -112,6 +112,10 @@ function windowFor(label) {
 //   Current week (all models)
 //   46% 46% used
 //   Resets Jul 10, 2am (Asia/Tokyo)
+// Recognized block-header shapes (see the comment above the label-detection
+// loop below for why the label is extracted via this pattern, not taken verbatim).
+const LABEL_RE = /Current (?:session|week(?:\s*\([^)]*\))?)/i;
+
 export function parseUsage(raw) {
   const clean = stripRender(raw);
   const lines = clean.split('\n').map((l) => l.trim());
@@ -133,12 +137,22 @@ export function parseUsage(raw) {
     // drop the block rather than show an impossible number.
     if (pct > 100) continue;
 
-    // Label: nearest preceding real line that isn't a percentage / reset line.
+    // Label: nearest preceding real line that isn't a percentage / reset
+    // line, extracted via the known header patterns rather than taken
+    // verbatim. The /usage screen's async re-render (e.g. "Scanning local
+    // sessions…" -> "Refreshing…") can glue a leftover status string onto
+    // the header line the same way issue #109 found it glued onto
+    // percent/Resets lines -- pulling only the recognized "Current session"
+    // / "Current week (...)" substring keeps that leftover text out of the
+    // label shown to the user. If the nearest candidate line has no
+    // recognizable header at all (header not yet rendered), the whole block
+    // is dropped rather than showing whatever transient text sits there.
     let label = null;
     for (let j = i - 1; j >= Math.max(0, i - 4); j--) {
       const t = lines[j];
       if (!t || /used$/.test(t) || /Resets(\s|$)/.test(t)) continue;
-      label = t;
+      const lm = t.match(LABEL_RE);
+      label = lm ? lm[0] : null;
       break;
     }
     if (!label) continue;

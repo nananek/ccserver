@@ -173,3 +173,45 @@ test('parseUsage: a digit-ending prefix merged into the percentage is rejected a
   const parsed = parseUsage(raw);
   assert.equal(parsed.limits.length, 0, 'an impossible >100% value must be dropped, not shown');
 });
+
+// Reported: a stray "Refreshing…" (the /usage screen's async re-render,
+// per the #109 comment above) leaked into the label shown in the Usage
+// popover. Unlike the percent/Resets lines, the label used to be taken
+// verbatim from whatever line preceded the percent line -- these pin the
+// fix (extract the known "Current session"/"Current week (...)" substring
+// instead of the raw line).
+
+test('parseUsage: "Refreshing…" glued after the header is stripped from the label', () => {
+  const raw = [
+    'Current sessionRefreshing…',
+    '87% 87% used',
+    'Resets 5:40pm (Asia/Tokyo)',
+  ].join('\n');
+
+  const parsed = parseUsage(raw);
+  assert.equal(parsed.limits.length, 1);
+  assert.equal(parsed.limits[0].label, 'Current session', 'the leftover status text must not end up in the label');
+});
+
+test('parseUsage: "Refreshing…" glued before the header is stripped from the label', () => {
+  const raw = [
+    'Refreshing…Current week (all models)',
+    '46% 46% used',
+    'Resets Jul 10, 2am (Asia/Tokyo)',
+  ].join('\n');
+
+  const parsed = parseUsage(raw);
+  assert.equal(parsed.limits.length, 1);
+  assert.equal(parsed.limits[0].label, 'Current week (all models)');
+});
+
+test('parseUsage: a block whose header has not rendered yet (only "Refreshing…" precedes it) is dropped rather than mislabeled', () => {
+  const raw = [
+    'Refreshing…',
+    '87% 87% used',
+    'Resets 5:40pm (Asia/Tokyo)',
+  ].join('\n');
+
+  const parsed = parseUsage(raw);
+  assert.equal(parsed.limits.length, 0, 'no block should render with "Refreshing…" (or similar) as its label');
+});
