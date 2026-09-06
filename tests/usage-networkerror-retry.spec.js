@@ -31,9 +31,10 @@ function usageBody(app) {
 
 // Returns the switchboard the test drives: flip `failing` (or list apps in
 // `failApps`, or set `failNext` to a count) to make /api/usage look like a
-// dropped connection, and read `calls` to count what each app actually sent.
+// dropped connection, `failDelayMs` to make it die slowly the way a real
+// dropped tunnel does, and read `calls` to count what each app actually sent.
 function mockRoutes(page, { serverError = null } = {}) {
-  const net = { failing: false, failApps: null, failNext: 0, calls: [] };
+  const net = { failing: false, failApps: null, failNext: 0, failDelayMs: 0, calls: [] };
   page.route('**/api/dirs/home*', async (route) => {
     await route.fulfill({
       status: 200,
@@ -56,6 +57,7 @@ function mockRoutes(page, { serverError = null } = {}) {
     else if (net.failing) fail = true;
     else if (net.failNext > 0) { net.failNext -= 1; fail = true; }
     if (fail) {
+      if (net.failDelayMs) await new Promise((r) => setTimeout(r, net.failDelayMs));
       await route.abort('failed');
       return;
     }
@@ -176,4 +178,23 @@ test('a server-reported error keeps its plain message and is not retried', async
   // Mount + popover open, and no retry on top: HTTP 200 is a real answer.
   await page.waitForTimeout(RETRY_DELAY_MS + 500);
   expect(callsFor(net, 'claude')).toBe(2);
+});
+
+test('a failure a newer load already replaced does not retry over it', async ({ page }) => {
+  const net = mockRoutes(page);
+  net.failNext = 1;
+  net.failDelayMs = 2000;   // a dropped tunnel rejects late, not instantly
+  await page.goto('/');
+
+  // The popover is opened while the badge's mount fetch is still hanging, and
+  // its own fetch succeeds -- so the hanging one is stale by the time it dies.
+  await page.locator('.usage-btn').click();
+  await expect(pct(page)).toHaveText('10%');
+  expect(callsFor(net, 'claude')).toBe(2);
+
+  // That stale failure lands at ~2s; a backoff scheduled from it would fire at
+  // ~5s and drag the popover back into 取得中… over data already on screen.
+  await page.waitForTimeout(RETRY_DELAY_MS + 2500);
+  expect(callsFor(net, 'claude')).toBe(2);
+  await expect(page.locator('.usage-menu-header button')).toHaveText('更新');
 });

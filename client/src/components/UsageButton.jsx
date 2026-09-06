@@ -96,6 +96,8 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   });
   const wrapRef = useRef(null);
   const retryTimerRef = useRef(null);
+  // Ticket handed to each load(); only the newest one may touch state.
+  const loadSeqRef = useRef(0);
 
   const visibleApps = USAGE_APPS.filter((a) => isSelectable(a));
 
@@ -112,6 +114,13 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   // in-flight opencode fetch outlasting a quick switch to codex).
   const load = useCallback(async (force = false, attempt = 0) => {
     const forTab = tab;
+    const seq = ++loadSeqRef.current;
+    // This call is no longer the one being awaited once the user has moved to
+    // another tab, or once a newer load() for the same tab has taken over --
+    // a popover open or 更新 while this one is still hanging. Either way it
+    // must not write state: a slow failure landing after the load that
+    // replaced it succeeded would otherwise schedule a retry over good data.
+    const superseded = () => forTab !== tabRef.current || seq !== loadSeqRef.current;
     // Any newer call (tab switch, popover open, 更新/再試行) takes over a
     // pending backoff, so a timer-driven retry never races a user-driven one.
     clearTimeout(retryTimerRef.current);
@@ -120,20 +129,20 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
     try {
       const res = await authFetch(`/api/usage?app=${forTab}${force ? '&force=1' : ''}`);
       const json = await res.json();
-      if (forTab !== tabRef.current) return;
+      if (superseded()) return;
       setData(json);
       setLoading(false);
     } catch (err) {
       // Only transport-level failures reach here: an application-level one
       // (capture timeout, CLI hidden, ...) comes back as HTTP 200 with an
       // `error` field, so everything caught here is worth one retry.
-      if (forTab !== tabRef.current) return;
+      if (superseded()) return;
       if (attempt === 0) {
         // Stay in the loading state across the backoff so the popover keeps
         // saying 取得中… instead of flashing an error we are about to retry.
         retryTimerRef.current = setTimeout(() => {
           retryTimerRef.current = null;
-          if (forTab !== tabRef.current) return;
+          if (superseded()) return;
           // Always without force: the point is to pick up the result the
           // server finished for us, not to start a second 30s capture.
           load(false, 1);
