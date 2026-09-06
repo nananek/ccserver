@@ -1,8 +1,7 @@
 import { fmtAge } from './useUsage.js';
 import UsageLimits from './UsageLimits.jsx';
 
-// UsageButton (popover) と UsageWidget (sidebar) で共有するパネル本体。
-// 見た目の差異は作らないこと (UsageLimits のコメントと同一方針)。
+// UsageWidget (サイドバー) のパネル本体。
 export default function UsagePanel({ tabLabel, tabs, tab, setTab, tabLabels, data, loading, load, limits, now }) {
   return (
     <>

@@ -27,7 +27,7 @@ const USAGE_APP_KEY = 'ccserver-usage-app';
 
 // Apps with a Usage tab. opencode Go needs no binary (Go subscription only),
 // so visibility follows isAppVisible's Go rule (toggle + key), not install
-// detection. Shared by UsageButton and UsageWidget so the tab sets agree.
+// detection.
 export const USAGE_APPS = ['claude', 'codex', 'opencode'];
 
 export const USAGE_APP_LABELS = {
@@ -57,7 +57,7 @@ export function saveUsageApp(app) {
   } catch {
     // Storage unavailable (private mode etc.) -- selection just won't persist.
   }
-  // 同一ドキュメント内の他インスタンス (UsageButton/UsageWidget) へ通知。
+  // 同一ドキュメント内の他インスタンスへ通知。
   // storage イベントは同一ドキュメントに届かないため CustomEvent を使う。
   window.dispatchEvent(new CustomEvent(USAGE_APP_KEY, { detail: app }));
 }
@@ -129,7 +129,7 @@ export function useUsageTab({ defaultApp = 'claude', availableApps = null, hidde
 export const RETRY_DELAY_MS = 3000;
 
 // 同一appへの同時リクエストを一本化するためのin-flight共有マップ
-// (app -> Promise)。UsageButtonとUsageWidgetのマウント時など、
+// (app -> Promise)。UsageWidgetのマウント時など、
 // 同タイミングの同一クエリが2本飛ぶのを防ぐ。settledら除去し、
 // 結果のキャッシュはしない (stalenessを持ち込まない)。
 const inflightUsage = new Map();

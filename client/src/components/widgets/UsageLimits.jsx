@@ -1,7 +1,6 @@
 import { pctClass, paceMark } from './useUsage.js';
 
-// UsageButton (popover) と UsageWidget (sidebar) で共有する limits/empty
-// 表示。二重管理による乖離を避けるため、見た目の差異は作らないこと。
+// UsageWidget (サイドバー) の limits/empty 表示。
 export default function UsageLimits({ limits, loading, data, onRetry, now = Date.now() }) {
   const error = data?.error;
   if (limits.length === 0) {
