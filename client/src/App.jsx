@@ -595,7 +595,9 @@ export default function App() {
     if (!window.confirm(`セッションを終了しますか?\n${label}`)) return;
     try {
       const res = await authFetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
-      if (!res.ok) {
+      if (res.status === 404) {
+        // Session already gone server-side: termination is effectively done.
+      } else if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${res.status}`);
       }

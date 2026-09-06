@@ -174,3 +174,48 @@ test('menu X closes the tab; unopened running session appears below and X termin
   // Cleanup any remaining leaked sessions (e.g. from retries).
   await terminateAllLower(page);
 });
+
+test('X on a lower item already gone server-side shows no error alert and the stale row disappears (404 handling)', async ({ page, request }) => {
+  await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+  await usePopupMode(page);
+  await gotoApp(page);
+
+  const beforeIds = new Set((await (await request.get('/api/sessions')).json()).sessions.map((s) => s.id));
+
+  await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
+  await openTerminalBtn(page).click();
+  await expect(page.locator('.session-menu-count')).toHaveText('1');
+  await waitForShellPrompt(page);
+
+  // X on the upper item closes the tab; the still-running session moves to
+  // the lower ("unopened") section.
+  await hamburger(page).click();
+  const upper = sessionMenu(page).locator('[data-section="opened"] .session-menu-item.is-running').first();
+  await upper.locator('.session-menu-close').click();
+  await expect(sessionMenu(page).getByText('稼働中のセッション', { exact: true })).toBeVisible({ timeout: 10_000 });
+
+  // Simulate the row going stale: delete the session directly through the
+  // API (bypassing the UI), so the menu still shows it while the server has
+  // already forgotten it -- the exact scenario handleTerminateUnopenedSession
+  // must treat as a successful termination, not an error.
+  const afterSessions = (await (await request.get('/api/sessions')).json()).sessions;
+  const newSession = afterSessions.find((s) => !beforeIds.has(s.id));
+  expect(newSession).toBeTruthy();
+  const delRes = await request.delete(`/api/sessions/${newSession.id}`);
+  expect(delRes.ok()).toBe(true);
+
+  let alerted = false;
+  page.on('dialog', (d) => {
+    if (d.type() === 'alert') alerted = true;
+    d.accept().catch(() => {});
+  });
+
+  // X on the now-stale lower item: window.confirm(), then a DELETE that
+  // gets a real 404 from the server.
+  await sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').first().locator('.session-menu-close').click();
+  await expect(sessionMenu(page).locator('[data-section="unopened"] .session-menu-item')).toHaveCount(0, { timeout: 10_000 });
+  expect(alerted).toBe(false);
+
+  await page.keyboard.press('Escape');
+  await terminateAllLower(page);
+});
