@@ -84,15 +84,18 @@ const SANDBOX_PROVISION_PATH = '/ccserver-sandbox-provision.sh';
 // them installed; sandbox.config.json's "tools" (or the client's per-session
 // sandboxOpts.tools) enables them, and the object form can override any of
 // these fields (version / url / sha256).
-const RTK_ASSET = { x64: 'x86_64-unknown-linux-musl', arm64: 'aarch64-unknown-linux-gnu' }[process.arch] || 'x86_64-unknown-linux-musl';
-const RTK_DEFAULT = {
-  version: 'v0.45.0',
-  url: `https://github.com/rtk-ai/rtk/releases/download/v0.45.0/rtk-${RTK_ASSET}.tar.gz`,
+const RTK_VERSION = 'v0.45.0';
+const RTK_ASSET = { x64: 'x86_64-unknown-linux-musl', arm64: 'aarch64-unknown-linux-gnu' }[process.arch] || null;
+// Unknown arches (armv7, riscv64, ...) resolve to no spec: provisioning skips
+// rtk instead of installing an unrunnable binary with a skipped checksum.
+const RTK_DEFAULT = RTK_ASSET ? {
+  version: RTK_VERSION,
+  url: `https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/rtk-${RTK_ASSET}.tar.gz`,
   // sha256 of the x86_64 musl tarball (the arch ccserver runs on in practice).
   // Empty on other arches: the provisioner warns on the terminal, logs, and
   // skips the checksum, and the config object form can pin one explicitly.
   sha256: process.arch === 'x64' ? 'c4c036fbf181fc55ef329786c8c17e0d427972b053b825944d968a6aafef1ba4' : '',
-};
+} : null;
 const CRG_DEFAULT = { version: '2.3.7' };
 
 const HOME = homedir();
@@ -729,13 +732,17 @@ export function resolveTools(sandboxOpts = null, cfgTools = null) {
     // would let any WS caller point the provisioner at an arbitrary URL
     // (with an empty sha256 skipping the checksum) or an arbitrary pip
     // version.
-    if (per[jsKey] !== undefined) return per[jsKey] === true ? { ...def } : null;
+    // A null def means this host arch has no pinned binary (see RTK_DEFAULT):
+    // toggles resolve to disabled unless the operator pins an explicit url
+    // in the object form below.
+    if (per[jsKey] !== undefined) return per[jsKey] === true ? (def && { ...def }) : null;
     const v = cfgKeys.map((k) => cfg[k]).find((x) => x !== undefined);
-    if (v === true) return { ...def };
+    if (v === true) return def && { ...def };
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       if (v.enabled === false) return null;
       const { enabled, ...overrides } = v;
-      return { ...def, ...overrides };
+      if (!def && !overrides.url) return null;
+      return { ...(def || {}), ...overrides };
     }
     return null;
   };
