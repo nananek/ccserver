@@ -13,7 +13,7 @@ import { test, expect } from '@playwright/test';
 // is simulated with route.abort('failed') -- Chromium surfaces that to
 // fetch() as a rejected promise, the same catch path the real failure takes.
 
-const RETRY_DELAY_MS = 3000;   // keep in sync with UsageButton.jsx
+const RETRY_DELAY_MS = 3000;   // keep in sync with useUsage.js (shared hook used by the popover and the sidebar widget)
 
 function usageBody(app) {
   const pct = app === 'codex' ? 55 : 10;
