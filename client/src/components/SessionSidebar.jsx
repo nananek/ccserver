@@ -1,5 +1,6 @@
 import { useRef, useCallback } from 'react';
 import SessionList from './SessionList.jsx';
+import { moveMenuFocus } from './sessionMenuNav.js';
 
 // 左セッションサイドバー: 右ウィジェット (RightSidebar) と同じ挙動の常時表示パネル。
 // - open でゲートし、閉じている間は null (RightSidebarInner と同一方針)
@@ -26,19 +27,7 @@ export default function SessionSidebar({
   const listRef = useRef(null);
 
   const onListKeyDown = useCallback((e) => {
-    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
-    const list = listRef.current;
-    if (!list) return;
-    const buttons = [...list.querySelectorAll('button.session-menu-select, button.session-menu-close')];
-    if (buttons.length === 0) return;
-    const idx = buttons.indexOf(document.activeElement);
-    e.preventDefault();
-    if (e.key === 'Home') { buttons[0].focus(); return; }
-    if (e.key === 'End') { buttons[buttons.length - 1].focus(); return; }
-    const next = e.key === 'ArrowDown'
-      ? buttons[(idx + 1 + buttons.length) % buttons.length]
-      : buttons[(idx - 1 + buttons.length) % buttons.length];
-    next.focus();
+    if (moveMenuFocus(listRef.current, e.key)) e.preventDefault();
   }, []);
 
   if (!open) return null;

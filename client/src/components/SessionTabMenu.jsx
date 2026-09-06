@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import SessionList from './SessionList.jsx';
+import { moveMenuFocus } from './sessionMenuNav.js';
 
 // セッションタブ用ハンバーガーメニュー: 開いている terminal タブと group
 // (コンボ) タブを上段、サーバー上で稼働中だが未オープンのセッションを下段に
@@ -50,20 +51,9 @@ export default function SessionTabMenu({
   }, [open, onClose]);
 
   // メニュー内のボタン間を矢印キーで移動する (menu パターンのキーボード操作)。
+  // 実体は SessionSidebar と共用の moveMenuFocus。
   const onMenuKeyDown = useCallback((e) => {
-    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
-    const menu = menuRef.current;
-    if (!menu) return;
-    const buttons = [...menu.querySelectorAll('button.session-menu-select, button.session-menu-close')];
-    if (buttons.length === 0) return;
-    const idx = buttons.indexOf(document.activeElement);
-    e.preventDefault();
-    if (e.key === 'Home') { buttons[0].focus(); return; }
-    if (e.key === 'End') { buttons[buttons.length - 1].focus(); return; }
-    const next = e.key === 'ArrowDown'
-      ? buttons[(idx + 1 + buttons.length) % buttons.length]
-      : buttons[(idx - 1 + buttons.length) % buttons.length];
-    next.focus();
+    if (moveMenuFocus(menuRef.current, e.key)) e.preventDefault();
   }, []);
 
   const openedCount = sessionTabs.length + groupTabs.length;
