@@ -32,6 +32,16 @@ const USAGE_APP_KEY = 'ccserver-usage-app';
 
 const USAGE_APPS = ['claude', 'codex', 'opencode'];
 
+// A /api/usage capture holds one HTTP connection open for up to 30s
+// (server/usage.js CAPTURE_TIMEOUT_MS), which is long enough for a tunnelled
+// or roaming path (Tailscale switching DERP relays, a phone moving between
+// WiFi and cellular) to drop it -- surfacing as a bare "NetworkError when
+// attempting to fetch resource." from fetch() itself. The server's capture is
+// independent of our request: it completes anyway and writes the result to a
+// 60s cache (server/usage.js getUsage), so one short retry almost always
+// lands on that warm cache instead of starting another 30s capture.
+const RETRY_DELAY_MS = 3000;
+
 const USAGE_APP_LABELS = {
   claude: 'Claude 使用量',
   codex: 'Codex 使用量',
@@ -85,6 +95,7 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
     return 'claude';
   });
   const wrapRef = useRef(null);
+  const retryTimerRef = useRef(null);
 
   const visibleApps = USAGE_APPS.filter((a) => isSelectable(a));
 
@@ -99,19 +110,38 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   // clobber whatever the now-current tab already displays -- opencode's
   // external HTTPS round trip makes this race easy to hit in practice (an
   // in-flight opencode fetch outlasting a quick switch to codex).
-  const load = useCallback(async (force = false) => {
+  const load = useCallback(async (force = false, attempt = 0) => {
     const forTab = tab;
+    // Any newer call (tab switch, popover open, 更新/再試行) takes over a
+    // pending backoff, so a timer-driven retry never races a user-driven one.
+    clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = null;
     setLoading(true);
     try {
       const res = await authFetch(`/api/usage?app=${forTab}${force ? '&force=1' : ''}`);
       const json = await res.json();
       if (forTab !== tabRef.current) return;
       setData(json);
+      setLoading(false);
     } catch (err) {
+      // Only transport-level failures reach here: an application-level one
+      // (capture timeout, CLI hidden, ...) comes back as HTTP 200 with an
+      // `error` field, so everything caught here is worth one retry.
       if (forTab !== tabRef.current) return;
-      setData({ error: String(err?.message || err) });
-    } finally {
-      if (forTab === tabRef.current) setLoading(false);
+      if (attempt === 0) {
+        // Stay in the loading state across the backoff so the popover keeps
+        // saying 取得中… instead of flashing an error we are about to retry.
+        retryTimerRef.current = setTimeout(() => {
+          retryTimerRef.current = null;
+          if (forTab !== tabRef.current) return;
+          // Always without force: the point is to pick up the result the
+          // server finished for us, not to start a second 30s capture.
+          load(false, 1);
+        }, RETRY_DELAY_MS);
+        return;
+      }
+      setData({ error: String(err?.message || err), transient: true });
+      setLoading(false);
     }
   }, [tab]);
 
@@ -162,6 +192,9 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
     const id = setInterval(() => setTick((t) => t + 1), 30000);
     return () => clearInterval(id);
   }, [open]);
+
+  // A backoff outliving the component would retry (and setState) after unmount.
+  useEffect(() => () => clearTimeout(retryTimerRef.current), []);
 
   const limits = data?.usage?.limits || [];
   // Claude's first limit is the session window; Codex/Go label their
@@ -253,7 +286,21 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
             </div>
           ) : (
             <div className="usage-empty">
-              {loading ? '読み込み中…' : (data?.error ? `取得できませんでした: ${data.error}` : 'データがありません')}
+              {loading ? '読み込み中…' : data?.transient ? (
+                <div className="usage-error">
+                  <div className="usage-error-title">サーバーに接続できませんでした</div>
+                  {/* The raw message stays reachable on hover: it is what let the
+                      original report pin this on the transport layer. */}
+                  <div className="usage-error-hint" title={data.error}>
+                    ネットワークが不安定な可能性があります (Tailscale 経由の場合は接続の切り替わり中など)。自動再試行も失敗しました。
+                  </div>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => load(false)}
+                    title="キャッシュを使って接続し直す"
+                  >再試行</button>
+                </div>
+              ) : data?.error ? `取得できませんでした: ${data.error}` : 'データがありません'}
             </div>
           )}
 

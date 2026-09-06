@@ -3287,6 +3287,24 @@ body {
   padding: 8px 0;
 }
 
+/* Transport-level failure: a headline, a hint and a retry button stacked, in
+   place of the single muted line the other empty states use. */
+.usage-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.usage-error-title {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.usage-error-hint {
+  line-height: 1.5;
+}
+
 .usage-cost {
   margin-top: 10px;
   font-size: 11px;
