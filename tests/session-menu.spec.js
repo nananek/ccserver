@@ -182,7 +182,7 @@ test('X on a lower item already gone server-side shows no error alert and the st
 
   const beforeIds = new Set((await (await request.get('/api/sessions')).json()).sessions.map((s) => s.id));
 
-  await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
+  await page.locator('.tab-list').getByTitle('Files').click();
   await openTerminalBtn(page).click();
   await expect(page.locator('.session-menu-count')).toHaveText('1');
   await waitForShellPrompt(page);
