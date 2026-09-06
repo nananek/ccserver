@@ -50,6 +50,32 @@ test('resolveSessionTimeoutMs: env overrides, 0 disables, garbage falls back', (
   assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: 'forever' }), TWO_HOURS,
     'a non-number must not silently become 0 (that would disable teardown by typo)');
   assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '1500.7' }), 1500, 'truncated to ms');
+  // setTimeout silently turns an over-32-bit delay into 1ms, so "keep sessions
+  // for a very long time" would otherwise mean "destroy them immediately".
+  assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '2147483648' }), 2147483647,
+    'one past the setTimeout ceiling is clamped');
+  assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '999999999999' }), 2147483647,
+    'a huge value is clamped, never wrapped');
+});
+
+test('a clamped timeout is actually safe to hand to setTimeout', async () => {
+  const seen = [];
+  // Only the overflow warning matters here; the runner emits unrelated ones
+  // of its own (ExperimentalWarning for node:sqlite, for instance).
+  const onWarning = (w) => { if (w.name === 'TimeoutOverflowWarning') seen.push(w.name); };
+  process.on('warning', onWarning);
+  try {
+    const ms = sessionManager.resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '999999999999' });
+    // The value alone proves nothing -- what matters is that Node accepts it
+    // as a real delay. An unclamped one emits TimeoutOverflowWarning and fires
+    // within milliseconds instead.
+    const timer = setTimeout(() => seen.push('FIRED'), ms);
+    await sleep(120);
+    clearTimeout(timer);
+    assert.deepEqual(seen, [], `expected no overflow warning and no early fire, got ${seen.join(',')}`);
+  } finally {
+    process.off('warning', onWarning);
+  }
 });
 
 test('resolveExitedTimeoutMs: defaults to 5min and can never be disabled', () => {
@@ -63,6 +89,8 @@ test('resolveExitedTimeoutMs: defaults to 5min and can never be disabled', () =>
   // session list with rows nothing can ever attach to.
   assert.equal(resolveExitedTimeoutMs({ CCSERVER_SESSION_EXITED_TIMEOUT_MS: '0' }), 1000, 'clamped, not disabled');
   assert.equal(resolveExitedTimeoutMs({ CCSERVER_SESSION_EXITED_TIMEOUT_MS: '-1' }), 1000, 'clamped, not disabled');
+  assert.equal(resolveExitedTimeoutMs({ CCSERVER_SESSION_EXITED_TIMEOUT_MS: '999999999999' }), 2147483647,
+    'and clamped at the setTimeout ceiling on the other end');
 });
 
 test('with the idle timeout disabled, a session with no viewers is left alone', async () => {

@@ -38,6 +38,11 @@ const DEFAULT_SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours for active ses
 // exit code.
 const DEFAULT_SESSION_EXITED_TIMEOUT_MS = 5 * 60 * 1000;
 const MIN_SESSION_EXITED_TIMEOUT_MS = 1000;
+// setTimeout's 32-bit ceiling (~24.8 days). Node does not reject a longer
+// delay -- it warns (TimeoutOverflowWarning) and silently uses 1ms instead,
+// so an operator setting a huge value to keep sessions around for a long
+// time would get the exact opposite: immediate teardown.
+const MAX_TIMEOUT_MS = 2147483647;
 const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 const IDLE_TIMEOUT_MS = 3000;
 // PTY size negotiation floor. The pty is sized to the SMALLEST viewport among
@@ -56,7 +61,15 @@ function parseTimeoutEnv(raw, { name, fallback, min }) {
     console.warn(`[session] ignoring invalid ${name}=${raw} (not a number); using ${fallback}ms`);
     return fallback;
   }
-  return Math.max(min, Math.trunc(n));
+  const ms = Math.trunc(n);
+  if (ms > MAX_TIMEOUT_MS) {
+    console.warn(
+      `[session] ${name}=${raw} exceeds setTimeout's ${MAX_TIMEOUT_MS}ms ceiling; `
+      + 'clamping to it (set 0 to disable the timeout instead of using a huge value)'
+    );
+    return MAX_TIMEOUT_MS;
+  }
+  return Math.max(min, ms);
 }
 
 // Idle (no viewer attached) destroy timeout. 0 or negative disables it
