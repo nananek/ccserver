@@ -35,7 +35,7 @@ export default function UsagePanel({ tabLabel, tabs, tab, setTab, tabLabels, dat
         <div className="usage-plan">{data.usage.plan}</div>
       )}
 
-      <UsageLimits limits={limits} loading={loading} error={data?.error} now={now} />
+      <UsageLimits limits={limits} loading={loading} data={data} onRetry={() => load(false)} now={now} />
 
       {data?.usage?.cost && data.usage.cost !== '$0.0000' && (
         <div className="usage-cost">セッション費用: {data.usage.cost}</div>

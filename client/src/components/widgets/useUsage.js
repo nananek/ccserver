@@ -118,6 +118,16 @@ export function useUsageTab({ defaultApp = 'claude', availableApps = null, hidde
   return { tab, setTab, isSelectable, visibleApps };
 }
 
+// A /api/usage capture holds one HTTP connection open for up to 30s
+// (server/usage.js CAPTURE_TIMEOUT_MS), which is long enough for a tunnelled
+// or roaming path (Tailscale switching DERP relays, a phone moving between
+// WiFi and cellular) to drop it -- surfacing as a bare "NetworkError when
+// attempting to fetch resource." from fetch() itself. The server's capture is
+// independent of our request: it completes anyway and writes the result to a
+// 60s cache (server/usage.js getUsage), so one short retry almost always
+// lands on that warm cache instead of starting another 30s capture.
+export const RETRY_DELAY_MS = 3000;
+
 // 同一appへの同時リクエストを一本化するためのin-flight共有マップ
 // (app -> Promise)。UsageButtonとUsageWidgetのマウント時など、
 // 同タイミングの同一クエリが2本飛ぶのを防ぐ。settledら除去し、
@@ -128,36 +138,71 @@ export function useUsageData(tab, { enabled = true } = {}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const tabRef = useRef(tab);
-  const requestIdRef = useRef(0);
+  const retryTimerRef = useRef(null);
+  // Ticket handed to each load(); only the newest one may touch state.
+  const loadSeqRef = useRef(0);
 
   useEffect(() => { tabRef.current = tab; });
 
-  const load = useCallback(async (force = false) => {
-    const app = tabRef.current;
-    const requestId = ++requestIdRef.current;
+  // A slow response for a tab the user has since switched away from must not
+  // clobber whatever the now-current tab already displays -- opencode's
+  // external HTTPS round trip makes this race easy to hit in practice (an
+  // in-flight opencode fetch outlasting a quick switch to codex).
+  const load = useCallback(async (force = false, attempt = 0) => {
+    const forTab = tabRef.current;
+    const seq = ++loadSeqRef.current;
+    // This call is no longer the one being awaited once the user has moved to
+    // another tab, or once a newer load() for the same tab has taken over --
+    // a popover open or 更新 while this one is still hanging. Either way it
+    // must not write state: a slow failure landing after the load that
+    // replaced it succeeded would otherwise schedule a retry over good data.
+    const superseded = () => forTab !== tabRef.current || seq !== loadSeqRef.current;
+    // Any newer call (tab switch, popover open, 更新/再試行) takes over a
+    // pending backoff, so a timer-driven retry never races a user-driven one.
+    clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = null;
     setLoading(true);
     try {
-      let pending = !force ? inflightUsage.get(app) : null;
+      let pending = !force ? inflightUsage.get(forTab) : null;
       if (!pending) {
         pending = (async () => {
-          const res = await authFetch(`/api/usage?app=${app}${force ? '&force=1' : ''}`);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const res = await authFetch(`/api/usage?app=${forTab}${force ? '&force=1' : ''}`);
+          // HTTPエラーは再試行しない (通常エラーとして表示)。バックオフの
+          // 対象はfetch自体のreject (切断) のみ -- #112 の方針通り。
+          if (!res.ok) return { usage: null, error: `HTTP ${res.status}`, updatedAt: Date.now() };
           return res.json();
         })();
         // force時は共有マップを汚さない (明示更新は常に新規取得)。
-        if (!force) inflightUsage.set(app, pending);
+        if (!force) inflightUsage.set(forTab, pending);
         try {
           await pending;
         } finally {
-          if (inflightUsage.get(app) === pending) inflightUsage.delete(app);
+          if (inflightUsage.get(forTab) === pending) inflightUsage.delete(forTab);
         }
       }
       const json = await pending;
-      if (requestIdRef.current === requestId) setData(json);
+      if (superseded()) return;
+      setData(json);
+      setLoading(false);
     } catch (err) {
-      if (requestIdRef.current === requestId) setData({ error: String(err?.message || err) });
-    } finally {
-      if (requestIdRef.current === requestId) setLoading(false);
+      // Only transport-level failures reach here: an application-level one
+      // (capture timeout, CLI hidden, ...) comes back as HTTP 200 with an
+      // `error` field, so everything caught here is worth one retry.
+      if (superseded()) return;
+      if (attempt === 0) {
+        // Stay in the loading state across the backoff so the UI keeps
+        // saying 取得中… instead of flashing an error we are about to retry.
+        retryTimerRef.current = setTimeout(() => {
+          retryTimerRef.current = null;
+          if (superseded()) return;
+          // Always without force: the point is to pick up the result the
+          // server finished for us, not to start a second 30s capture.
+          load(false, 1);
+        }, RETRY_DELAY_MS);
+        return;
+      }
+      setData({ error: String(err?.message || err), transient: true });
+      setLoading(false);
     }
   }, []);
 
@@ -166,6 +211,9 @@ export function useUsageData(tab, { enabled = true } = {}) {
     setData(null);
     load(false);
   }, [tab, load, enabled]);
+
+  // A backoff outliving the component would retry (and setState) after unmount.
+  useEffect(() => () => clearTimeout(retryTimerRef.current), []);
 
   return { data, loading, load };
 }

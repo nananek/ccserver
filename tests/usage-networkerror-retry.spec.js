@@ -134,7 +134,9 @@ test('the 更新 button stays disabled through the backoff instead of flashing a
   await page.goto('/');
 
   await page.locator('.usage-btn').click();
-  const refresh = page.locator('.usage-menu-header button');
+  // Scope to the popover: the sidebar UsageWidget renders an identical
+  // refresh button (shared UsagePanel), so a page-wide locator matches two.
+  const refresh = page.locator('.usage-menu .usage-menu-header button');
   // Both the mount fetch and the popover-open fetch have failed by now.
   await expect.poll(() => callsFor(net, 'claude')).toBeGreaterThanOrEqual(2);
 
@@ -200,5 +202,5 @@ test('a failure a newer load already replaced does not retry over it', async ({ 
   // ~5s and drag the popover back into 取得中… over data already on screen.
   await page.waitForTimeout(RETRY_DELAY_MS + 2500);
   expect(callsFor(net, 'claude')).toBe(2);
-  await expect(page.locator('.usage-menu-header button')).toHaveText('更新');
+  await expect(page.locator('.usage-menu .usage-menu-header button')).toHaveText('更新');
 });

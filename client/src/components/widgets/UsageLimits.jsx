@@ -2,11 +2,32 @@ import { pctClass, paceMark } from './useUsage.js';
 
 // UsageButton (popover) と UsageWidget (sidebar) で共有する limits/empty
 // 表示。二重管理による乖離を避けるため、見た目の差異は作らないこと。
-export default function UsageLimits({ limits, loading, error, now = Date.now() }) {
+export default function UsageLimits({ limits, loading, data, onRetry, now = Date.now() }) {
+  const error = data?.error;
   if (limits.length === 0) {
     return (
       <div className="usage-empty">
-        {loading ? '読み込み中…' : (error ? `取得できませんでした: ${error}` : 'データがありません')}
+        {loading ? '読み込み中…' : data?.transient ? (
+          <div className="usage-error">
+            <div className="usage-error-title">サーバーに接続できませんでした</div>
+            <div className="usage-error-hint">
+              ネットワークが不安定な可能性があります (Tailscale 経由の場合は接続の切り替わり中など)。自動再試行も失敗しました。
+            </div>
+            {/* The raw message is what let the original report pin this on
+                the transport layer, so it stays -- behind a tap rather
+                than a hover, since the phone on the flaky tunnel is
+                exactly the device that has no hover. */}
+            <details className="usage-error-detail">
+              <summary>詳細</summary>
+              <div className="usage-error-raw">{error}</div>
+            </details>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={onRetry}
+              title="キャッシュを使って接続し直す"
+            >再試行</button>
+          </div>
+        ) : (error ? `取得できませんでした: ${error}` : 'データがありません')}
       </div>
     );
   }
