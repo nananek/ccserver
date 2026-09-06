@@ -148,7 +148,7 @@ test('combo launch is single-slot per directory: relaunching the same cwd activa
 
     // Relaunching the same cwd from the browser must activate the existing
     // row instead of spawning a second group.
-    await page.locator('.tab-item', { hasText: 'Files' }).click();
+    await page.locator('.tab-list').getByTitle('Files').click();
     await openLaunchModal();
 
     await expect(groupRow).toHaveClass(/active/);
@@ -188,7 +188,7 @@ test('opened group tab lives in the session sidebar as a single parent row', asy
     await expect(page.locator('.group-subtab-bar')).toBeVisible();
 
     // Selecting the Files tab then the sidebar row re-activates the group.
-    await page.locator('.tab-item', { hasText: 'Files' }).click();
+    await page.locator('.tab-list').getByTitle('Files').click();
     await expect(page.locator('.group-subtab-bar')).toBeHidden();
     await groupRow.locator('.session-menu-select').click();
     await expect(page.locator('.group-subtab-bar')).toBeVisible();

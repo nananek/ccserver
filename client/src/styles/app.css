@@ -963,7 +963,7 @@ body {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  /* 隣のSettingsボタンと揃えたゴースト表示 (.settings-tab-btnと同一方針) */
+  /* .session-menu-btn と揃えたゴースト表示 */
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-secondary);
@@ -3508,29 +3508,10 @@ body {
   }
 }
 
-/* ── Tab bar trailing controls (Settings / Widgets toggle) ───────── */
+/* ── Tab bar trailing controls (Widgets toggle) ───────────────────── */
 .tab-bar-spacer {
   flex: 1 1 auto;
   min-width: 12px;
-}
-
-.settings-tab-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  padding: 6px 10px;
-  border-radius: 6px;
-  line-height: 1;
-  margin-right: 4px;
-}
-
-.settings-tab-btn:hover {
-  background: var(--bg-surface);
-  border-color: var(--border);
 }
 
 /* Usage popover panel body (shared with the sidebar UsageWidget via

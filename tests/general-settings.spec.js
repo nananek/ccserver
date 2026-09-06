@@ -24,7 +24,7 @@ test.describe('Settings general section', () => {
     });
     await page.reload();
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.locator('.tab-list').getByTitle('Settings').click();
     await expect(page.locator('.settings-view')).toBeVisible();
   });
 
@@ -50,7 +50,7 @@ test.describe('Settings general section', () => {
     // shellタブを開いても、CLI上部のテーマ切り替えは存在しない
     // (一般設定に移植済み)。セッションタブはハンバーガーメニュー内に
     // 縦表示されるため、件数バッジで開 tab 数を検証する。
-    await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
+    await page.locator('.tab-list').getByTitle('Files').click();
     await page.getByRole('button', { name: 'Terminal', exact: true }).click();
     await expect(page.locator('.session-menu-count')).toHaveText('1');
     await page.getByRole('button', { name: 'セッション一覧メニュー' }).click();
@@ -125,7 +125,7 @@ test.describe('Settings general section', () => {
     // リロード後も復元される。
     await page.reload();
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.locator('.tab-list').getByTitle('Settings').click();
     const panel2 = page.locator('[role="tabpanel"]');
     await expect(panel2.getByLabel('GPG署名を使う')).toBeChecked();
     await expect(panel2.getByLabel('ssh-agentを転送する')).toBeChecked();
@@ -145,7 +145,7 @@ test.describe('Settings general section', () => {
     // リロード後も復元される。
     await page.reload();
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.locator('.tab-list').getByTitle('Settings').click();
     await expect(page.locator('[role="tabpanel"]').getByLabel('ブラウザの戻る・進む操作')).toHaveValue('suppress');
   });
 
@@ -153,7 +153,7 @@ test.describe('Settings general section', () => {
     await page.evaluate(() => localStorage.setItem('ccserver-nav-guard', 'bogus'));
     await page.reload();
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.locator('.tab-list').getByTitle('Settings').click();
     await expect(page.locator('[role="tabpanel"]').getByLabel('ブラウザの戻る・進む操作')).toHaveValue('confirm');
   });
 });

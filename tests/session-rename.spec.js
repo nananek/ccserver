@@ -18,7 +18,7 @@ async function gotoApp(page) {
 }
 
 async function openShellTab(page) {
-  await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
+  await page.locator('.tab-list').getByTitle('Files').click();
   await openTerminalBtn(page).click();
   await expect(page.locator('.terminal-container')).toBeVisible();
   await expect(openedItems(page)).toHaveCount(1);

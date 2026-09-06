@@ -78,7 +78,7 @@ test('hamburger is always at the left end; shell tabs go to the vertical menu, n
   await expect(sessionMenu(page)).toBeHidden();
 
   // Open a shell tab from Files.
-  await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
+  await page.locator('.tab-list').getByTitle('Files').click();
   const barCountBefore = await barTabs(page).count();
   await openTerminalBtn(page).click();
   // The horizontal bar must not gain a terminal tab; Files/Remote stay.
@@ -109,7 +109,7 @@ test('menu supports keyboard operation: Enter selects, arrows move focus, Escape
   await usePopupMode(page);
   await gotoApp(page);
 
-  await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
+  await page.locator('.tab-list').getByTitle('Files').click();
   await openTerminalBtn(page).click();
   await expect(page.locator('.session-menu-count')).toHaveText('1');
   await waitForShellPrompt(page);
@@ -145,7 +145,7 @@ test('menu X closes the tab; unopened running session appears below and X termin
   await usePopupMode(page);
   await gotoApp(page);
 
-  await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
+  await page.locator('.tab-list').getByTitle('Files').click();
   await openTerminalBtn(page).click();
   await expect(page.locator('.session-menu-count')).toHaveText('1');
   await waitForShellPrompt(page);

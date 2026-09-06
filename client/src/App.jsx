@@ -3,7 +3,7 @@ import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import SettingsView from './components/SettingsView.jsx';
 import ApprovalBanner from './components/ApprovalBanner.jsx';
 import PairingRequestBanner from './components/PairingRequestBanner.jsx';
-import TabIcon from './components/TabIcon.jsx';
+import TabIcon, { sessionMenuIcon } from './components/TabIcon.jsx';
 import SessionTabMenu from './components/SessionTabMenu.jsx';
 import SessionSidebar from './components/SessionSidebar.jsx';
 import SessionContextMenu from './components/SessionContextMenu.jsx';
@@ -30,6 +30,7 @@ export default function App() {
   const [tabs, setTabs] = useState([
     { id: 'browser', type: 'browser', label: 'Files' },
     { id: 'remote', type: 'remote', label: 'Remote' },
+    { id: 'settings', type: 'settings', label: 'Settings' },
   ]);
   const [activeTabId, setActiveTabId] = useState('browser');
   const [lastDir, setLastDir] = useState(() => localStorage.getItem('ccserver-last-dir'));
@@ -247,16 +248,6 @@ export default function App() {
     // still handled by handleOpen.
     await handleOpen(dir, { sandbox: !!sandbox, sandboxOpts: null, app, model, isMetaAgent: true });
   }, [metaAgentDir, handleOpen]);
-
-  // Settings page as a tab (singleton): the gear button in the directory
-  // browser opens/activates it; it is closable like any dynamic tab.
-  const openSettingsTab = useCallback(() => {
-    setTabs((prev) => {
-      if (prev.some((t) => t.type === 'settings')) return prev;
-      return [...prev, { id: 'settings', type: 'settings', label: 'Settings' }];
-    });
-    setActiveTabId('settings');
-  }, []);
 
   // Combo launch: ask the server to spawn 2 workers + 1 orchestrator as one
   // group, then add a single group tab for all three (each member attaches
@@ -789,7 +780,7 @@ export default function App() {
             aria-label={sessionSidebarOpen ? 'セッションサイドバーを閉じる' : 'セッションサイドバーを開く'}
             aria-expanded={sessionSidebarOpen}
           >
-            <span aria-hidden="true">☰</span>
+            {sessionMenuIcon}
             {openedTabCount > 0 && (
               <span className="session-menu-count" aria-hidden="true">{openedTabCount}</span>
             )}
@@ -800,15 +791,15 @@ export default function App() {
           <div
             key={tab.id}
             className={`tab-item${tab.id === activeTabId ? ' active' : ''}`}
-            title={tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : undefined}
+            title={tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : tab.label}
+            aria-label={tab.label}
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
               <TabIcon type={tab.type} app={tab.app} shell={tab.shell} isMetaAgent={!!tab.isMetaAgent} />
-              {tab.label}
               {tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
             </span>
-            {tab.type !== 'browser' && tab.type !== 'remote' && (
+            {tab.type !== 'browser' && tab.type !== 'remote' && tab.type !== 'settings' && (
               <button
                 className="tab-close"
                 onClick={(e) => {
@@ -824,17 +815,6 @@ export default function App() {
         ))}
         <div className="tab-bar-spacer" />
         </div>
-        <button
-          type="button"
-          className="btn settings-tab-btn"
-          onClick={openSettingsTab}
-          title="Settings"
-          aria-label="Settings"
-        >
-          <svg className="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-          </svg>
-        </button>
         <button
           type="button"
           className="btn sidebar-toggle-btn"

@@ -14,6 +14,13 @@ const commandcodeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none
 // Meta agent: a key -- the session carries the privileged ccserver-meta MCP.
 const metaIcon = <svg className="tab-icon tab-icon-meta" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="5" cy="11" r="3"/><path d="M7.2 8.8 13.5 2.5"/><path d="M10.8 5.2l2.2 2.2"/><path d="M13.5 2.5V5"/></svg>;
 
+// Session hamburger menu (SessionTabMenu.jsx / App.jsx's sidebar-mode toggle):
+// a terminal-prompt glyph ([>_]-ish), same "rect frame + chevron" family as
+// shellIcon/commandcodeIcon above, so the two open/close buttons that share
+// one job (toggle the session list) also share one icon instead of each
+// hardcoding its own "☰" string.
+export const sessionMenuIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4 6.3l2.4 1.7-2.4 1.7"/><path d="M9 9.7h2.5"/></svg>;
+
 export default function TabIcon({ type, app, shell, isMetaAgent }) {
   if (type === 'browser') {
     return <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3.5A1.5 1.5 0 013.5 2h3l1.5 2h4.5A1.5 1.5 0 0114 5.5v7a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12.5z"/></svg>;
@@ -21,13 +28,13 @@ export default function TabIcon({ type, app, shell, isMetaAgent }) {
   if (type === 'settings') {
     return <svg className="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>;
   }
-  // Cross-instance federation (plan Phase 1): two linked nodes, for the
-  // top-level "Remote" tab. A remote terminal tab itself just gets the usual
-  // per-app icon below, with its label carrying a "⇄ " prefix (see App.jsx's
-  // openRemoteTerminalTab) -- the same convention shell ("$ ") and
+  // Cross-instance federation (plan Phase 1): a broadcast/Wi-Fi glyph, for
+  // the top-level "Remote" tab. A remote terminal tab itself just gets the
+  // usual per-app icon below, with its label carrying a "⇄ " prefix (see
+  // App.jsx's openRemoteTerminalTab) -- the same convention shell ("$ ") and
   // meta-agent ("⌘ ") tabs already use instead of a distinct icon.
   if (type === 'remote') {
-    return <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.4 5.4l5.2 5.2"/></svg>;
+    return <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2.2 6.3a9 9 0 0 1 11.6 0"/><path d="M4.4 8.8a5.8 5.8 0 0 1 7.2 0"/><path d="M6.6 11.3a2.6 2.6 0 0 1 2.8 0"/><circle cx="8" cy="13.2" r="0.9" fill="currentColor" stroke="none"/></svg>;
   }
   if (type === 'group') {
     return <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="2.5" width="5" height="4.5" rx="1"/><rect x="9.5" y="2.5" width="5" height="4.5" rx="1"/><rect x="1.5" y="9.5" width="5" height="4" rx="1"/><rect x="9.5" y="9.5" width="5" height="4" rx="1"/></svg>;

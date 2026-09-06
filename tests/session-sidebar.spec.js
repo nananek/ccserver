@@ -19,7 +19,7 @@ async function gotoApp(page) {
 }
 
 async function openShellTab(page) {
-  await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
+  await page.locator('.tab-list').getByTitle('Files').click();
   await openTerminalBtn(page).click();
   await expect(tabToggleBadge(page)).toHaveText('1');
   // pty確立 (サーバー側セッション生成) を待つ。直後にタブを閉じる手順では、
@@ -89,7 +89,7 @@ test('settings select switches mode and persists', async ({ page }) => {
   await gotoApp(page);
   await expect(leftSidebar(page)).toBeVisible();
 
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.locator('.tab-list').getByTitle('Settings').click();
   await expect(page.locator('.settings-view')).toBeVisible();
   const panel = page.locator('[role="tabpanel"]');
   const select = panel.getByLabel('セッション表示');
@@ -127,7 +127,7 @@ test('session overlay is independent from widget overlay', async ({ page }) => {
   // overlay設定自体は開閉と独立に永続化される。
   await sessionToggle(page).click();
   await expect(leftSidebar(page)).toBeHidden();
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.locator('.tab-list').getByTitle('Settings').click();
   const panel = page.locator('[role="tabpanel"]');
   const sessionCheck = panel.getByLabel('セッションをCLIの上に重ねて表示する');
   const widgetCheck = panel.getByLabel('ウィジェットをCLIの上に重ねて表示する');

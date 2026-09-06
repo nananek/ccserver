@@ -7,8 +7,13 @@ import { test, expect } from '@playwright/test';
 
 const openTerminalBtn = (page) => page.getByRole('button', { name: 'Terminal', exact: true });
 const launchMenuBtn = (page) => page.getByRole('button', { name: '起動方法を選択' });
-const rtkCheck = (page) => page.getByLabel('rtk を導入する (sandbox 内にインストール)');
-const crgCheck = (page) => page.getByLabel('code-review-graph MCP を導入する');
+// Scoped to the launch dialog: Settings is now a permanent (always-mounted)
+// tab, so its General section's identically-labeled checkboxes ("rtk を導入
+// する" / "code-review-graph MCP を導入する") are also in the DOM and would
+// otherwise make an unscoped getByLabel ambiguous.
+const launchDialog = (page) => page.locator('.resume-dialog.open-dialog');
+const rtkCheck = (page) => launchDialog(page).getByLabel('rtk を導入する (sandbox 内にインストール)');
+const crgCheck = (page) => launchDialog(page).getByLabel('code-review-graph MCP を導入する');
 
 // currentPath は初回 '/' (ccserver-last-dir 未設定時)。起動メニューは
 // currentPath に対する sandboxOpts を表示するため、'/' への記憶で足りる。

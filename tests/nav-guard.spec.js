@@ -80,7 +80,7 @@ test.describe('nav guard', () => {
     await page.goto('/');
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
     // Settings を開いて select (editable) にフォーカスする。
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.locator('.tab-list').getByTitle('Settings').click();
     const select = page.locator('#general-theme-select');
     await expect(select).toBeVisible();
     await select.focus();
@@ -117,7 +117,7 @@ test.describe('nav guard', () => {
     const select = page.locator('[role="tabpanel"]').getByLabel('ブラウザの戻る・進む操作');
     // 設定UIで allow に切り替えると、積まれていたガードが剥がれる。
     // confirm に戻して再び allow にしても剥がれる (peel フラグのリセット確認)。
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.locator('.tab-list').getByTitle('Settings').click();
     for (let i = 0; i < 2; i++) {
       await select.selectOption('allow');
       await expect.poll(() => guardPresent(page)).toBe(false);
@@ -193,7 +193,7 @@ test.describe('nav guard', () => {
     // popstate が誤消費されず、確認が出続ける。
     await page.goto('/');
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.locator('.tab-list').getByTitle('Settings').click();
     const select = page.locator('[role="tabpanel"]').getByLabel('ブラウザの戻る・進む操作');
     await page.evaluate(() => {
       window.__origBack = window.history.back.bind(window.history);
@@ -224,7 +224,7 @@ test.describe('nav guard', () => {
     // 確定後に実行する。こうすると peel 完了 pop が confirm リスナーに届く
     // 順序が確定し、誤認があれば必ず自発ダイアログとして現れる。
     await gotoWithPrior(page);
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.locator('.tab-list').getByTitle('Settings').click();
     const select = page.locator('[role="tabpanel"]').getByLabel('ブラウザの戻る・進む操作');
     await page.evaluate(() => {
       window.__origBack = window.history.back.bind(window.history);

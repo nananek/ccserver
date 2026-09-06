@@ -8,8 +8,8 @@ test.describe('Settings left menu', () => {
     await page.goto('/');
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
 
-    // Settings タブを開く (DirectoryBrowser のギアボタン)。
-    await page.getByRole('button', { name: 'Settings' }).click();
+    // Settings タブに切り替える (常設タブ、アイコンのみ表示)。
+    await page.locator('.tab-list').getByTitle('Settings').click();
     const settings = page.locator('.settings-view');
     await expect(settings).toBeVisible();
 

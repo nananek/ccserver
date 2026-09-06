@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import SessionList from './SessionList.jsx';
 import { moveMenuFocus } from './sessionMenuNav.js';
+import { sessionMenuIcon } from './TabIcon.jsx';
 
 // セッションタブ用ハンバーガーメニュー: 開いている terminal タブと group
 // (コンボ) タブを上段、サーバー上で稼働中だが未オープンのセッションを下段に
@@ -69,7 +70,7 @@ export default function SessionTabMenu({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <span aria-hidden="true">☰</span>
+        {sessionMenuIcon}
         {openedCount > 0 && (
           <span className="session-menu-count" aria-hidden="true">{openedCount}</span>
         )}

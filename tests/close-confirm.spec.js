@@ -10,7 +10,8 @@ const usePopupMode = (page) => page.addInitScript(() => {
 
 // Locators / helpers ---------------------------------------------------------
 // Session (terminal) tabs now live in the hamburger menu at the left end of
-// the tab bar, not in .tab-list. Files/Remote tabs stay horizontal.
+// the tab bar, not in .tab-list. Files/Remote/Settings tabs stay horizontal
+// (permanent, icon-only -- selected by title/aria-label, not visible text).
 
 const openTerminalBtn = (page) => page.getByRole('button', { name: 'Terminal', exact: true });
 const hamburger = (page) => page.getByRole('button', { name: 'セッション一覧メニュー' });
@@ -25,7 +26,7 @@ async function badgeCount(page) {
 
 async function openShellTab(page) {
   // The "Terminal" button lives in the Files/DirectoryBrowser tab.
-  await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
+  await page.locator('.tab-list').getByTitle('Files').click();
   const before = await badgeCount(page);
   await openTerminalBtn(page).click();
   if (before === 0) {
