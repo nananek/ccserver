@@ -141,14 +141,26 @@ test('list() reports viewers as the current subscriber count', () => {
 });
 
 test('subscribe replays buffered output; sinceSeq filters to only newer chunks', async () => {
+  // Search for the *evaluated* marker ("AAA1"/"BBB1"), not a bare literal
+  // ("AAA"/"BBB"). The pty echoes back the raw input line itself (e.g.
+  // "echo AAA\n"), and that echo can land as its own onData chunk, separate
+  // from and before the command's actual output -- the two are not
+  // guaranteed to coalesce into one chunk. A bare-literal waitFor can then
+  // resolve on the input-echo chunk alone, fixing lastSeq one chunk too
+  // early and racily failing the "AAA already before sinceSeq" assertion
+  // below. Arithmetic expansion ($((...))) sidesteps this: the raw typed
+  // text ("AAA$((1+0))") never contains the string being searched for
+  // ("AAA1") -- only bash's evaluated output does, so a match can only mean
+  // the real output chunk is already in the backlog. (Same technique as the
+  // PTY_HOST_MARKER_$((1+1)) test above.)
   const store = new PtyStore();
   const { id } = shellSpawn(store);
   store.subscribe(id, 'watcher'); // so data actually gets buffered/pushed while "unseen"
-  store.write(id, 'echo AAA\n');
+  store.write(id, 'echo AAA$((1+0))\n');
   await waitFor(() => {
     const r = store.subscribe(id, 'peek');
     store.unsubscribe(id, 'peek');
-    return r.backlog.some((c) => c.data.includes('AAA'));
+    return r.backlog.some((c) => c.data.includes('AAA1'));
   });
 
   const full = store.subscribe(id, 'late-joiner', null);
@@ -156,17 +168,17 @@ test('subscribe replays buffered output; sinceSeq filters to only newer chunks',
   assert.equal(full.truncated, false);
   const lastSeq = full.lastSeq;
 
-  store.write(id, 'echo BBB\n');
+  store.write(id, 'echo BBB$((1+0))\n');
   await waitFor(() => {
     const r = store.subscribe(id, 'peek2', lastSeq);
     store.unsubscribe(id, 'peek2');
-    return r.backlog.some((c) => c.data.includes('BBB'));
+    return r.backlog.some((c) => c.data.includes('BBB1'));
   });
 
   const sinceLatest = store.subscribe(id, 'catchup', lastSeq);
   assert.ok(sinceLatest.backlog.every((c) => c.seq > lastSeq));
-  assert.ok(sinceLatest.backlog.some((c) => c.data.includes('BBB')));
-  assert.ok(!sinceLatest.backlog.some((c) => c.data.includes('AAA')), 'AAA was already before sinceSeq');
+  assert.ok(sinceLatest.backlog.some((c) => c.data.includes('BBB1')));
+  assert.ok(!sinceLatest.backlog.some((c) => c.data.includes('AAA1')), 'AAA1 was already before sinceSeq');
 
   store.destroy(id);
 });
