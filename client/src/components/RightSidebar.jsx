@@ -94,22 +94,39 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
     }
     const data = stats?.data;
     const showIpmi = stats?.showIpmi;
-    // 未取得時は枠を作らない。ローディング／エラー表示は
-    // リスト上部の単一バナーに集約する。
-    if (!data) return null;
+    // data 未取得時の扱い:
+    // - ローディング中 (!error) は枠を作らず、上部の単一ローディング表示に任せる。
+    // - 取得失敗時 (error) は可視モニターウィジェットごとに枠を作り、
+    //   枠内にエラーを出す。単一バナーに集約すると枠が0件になり
+    //   隠す/移動/追加の操作対象が消えるため。
+    if (!data) {
+      if (stats?.error && MONITOR_WIDGET_IDS.includes(id)) {
+        if (id === 'ipmi' && !showIpmi) return null;
+        return <div className="error">Failed to load system stats: {stats.error}</div>;
+      }
+      return null;
+    }
     // 各カードはデータ欠落時に内部で null を描画するが、ここで返す React 要素
     // 自体は null にならないため、下流の `.filter(body !== null)` では除外
     // できない。空の WidgetShell を作らないよう、ここで描画可否を判定する。
+    // ただしバックエンドが部分200 + errors を返した項目は、欠測として隠すのではなく
+    // 枠内に項目別エラーを出す (HTTP 500時の !data 分岐と対になる処理)。
+    const sectionError = (section) => data?.errors?.[section] ?? null;
+    const sectionErrorBody = (section) => {
+      const msg = sectionError(section);
+      if (msg == null || msg === '') return null;
+      return <div className="error">Failed to load {section}: {msg}</div>;
+    };
     switch (id) {
       case 'system': {
-        if (!hasSystemMetrics(data)) return null;
+        if (!hasSystemMetrics(data)) return sectionErrorBody('system');
         return <SystemCard data={data} hideTitle />;
       }
       case 'cpu':
-        if (!hasCpuUsage(data)) return null;
+        if (!hasCpuUsage(data)) return sectionErrorBody('cpu');
         return <CpuCard data={data} hideTitle />;
       case 'memory-storage':
-        if (!hasMemoryOrStorage(data)) return null;
+        if (!hasMemoryOrStorage(data)) return sectionErrorBody('memory');
         return (
           <>
             <MemoryCard data={data} hideTitle />
@@ -231,9 +248,6 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
         </span>
       </div>
       <div className="sidebar-widgets">
-        {showMonitorStatus && stats?.error && !stats?.data && (
-          <div className="error">Failed to load system stats: {stats.error}</div>
-        )}
         {showMonitorStatus && !stats?.error && !stats?.data && (
           <div className="loading">Loading system stats...</div>
         )}

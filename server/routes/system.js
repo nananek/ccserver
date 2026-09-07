@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import os from 'node:os';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,9 +36,39 @@ function calcUsage(prev, curr) {
   return ((curr.busy - prev.busy) / totalDelta) * 100;
 }
 
+function cpuStatsFromOs() {
+  const cpus = os.cpus();
+  const cores = [];
+  let totalIdle = 0;
+  let totalBusy = 0;
+  for (const cpu of cpus) {
+    const t = cpu.times;
+    const idle = t.idle ?? 0;
+    const busy = (t.user ?? 0) + (t.nice ?? 0) + (t.sys ?? 0) + (t.irq ?? 0);
+    totalIdle += idle;
+    totalBusy += busy;
+    cores.push({ idle, busy, total: idle + busy });
+  }
+  return { total: { idle: totalIdle, busy: totalBusy, total: totalIdle + totalBusy }, cores };
+}
+
 async function getCpuUsage() {
-  const content = await readFile('/proc/stat', 'utf-8');
-  const stats = parseCpuStats(content);
+  let stats;
+  try {
+    const content = await readFile('/proc/stat', 'utf-8');
+    stats = parseCpuStats(content);
+    if (!stats.total) throw new Error('unparseable /proc/stat');
+  } catch (err) {
+    // macOS / BSD には /proc が無いため os.cpus() にフォールバックする。
+    // /proc が読めない Linux 環境でも同様にフォールバックする。
+    if (process.platform !== 'linux') {
+      stats = cpuStatsFromOs();
+    } else if (err?.code === 'ENOENT') {
+      stats = cpuStatsFromOs();
+    } else {
+      throw err;
+    }
+  }
   const now = Date.now();
 
   let totalUsage = 0;
@@ -59,8 +90,32 @@ async function getCpuUsage() {
   };
 }
 
+function memoryFromOs() {
+  const toMb = (b) => Math.round(b / 1024 / 1024);
+  const total = os.totalmem();
+  const free = os.freemem();
+  return {
+    total: toMb(total),
+    used: toMb(total - free),
+    free: toMb(free),
+    available: toMb(free),
+    bufferCache: null,
+    swapTotal: 0,
+    swapUsed: 0,
+  };
+}
+
 async function getMemory() {
-  const content = await readFile('/proc/meminfo', 'utf-8');
+  let content;
+  try {
+    content = await readFile('/proc/meminfo', 'utf-8');
+  } catch (err) {
+    // macOS には /proc/meminfo が無いため os モジュールにフォールバックする。
+    if (process.platform !== 'linux' || err?.code === 'ENOENT') {
+      return memoryFromOs();
+    }
+    throw err;
+  }
   const get = (key) => {
     const m = content.match(new RegExp(`${key}:\\s+(\\d+)`));
     return m ? parseInt(m[1], 10) : 0;
@@ -213,24 +268,42 @@ function requestIpmi() {
 }
 
 async function getLoadAndUptime() {
-  const content = await readFile('/proc/uptime', 'utf-8');
-  const uptime = parseFloat(content.split(' ')[0]);
-  const loadavgContent = await readFile('/proc/loadavg', 'utf-8');
-  const parts = loadavgContent.trim().split(/\s+/);
-  return {
-    loadAvg: parts.slice(0, 3).map(Number),
-    uptime: Math.floor(uptime),
-  };
+  try {
+    const content = await readFile('/proc/uptime', 'utf-8');
+    const uptime = parseFloat(content.split(' ')[0]);
+    const loadavgContent = await readFile('/proc/loadavg', 'utf-8');
+    const parts = loadavgContent.trim().split(/\s+/);
+    return {
+      loadAvg: parts.slice(0, 3).map(Number),
+      uptime: Math.floor(uptime),
+    };
+  } catch (err) {
+    // macOS には /proc/uptime・/proc/loadavg が無いため os モジュールにフォールバックする。
+    if (process.platform !== 'linux' || err?.code === 'ENOENT') {
+      return {
+        loadAvg: os.loadavg(),
+        uptime: Math.floor(os.uptime()),
+      };
+    }
+    throw err;
+  }
 }
 
 function getCpuModel() {
   try {
     const content = readFileSync('/proc/cpuinfo', 'utf-8');
     const m = content.match(/model name\s*:\s*(.+)/);
-    return m ? m[1].trim() : 'Unknown';
+    if (m) return m[1].trim();
   } catch {
-    return 'Unknown';
+    // fall through to os.cpus() below (macOS には /proc/cpuinfo が無い)
   }
+  try {
+    const model = os.cpus()?.[0]?.model;
+    if (model) return model.trim();
+  } catch {
+    // ignore
+  }
+  return 'Unknown';
 }
 
 const cpuModel = getCpuModel();
@@ -241,7 +314,9 @@ const EXCLUDE_FS = new Set(['tmpfs', 'devtmpfs', 'udev', 'squashfs', 'overlay', 
 
 async function getStorageInfo() {
   try {
-    const { stdout } = await execFileAsync('df', ['-P', '-B1'], { timeout: 5000 });
+    // -B1 は GNU df 専用のため BSD/macOS では失敗する。
+    // -k (1Kブロック) は両対応のため、1024倍してバイト換算する。
+    const { stdout } = await execFileAsync('df', ['-P', '-k'], { timeout: 5000 });
     const lines = stdout.trim().split('\n').slice(1);
     const entries = [];
     for (const line of lines) {
@@ -251,7 +326,7 @@ async function getStorageInfo() {
       const fsType = device.startsWith('/dev/') ? null : device;
       if (fsType && EXCLUDE_FS.has(fsType)) continue;
       if (!device.startsWith('/dev/')) continue;
-      const toMb = (b) => Math.round(parseInt(b, 10) / 1024 / 1024);
+      const toMb = (k) => Math.round((parseInt(k, 10) * 1024) / 1024 / 1024);
       const totalMb = toMb(total);
       if (totalMb === 0) continue;
       const usedMb = toMb(used);
@@ -272,23 +347,41 @@ async function getStorageInfo() {
 
 export async function systemRoute(fastify, opts) {
   fastify.get('/system-stats', async (request) => {
-    const [cpuUsage, memory, gpu, loadUptime, storage] = await Promise.all([
+    // 1項目の失敗で全体を500にしない。取得できた項目は返し、
+    // 失敗した項目は null/空値 + errors に理由を詰めて常に200を返す。
+    // (gpu/temperatures/storage は元から失敗時フォールバック済みのため
+    // errors には含めない。存在しないGPU等は正常系の欠測として扱う)
+    const [cpuRes, memRes, gpuRes, loadRes, storageRes] = await Promise.allSettled([
       getCpuUsage(),
       getMemory(),
       getGpuInfo(),
       getLoadAndUptime(),
       getStorageInfo(),
     ]);
+    const errors = {};
+    const cpuUsage = cpuRes.status === 'fulfilled' ? cpuRes.value : null;
+    if (cpuRes.status === 'rejected') errors.cpu = String(cpuRes.reason?.message ?? cpuRes.reason);
+    const memory = memRes.status === 'fulfilled' ? memRes.value : null;
+    if (memRes.status === 'rejected') errors.memory = String(memRes.reason?.message ?? memRes.reason);
+    const gpu = gpuRes.status === 'fulfilled' ? gpuRes.value : null;
+    const loadUptime = loadRes.status === 'fulfilled'
+      ? loadRes.value
+      : { loadAvg: [], uptime: null };
+    if (loadRes.status === 'rejected') errors.system = String(loadRes.reason?.message ?? loadRes.reason);
+    const storage = storageRes.status === 'fulfilled' ? storageRes.value : [];
+
     const wantIpmi = request.query.ipmi === '1';
     const ipmi = wantIpmi ? requestIpmi() : null;
     const temperatures = getTemperatures();
 
-    return {
-      cpu: {
-        model: cpuModel,
-        coreCount: cpuUsage.cores.length,
-        usage: cpuUsage,
-      },
+    const body = {
+      cpu: cpuUsage
+        ? {
+          model: cpuModel,
+          coreCount: cpuUsage.cores.length,
+          usage: cpuUsage,
+        }
+        : null,
       memory,
       storage,
       temperatures,
@@ -296,5 +389,7 @@ export async function systemRoute(fastify, opts) {
       ipmi,
       ...loadUptime,
     };
+    if (Object.keys(errors).length > 0) body.errors = errors;
+    return body;
   });
 }

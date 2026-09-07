@@ -37,7 +37,7 @@ function mockRoutes(page, hooks = {}) {
     hooks.onSystemStats?.();
     if (hooks.systemStatsDelay) await new Promise((r) => setTimeout(r, hooks.systemStatsDelay));
     await route.fulfill({
-      status: 200,
+      status: hooks.systemStatsStatus ?? 200,
       contentType: 'application/json',
       body: JSON.stringify(hooks.systemStats ?? {
         uptime: 3600,
@@ -849,6 +849,66 @@ test('sidebar menus close on Escape and are mutually exclusive', async ({ page }
   await page.keyboard.press('Escape');
   await expect(addBtn).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('.sidebar-add-menu')).toHaveCount(0);
+});
+
+test('system-stats 500 shows per-widget errors and keeps widgets editable', async ({ page }) => {
+  mockRoutes(page, { systemStatsStatus: 500, systemStats: { error: 'internal' } });
+  await page.goto('/');
+
+  // 可視モニターウィジェットごとに枠が作られ、枠内にエラーが出る。
+  // 旧コードはリスト上部の単一バナーのみで枠が0件だった。
+  for (const title of ['System', 'CPU', 'Memory / Storage', 'GPU']) {
+    const card = page.locator('.widget-card', {
+      has: page.locator('.widget-card-title', { hasText: title }),
+    });
+    await expect(card).toBeVisible();
+    await expect(card.locator('.error')).toContainText('Failed to load system stats: HTTP 500');
+  }
+  // 単一バナーへの集約はしない (サイドバー直下の .error が残らないこと)。
+  await expect(page.locator('.sidebar-widgets > .error')).toHaveCount(0);
+  // Usage は system-stats と独立に表示される。
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'Usage' }),
+  })).toBeVisible();
+
+  // エラー枠でも非表示・移動の操作対象になること。
+  const cpuWidget = page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'CPU' }),
+  });
+  await cpuWidget.locator('.widget-icon-btn[title="非表示"]').click();
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'CPU' }),
+  })).toBeHidden();
+});
+
+test('partial 200 with errors shows only the failed widget as an error', async ({ page }) => {
+  mockRoutes(page, {
+    systemStats: {
+      uptime: 3600,
+      loadAvg: [0.5, 0.4, 0.3],
+      cpu: null,
+      memory: { total: 16000, used: 8000, available: 8000, bufferCache: 1000, swapTotal: 0, swapUsed: 0 },
+      storage: [],
+      temperatures: {},
+      gpu: null,
+      ipmi: null,
+      errors: { cpu: 'ENOENT: no such file or directory' },
+    },
+  });
+  await page.goto('/');
+
+  // CPU枠だけ項目別エラーになり、他は正常表示のまま。
+  const cpuCard = page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'CPU' }),
+  });
+  await expect(cpuCard).toBeVisible();
+  await expect(cpuCard.locator('.error')).toContainText('Failed to load cpu');
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'System' }),
+  })).toBeVisible();
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'Memory / Storage' }),
+  })).toBeVisible();
 });
 
 test('slow responses do not pile up overlapping system-stats polls', async ({ page }) => {
