@@ -55,10 +55,16 @@ export default function App() {
   // is in flight the dialog buttons are disabled and re-entry is ignored,
   // so a double-click can't fire a duplicate DELETE (whose 404 would
   // surface a bogus failure alert after a successful termination).
-  // The guard is a ref (not just the state below): setState applies
-  // asynchronously, so two clicks before the next render would both see a
-  // stale `false` and slip through. The state remains for the disabled UI.
-  const isTerminatingRef = useRef(false);
+  // The guard is a ref keyed by tabId (not just the state below): setState
+  // applies asynchronously, so two clicks before the next render would both
+  // see a stale `false` and slip through. Keying by tabId (rather than a
+  // single shared flag) matters because terminateSessionById is also called
+  // from the "次回以降確認しない" skip path in handleCloseTab, where
+  // closing several different tabs in quick succession must not have the
+  // second one silently no-op just because the first tab's DELETE is still
+  // in flight. The state remains for the disabled UI (dialog-only, so it
+  // only ever reflects the single in-flight closeConfirm.tabId).
+  const terminatingTabIdsRef = useRef(new Set());
   const [isTerminatingSession, setIsTerminatingSession] = useState(false);
   // Hoisted above terminateSessionById (below) so it can optimistically drop
   // a just-terminated session the instant doCloseTab fires, in the same
@@ -435,11 +441,11 @@ export default function App() {
   // call is already in flight -- callers that persist "次回以降確認しない"
   // only after success (terminateSessionAndCloseTab below) rely on this.
   const terminateSessionById = useCallback(async (tabId) => {
-    if (isTerminatingRef.current) return false;
+    if (terminatingTabIdsRef.current.has(tabId)) return false;
     const tab = tabs.find((t) => t.id === tabId);
     const sessionId = tab?.sessionId || tab?.attachSessionId || null;
     if (!tab || !sessionId) { doCloseTab(tabId); return true; }
-    isTerminatingRef.current = true;
+    terminatingTabIdsRef.current.add(tabId);
     setIsTerminatingSession(true);
     try {
       const res = await authFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
@@ -453,8 +459,8 @@ export default function App() {
       window.alert(`セッションを終了できませんでした: ${err.message}`);
       return false;
     } finally {
-      isTerminatingRef.current = false;
-      setIsTerminatingSession(false);
+      terminatingTabIdsRef.current.delete(tabId);
+      setIsTerminatingSession(terminatingTabIdsRef.current.size > 0);
     }
     doCloseTab(tabId);
     // Drop it from the last-fetched server list in the same tick as the tab
