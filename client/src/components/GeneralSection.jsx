@@ -1,20 +1,18 @@
 import { getThemeIds, getTheme } from '../themes.js';
 
-// "一般" メニュー: テーマ・終了確認・戻る/進むガード・セッション表示・ウィジェット表示・
+// "一般" メニュー: テーマ・終了確認・戻る/進むガード・セッション表示・
 // デスクトップ通知・サンドボックス既定値。
 // いずれも即時反映し、localStorage に永続化される (保存先の詳細は
-// 各 setter 側 = App.jsx / useWidgetPrefs.js / useSessionSidebarPrefs.js / themes.js / sandboxDefaults.js を参照)。
+// 各 setter 側 = App.jsx / useSessionSidebarPrefs.js / themes.js / sandboxDefaults.js を参照)。
+// なお左右パネルの「前面に重ねて表示 (ピン留め)」設定は各パネルのヘッダーの
+// ピン留めボタン (RightSidebar.jsx / SessionSidebar.jsx) に移設済みで、ここには無い。
 export default function GeneralSection({
   themeId,
   onThemeChange,
   confirmBeforeClose,
   onConfirmBeforeCloseChange,
-  sidebarOverlay,
-  onSidebarOverlayChange,
   sessionMode,
   onSessionModeChange,
-  sessionOverlay,
-  onSessionOverlayChange,
   sandboxDefaults,
   onSandboxDefaultsChange,
   navGuardMode,
@@ -86,30 +84,6 @@ export default function GeneralSection({
       <p className="settings-hint">
         サイドバーは右ウィジェットと同じ常時表示パネルです。
         ポップアップはタブバー左端の☰ボタンから開く従来表示です。
-      </p>
-      <label className="general-setting-check">
-        <input
-          type="checkbox"
-          checked={!!sessionOverlay}
-          onChange={(e) => onSessionOverlayChange(e.target.checked)}
-        />
-        セッションをCLIの上に重ねて表示する
-      </label>
-      <p className="settings-hint">
-        オンにすると、デスクトップ幅でも左セッションサイドバーがCLIのサイズを変更せず
-        前面に重ねて表示されます (右ウィジェットとは独立した設定です)。
-      </p>
-      <label className="general-setting-check">
-        <input
-          type="checkbox"
-          checked={sidebarOverlay}
-          onChange={(e) => onSidebarOverlayChange(e.target.checked)}
-        />
-        ウィジェットをCLIの上に重ねて表示する
-      </label>
-      <p className="settings-hint">
-        オンにすると、デスクトップ幅でも右サイドバーがCLIのサイズを変更せず
-        前面に重ねて表示されます (左セッションとは独立した設定です)。
       </p>
       <label className="general-setting-check">
         <input

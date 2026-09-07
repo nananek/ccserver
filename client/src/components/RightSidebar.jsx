@@ -48,7 +48,7 @@ function WidgetShell({ title, onHide, onMoveUp, onMoveDown, canMoveUp = true, ca
 }
 
 function RightSidebarInner({ usageProps = {}, prefs }) {
-  const { open, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget } = prefs;
+  const { open, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget, overlay, setOverlay } = prefs;
   const [addOpen, setAddOpen] = useState(false);
   const [intervalOpen, setIntervalOpen] = useState(false);
   const addWrapRef = useRef(null);
@@ -155,6 +155,19 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
       <div className="sidebar-header">
         <span className="sidebar-title">Widgets</span>
         <span className="sidebar-header-actions">
+          <button
+            type="button"
+            className="widget-icon-btn sidebar-pin-btn"
+            onClick={() => setOverlay(!overlay)}
+            aria-pressed={overlay}
+            title={overlay ? 'ピン留めを解除' : 'ピン留めして前面に重ねて表示'}
+            aria-label={overlay ? 'ピン留めを解除' : 'ピン留めして前面に重ねて表示'}
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" fill={overlay ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="8" cy="5" r="3" />
+              <path d="M8 8.5v6" />
+            </svg>
+          </button>
           {stats?.setInterval && (
             <span className="sidebar-add-wrap" ref={intervalWrapRef}>
               <button

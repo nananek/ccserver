@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
 
-// Settings > 一般: テーマ・終了確認・ウィジェット重ね表示の各設定が
-// 即時反映＋永続化されることを検証する。
+// Settings > 一般: テーマ・終了確認の各設定が即時反映＋永続化されることを
+// 検証する。ウィジェット重ね表示 (ピン留め) は右サイドバーヘッダーの
+// ボタンに移設済みのため、この spec の対象外 (session-sidebar.spec.js 側で検証)。
 test.describe('Settings general section', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
@@ -74,15 +75,22 @@ test.describe('Settings general section', () => {
       .toBeNull();
   });
 
-  test('sidebar overlay checkbox toggles overlay mode', async ({ page }) => {
-    const panel = page.locator('[role="tabpanel"]');
-    const check = panel.getByLabel('ウィジェットをCLIの上に重ねて表示する');
-    await expect(check).not.toBeChecked();
-    await check.check();
+  test('widget sidebar pin button toggles overlay mode', async ({ page }) => {
+    // Settingsからチェックボックスは廃止済み。ウィジェットパネルのヘッダーに
+    // あるピン留めボタンから同じ overlay state を切り替える (RightSidebar は
+    // アクティブタブに関わらず常時表示されるため、Settingsタブのままでよい。
+    // session-sidebar側は session-sidebar.spec.js の 'session overlay is
+    // independent...' で検証)。
+    const pinBtn = page.locator('.right-sidebar').getByRole('button', { name: 'ピン留めして前面に重ねて表示' });
+    await expect(pinBtn).toBeVisible();
+    await expect(pinBtn).toHaveAttribute('aria-pressed', 'false');
+    await pinBtn.click();
     await expect
       .poll(() => page.evaluate(() => localStorage.getItem('ccserver-sidebar-overlay')))
       .toBe('1');
     await expect(page.locator('.main-row')).toHaveClass(/sidebar-overlay/);
+    const pinnedBtn = page.locator('.right-sidebar').getByRole('button', { name: 'ピン留めを解除' });
+    await expect(pinnedBtn).toHaveAttribute('aria-pressed', 'true');
     // 重ね表示中もタブバーのトグルボタンはサイドバーに覆われず、
     // クリックで閉じられる (サイドバー自体に閉じるボタンはないため)。
     const toggle = page.getByRole('button', { name: 'Widgetsパネルを閉じる' });
@@ -91,7 +99,7 @@ test.describe('Settings general section', () => {
     await expect(page.locator('.right-sidebar')).toBeHidden();
     await page.getByRole('button', { name: 'Widgetsパネルを開く' }).click();
     await expect(page.locator('.right-sidebar')).toBeVisible();
-    await check.uncheck();
+    await pinnedBtn.click();
     await expect(page.locator('.main-row')).not.toHaveClass(/sidebar-overlay/);
   });
 

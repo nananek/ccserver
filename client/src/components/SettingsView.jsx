@@ -17,12 +17,8 @@ export default function SettingsView({
   onThemeChange,
   confirmBeforeClose,
   onConfirmBeforeCloseChange,
-  sidebarOverlay,
-  onSidebarOverlayChange,
   sessionMode,
   onSessionModeChange,
-  sessionOverlay,
-  onSessionOverlayChange,
   sandboxDefaults,
   onSandboxDefaultsChange,
   navGuardMode,
@@ -70,12 +66,8 @@ export default function SettingsView({
               onThemeChange={onThemeChange}
               confirmBeforeClose={confirmBeforeClose}
               onConfirmBeforeCloseChange={onConfirmBeforeCloseChange}
-              sidebarOverlay={sidebarOverlay}
-              onSidebarOverlayChange={onSidebarOverlayChange}
               sessionMode={sessionMode}
               onSessionModeChange={onSessionModeChange}
-              sessionOverlay={sessionOverlay}
-              onSessionOverlayChange={onSessionOverlayChange}
               sandboxDefaults={sandboxDefaults}
               onSandboxDefaultsChange={onSandboxDefaultsChange}
               navGuardMode={navGuardMode}

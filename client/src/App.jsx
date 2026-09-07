@@ -899,6 +899,8 @@ export default function App() {
       {sessionSidebarMode === 'sidebar' && (
         <SessionSidebar
           open={sessionSidebarOpen}
+          overlay={sessionSidebarPrefs.overlay}
+          onOverlayChange={sessionSidebarPrefs.setOverlay}
           sessionTabs={sessionTabs}
           groupTabs={groupTabs}
           activeTabId={activeTabId}
@@ -927,12 +929,8 @@ export default function App() {
               onThemeChange={setThemeId}
               confirmBeforeClose={!skipCloseConfirm}
               onConfirmBeforeCloseChange={(v) => setSkipCloseConfirmPersisted(!v)}
-              sidebarOverlay={sidebarPrefs.overlay}
-              onSidebarOverlayChange={sidebarPrefs.setOverlay}
               sessionMode={sessionSidebarPrefs.mode}
               onSessionModeChange={sessionSidebarPrefs.setMode}
-              sessionOverlay={sessionSidebarPrefs.overlay}
-              onSessionOverlayChange={sessionSidebarPrefs.setOverlay}
               sandboxDefaults={sandboxDefaults}
               onSandboxDefaultsChange={setSandboxDefaultsPersisted}
               navGuardMode={navGuardMode}

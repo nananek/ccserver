@@ -122,37 +122,38 @@ test('session overlay is independent from widget overlay', async ({ page }) => {
   });
   await page.reload();
   await expect(openTerminalBtn(page)).toBeVisible();
-  // overlay ON時は左パネルが設定UIに重なるため (右overlayと同一設計:
-  // 閉じるのはtab-barトグルのみ)、チェック操作時はパネルを閉じておく。
-  // overlay設定自体は開閉と独立に永続化される。
-  await sessionToggle(page).click();
-  await expect(leftSidebar(page)).toBeHidden();
-  await page.locator('.tab-list').getByTitle('Settings').click();
-  const panel = page.locator('[role="tabpanel"]');
-  const sessionCheck = panel.getByLabel('セッションをCLIの上に重ねて表示する');
-  const widgetCheck = panel.getByLabel('ウィジェットをCLIの上に重ねて表示する');
-  await expect(sessionCheck).not.toBeChecked();
-  await expect(widgetCheck).not.toBeChecked();
+  // Settingsのチェックボックスは廃止済み。各パネル自身のヘッダーにある
+  // ピン留めボタンから overlay state を切り替える (ボタンはパネルが
+  // 開いている間だけ存在する)。
+  await expect(leftSidebar(page)).toBeVisible();
+  const sessionPin = leftSidebar(page).getByRole('button', { name: 'ピン留めして前面に重ねて表示' });
+  const widgetPin = page.locator('.right-sidebar').getByRole('button', { name: 'ピン留めして前面に重ねて表示' });
+  await expect(sessionPin).toHaveAttribute('aria-pressed', 'false');
+  await expect(widgetPin).toHaveAttribute('aria-pressed', 'false');
 
   // 左のみ ON: session-overlay のみ付与、右キー・右クラスに影響なし。
-  await sessionCheck.check();
+  await sessionPin.click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem('ccserver-session-sidebar-overlay'))).toBe('1');
   await expect(page.locator('.main-row')).toHaveClass(/session-overlay/);
   await expect(page.locator('.main-row')).not.toHaveClass(/sidebar-overlay/);
   expect(await page.evaluate(() => localStorage.getItem('ccserver-sidebar-overlay'))).toBeNull();
-  // 開き直しても表示され、前面に重なる (absolute配置)。
+  // 前面に重なる (absolute配置)。
+  await expect.poll(() => page.locator('.left-sidebar').evaluate((el) => getComputedStyle(el).position)).toBe('absolute');
+  const sessionPinned = leftSidebar(page).getByRole('button', { name: 'ピン留めを解除' });
+
+  // 閉じ直しても (overlayとして) 表示され、前面に重なったままであることを確認。
+  await page.getByRole('button', { name: 'セッションサイドバーを閉じる' }).click();
+  await expect(leftSidebar(page)).toBeHidden();
   await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
   await expect(leftSidebar(page)).toBeVisible();
   await expect.poll(() => page.locator('.left-sidebar').evaluate((el) => getComputedStyle(el).position)).toBe('absolute');
-  await page.getByRole('button', { name: 'セッションサイドバーを閉じる' }).click();
-  await expect(leftSidebar(page)).toBeHidden();
 
-  await sessionCheck.uncheck();
+  await sessionPinned.click();
   await expect(page.locator('.main-row')).not.toHaveClass(/session-overlay/);
 
   // 右のみ ON: sidebar-overlay のみ付与、左キーに影響なし。
   // (左OFF後の値は '0' 保存。右 useWidgetPrefs と同一の永続化方針)
-  await widgetCheck.check();
+  await widgetPin.click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem('ccserver-sidebar-overlay'))).toBe('1');
   await expect(page.locator('.main-row')).toHaveClass(/sidebar-overlay/);
   await expect(page.locator('.main-row')).not.toHaveClass(/session-overlay/);

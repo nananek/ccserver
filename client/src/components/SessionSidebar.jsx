@@ -11,6 +11,8 @@ import { moveMenuFocus } from './sessionMenuNav.js';
 // - キーボードの矢印/Home/End 移動は popup と同一パターン
 export default function SessionSidebar({
   open,
+  overlay,
+  onOverlayChange,
   sessionTabs,
   groupTabs = [],
   activeTabId,
@@ -42,6 +44,21 @@ export default function SessionSidebar({
           {openedCount > 0 && (
             <span className="session-menu-count" aria-hidden="true" style={{ marginLeft: 8 }}>{openedCount}</span>
           )}
+        </span>
+        <span className="sidebar-header-actions">
+          <button
+            type="button"
+            className="widget-icon-btn sidebar-pin-btn"
+            onClick={() => onOverlayChange(!overlay)}
+            aria-pressed={overlay}
+            title={overlay ? 'ピン留めを解除' : 'ピン留めして前面に重ねて表示'}
+            aria-label={overlay ? 'ピン留めを解除' : 'ピン留めして前面に重ねて表示'}
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" fill={overlay ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="8" cy="5" r="3" />
+              <path d="M8 8.5v6" />
+            </svg>
+          </button>
         </span>
       </div>
       <div className="sidebar-widgets session-sidebar-list" ref={listRef} onKeyDown={onListKeyDown} role="menu" aria-label="セッション一覧">

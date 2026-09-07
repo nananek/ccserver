@@ -987,7 +987,8 @@ body {
 }
 
 /* Left session sidebar: RightSidebar の左右反転。in-flow時はCLIをリサイズし、
-   session-overlay時は前面に重ねる (右とは独立したフラグで制御)。 */
+   session-overlay時は前面に重ねる (右とは独立したフラグ、ヘッダーのピン留め
+   ボタンで制御)。 */
 .left-sidebar {
   width: 300px;
   flex-shrink: 0;
@@ -1137,6 +1138,16 @@ body {
   color: var(--text-primary);
 }
 
+.sidebar-pin-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
+.sidebar-pin-btn[aria-pressed="true"]:hover {
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
 .widget-card-body {
   padding: 10px;
   display: flex;
@@ -1167,9 +1178,10 @@ body {
    しておくこと。ここで max-width を解除すると、サイドバー表示で残幅いっぱいに
    伸びて内容サイズが不連続に変わる（閉800px中央寄せ→開980pxストレッチ等）。 */
 
-/* Desktop overlay mode (sidebarOverlay ON in 一般設定): the sidebar floats
-   above the CLI without resizing it, at any viewport width. Narrow screens
-   (<=900px) already behave this way; this class extends it to desktop.
+/* Desktop overlay mode (sidebarOverlay ON via the header pin button): the
+   sidebar floats above the CLI without resizing it, at any viewport width.
+   Narrow screens (<=900px) already behave this way; this class extends it
+   to desktop.
    No backdrop here by design -- closing is via the toggle button only, so
    the overlay stays inside .main-row (absolute, not fixed): a viewport-wide
    fixed layer would also cover the tab bar and bury the toggle button. */
