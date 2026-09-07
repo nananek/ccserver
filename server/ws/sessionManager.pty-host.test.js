@@ -355,3 +355,42 @@ test('restorePtyHostSessions drops a metadata entry whose pty-host session no lo
   assert.equal(ptyHostSessionMeta.loadPtyHostSessionMeta()[fakeId], undefined, 'its metadata entry was dropped');
   assert.equal(sessionManager.getSession(fakeId), undefined, 'nothing was ever added to the sessions Map for it');
 });
+
+// Step4 (plan5): gracefulShutdown() under CCSERVER_PTY_HOST=1 must not kill
+// the pty-host-owned session -- doing so would defeat Step3's
+// restore-on-restart before it ever gets a chance to run (see
+// gracefulShutdown()'s own header comment in sessionManager.js). It should
+// only drop server本体's local bookkeeping and disconnect this process's own
+// UDS link, leaving the pty (and its restore metadata) alone -- so a
+// restorePtyHostSessions() call right after, simulating the next boot, can
+// still reattach to it with its backlog intact.
+test('gracefulShutdown under CCSERVER_PTY_HOST=1 does not kill pty-host sessions -- they survive for the next restorePtyHostSessions()', async () => {
+  const res = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId } = res;
+  const marker = `PRE_SHUTDOWN_${Date.now()}`;
+  sessionManager.writeToSession(sessionId, `echo ${marker}`, { submit: true });
+  await waitFor(() => res.session.outputBuffer.join('').includes(marker), { timeoutMs: 5000 });
+
+  await sessionManager.gracefulShutdown();
+
+  assert.equal(sessionManager.getSession(sessionId), undefined, 'server本体 forgot the session locally');
+  assert.ok(
+    host.ptyStore.list().some((s) => s.id === sessionId && !s.exited),
+    'the pty itself is still alive on pty-host, untouched by the shutdown',
+  );
+
+  // Simulate the client-side half of a server本体 restart, same rig as the
+  // restorePtyHostSessions test above.
+  ptyHostClientMod.resetPtyHostClientForTests();
+  sessionManager.resetPtyHostDestroyedHandlerForTests();
+  sessionManager.initPtyHostDestroyedHandler();
+
+  const info = await sessionManager.restorePtyHostSessions();
+  assert.ok(info.restored >= 1, 'the still-live session was reattached after the simulated restart');
+
+  const restored = sessionManager.getSession(sessionId);
+  assert.ok(restored, 'session is back in the local sessions Map after restore');
+  assert.ok(restored.outputBuffer.join('').includes(marker), 'pre-shutdown output survived and was replayed');
+
+  await destroySessionAndWait(sessionId);
+});

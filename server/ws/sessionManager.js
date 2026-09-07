@@ -2255,6 +2255,44 @@ export function savedSessionPublic(session, claudeId) {
 }
 
 export function gracefulShutdown() {
+  // Step4 (plan5): under CCSERVER_PTY_HOST=1, pty-host owns these ptys as a
+  // separate, independently-restarted systemd unit (see
+  // server/pty-host/index.js's header comment + Step0's PoC finding that a
+  // killed parent takes its ptys down with it) -- killing them here would
+  // defeat Step3's restore-on-restart (restorePtyHostSessions()) before it
+  // ever gets a chance to run: there would be nothing left for it to
+  // reattach to. Server本体 must only drop its own local bookkeeping and
+  // disconnect THIS process's UDS link, leaving the actual ptys running on
+  // pty-host for the next boot's restorePtyHostSessions() to find via
+  // list(). No .saved-sessions.json write either: that file only feeds the
+  // legacy direct-spawn restore path below -- pty-host sessions instead
+  // restore from ptyHostSessionMeta.json, which createSession() already
+  // keeps continuously up to date (see setPtyHostSessionMeta), so there is
+  // nothing new to persist here. destroyAllSessions()/destroySession() are
+  // deliberately not reused for this cleanup: both call
+  // session.ptyProcess.kill()/.destroy(), which for a RemotePty is an actual
+  // fire-and-forget kill/destroy RPC to pty-host (see ptyHostClient.js) --
+  // exactly the "pty dies with the server本体 restart" bug this step fixes.
+  if (process.env.CCSERVER_PTY_HOST === '1') {
+    for (const [id, session] of sessions) {
+      if (session.timeoutTimer) {
+        clearTimeout(session.timeoutTimer);
+        session.timeoutTimer = null;
+      }
+      if (session.idleTimer) {
+        clearTimeout(session.idleTimer);
+        session.idleTimer = null;
+      }
+      if (session.pendingInjectionTimer) {
+        clearTimeout(session.pendingInjectionTimer);
+        session.pendingInjectionTimer = null;
+      }
+      sessions.delete(id);
+    }
+    getPtyHostClient().close();
+    return Promise.resolve();
+  }
+
   return new Promise((resolve) => {
     const pendingSessions = [];
 
