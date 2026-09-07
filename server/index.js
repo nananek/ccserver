@@ -36,6 +36,7 @@ import { warmOpencodeUsage } from './opencodeUsage.js';
 import { initDb, dbPath } from './db.js';
 import { selectableAppIds, installedApps } from './ws/sandbox.js';
 import { verifySessionCookie } from './authSessions.js';
+import { resolveAuthMode } from './authMode.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
@@ -69,15 +70,14 @@ try {
 // session-cookie based auth). Never mixed -- passkey mode does not accept
 // CCSERVER_TOKEN at all (plan decision 5).
 //
-// CCSERVER_AUTH_MODE left unset defaults to 'token' when CCSERVER_TOKEN is
-// set, 'none' otherwise -- matching the pre-#141 behavior where CCSERVER_TOKEN
-// alone ("Optional token auth (Jupyter-style): set CCSERVER_TOKEN to enable",
-// per README) turned auth on. Without this, every existing deployment that
-// only sets CCSERVER_TOKEN would silently lose auth on upgrade to this
-// branch, since the new default would otherwise be 'none' regardless. An
-// explicitly-set CCSERVER_AUTH_MODE (including 'none') always wins.
+// Defaulting when CCSERVER_AUTH_MODE is unset (matching the pre-#141 behavior
+// where CCSERVER_TOKEN alone -- "Optional token auth (Jupyter-style): set
+// CCSERVER_TOKEN to enable", per README -- turned auth on, so an existing
+// deployment doesn't silently lose auth on upgrade) is resolveAuthMode()'s
+// job, shared with server/cli/issue-login-token.js so both agree on the
+// effective mode.
 const AUTH_TOKEN = process.env.CCSERVER_TOKEN;
-const AUTH_MODE = process.env.CCSERVER_AUTH_MODE || (AUTH_TOKEN ? 'token' : 'none');
+const AUTH_MODE = resolveAuthMode();
 
 // Login/WebAuthn endpoints (server/routes/auth.js, Step2/Step3) must never be
 // gated by the very auth hook they exist to satisfy.

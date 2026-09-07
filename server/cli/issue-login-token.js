@@ -7,8 +7,9 @@
 import { randomUUID } from 'node:crypto';
 import { initDb, getDb } from '../db.js';
 import { generateLoginToken, LOGIN_TOKEN_TTL_MS } from '../loginTokens.js';
+import { resolveAuthMode } from '../authMode.js';
 
-const authMode = process.env.CCSERVER_AUTH_MODE || 'none';
+const authMode = resolveAuthMode();
 if (authMode !== 'passkey') {
   console.error(
     `このサーバーは CCSERVER_AUTH_MODE=${authMode} で動作しています。`
