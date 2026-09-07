@@ -177,9 +177,14 @@ test('overlay時は選択で閉じる (上段・下段とも)', async ({ page })
   await expect(leftSidebar(page)).toBeHidden();
   await expect.poll(() => page.evaluate(() => localStorage.getItem('ccserver-session-sidebar-open'))).toBe('0');
 
-  // 開き直してタブを閉じると下段に移る。下段選択でも閉じる。
+  // Closing a local tab via X now always fully terminates its session (see
+  // close-confirm.spec.js) -- there is no UI path left that detaches a tab
+  // while keeping its session alive. A reload is the realistic way a
+  // running session ends up in the lower ("unopened") section instead.
+  // 下段選択でも閉じることを確認する。
+  await page.reload();
+  await expect(openTerminalBtn(page)).toBeVisible();
   await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
-  await openedItems(page).first().locator('.session-menu-close').click();
   await expect(unopenedItems(page)).toHaveCount(1, { timeout: 10_000 });
   await unopenedItems(page).first().locator('.session-menu-select').click();
   await expect(page.locator('.terminal-container')).toBeVisible();
@@ -197,7 +202,11 @@ test('in-flowでは下段選択でも開いたまま', async ({ page }) => {
   await expect(page.locator('.main-row')).not.toHaveClass(/session-overlay/);
   await openShellTab(page);
 
-  await openedItems(page).first().locator('.session-menu-close').click();
+  // Closing a local tab via X now always fully terminates its session (see
+  // close-confirm.spec.js); a reload is the realistic way a running session
+  // ends up in the lower ("unopened") section instead.
+  await page.reload();
+  await expect(openTerminalBtn(page)).toBeVisible();
   await expect(unopenedItems(page)).toHaveCount(1, { timeout: 10_000 });
   await unopenedItems(page).first().locator('.session-menu-select').click();
   await expect(page.locator('.terminal-container')).toBeVisible();

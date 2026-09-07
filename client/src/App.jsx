@@ -26,6 +26,15 @@ const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
 
 let tabIdCounter = 0;
 
+// Whether a tab's session can be fully terminated (DELETE /api/sessions/:id)
+// rather than merely detached: local terminal tabs with a known session id.
+// Remote tabs belong to another instance (a local DELETE would 404 or hit
+// the wrong session) and group tabs already destroy their members via
+// destroyGroupTab, so both stay on the detach-only "閉じる" path.
+function canTerminateTab(tab) {
+  return !!tab && tab.type === 'terminal' && !tab.remote && !!(tab.sessionId || tab.attachSessionId);
+}
+
 export default function App() {
   const [tabs, setTabs] = useState([
     { id: 'browser', type: 'browser', label: 'Files' },
@@ -42,15 +51,23 @@ export default function App() {
   const [themeId, setThemeId] = useState(loadThemeId);
   const [closeConfirm, setCloseConfirm] = useState(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
-  // "セッションを終了" (terminateSessionAndCloseTab) is async: while its
-  // DELETE is in flight the dialog buttons are disabled and re-entry is
-  // ignored, so a double-click can't fire a duplicate DELETE (whose 404
-  // would surface a bogus failure alert after a successful termination).
+  // "セッションを終了" (terminateSessionById) is async: while its DELETE
+  // is in flight the dialog buttons are disabled and re-entry is ignored,
+  // so a double-click can't fire a duplicate DELETE (whose 404 would
+  // surface a bogus failure alert after a successful termination).
   // The guard is a ref (not just the state below): setState applies
   // asynchronously, so two clicks before the next render would both see a
   // stale `false` and slip through. The state remains for the disabled UI.
   const isTerminatingRef = useRef(false);
   const [isTerminatingSession, setIsTerminatingSession] = useState(false);
+  // Hoisted above terminateSessionById (below) so it can optimistically drop
+  // a just-terminated session the instant doCloseTab fires, in the same
+  // render as the tab's removal -- otherwise there's a render in between
+  // where `tabs` no longer lists the session but this stale snapshot still
+  // does, and the unopened-section filter (openedSessionIds vs
+  // serverSessions, further down) briefly mis-files the just-terminated
+  // session as a still-running "unopened" one.
+  const [serverSessions, setServerSessions] = useState([]);
   const [groupActiveApp, setGroupActiveApp] = useState(null);
   // Bumped whenever a group is created / destroyed / re-opened, so the
   // directory browser's groups list refetches (it is otherwise fetch-on-mount).
@@ -409,10 +426,49 @@ export default function App() {
     }
   }, []);
 
+  // 対象タブのセッションを完全に終了する (DELETE /api/sessions/:id) 後に
+  // タブを閉じる。閉じる確認ダイアログの「セッションを終了」ボタンと、
+  // 「次回以降確認しない」設定時の即時終了の両方がこれを通る。
+  // 削除不能な形 (sessionId不明) は従来通り閉じるだけにフォールバックする。
+  // Returns true once the tab is actually closed (termination succeeded, or
+  // there was nothing to terminate), false on failure or when a concurrent
+  // call is already in flight -- callers that persist "次回以降確認しない"
+  // only after success (terminateSessionAndCloseTab below) rely on this.
+  const terminateSessionById = useCallback(async (tabId) => {
+    if (isTerminatingRef.current) return false;
+    const tab = tabs.find((t) => t.id === tabId);
+    const sessionId = tab?.sessionId || tab?.attachSessionId || null;
+    if (!tab || !sessionId) { doCloseTab(tabId); return true; }
+    isTerminatingRef.current = true;
+    setIsTerminatingSession(true);
+    try {
+      const res = await authFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+      if (res.status === 404) {
+        // Session already gone server-side: termination is effectively done.
+      } else if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      window.alert(`セッションを終了できませんでした: ${err.message}`);
+      return false;
+    } finally {
+      isTerminatingRef.current = false;
+      setIsTerminatingSession(false);
+    }
+    doCloseTab(tabId);
+    // Drop it from the last-fetched server list in the same tick as the tab
+    // removal above, rather than waiting for the next fetchServerSessions()
+    // (triggered by tabs changing, further down) to catch up -- otherwise a
+    // render in between shows it under "unopened" (see the comment on
+    // serverSessions' declaration above).
+    setServerSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    return true;
+  }, [tabs, doCloseTab]);
+
   const handleCloseTab = useCallback(async (tabId) => {
-    // タブを閉じてもセッション自体はサーバー側で動き続けるが、
-    // 再アタッチの手間があるため、稼働中のタブは閉じる前に確認する。
-    // プロセスが終了済みのタブや「次回以降確認しない」設定時は確認なしで閉じる。
+    // タブを閉じるとセッションは完全に終了する(下記 canTerminateTab を
+    // 満たす場合)。「次回以降確認しない」設定時は確認なしで終了する。
     // グループタブは3セッションを破棄するため、「次回以降確認しない」が
     // 設定されていない限り必ず確認する。
     const tab = tabs.find((t) => t.id === tabId);
@@ -430,13 +486,23 @@ export default function App() {
       }
       return;
     }
-    if (tab && tab.type === 'terminal' && !tab.exited && !skipCloseConfirm) {
+    if (tab && tab.type === 'terminal' && !tab.exited) {
+      if (skipCloseConfirm) {
+        // 確認済み(次回以降確認しない)なら、削除可能なタブは即座に終了、
+        // リモート等の削除不能なタブは従来通りデタッチにフォールバックする。
+        if (canTerminateTab(tab)) {
+          terminateSessionById(tabId);
+        } else {
+          doCloseTab(tabId);
+        }
+        return;
+      }
       setDontAskAgain(false);
       setCloseConfirm({ tabId, kind: 'terminal' });
       return;
     }
     doCloseTab(tabId);
-  }, [tabs, skipCloseConfirm, doCloseTab, destroyGroupTab]);
+  }, [tabs, skipCloseConfirm, doCloseTab, destroyGroupTab, terminateSessionById]);
 
   const confirmCloseTab = useCallback(async () => {
     if (!closeConfirm) return;
@@ -484,7 +550,6 @@ export default function App() {
   const sessionSidebarMode = sessionSidebarPrefs.mode;
   const sessionSidebarOpen = sessionSidebarPrefs.open;
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
-  const [serverSessions, setServerSessions] = useState([]);
   const sessionsRefreshingRef = useRef(false);
   const sessionsRefreshQueuedRef = useRef(false);
   const fetchServerSessions = useCallback(async () => {
@@ -597,49 +662,25 @@ export default function App() {
     fetchServerSessions();
   }, [fetchServerSessions]);
 
-  // Close-confirm dialog's "セッションを終了": fully terminate the
-  // server-side session (DELETE /api/sessions/:id -- the same primitive as
-  // the lower-section X above) and close the tab as well. Unlike
-  // confirmCloseTab ("閉じる") the session does not linger for re-attach.
-  // Shown only for local terminal tabs with a known session id: group tabs
-  // already destroy their members on close, and remote tabs belong to another
-  // instance (a local DELETE would 404 or hit the wrong session).
-  // NOTE: this must stay below fetchServerSessions/follow-ups in source
-  // order -- the deps array below is evaluated during render, so referencing
-  // a later const would throw a TDZ ReferenceError and blank the whole app.
+  // Close-confirm dialog's "セッションを終了": delegates the DELETE + tab
+  // close to terminateSessionById above, shown only for local terminal tabs
+  // with a known session id (canTerminateCloseConfirm below) -- group tabs
+  // already destroy their members via destroyGroupTab, and remote tabs
+  // belong to another instance (a local DELETE would 404 or hit the wrong
+  // session), so both keep the "閉じる" (detach) button instead.
+  // "次回以降確認しない" is persisted only after a successful termination
+  // (terminateSessionById's return value): on failure the session is still
+  // alive and the dialog stays open so the user can see the alert and retry
+  // or cancel, rather than silently persisting a skip past a failure.
   const terminateSessionAndCloseTab = useCallback(async () => {
-    if (!closeConfirm || isTerminatingRef.current) return;
-    const tab = tabs.find((t) => t.id === closeConfirm.tabId);
-    const sessionId = tab?.sessionId || tab?.attachSessionId || null;
-    if (!tab || !sessionId) return;
-    isTerminatingRef.current = true;
-    setIsTerminatingSession(true);
-    try {
-      const res = await authFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
-      if (res.status === 404) {
-        // Session already gone server-side: termination is effectively done,
-        // fall through and close the tab.
-      } else if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-    } catch (err) {
-      window.alert(`セッションを終了できませんでした: ${err.message}`);
-      return;
-    } finally {
-      isTerminatingRef.current = false;
-      setIsTerminatingSession(false);
-    }
-    // Persist "don't ask again" only after a successful termination: on
-    // failure the session is still alive, and a persisted skip would
-    // silently switch future closes to the keep-alive path.
+    if (!closeConfirm) return;
+    const ok = await terminateSessionById(closeConfirm.tabId);
+    if (!ok) return;
     if (dontAskAgain) {
       setSkipCloseConfirmPersisted(true);
     }
-    doCloseTab(closeConfirm.tabId);
     setCloseConfirm(null);
-    fetchServerSessions();
-  }, [closeConfirm, dontAskAgain, tabs, doCloseTab, setSkipCloseConfirmPersisted, fetchServerSessions]);
+  }, [closeConfirm, dontAskAgain, setSkipCloseConfirmPersisted, terminateSessionById]);
 
   // セッション表示名 (右クリック改名): サーバー保存の customLabel を
   // sessionId で引くマップ。一覧の上段・ターミナルヘッダーで使う。
@@ -709,8 +750,7 @@ export default function App() {
   // tabs with a known server-side session id only (group tabs destroy their
   // members on close already; remote tabs belong to another instance).
   const closeConfirmTab = closeConfirm ? tabs.find((t) => t.id === closeConfirm.tabId) : null;
-  const canTerminateCloseConfirm = !!closeConfirmTab && closeConfirm?.kind === 'terminal'
-    && !closeConfirmTab.remote && !!(closeConfirmTab.sessionId || closeConfirmTab.attachSessionId);
+  const canTerminateCloseConfirm = canTerminateTab(closeConfirmTab);
   // Usage covers claude (Claude Code's /usage), codex (Codex's rate-limit
   // read) and opencode Go (the zen/go quota API); the UsageWidget (right
   // sidebar) itself has tabs to switch between them, so it is no longer tied
@@ -1036,7 +1076,9 @@ export default function App() {
             <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : 'タブを閉じますか?'}</h3>
             <p>{closeConfirm.kind === 'group'
               ? 'グループの3つのセッション（ワーカー2つとオーケストレーター）を終了します。'
-              : 'セッションは背後で動き続け、セッション一覧から再接続できます。'}</p>
+              : canTerminateCloseConfirm
+                ? 'セッションを終了します。終了後は再接続できません。'
+                : 'セッションは背後で動き続け、セッション一覧から再接続できます。'}</p>
             <label className="close-confirm-checkbox">
               <input
                 type="checkbox"
@@ -1047,17 +1089,19 @@ export default function App() {
               次回以降確認しない
             </label>
             <div className="resume-actions">
-              {canTerminateCloseConfirm && (
+              {canTerminateCloseConfirm ? (
                 <button className="btn btn-danger btn-left" onClick={terminateSessionAndCloseTab} disabled={isTerminatingSession}>
                   {isTerminatingSession ? '終了中...' : 'セッションを終了'}
                 </button>
-              )}
+              ) : null}
               <button className="btn btn-secondary" onClick={() => setCloseConfirm(null)} disabled={isTerminatingSession}>
                 キャンセル
               </button>
-              <button className="btn btn-primary" onClick={confirmCloseTab} disabled={isTerminatingSession}>
-                閉じる
-              </button>
+              {!canTerminateCloseConfirm && (
+                <button className="btn btn-primary" onClick={confirmCloseTab} disabled={isTerminatingSession}>
+                  閉じる
+                </button>
+              )}
             </div>
           </div>
         </div>

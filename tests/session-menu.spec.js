@@ -138,10 +138,7 @@ test('menu supports keyboard operation: Enter selects, arrows move focus, Escape
   await terminateAllLower(page);
 });
 
-test('menu X closes the tab; unopened running session appears below and X terminates it', async ({ page }) => {
-  // Deterministic close: skip the close-confirm modal (must be set before
-  // the app mounts, since App reads it into state on first render).
-  await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+test('lower section shows a session left running after a reload, and X terminates it', async ({ page }) => {
   await usePopupMode(page);
   await gotoApp(page);
 
@@ -150,15 +147,17 @@ test('menu X closes the tab; unopened running session appears below and X termin
   await expect(page.locator('.session-menu-count')).toHaveText('1');
   await waitForShellPrompt(page);
 
-  // X on the upper item closes the tab (session keeps running server-side).
-  await hamburger(page).click();
-  const upper = sessionMenu(page).locator('[data-section="opened"] .session-menu-item.is-running').first();
-  await upper.locator('.session-menu-close').click();
-  await expect(page.locator('.session-menu-count')).toHaveCount(0);
+  // Closing a local tab via X now always fully terminates its session (see
+  // close-confirm.spec.js) -- there is no UI path left that detaches a tab
+  // while keeping its session alive. A reload is the realistic way a
+  // running session ends up in the lower ("unopened") section instead: the
+  // local tab state resets, but the untouched server-side session keeps
+  // running, the same situation another browser tab/device would see under
+  // the multi-device session-sharing feature.
+  await page.reload();
+  await expect(openTerminalBtn(page)).toBeVisible();
 
-  // The still-running session now appears in the lower section.
-  // The menu stays open after the X click and refreshes on tab changes,
-  // so the lower section appears without reopening.
+  await hamburger(page).click();
   await expect(sessionMenu(page).getByText('稼働中のセッション', { exact: true })).toBeVisible({ timeout: 10_000 });
   const before = await sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').count();
   expect(before).toBeGreaterThanOrEqual(1);
@@ -176,7 +175,6 @@ test('menu X closes the tab; unopened running session appears below and X termin
 });
 
 test('X on a lower item already gone server-side shows no error alert and the stale row disappears (404 handling)', async ({ page, request }) => {
-  await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
   await usePopupMode(page);
   await gotoApp(page);
 
@@ -187,11 +185,13 @@ test('X on a lower item already gone server-side shows no error alert and the st
   await expect(page.locator('.session-menu-count')).toHaveText('1');
   await waitForShellPrompt(page);
 
-  // X on the upper item closes the tab; the still-running session moves to
-  // the lower ("unopened") section.
+  // A reload leaves the tab's session running server-side with no local tab,
+  // so it shows up in the lower ("unopened") section -- closing via X now
+  // always fully terminates a local tab's session (see close-confirm.spec.js),
+  // so this is the realistic way a stale-but-still-listed row occurs.
+  await page.reload();
+  await expect(openTerminalBtn(page)).toBeVisible();
   await hamburger(page).click();
-  const upper = sessionMenu(page).locator('[data-section="opened"] .session-menu-item.is-running').first();
-  await upper.locator('.session-menu-close').click();
   await expect(sessionMenu(page).getByText('稼働中のセッション', { exact: true })).toBeVisible({ timeout: 10_000 });
 
   // Simulate the row going stale: delete the session directly through the
