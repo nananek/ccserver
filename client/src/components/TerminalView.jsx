@@ -742,8 +742,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // drain budget is cut way down by the browser while a live TUI keeps
     // pushing output, so the queue -- and this process's memory -- grows
     // without bound over a multi-day session. Dropped frames are made up by
-    // a clear() + reconnect (server replay) once the tab is visible again,
-    // see handleVisibilityChange below.
+    // a reconnect (server replay) once the tab is visible again -- appended
+    // to the existing scrollback rather than replacing it, see
+    // handleVisibilityChange below.
     function writeToTerm(data) {
       if (document.hidden) {
         hiddenWriteDropped = true;
@@ -840,23 +841,25 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             // 再接続などで同一タブに新しいセッションが始まるケースがあるため、
             // セッション確立のたびにexitedフラグを戻す。
             if (onExitedRef.current) onExitedRef.current(false);
+            // Reconnecting no longer clears the buffer -- the replay that
+            // follows is appended to whatever scrollback is already on
+            // screen (possibly duplicating a little of it) instead of
+            // wiping out anything the user had scrolled up to read. This
+            // divider marks where the replayed output starts.
             if (msg.isReconnect) {
-              term.clear();
+              term.writeln('\r\n\x1b[2m--- 再接続: 直近の出力を再表示します ---\x1b[0m');
             }
             // Silent-downgrade guard: the init asked for the meta MCP but the
             // server did not grant it (feature disabled / broker not running).
-            // Written AFTER the reconnect clear() so a warning about an
-            // attached, downgraded session stays visible instead of being
-            // wiped the moment it appears.
             if (requestedMetaRef.current != null) {
               if (requestedMetaRef.current && msg.isMetaAgent !== true) {
                 term.writeln('\r\n[警告: ccserver-meta は注入されませんでした (metaAgentMcp 無効またはブローカー未起動)]');
               }
               requestedMetaRef.current = null;
             }
-            // Also after the reconnect clear(), for the same reason. Attaching
-            // to a session another device is already on shrinks the screen to
-            // that device's size, which looks like a bug without a word here.
+            // Attaching to a session another device is already on shrinks
+            // the screen to that device's size, which looks like a bug
+            // without a word here.
             if (typeof msg.viewers === 'number' && msg.viewers > 1) {
               term.writeln(`\r\n[このセッションは他${msg.viewers - 1}台の端末でも開いています。画面は最も小さい端末に合わせて${term.cols}x${term.rows}になります]`);
             }
@@ -1049,11 +1052,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           // The socket stayed open the whole time the tab was hidden, so no
           // reconnect would otherwise happen -- but writeToTerm dropped
           // output while hidden to keep xterm's write queue bounded (issue
-          // #123 #1), so the screen is now stale. Force a clean resync via
+          // #123 #1), so the screen is now stale. Force a resync via
           // reconnect: connect() closes this socket itself, and the
-          // server's replay buffer (terminal.js attach case) fills the gap.
+          // server's replay buffer (terminal.js attach case) fills the gap,
+          // appended to the existing scrollback (see the 'session' handler's
+          // isReconnect branch) rather than replacing it.
           hiddenWriteDropped = false;
-          term.clear();
           reconnectAttemptsRef.current = 0;
           clearTimeout(reconnectTimerRef.current);
           connect();
