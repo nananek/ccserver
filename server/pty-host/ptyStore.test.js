@@ -105,6 +105,29 @@ test('kill signals the process but keeps the record; destroy removes it', async 
   assert.ok(events.some((f) => f.event === 'destroyed'));
 });
 
+test('destroy() on a still-running, viewer-less session does not let the late onExit re-arm a timer (zombie-entry regression)', async () => {
+  // Regression coverage for the race _handleExit()'s identity check guards
+  // against: destroy() removes the entry from _sessions and returns well
+  // before node-pty's onExit for the killed process actually fires. Without
+  // the "is this still the live entry for this id" check, that late onExit
+  // would re-arm a timer keyed by entry.id -- and if a new session later
+  // reuses the same id, the zombie's timer would destroy IT instead.
+  const store = new PtyStore({ sessionTimeoutMs: 300, exitedTimeoutMs: 300 });
+  const { id } = shellSpawn(store); // no subscribers; pty is still running
+  assert.equal(store.destroy(id), true);
+  assert.equal(store.list().some((s) => s.id === id), false);
+
+  // Give the killed process's onExit time to fire late (well under the
+  // 300ms timer window, so a mis-armed zombie timer is still pending when
+  // id2 spawns below rather than having already fired against nothing).
+  await sleep(50);
+
+  const { id: id2 } = shellSpawn(store, { id }); // reuse the same id
+  await sleep(400); // past the 300ms window a mis-armed zombie timer would use
+  assert.ok(store.list().some((s) => s.id === id2), 'new session with the reused id must not be hijacked by the old ptys late exit');
+  store.destroy(id2);
+});
+
 test('list() reports viewers as the current subscriber count', () => {
   const store = new PtyStore();
   const { id } = shellSpawn(store);

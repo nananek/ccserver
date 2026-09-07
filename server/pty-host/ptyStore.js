@@ -191,10 +191,12 @@ export class PtyStore {
   _handleData(entry, data) {
     const seq = entry.nextSeq++;
     entry.outputBuffer.push({ seq, data });
-    entry.bufferBytes += data.length;
+    // .length is UTF-16 code units, not bytes -- multi-byte output (CJK text,
+    // emoji) would otherwise undercount against outputBufferMaxBytes.
+    entry.bufferBytes += Buffer.byteLength(data, 'utf8');
     while (entry.bufferBytes > this._outputBufferMaxBytes && entry.outputBuffer.length > 0) {
       const removed = entry.outputBuffer.shift();
-      entry.bufferBytes -= removed.data.length;
+      entry.bufferBytes -= Buffer.byteLength(removed.data, 'utf8');
     }
     this._emit(entry, { type: 'event', event: 'data', id: entry.id, seq, data });
   }

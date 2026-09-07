@@ -8,7 +8,6 @@
 //
 // Run directly: `node server/pty-host/index.js`.
 
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PtyStore } from './ptyStore.js';
 import { createRpcServer } from './rpcServer.js';
