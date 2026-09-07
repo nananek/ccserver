@@ -8,8 +8,27 @@ import { test, expect } from '@playwright/test';
 // The check hits GET /api/sessions before anything is actually launched, so
 // it's exercised here entirely by stubbing that endpoint -- no real
 // claude/opencode CLI (nor bwrap) needs to be installed on the runner.
+//
+// The toolbar's app-picker "起動" button is disabled whenever the picked app
+// isn't actually installed/visible on the server (plain CI runners have
+// neither claude nor opencode -- see availableApps in
+// DirectoryBrowser.jsx's effectiveAppHidden), which would otherwise make
+// every test here hang. neutralizeAppAvailability() patches the one
+// /api/dirs/home response field that drives that gate so the button stays
+// enabled regardless of what's actually installed on the runner -- the
+// duplicate check itself never depends on the launch actually succeeding.
 
 const DUP_CWD = '/tmp/ccserver-e2e-dup-session';
+
+async function neutralizeAppAvailability(page) {
+  await page.route('**/api/dirs/home', async (route) => {
+    const response = await route.fetch();
+    const json = await response.json();
+    json.availableApps = null;
+    json.hiddenApps = [];
+    await route.fulfill({ response, json });
+  });
+}
 
 function stubDuplicateSession(page, cwd, overrides = {}) {
   return page.route('**/api/sessions', (route) => {
@@ -56,6 +75,7 @@ function sentFrames(page) {
 }
 
 async function gotoWithFixedDir(page, cwd) {
+  await neutralizeAppAvailability(page);
   await page.addInitScript((dir) => {
     localStorage.setItem('ccserver-last-dir', dir);
   }, cwd);
@@ -66,7 +86,9 @@ async function gotoWithFixedDir(page, cwd) {
 async function launchViaMenu(page, appLabel = 'Claude Code') {
   await page.locator('.open-split-caret').click();
   await page.locator('.open-menu-item', { hasText: appLabel }).click();
-  await page.locator('.resume-dialog .btn-primary', { hasText: '起動' }).click();
+  const launchBtn = page.locator('.resume-dialog .btn-primary', { hasText: '起動' });
+  await expect(launchBtn).toBeEnabled();
+  await launchBtn.click();
 }
 
 test('opening a directory with a live session shows the duplicate-session prompt', async ({ page }) => {
