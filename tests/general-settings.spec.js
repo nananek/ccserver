@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 // Settings > 一般: テーマ・終了確認の各設定が即時反映＋永続化されることを
-// 検証する。ウィジェット重ね表示 (ピン留め) は右サイドバーヘッダーの
+// 検証する。ウィジェットのピン留め設定は右サイドバーヘッダーの
 // ボタンに移設済みのため、この spec の対象外 (session-sidebar.spec.js 側で検証)。
 test.describe('Settings general section', () => {
   test.beforeEach(async ({ page }) => {
@@ -81,16 +81,16 @@ test.describe('Settings general section', () => {
     // アクティブタブに関わらず常時表示されるため、Settingsタブのままでよい。
     // session-sidebar側は session-sidebar.spec.js の 'session overlay is
     // independent...' で検証)。
-    const pinBtn = page.locator('.right-sidebar').getByRole('button', { name: 'ピン留めして前面に重ねて表示' });
+    const pinBtn = page.locator('.right-sidebar').getByRole('button', { name: 'ピン留めを解除して前面に重ねて表示' });
     await expect(pinBtn).toBeVisible();
-    await expect(pinBtn).toHaveAttribute('aria-pressed', 'false');
+    await expect(pinBtn).toHaveAttribute('aria-pressed', 'true');
     await pinBtn.click();
     await expect
       .poll(() => page.evaluate(() => localStorage.getItem('ccserver-sidebar-overlay')))
       .toBe('1');
     await expect(page.locator('.main-row')).toHaveClass(/sidebar-overlay/);
-    const pinnedBtn = page.locator('.right-sidebar').getByRole('button', { name: 'ピン留めを解除' });
-    await expect(pinnedBtn).toHaveAttribute('aria-pressed', 'true');
+    const unpinnedBtn = page.locator('.right-sidebar').getByRole('button', { name: 'ピン留めして固定表示' });
+    await expect(unpinnedBtn).toHaveAttribute('aria-pressed', 'false');
     // 重ね表示中もタブバーのトグルボタンはサイドバーに覆われず、
     // クリックで閉じられる (サイドバー自体に閉じるボタンはないため)。
     const toggle = page.getByRole('button', { name: 'Widgetsパネルを閉じる' });
@@ -99,7 +99,7 @@ test.describe('Settings general section', () => {
     await expect(page.locator('.right-sidebar')).toBeHidden();
     await page.getByRole('button', { name: 'Widgetsパネルを開く' }).click();
     await expect(page.locator('.right-sidebar')).toBeVisible();
-    await pinnedBtn.click();
+    await unpinnedBtn.click();
     await expect(page.locator('.main-row')).not.toHaveClass(/sidebar-overlay/);
   });
 

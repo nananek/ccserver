@@ -126,10 +126,10 @@ test('session overlay is independent from widget overlay', async ({ page }) => {
   // ピン留めボタンから overlay state を切り替える (ボタンはパネルが
   // 開いている間だけ存在する)。
   await expect(leftSidebar(page)).toBeVisible();
-  const sessionPin = leftSidebar(page).getByRole('button', { name: 'ピン留めして前面に重ねて表示' });
-  const widgetPin = page.locator('.right-sidebar').getByRole('button', { name: 'ピン留めして前面に重ねて表示' });
-  await expect(sessionPin).toHaveAttribute('aria-pressed', 'false');
-  await expect(widgetPin).toHaveAttribute('aria-pressed', 'false');
+  const sessionPin = leftSidebar(page).getByRole('button', { name: 'ピン留めを解除して前面に重ねて表示' });
+  const widgetPin = page.locator('.right-sidebar').getByRole('button', { name: 'ピン留めを解除して前面に重ねて表示' });
+  await expect(sessionPin).toHaveAttribute('aria-pressed', 'true');
+  await expect(widgetPin).toHaveAttribute('aria-pressed', 'true');
 
   // 左のみ ON: session-overlay のみ付与、右キー・右クラスに影響なし。
   await sessionPin.click();
@@ -139,7 +139,7 @@ test('session overlay is independent from widget overlay', async ({ page }) => {
   expect(await page.evaluate(() => localStorage.getItem('ccserver-sidebar-overlay'))).toBeNull();
   // 前面に重なる (absolute配置)。
   await expect.poll(() => page.locator('.left-sidebar').evaluate((el) => getComputedStyle(el).position)).toBe('absolute');
-  const sessionPinned = leftSidebar(page).getByRole('button', { name: 'ピン留めを解除' });
+  const sessionUnpinned = leftSidebar(page).getByRole('button', { name: 'ピン留めして固定表示' });
 
   // 閉じ直しても (overlayとして) 表示され、前面に重なったままであることを確認。
   await page.getByRole('button', { name: 'セッションサイドバーを閉じる' }).click();
@@ -148,7 +148,7 @@ test('session overlay is independent from widget overlay', async ({ page }) => {
   await expect(leftSidebar(page)).toBeVisible();
   await expect.poll(() => page.locator('.left-sidebar').evaluate((el) => getComputedStyle(el).position)).toBe('absolute');
 
-  await sessionPinned.click();
+  await sessionUnpinned.click();
   await expect(page.locator('.main-row')).not.toHaveClass(/session-overlay/);
 
   // 右のみ ON: sidebar-overlay のみ付与、左キーに影響なし。

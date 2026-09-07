@@ -986,9 +986,9 @@ body {
   min-height: 0;
 }
 
-/* Left session sidebar: RightSidebar の左右反転。in-flow時はCLIをリサイズし、
-   session-overlay時は前面に重ねる (右とは独立したフラグ、ヘッダーのピン留め
-   ボタンで制御)。 */
+/* Left session sidebar: RightSidebar の左右反転。in-flow (ピン留め) 時はCLIを
+   リサイズし、session-overlay (ピン留め解除) 時は前面に重ねる (右とは独立した
+   フラグ、ヘッダーのピン留めボタンで制御)。 */
 .left-sidebar {
   width: 300px;
   flex-shrink: 0;

@@ -50,11 +50,11 @@ export default function SessionSidebar({
             type="button"
             className="widget-icon-btn sidebar-pin-btn"
             onClick={() => onOverlayChange(!overlay)}
-            aria-pressed={overlay}
-            title={overlay ? 'ピン留めを解除' : 'ピン留めして前面に重ねて表示'}
-            aria-label={overlay ? 'ピン留めを解除' : 'ピン留めして前面に重ねて表示'}
+            aria-pressed={!overlay}
+            title={!overlay ? 'ピン留めを解除して前面に重ねて表示' : 'ピン留めして固定表示'}
+            aria-label={!overlay ? 'ピン留めを解除して前面に重ねて表示' : 'ピン留めして固定表示'}
           >
-            <svg viewBox="0 0 16 16" width="14" height="14" fill={overlay ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill={!overlay ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="8" cy="5" r="3" />
               <path d="M8 8.5v6" />
             </svg>

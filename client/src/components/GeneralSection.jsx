@@ -4,8 +4,9 @@ import { getThemeIds, getTheme } from '../themes.js';
 // デスクトップ通知・サンドボックス既定値。
 // いずれも即時反映し、localStorage に永続化される (保存先の詳細は
 // 各 setter 側 = App.jsx / useSessionSidebarPrefs.js / themes.js / sandboxDefaults.js を参照)。
-// なお左右パネルの「前面に重ねて表示 (ピン留め)」設定は各パネルのヘッダーの
-// ピン留めボタン (RightSidebar.jsx / SessionSidebar.jsx) に移設済みで、ここには無い。
+// なお左右パネルの「ピン留め (固定表示/前面に重ねて表示の切替)」設定は各パネルの
+// ヘッダーのピン留めボタン (RightSidebar.jsx / SessionSidebar.jsx) に移設済みで、
+// ここには無い。
 export default function GeneralSection({
   themeId,
   onThemeChange,
