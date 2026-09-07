@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test --test-timeout=60000"
   },
   "dependencies": {
     "@fastify/multipart": "^9.4.0",
