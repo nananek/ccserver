@@ -6,11 +6,11 @@
 // Process-wide concept (NOT group-scoped like the control/handoff brokers,
 // and unlike ccserver-notify carries no per-connection identity): one Unix
 // socket hosts it for the whole server process
-// (${XDG_RUNTIME_DIR}/ccserver-usage.sock, see getUsageSockPath). Each
-// usage-enabled session's sandbox binds that one socket in; the MCP config
-// tells the agent to reach it through the same bridge wrapper as the notify
-// server (see mcpConfig.js / sandbox-mcp-wrapper.cjs), just with a different
-// argv mode.
+// (${XDG_RUNTIME_DIR}/ccserver-usage.d/sock, see getUsageSockPath). Each
+// usage-enabled session's sandbox binds that socket's directory in (Issue
+// #143 problem 1); the MCP config tells the agent to reach it through the
+// same bridge wrapper as the notify server (see mcpConfig.js /
+// sandbox-mcp-wrapper.cjs), just with a different argv mode.
 //
 // get_usage always returns the same server-wide snapshot regardless of which
 // session asks -- there is nothing to attribute, so (unlike notify) no
@@ -24,14 +24,17 @@ import { join } from 'node:path';
 import { getUsage } from '../usage.js';
 import { loadSandboxConfig, resolveClaude } from './sandbox.js';
 
-const USAGE_SOCKET_NAME = 'ccserver-usage.sock';
+// Issue #143 problem 1: a dedicated directory holding only `sock`, bound into
+// sandboxes as a directory rather than the socket file itself -- see
+// mcpBroker.js's header comment for why.
+const USAGE_SOCKET_DIR_NAME = 'ccserver-usage.d';
 
 let usageBroker = null; // { server, sockPath, dir, connections } | null
 
 export function getUsageSockPath() {
   const base = process.env.XDG_RUNTIME_DIR
     || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, USAGE_SOCKET_NAME);
+  return join(base, USAGE_SOCKET_DIR_NAME, 'sock');
 }
 
 // Whether the get_usage MCP tool should exist on this server at all: claude

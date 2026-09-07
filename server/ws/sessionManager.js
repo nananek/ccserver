@@ -2154,6 +2154,89 @@ export function resetPtyHostDestroyedHandlerForTests() {
   ptyHostDestroyedHandlerArmed = false;
 }
 
+let ptyHostDisconnectedHandlerArmed = false;
+
+// Issue #143 problem 2: pairs with initPtyHostDestroyedHandler() above, but
+// reacts to an entire SHARD disappearing (see ptyHostClient.js's
+// onDisconnected() -- fired only when a shard's pty-host process actually
+// died, never for our own close() during gracefulShutdown()/test teardown)
+// rather than one session being torn down individually.
+//
+// Unlike the `destroyed` handler, this cannot rely on the ordinary
+// ptyProcess.onExit() path having already run: `exit`/`destroyed` are both
+// events pty-host sends over the very connection that just died, so neither
+// will EVER arrive for a session whose shard is gone. That means this
+// handler must itself do everything onExit would have -- including running
+// sessionExitListeners (groupManager.js's onSessionExit stops the dead
+// orchestrator's control broker / a dead worker's handoff channel and
+// auto-destroys an emptied group; skipping it here would leak those brokers
+// forever, exactly the kind of silently-broken-forever state this Issue is
+// about) -- not just the local sessions Map bookkeeping.
+//
+// Deliberately deletes from `sessions` immediately (unlike a normal pty
+// exit, which lingers exited:true behind SESSION_EXITED_TIMEOUT_MS so a
+// client can still read final scrollback) -- Issue #143's own complaint is
+// that a ghosted session keeps appearing in GET /api/sessions, and there is
+// no live pty left to reattach to even if a client did ask. ptyHostSessionMeta
+// is deliberately left untouched (see restorePtyHostSessions()'s
+// unreachableShards handling): the next restore, once this shard is back,
+// either reattaches a session that in fact survived or sweeps the entry via
+// the existing orphaned-metadata path -- guessing now would destroy
+// information Step6 (auto-resume) will want.
+export function initPtyHostDisconnectedHandler() {
+  if (process.env.CCSERVER_PTY_HOST !== '1') return;
+  if (ptyHostDisconnectedHandlerArmed) return;
+  ptyHostDisconnectedHandlerArmed = true;
+  for (const client of getAllPtyHostClients()) {
+    client.onDisconnected((sessionIds) => {
+      for (const sessionId of sessionIds) {
+        const session = sessions.get(sessionId);
+        if (!session) continue;
+        if (session.timeoutTimer) {
+          clearTimeout(session.timeoutTimer);
+          session.timeoutTimer = null;
+        }
+        if (session.idleTimer) {
+          clearTimeout(session.idleTimer);
+          session.idleTimer = null;
+        }
+        if (session.pendingInjectionTimer) {
+          clearTimeout(session.pendingInjectionTimer);
+          session.pendingInjectionTimer = null;
+        }
+        session.exited = true;
+        for (const fn of sessionExitListeners) {
+          try {
+            fn(session);
+          } catch {
+            // a listener must never break this cleanup path
+          }
+        }
+        console.log(`[session] ${sessionId} marked exited: its pty-host shard disconnected (viewers=${session.sockets.size})`);
+        // exitCode/signal are genuinely unknown -- pty-host died mid-flight,
+        // no exit frame was ever sent -- so both ride as null. Same
+        // {type:'exit', ...} shape a real pty exit broadcasts (see
+        // buildSessionRecord's ptyProcess.onExit above) so the existing
+        // frontend handler needs no changes.
+        broadcast(session, {
+          type: 'exit',
+          exitCode: null,
+          signal: null,
+          claudeSessionId: session.claudeSessionId,
+        });
+        sessions.delete(sessionId);
+      }
+    });
+  }
+}
+
+// Test seam: re-arm initPtyHostDisconnectedHandler() for a test that starts
+// its own in-process pty-host and needs the handler registered against a
+// fresh PtyHostClient (see ptyHostClient.js's resetPtyHostClientForTests()).
+export function resetPtyHostDisconnectedHandlerForTests() {
+  ptyHostDisconnectedHandlerArmed = false;
+}
+
 // Plan5 Step3: rebuilds `sessions` Map entries for pty-host sessions that
 // survived a server本体 restart (pty-host is a separate process/systemd unit
 // -- see server/pty-host/'s header docs -- so its ptys keep running across a

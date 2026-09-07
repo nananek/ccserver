@@ -13,10 +13,25 @@
 // derived from the full dashless groupId so each group's channels are unique
 // without a fresh UUID per channel -- Unix socket paths are limited to ~104
 // chars, and a per-channel random UUID pushed control/handoff paths over it.
+//
+// Issue #143 problem 1: every socket this module hosts (group control/handoff
+// via sockPathFor(), and the process-global notify/usage/meta/reviewer
+// sockets passed in explicitly by their own modules) lives alone inside its
+// own dedicated directory (`<name>.d/sock`), and listenMcp() below binds a
+// FRESH one into every sandbox as a directory (see sandbox.js's
+// buildBwrapArgs), not the socket file itself. bwrap's --bind-try snapshots
+// whatever it binds by inode; a plain file bind means a server本体 restart
+// (rmSync + re-listen(), right below) leaves already-sandboxed sessions
+// holding a bind to the now-unlinked old inode forever. A directory bind
+// mounts the directory ENTRY instead, so a file recreated inside it is picked
+// up immediately by every sandbox with that directory bound in -- as long as
+// the directory holds exactly that one file, this is exactly as narrow a
+// bind as the old file-level one, just immune to the old file being replaced
+// underneath it.
 
 import { createServer } from 'node:net';
-import { rmSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { rmSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildMetaMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
@@ -35,7 +50,7 @@ const IDENTITY_FRAME_GRACE_MS = 1000;
 
 function sockPathFor(groupId, tag) {
   const id = String(groupId).replace(/-/g, '');
-  return join(RUNTIME_BASE, `ccserver-mcp-${id}-${tag}`);
+  return join(RUNTIME_BASE, `ccserver-mcp-${id}-${tag}.d`, 'sock');
 }
 
 // bwrap's --bind-try snapshots the socket file at mount time, so the file
@@ -66,6 +81,16 @@ function waitForSocketFile(sockPath, timeoutMs) {
 // otherwise the path is derived from groupId + tag.
 async function listenMcp({ groupId, tag, buildServer, sockPath }) {
   const target = sockPath || sockPathFor(groupId, tag);
+  // Issue #143 problem 1: the directory this socket lives alone in must exist
+  // before bwrap can bind it into a sandbox (buildSandboxSpawn/createSession
+  // run after this resolves, same ordering constraint as the socket file
+  // itself below). Idempotent -- a second listenMcp() for the same target
+  // (e.g. a restart) finds it already there.
+  try {
+    mkdirSync(dirname(target), { recursive: true });
+  } catch {
+    // best effort
+  }
   // A socket file left over from a crash (teardown never ran) would make
   // listen() fail with EADDRINUSE. The path is group-scoped and derived, so
   // a stale file can never belong to a live listener -- safe to drop. The

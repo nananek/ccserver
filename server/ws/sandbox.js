@@ -80,11 +80,21 @@ const SANDBOX_COMMIT_GUARD_CONFIG_PATH = '/ccserver-sandbox-commit-guard.json';
 // argument. The process-global reviewer socket (ccserver-reviewer, see
 // reviewer.js) is bound at a fifth fixed path, reached with the 'reviewer'
 // argument.
-const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.sock';
-const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.sock';
-const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.sock';
-const SANDBOX_META_SOCK_PATH = '/ccserver-sandbox-meta.sock';
-const SANDBOX_REVIEWER_SOCK_PATH = '/ccserver-sandbox-reviewer.sock';
+//
+// Issue #143 problem 1: each of these five now names a file inside its own
+// dedicated `.d` directory rather than sitting directly under sandbox root.
+// buildBwrapArgs binds dirname(hostSocketPath) onto dirname(this constant) --
+// a DIRECTORY bind, immune to the host socket file being replaced underneath
+// it across a server本体 restart (see mcpBroker.js's header comment) -- so
+// each of these needs a dedicated parent directory to bind onto that holds
+// nothing else (sandbox root itself is not an option: binding a directory
+// there would shadow the whole sandbox filesystem built by every earlier
+// bind in this function).
+const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.d/sock';
+const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.d/sock';
+const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.d/sock';
+const SANDBOX_META_SOCK_PATH = '/ccserver-sandbox-meta.d/sock';
+const SANDBOX_REVIEWER_SOCK_PATH = '/ccserver-sandbox-reviewer.d/sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
 
@@ -1238,26 +1248,35 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // stdin/stdout <-> the socket (see sandbox-mcp-wrapper.cjs). The wrapper's
   // shebang needs the node binary bound at SANDBOX_NODE_PATH -- that bind is
   // shared with the git-broker branch below, so it's pulled out there.
+  //
+  // Issue #143 problem 1: binds mcpSocketPath's DIRECTORY (which holds only
+  // that one socket file, see mcpBroker.js's sockPathFor) onto
+  // SANDBOX_MCP_SOCK_PATH's directory, not the file itself -- immune to the
+  // host file being unlinked+recreated by a server本体 restart. The env var's
+  // VALUE is unchanged (still the fixed file path); only the bind granularity
+  // changed, so sandbox-mcp-wrapper.cjs needs no changes.
   if (mcpSocketPath) {
-    args.push('--bind-try', mcpSocketPath, SANDBOX_MCP_SOCK_PATH);
+    args.push('--bind-try', dirname(mcpSocketPath), dirname(SANDBOX_MCP_SOCK_PATH));
     args.push('--setenv', 'CCSANDBOX_MCP_SOCK', SANDBOX_MCP_SOCK_PATH);
   }
 
   // ccserver-notify: the same wrapper script, reached with the 'notify' argv
   // so it reads CCSANDBOX_NOTIFY_MCP_SOCK (bound here) instead of
   // CCSANDBOX_MCP_SOCK. Independent of the group brokers: standalone sandboxes
-  // (no mcpSocketPath) get notify on its own.
+  // (no mcpSocketPath) get notify on its own. Directory bind, same reasoning
+  // as the group MCP socket above.
   if (notifySocketPath) {
-    args.push('--bind-try', notifySocketPath, SANDBOX_NOTIFY_SOCK_PATH);
+    args.push('--bind-try', dirname(notifySocketPath), dirname(SANDBOX_NOTIFY_SOCK_PATH));
     args.push('--setenv', 'CCSANDBOX_NOTIFY_MCP_SOCK', SANDBOX_NOTIFY_SOCK_PATH);
   }
 
   // ccserver-usage: same wrapper script again, reached with the 'usage' argv
   // so it reads CCSANDBOX_USAGE_MCP_SOCK (bound here) instead. Independent of
   // both the group brokers and notify -- a claude session may have any
-  // combination of the three sockets bound.
+  // combination of the three sockets bound. Directory bind, same reasoning as
+  // above.
   if (usageSocketPath) {
-    args.push('--bind-try', usageSocketPath, SANDBOX_USAGE_SOCK_PATH);
+    args.push('--bind-try', dirname(usageSocketPath), dirname(SANDBOX_USAGE_SOCK_PATH));
     args.push('--setenv', 'CCSANDBOX_USAGE_MCP_SOCK', SANDBOX_USAGE_SOCK_PATH);
   }
 
@@ -1265,8 +1284,9 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // reads CCSANDBOX_META_MCP_SOCK (bound here). Only ever set for the single
   // isMetaAgent session (see sessionManager) -- this socket is the privilege
   // boundary for server-wide self-management, so nothing else may bind it.
+  // Directory bind, same reasoning as the sockets above.
   if (metaSocketPath) {
-    args.push('--bind-try', metaSocketPath, SANDBOX_META_SOCK_PATH);
+    args.push('--bind-try', dirname(metaSocketPath), dirname(SANDBOX_META_SOCK_PATH));
     args.push('--setenv', 'CCSANDBOX_META_MCP_SOCK', SANDBOX_META_SOCK_PATH);
   }
 
@@ -1275,9 +1295,9 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // this one is available to any session (see reviewer.js's
   // shouldInjectReviewer) -- the trust boundary is the run_review job itself
   // only ever touching a disposable worktree it created, never the caller's
-  // own cwd.
+  // own cwd. Directory bind, same reasoning as the sockets above.
   if (reviewerSocketPath) {
-    args.push('--bind-try', reviewerSocketPath, SANDBOX_REVIEWER_SOCK_PATH);
+    args.push('--bind-try', dirname(reviewerSocketPath), dirname(SANDBOX_REVIEWER_SOCK_PATH));
     args.push('--setenv', 'CCSANDBOX_REVIEWER_MCP_SOCK', SANDBOX_REVIEWER_SOCK_PATH);
   }
 

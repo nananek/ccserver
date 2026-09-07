@@ -91,7 +91,7 @@ test('getUsageSockPath: distinct socket file under XDG_RUNTIME_DIR, not the noti
   try {
     process.env.XDG_RUNTIME_DIR = dir;
     const sockPath = getUsageSockPath();
-    assert.equal(sockPath, join(dir, 'ccserver-usage.sock'));
+    assert.equal(sockPath, join(dir, 'ccserver-usage.d', 'sock'));
     assert.ok(!sockPath.includes('notify'), 'usage socket must not collide with the notify socket name');
   } finally {
     if (prev === undefined) delete process.env.XDG_RUNTIME_DIR;

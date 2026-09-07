@@ -57,7 +57,7 @@ test('the socket path lives under XDG_RUNTIME_DIR and the broker starts stopped'
   const savedRuntime = process.env.XDG_RUNTIME_DIR;
   process.env.XDG_RUNTIME_DIR = '/tmp/meta-agent-test-rt';
   try {
-    assert.match(getMetaSockPath(), /\/tmp\/meta-agent-test-rt\/ccserver-meta\.sock$/);
+    assert.match(getMetaSockPath(), /\/tmp\/meta-agent-test-rt\/ccserver-meta\.d\/sock$/);
   } finally {
     if (savedRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
     else process.env.XDG_RUNTIME_DIR = savedRuntime;

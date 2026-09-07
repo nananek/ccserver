@@ -69,6 +69,7 @@ before(async () => {
   ptyHostClientMod = await import('./ptyHostClient.js');
   sessionManager = await import('./sessionManager.js');
   sessionManager.initPtyHostDestroyedHandler();
+  sessionManager.initPtyHostDisconnectedHandler();
 });
 
 after(async () => {
@@ -193,6 +194,8 @@ test('restorePtyHostSessions reattaches sessions spread across multiple shards, 
     ptyHostClientMod.resetPtyHostClientForTests();
     sessionManager.resetPtyHostDestroyedHandlerForTests();
     sessionManager.initPtyHostDestroyedHandler();
+    sessionManager.resetPtyHostDisconnectedHandlerForTests();
+    sessionManager.initPtyHostDisconnectedHandler();
 
     const info = await sessionManager.restorePtyHostSessions();
     assert.ok(info.restored >= 2, "both shards' sessions were reattached");
@@ -227,6 +230,8 @@ test("gracefulShutdown closes every shard's client without killing any shard's p
   ptyHostClientMod.resetPtyHostClientForTests();
   sessionManager.resetPtyHostDestroyedHandlerForTests();
   sessionManager.initPtyHostDestroyedHandler();
+  sessionManager.resetPtyHostDisconnectedHandlerForTests();
+  sessionManager.initPtyHostDisconnectedHandler();
 
   const info = await sessionManager.restorePtyHostSessions();
   assert.ok(info.restored >= 2, 'both survived and were reattached after the simulated restart');
@@ -258,6 +263,8 @@ test('restorePtyHostSessions preserves a healthy shard\'s restore metadata when 
     ptyHostClientMod.resetPtyHostClientForTests();
     sessionManager.resetPtyHostDestroyedHandlerForTests();
     sessionManager.initPtyHostDestroyedHandler();
+    sessionManager.resetPtyHostDisconnectedHandlerForTests();
+    sessionManager.initPtyHostDisconnectedHandler();
 
     const info = await sessionManager.restorePtyHostSessions();
     assert.ok(info.restored >= 1, "shard 0's session was still restored");
@@ -277,6 +284,8 @@ test('restorePtyHostSessions preserves a healthy shard\'s restore metadata when 
     ptyHostClientMod.resetPtyHostClientForTests();
     sessionManager.resetPtyHostDestroyedHandlerForTests();
     sessionManager.initPtyHostDestroyedHandler();
+    sessionManager.resetPtyHostDisconnectedHandlerForTests();
+    sessionManager.initPtyHostDisconnectedHandler();
 
     const info2 = await sessionManager.restorePtyHostSessions();
     assert.ok(info2.restored >= 1, "shard 1's session was restored now that its shard is reachable again, thanks to the preserved metadata");
@@ -284,5 +293,57 @@ test('restorePtyHostSessions preserves a healthy shard\'s restore metadata when 
   } finally {
     await destroySessionAndWait(res0.sessionId, 0);
     await destroySessionAndWait(res1.sessionId, 1);
+  }
+});
+
+// Issue #143 problem 2: unlike the "unreachable" test above (rpc listener
+// down, ptyStore untouched -- a stand-in for a transient blip),
+// initPtyHostDisconnectedHandler() must react the instant the shard's
+// connection drops, not wait for a future restorePtyHostSessions() at the
+// next server本体 boot -- that's the whole point (Issue #143's own complaint
+// is that today nothing notices until then). Placed last in this file since
+// it deliberately leaves shard 1 stopped afterward (see this test's own
+// `finally` -- nothing later in this file needs it back up).
+test('a shard disconnecting marks its sessions exited, drops them from the sessions Map, and notifies WS viewers -- without touching restore metadata', async () => {
+  const { loadPtyHostSessionMeta } = await import('./ptyHostSessionMeta.js');
+  const cwd1 = findCwdForShard(1);
+  const res = await sessionManager.createSession({ cwd: cwd1, cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId, session } = res;
+  assert.equal(session.ptyHostShardIndex, 1);
+
+  // A minimal stand-in for a browser's WS connection: broadcast() only ever
+  // reads .readyState and calls .send(), so this is everything it needs.
+  const received = [];
+  const fakeSocket = { readyState: 1, send: (str) => received.push(str) };
+  session.sockets.set(fakeSocket, { cols: 80, rows: 24 });
+
+  const shard1PtyStore = hosts[1].ptyStore;
+  // Closes shard 1's listener AND destroys its accepted connections (see
+  // rpcServer.js's close()) -- from this client's side, indistinguishable
+  // from the real pty-host binary's process dying (see ptyHostClient.test.js's
+  // onDisconnected test for why the real binary can't produce this any other
+  // way).
+  await hosts[1].stop();
+
+  try {
+    await waitFor(() => sessionManager.getSession(sessionId) === undefined, { timeoutMs: 2000 });
+    assert.equal(session.exited, true, 'the session object itself is marked exited even though it is gone from the Map');
+    assert.ok(received.length > 0, 'the WS viewer received something');
+    const exitMsg = JSON.parse(received[received.length - 1]);
+    assert.equal(exitMsg.type, 'exit');
+    assert.equal(exitMsg.exitCode, null, 'exit code is genuinely unknown -- no exit frame was ever sent');
+    assert.equal(exitMsg.signal, null);
+    assert.ok(
+      loadPtyHostSessionMeta()[sessionId],
+      'restore metadata must survive a disconnect -- a future restorePtyHostSessions() decides its fate once this shard is reachable again, not this handler',
+    );
+  } finally {
+    // The underlying real shell process is untouched by hosts[1].stop()
+    // (same as the "unreachable" test above) and is now unreachable through
+    // any client (this handler forgot it, and shard 1's listener is down) --
+    // reap it directly via the store, exactly the pattern
+    // ptyHostClient.test.js's disconnect test uses, so it can never leak into
+    // this file's own process-exit the way a forgotten live pty has before.
+    shard1PtyStore.destroy(sessionId);
   }
 });

@@ -1,6 +1,9 @@
 // Sandbox argument building for combo sessions: when an mcpSocketPath is
-// passed, buildSandboxSpawn must bind the host socket at the fixed in-sandbox
-// path, ro-bind the bridge wrapper, set CCSANDBOX_MCP_SOCK, and share the
+// passed, buildSandboxSpawn must bind the host socket's DIRECTORY at the
+// fixed in-sandbox path's directory (Issue #143 problem 1 -- a directory
+// bind survives the host socket file being replaced across a server本体
+// restart, unlike the old file-level bind), ro-bind the bridge wrapper, set
+// CCSANDBOX_MCP_SOCK to the unchanged fixed file path, and share the
 // node-binary bind with the git-broker machinery (the wrapper's shebang).
 
 import { test, before, after } from 'node:test';
@@ -13,9 +16,9 @@ import { buildSandboxSpawn } from './sandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.sock';
-const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.sock';
-const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.sock';
+const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.d/sock';
+const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.d/sock';
+const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.d/sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const SANDBOX_NODE_PATH = '/ccserver-sandbox-node';
 
@@ -47,12 +50,12 @@ test('buildSandboxSpawn binds the MCP socket, wrapper and node binary when mcpSo
       mcpSocketPath: sockPath,
     });
     const args = spawn.args;
-    const idxBind = args.indexOf(SANDBOX_MCP_SOCK_PATH);
+    const idxBindDir = args.indexOf(dirname(SANDBOX_MCP_SOCK_PATH));
     const idxBridge = args.indexOf(SANDBOX_MCP_BRIDGE_PATH);
     const idxNode = args.indexOf(SANDBOX_NODE_PATH);
-    assert.ok(idxBind > 0, 'in-sandbox MCP socket path present');
-    assert.equal(args[idxBind - 2], '--bind-try');
-    assert.equal(args[idxBind - 1], sockPath);
+    assert.ok(idxBindDir > 0, 'in-sandbox MCP socket directory present');
+    assert.equal(args[idxBindDir - 2], '--bind-try');
+    assert.equal(args[idxBindDir - 1], dirname(sockPath));
     assert.ok(idxBridge > 0, 'bridge wrapper path present');
     assert.equal(args[idxBridge - 2], '--ro-bind');
     assert.equal(args[idxBridge - 1], join(__dirname, 'sandbox-mcp-wrapper.cjs'));
@@ -120,10 +123,10 @@ test('buildSandboxSpawn binds the notify socket + wrapper when notifySocketPath 
       notifySocketPath: notifySock,
     });
     const args = spawn.args;
-    const idxBind = args.indexOf(SANDBOX_NOTIFY_SOCK_PATH);
-    assert.ok(idxBind > 0, 'in-sandbox notify socket path present');
+    const idxBind = args.indexOf(dirname(SANDBOX_NOTIFY_SOCK_PATH));
+    assert.ok(idxBind > 0, 'in-sandbox notify socket directory present');
     assert.equal(args[idxBind - 2], '--bind-try');
-    assert.equal(args[idxBind - 1], notifySock);
+    assert.equal(args[idxBind - 1], dirname(notifySock));
     const sockEnv = args.indexOf('CCSANDBOX_NOTIFY_MCP_SOCK');
     assert.ok(sockEnv > 0, 'CCSANDBOX_NOTIFY_MCP_SOCK set');
     assert.equal(args[sockEnv + 1], SANDBOX_NOTIFY_SOCK_PATH);
@@ -175,10 +178,10 @@ test('buildSandboxSpawn binds the usage socket + wrapper when usageSocketPath is
       usageSocketPath: usageSock,
     });
     const args = spawn.args;
-    const idxBind = args.indexOf(SANDBOX_USAGE_SOCK_PATH);
-    assert.ok(idxBind > 0, 'in-sandbox usage socket path present');
+    const idxBind = args.indexOf(dirname(SANDBOX_USAGE_SOCK_PATH));
+    assert.ok(idxBind > 0, 'in-sandbox usage socket directory present');
     assert.equal(args[idxBind - 2], '--bind-try');
-    assert.equal(args[idxBind - 1], usageSock);
+    assert.equal(args[idxBind - 1], dirname(usageSock));
     const sockEnv = args.indexOf('CCSANDBOX_USAGE_MCP_SOCK');
     assert.ok(sockEnv > 0, 'CCSANDBOX_USAGE_MCP_SOCK set');
     assert.equal(args[sockEnv + 1], SANDBOX_USAGE_SOCK_PATH);

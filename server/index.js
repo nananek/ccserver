@@ -21,7 +21,7 @@ import { sandboxesRoute } from './routes/sandboxes.js';
 import { federationRoute } from './routes/federation.js';
 import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
-import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler, restorePtyHostSessions } from './ws/sessionManager.js';
+import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler, initPtyHostDisconnectedHandler, restorePtyHostSessions } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
@@ -158,6 +158,12 @@ const PORT = process.env.PORT || 3001;
 // a session down on its own. A no-op (never opens the UDS socket) unless
 // CCSERVER_PTY_HOST=1.
 initPtyHostDestroyedHandler();
+
+// Issue #143 problem 2: registers the disconnect handler that treats a
+// shard's pty-host process dying as every session it held being lost (see
+// sessionManager.js's initPtyHostDisconnectedHandler). Also a no-op unless
+// CCSERVER_PTY_HOST=1.
+initPtyHostDisconnectedHandler();
 
 // ccserver-notify: restore the subscription registry, then host the
 // process-global MCP socket if the feature is enabled (Discord webhook or

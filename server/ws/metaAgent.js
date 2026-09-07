@@ -5,8 +5,9 @@
 //
 // Process-wide concept (NOT group-scoped like the control/handoff brokers):
 // one Unix socket hosts it for the whole server process
-// (${XDG_RUNTIME_DIR}/ccserver-meta.sock, see getMetaSockPath). Unlike
-// notify/usage, the socket is bound into EXACTLY ONE sandbox: the session
+// (${XDG_RUNTIME_DIR}/ccserver-meta.d/sock, see getMetaSockPath; bound into
+// the sandbox as a directory, Issue #143 problem 1). Unlike notify/usage, the
+// socket is bound into EXACTLY ONE sandbox: the session
 // launched with isMetaAgent:true. That single-sandbox binding is the trust
 // boundary -- which is also why this feature is opt-in via
 // sandbox.config.json's "metaAgentMcp" (default false): the toolset itself
@@ -29,7 +30,10 @@ import { homedir } from 'node:os';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { loadSandboxConfig } from './sandbox.js';
 
-const META_SOCKET_NAME = 'ccserver-meta.sock';
+// Issue #143 problem 1: a dedicated directory holding only `sock`, bound into
+// the sandbox as a directory rather than the socket file itself -- see
+// mcpBroker.js's header comment for why.
+const META_SOCKET_DIR_NAME = 'ccserver-meta.d';
 
 let metaBroker = null; // { server, sockPath, dir, connections } | null
 let stopBrokerFn = null;
@@ -37,7 +41,7 @@ let stopBrokerFn = null;
 export function getMetaSockPath() {
   const base = process.env.XDG_RUNTIME_DIR
     || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, META_SOCKET_NAME);
+  return join(base, META_SOCKET_DIR_NAME, 'sock');
 }
 
 // The fixed, project-outside directory every meta-agent session runs in.

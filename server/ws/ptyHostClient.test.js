@@ -180,36 +180,66 @@ test('onDestroyed fires when a subscribed session is torn down via an explicit d
   }
 });
 
-test('reconnect: client resubscribes from lastSeq after the pty-host connection drops and comes back', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ccserver-ptyhostclient-reconnect-'));
+// Issue #143 problem 2: the real pty-host binary never closes its RPC
+// listener without the whole process exiting right after (see
+// server/pty-host/index.js's shutdown() -- stop()/rpc.close() is only ever
+// called immediately before process.exit(0)), and a dying process SIGHUPs
+// every pty it owned (Step0's PoC finding) -- so a 'close' on this
+// connection can only mean every session this client held is gone for good.
+// A previous version of this test simulated "the RPC listener bounces but
+// the ptys secretly survive" to exercise resubscribe-after-reconnect; that
+// scenario cannot happen with the real binary, and Issue #143 retires the
+// blind-resubscribe-across-a-close behavior it depended on in favor of the
+// onDisconnected() contract exercised below.
+test('onDisconnected fires with every held sessionId when the connection drops, and a forgotten session is never silently resubscribed after reconnecting', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-ptyhostclient-disconnect-'));
   const sp = join(dir, 'pty-host.sock');
   const store = new PtyStore();
   let rpc = await createRpcServer(store, { sockPath: sp });
   const client = new PtyHostClient(sp);
+  let rpty;
   try {
     const chunks = [];
-    const rpty = await client.spawn(shellSpawnParams());
+    rpty = await client.spawn(shellSpawnParams());
     rpty.onData((d) => chunks.push(d));
     await client.subscribe(rpty, 0);
 
     rpty.write('echo BEFORE_DROP\n');
     await waitFor(() => chunks.join('').includes('BEFORE_DROP'));
 
-    // Simulate a pty-host restart: close the RPC listener without touching
-    // the store (the live pty must survive -- passive teardown guarantee),
-    // then rebind a fresh listener on the same socket path/store.
+    const disconnected = [];
+    client.onDisconnected((sessionIds) => disconnected.push(...sessionIds));
+
+    // Stands in for "pty-host's process died" (see this test's header
+    // comment) -- rpcServer.js's close() destroys every accepted connection,
+    // which is exactly what a dead process's kernel-closed fds look like
+    // from this client's side.
     await rpc.close();
-    await sleep(50);
+    await waitFor(() => disconnected.length > 0);
+    assert.deepEqual(disconnected, [rpty.sessionId]);
+
+    // Bringing a listener back up on the same store (convenient for this
+    // test's setup only, NOT a claim that production ever preserves ptys
+    // across a close) must not silently resume delivering to the
+    // now-forgotten rpty: onDisconnected already told the caller this
+    // session is gone, so resubscribing it behind the caller's back would
+    // contradict that.
     rpc = await createRpcServer(store, { sockPath: sp });
-
     rpty.write('echo AFTER_RECONNECT\n');
-    await waitFor(() => chunks.join('').includes('AFTER_RECONNECT'), { timeoutMs: 8000 });
-
-    rpty.destroy();
-    // See the round-trip test's comment: wait for the teardown to actually
-    // land before this test's `finally` closes both ends of the connection.
-    await waitFor(() => !store.list().some((s) => s.id === rpty.sessionId));
+    let resumed = true;
+    try {
+      await waitFor(() => chunks.join('').includes('AFTER_RECONNECT'), { timeoutMs: 2000 });
+    } catch {
+      resumed = false;
+    }
+    assert.equal(resumed, false, 'a forgotten session must not silently resume receiving output after reconnect');
   } finally {
+    // Bypasses the client entirely (which may or may not still be able to
+    // reach this session) so the real shell process is always reaped, even
+    // though the assertions above deliberately leave it unsubscribed/unknown
+    // to the client -- see the round-trip test's comment on why a leaked
+    // live pty must never survive a test.
+    if (rpty) store.destroy(rpty.sessionId);
     client.close();
     await rpc.close();
     rmSync(dir, { recursive: true, force: true });

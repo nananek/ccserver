@@ -119,6 +119,7 @@ export class PtyHostClient {
     this._reconnectDelay = RECONNECT_BASE_MS;
     this._reconnectTimer = null;
     this._destroyedListeners = new Set();
+    this._disconnectedListeners = new Set();
     this._closed = false;
   }
 
@@ -129,6 +130,22 @@ export class PtyHostClient {
   onDestroyed(cb) {
     this._destroyedListeners.add(cb);
     return () => this._destroyedListeners.delete(cb);
+  }
+
+  // Issue #143 problem 2: fired when this client's UDS connection dies
+  // because pty-host's own PROCESS died (never for this client's own
+  // close(), see the 'close' handler below -- that is a controlled shutdown,
+  // not a loss). Called once per disconnect with the array of every
+  // sessionId this client still held a RemotePty for at that moment -- UDS
+  // has no notion of a transient network blip, so a `close` here can only
+  // mean the remote process (and every pty it owned, per Step0's PoC
+  // finding) is actually gone. See sessionManager.js's
+  // initPtyHostDisconnectedHandler, the pair to initPtyHostDestroyedHandler
+  // above but for "the whole shard vanished" rather than "one session was
+  // torn down".
+  onDisconnected(cb) {
+    this._disconnectedListeners.add(cb);
+    return () => this._disconnectedListeners.delete(cb);
   }
 
   _forgetSession(sessionId) {
@@ -174,7 +191,24 @@ export class PtyHostClient {
         this._socket = null;
         this._connectPromise = null;
         this._rejectAllPending(new Error('pty-host connection closed'));
-        if (!this._closed) this._scheduleReconnect();
+        // this._closed means close() was called deliberately (gracefulShutdown,
+        // test teardown) -- every session survives that (pty-host itself is
+        // still alive), so onDisconnected must stay silent and _remotePtys
+        // must stay intact for the same reason resetPtyHostClientForTests'
+        // reconnect is skipped below. Only an UNREQUESTED close (pty-host's
+        // process actually died) means the sessions are really gone.
+        if (!this._closed) {
+          const sessionIds = [...this._remotePtys.keys()];
+          this._remotePtys.clear();
+          for (const cb of this._disconnectedListeners) {
+            try {
+              cb(sessionIds);
+            } catch {
+              // a listener must never break dispatch to the others
+            }
+          }
+          this._scheduleReconnect();
+        }
       });
     });
 

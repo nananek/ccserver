@@ -3,7 +3,7 @@ title: コードレビュー (ccserver-reviewer)
 description: 使い捨てのヘッドレスセッションでローカルの ref/ブランチ/PR/未コミット差分をレビューする MCP サーバー
 ---
 
-任意のセッション (ワーカーでもオーケストレーターでも単発セッションでも) から、ローカルの git ref/ブランチ/PR 番号/未コミット差分に対して `/code-review` を走らせられる MCP サーバーです。GitHub の PR が存在しなくてもレビューできる点が特徴で、未 push のローカルブランチや PR 化前のブランチ、あるいは作業中の未コミット差分もそのままレビュー対象にできます。`ccserver-notify` / `ccserver-usage` と同じくプロセスグローバルな単一ソケット (`ccserver-reviewer.sock`) でホストされます。
+任意のセッション (ワーカーでもオーケストレーターでも単発セッションでも) から、ローカルの git ref/ブランチ/PR 番号/未コミット差分に対して `/code-review` を走らせられる MCP サーバーです。GitHub の PR が存在しなくてもレビューできる点が特徴で、未 push のローカルブランチや PR 化前のブランチ、あるいは作業中の未コミット差分もそのままレビュー対象にできます。`ccserver-notify` / `ccserver-usage` と同じくプロセスグローバルな単一ソケット (`ccserver-reviewer.d/sock`) でホストされます。
 
 - **オプトイン**: 既定では無効です。設定ファイルで `reviewerMcp: true` を明示した場合のみ有効化されます ([設定ファイル](/ccserver/sandbox/configuration/) 参照)。
 - **注入対象が広い**: `ccserver-meta` とは異なり、shell と copilot を除く**全セッション**に注入されます。コンボのワーカー/オーケストレーターも対象です (グループの有無を問わず呼び出せる、という設計方針のため)。

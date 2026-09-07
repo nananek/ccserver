@@ -12,10 +12,10 @@
 //     non-blocking: a failing webhook is logged, never thrown).
 //
 // One Unix socket hosts it for the whole server process
-// (${XDG_RUNTIME_DIR}/ccserver-notify.sock, see getNotifySockPath). Each
-// session's sandbox binds that one socket in; the MCP config tells the agent
-// to reach it through the same bridge wrapper as the group brokers (see
-// mcpConfig.js / sandbox-mcp-wrapper.cjs).
+// (${XDG_RUNTIME_DIR}/ccserver-notify.d/sock, see getNotifySockPath). Each
+// session's sandbox binds that socket's directory in (Issue #143 problem 1);
+// the MCP config tells the agent to reach it through the same bridge wrapper
+// as the group brokers (see mcpConfig.js / sandbox-mcp-wrapper.cjs).
 //
 // This module imports mcpBroker.js lazily (dynamic import) so the static
 // import graph stays acyclic: sessionManager -> notify -> sandbox, and the
@@ -40,7 +40,11 @@ function notifyPath() {
   return process.env.CCSERVER_NOTIFY_PATH || join(__dirname, '..', '..', '.saved-notifications.json');
 }
 
-const NOTIFY_SOCKET_NAME = 'ccserver-notify.sock';
+// Issue #143 problem 1: a dedicated directory holding only `sock`, bound into
+// sandboxes as a directory rather than the socket file itself -- see
+// mcpBroker.js's header comment for why (inode pinning across a server本体
+// restart) and getNotifySockPath() below.
+const NOTIFY_SOCKET_DIR_NAME = 'ccserver-notify.d';
 const DELIVERY_TIMEOUT_MS = 10_000;
 
 const LEVEL_EMOJI = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '🚨' };
@@ -75,7 +79,7 @@ function isValidWebhookUrl(url) {
 export function getNotifySockPath() {
   const base = process.env.XDG_RUNTIME_DIR
     || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, NOTIFY_SOCKET_NAME);
+  return join(base, NOTIFY_SOCKET_DIR_NAME, 'sock');
 }
 
 // Whether the notify feature is on at all: a Discord webhook configured, a

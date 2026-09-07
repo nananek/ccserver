@@ -8,10 +8,11 @@
 //
 // Process-wide concept (NOT group-scoped, like ccserver-notify/-usage): one
 // Unix socket hosts it for the whole server process
-// (${XDG_RUNTIME_DIR}/ccserver-reviewer.sock, see getReviewerSockPath). Each
-// reviewer-enabled session's sandbox binds that one socket in; the MCP
-// config tells the agent to reach it through the same bridge wrapper as the
-// other process-global servers (see mcpConfig.js / sandbox-mcp-wrapper.cjs).
+// (${XDG_RUNTIME_DIR}/ccserver-reviewer.d/sock, see getReviewerSockPath).
+// Each reviewer-enabled session's sandbox binds that socket's directory in
+// (Issue #143 problem 1); the MCP config tells the agent to reach it through
+// the same bridge wrapper as the other process-global servers (see
+// mcpConfig.js / sandbox-mcp-wrapper.cjs).
 // Opt-in via sandbox.config.json's "reviewerMcp" (default false, like
 // usageMcp/metaAgentMcp) -- this spawns real sandboxed sessions on any
 // caller's say-so, so it must not exist by accident.
@@ -77,7 +78,10 @@ import { stripAnsi } from './mcpTools.js';
 // imports neither this module nor sessionManager.js, so no cycle.
 import { sendNotification } from './notify.js';
 
-const REVIEWER_SOCKET_NAME = 'ccserver-reviewer.sock';
+// Issue #143 problem 1: a dedicated directory holding only `sock`, bound into
+// the sandbox as a directory rather than the socket file itself -- see
+// mcpBroker.js's header comment for why.
+const REVIEWER_SOCKET_DIR_NAME = 'ccserver-reviewer.d';
 
 const VALID_APPS = ['claude', 'opencode', 'codex'];
 const DEFAULT_APP = 'claude';
@@ -109,7 +113,7 @@ let stopBrokerFn = null;
 export function getReviewerSockPath() {
   const base = process.env.XDG_RUNTIME_DIR
     || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, REVIEWER_SOCKET_NAME);
+  return join(base, REVIEWER_SOCKET_DIR_NAME, 'sock');
 }
 
 // Whether the reviewer feature is on at all: an explicit opt-in flag in
