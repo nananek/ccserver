@@ -21,7 +21,7 @@ import { sandboxesRoute } from './routes/sandboxes.js';
 import { federationRoute } from './routes/federation.js';
 import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
-import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler } from './ws/sessionManager.js';
+import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler, restorePtyHostSessions } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
@@ -228,12 +228,36 @@ try {
 
 await fastify.listen({ port: PORT, host: '0.0.0.0' });
 
+// Reattach to pty-host sessions that survived this restart (plan5 Step3) --
+// pty-host is a separate process, so CCSERVER_PTY_HOST=1 sessions' ptys keep
+// running across a server本体 crash/restart even though the `sessions` Map
+// below started empty. A no-op when the flag is off. Must run before
+// restoreGroups() just below: a group's member is only treated as "gone,
+// offer a resume" when sessionApi.getSession() finds nothing, so a still-
+// running member needs to already be back in `sessions` by then.
+try {
+  const restoreInfo = await restorePtyHostSessions();
+  if (restoreInfo.restored) {
+    fastify.log.info(`Reattached ${restoreInfo.restored} pty-host session(s) from before restart`);
+  }
+  if (restoreInfo.orphanedLive) {
+    fastify.log.warn(`${restoreInfo.orphanedLive} pty-host session(s) had no restore metadata and were left running unmanaged`);
+  }
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to restore pty-host sessions');
+}
+
 // Re-arm scheduled prompts persisted before the last shutdown/restart. Missed
 // ones (server was down at their time) fire shortly after startup; live ones
 // wait for their time. Sessions are auto-resumed lazily at fire time.
-// Combo groups are restored first (their member sessions died with the old
-// process) so those auto-resumes can re-create MCP channels, and the UI can
-// offer to re-open the groups.
+// Combo groups are restored next: under a direct node-pty spawn (or a
+// non-graceful pty-host restart), every member's pty died with the old
+// process and only its .saved-sessions.json resume info is available; under
+// CCSERVER_PTY_HOST=1 a member that restorePtyHostSessions() just reattached
+// above is instead found live (see restoreGroups()/listGroupMembers() in
+// groupManager.js, which check sessionApi.getSession() before falling back
+// to the saved info). Either way this auto-resumes/re-creates MCP channels
+// as needed, and the UI can offer to re-open groups that still need it.
 try {
   const groupInfo = restoreGroups();
   if (groupInfo?.restored) {

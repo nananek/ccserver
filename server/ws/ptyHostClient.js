@@ -336,6 +336,20 @@ export class PtyHostClient {
     return res.sessions;
   }
 
+  // Reattaches to a session pty-host already has (plan5 Step3): unlike
+  // spawn(), issues no RPC of its own -- the session already exists on
+  // pty-host's side (found via a prior list()), so this only needs to build
+  // the local RemotePty proxy and register it for push-event dispatch. The
+  // caller is expected to follow up with subscribe() to receive the buffered
+  // backlog (and any live output going forward) exactly as the post-spawn()
+  // path does.
+  async attach(sessionId, { cols, rows, pid, sandbox } = {}) {
+    await this._ensureConnected();
+    const rpty = new RemotePty(this, sessionId, { cols, rows, pid, sandbox });
+    this._remotePtys.set(sessionId, rpty);
+    return rpty;
+  }
+
   // Subscribes (or re-subscribes) to a session's output, applying any replay
   // backlog immediately. Server本体 calls this once right after spawn() and
   // never unsubscribes for the session's whole lifetime -- see

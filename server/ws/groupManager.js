@@ -514,13 +514,21 @@ function persistGroups() {
   }
 }
 
-// Rebuild the in-memory registry at startup from .saved-groups.json. The
-// member ptys are gone (a restart kills them all), so members are registered
-// from the persisted map and their resume info is matched from the graceful-
-// shutdown .saved-sessions.json (see peekSavedSessions). The orchestrator dir
-// is re-created (empty -- CLAUDE.md/AGENTS.md are generated fresh at the next
-// actual spawn, see generateOrchestratorClaudeMdSrc) so a scheduled
-// auto-resume or an orchestrator restart can use it as cwd again.
+// Rebuild the in-memory registry at startup from .saved-groups.json. Under a
+// direct node-pty spawn (the CCSERVER_PTY_HOST unset default), the member
+// ptys are gone (a restart kills them all), so members are registered from
+// the persisted map and their resume info is matched from the graceful-
+// shutdown .saved-sessions.json (see peekSavedSessions) -- listGroupMembers()
+// et al then fall back to that saved info once sessionApi.getSession() finds
+// nothing. Under CCSERVER_PTY_HOST=1 a member's pty can instead survive the
+// restart: server/index.js calls sessionManager.restorePtyHostSessions()
+// (plan5 Step3) before this function runs, so sessionApi.getSession() may
+// already find it live -- group.members here is populated identically either
+// way (from the persisted role->sessionId map), it's only the live-vs-saved
+// resolution downstream that differs. The orchestrator dir is re-created
+// (empty -- CLAUDE.md/AGENTS.md are generated fresh at the next actual spawn,
+// see generateOrchestratorClaudeMdSrc) so a scheduled auto-resume or an
+// orchestrator restart can use it as cwd again.
 export function restoreGroups() {
   let arr;
   try {

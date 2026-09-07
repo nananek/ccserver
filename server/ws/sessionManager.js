@@ -26,6 +26,7 @@ import { stripAnsi } from './mcpTools.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { recordSessionLimitReset } from '../sessionLimitState.js';
 import { getPtyHostClient } from './ptyHostClient.js';
+import { setPtyHostSessionMeta, deletePtyHostSessionMeta, loadPtyHostSessionMeta } from './ptyHostSessionMeta.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
@@ -233,6 +234,319 @@ export function isInfrastructureError(msg) {
 // value can never leak into persistence or the CLI arg builder.
 function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
+}
+
+// Builds the `session` record and wires its ptyProcess onData/onExit
+// listeners -- the exact same construction both createSession() (a freshly
+// spawned or pty-host-spawned ptyProcess) and restorePtyHostSessions() (plan5
+// Step3: a ptyProcess re-attached to an already-running pty-host session via
+// PtyHostClient.attach()) need, registers it in `sessions`, and fires
+// sessionCreateListeners. Factored out so the restore path can produce a
+// session indistinguishable from one createSession() itself just launched --
+// AutoYes / session-limit detection / screenModel / outputBuffer accumulation
+// must all behave identically regardless of which path built the record.
+//
+// `meta.settled` defaults to false (a freshly launched TUI is still mid
+// init-burst); restorePtyHostSessions() passes true -- a session being
+// reattached to is by definition not in that initial burst any more.
+function buildSessionRecord(id, ptyProcess, meta) {
+  const session = {
+    id,
+    cwd: meta.cwd,
+    shell: !!meta.shell,
+    app: meta.app,
+    model: meta.model,
+    permissionMode: meta.permissionMode,
+    groupId: meta.groupId,
+    groupRole: meta.groupRole,
+    // Operator-assigned display name (null = none; the UI falls back to the
+    // directory basename). Set post-launch via setSessionLabel (PATCH
+    // /api/sessions/:id), never from launch input -- launch bodies are
+    // forwarded nearly as-is across trust boundaries (REST, MCP, federation),
+    // so a display string must not ride along with them.
+    customLabel: normalizeCustomLabel(meta.customLabel),
+    // True only for sessions launched with the explicit isMetaAgent flag (the
+    // privileged self-management agent). Display/debug bookkeeping -- the
+    // authorization boundary is the meta broker socket, not this flag.
+    isMetaAgent: !!meta.isMetaAgent,
+    sandbox: !!meta.sandbox,
+    sandboxOpts: meta.sandbox ? (meta.sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
+    docker: !!meta.docker, // whether THIS session's sandbox launched with docker (see dockerAvailability)
+    dockerTag: meta.docker && meta.sandboxStateDir ? basename(meta.sandboxStateDir) : null, // matches CCSANDBOX_DOCKERD_TAG (sandbox.js), identifies this session's dockerd in the status file
+    sandboxStateDir: meta.sandboxStateDir ?? null, // rootlesskit state dir to remove on teardown (docker only)
+    sandboxGitBrokerProc: meta.sandboxGitBrokerProc ?? null, // host-side git-broker child process, killed on teardown
+    sandboxGitBrokerDir: meta.sandboxGitBrokerDir ?? null, // its runtime dir (socket + allow-list), removed on teardown
+    sandboxCommitGuardDir: meta.sandboxCommitGuardDir ?? null, // commit-msg guard's runtime dir (config json only, no process), removed on teardown
+    reuseSandboxHome: meta.reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
+    ptyProcess,
+    // Every attached viewer, mapped to the viewport it last reported. A
+    // session is shared: opening it from a second device adds a socket here
+    // instead of evicting the first (see attachSocket). The viewport values
+    // feed negotiateSize -- the pty is sized to the smallest of them.
+    sockets: new Map(),
+    outputBuffer: [],
+    bufferSize: 0,
+    cols: meta.cols,
+    rows: meta.rows,
+    createdAt: Date.now(), // for the uptime figure in the teardown log
+    exited: false,
+    exitCode: null,
+    exitSignal: null,
+    timeoutTimer: null,
+    claudeSessionId: null,
+    idleTimer: null,
+    settled: !!meta.settled, // reached the first idle gap (TUI init burst over) -- the send_input settle gate
+    settleWaiters: [], // resolvers waiting on `settled` (see waitUntilSettled)
+    lastOutputAt: null, // epoch ms of the most recent output chunk; null until the first one (activity timestamp, Issue #16)
+    // Workers (groupRole in 'workerX' form) always run inside the sandbox, so
+    // start them with Auto-Y enabled. The orchestrator (groupRole ===
+    // 'orchestrator') and standalone sessions (groupRole === null) keep the
+    // historical off default. groupRole is already validated server-side
+    // (WORKER_ROLE_RE in groupManager), so "anything but the fixed
+    // 'orchestrator' string is a worker" is a safe check here.
+    autoYes: !!meta.groupRole && meta.groupRole !== 'orchestrator',
+    autoYesLog: [],
+    autoYesPending: null,
+    autoYesBuf: '',
+    // Session-limit auto-resume detection (see sessionLimitDetect.js).
+    // limitDetectBuf holds a sliding window of RAW bytes, not yet
+    // ANSI-stripped: a pty chunk boundary can split an escape sequence
+    // mid-sequence, and stripping each chunk independently would leak the
+    // tail of a split sequence as bare control bytes. Accumulating raw
+    // bytes and stripping the whole window each time lets the next chunk's
+    // arrival complete a sequence the previous chunk left dangling.
+    // lastAutoLimitResetAt is the resetAtMs already scheduled for, so a TUI
+    // redraw of the same status line doesn't re-arm the schedule every chunk.
+    limitDetectBuf: '',
+    lastAutoLimitResetAt: null,
+    startedClaudeSessionId: meta.startedClaudeSessionId ?? null,
+    scheduleId: null, // key into the module-level `schedules` map, if any
+    pendingInjection: null, // { text, at } — scheduled prompt awaiting a freshly-resumed session
+    pendingInjectionTimer: null, // RESUME_INJECT_FALLBACK_MS safety net; cleared on teardown
+    // Lightweight virtual screen (see screenModel.js): fed every output
+    // chunk, exposing the current visible screen and a change counter so
+    // read_output can tell "spinner still drawing" from "static screen".
+    // screenLastChangeAt is stamped when the screen visibly changes (not on
+    // every byte) -- the basis of read_output's screenIdleMs / get_tab_status.
+    screen: createScreenModel({ cols: meta.cols, rows: SCREEN_ROWS }),
+    screenLastChangeAt: null,
+  };
+
+  ptyProcess.onData((rawData) => {
+    const data = rawData;
+    // Activity timestamp: every output chunk counts, shells included (unlike
+    // the agent-only idle detection below). Pure activity bookkeeping.
+    session.lastOutputAt = Date.now();
+    appendToBuffer(session, data);
+
+    // Session-limit auto-resume detection -- role/app agnostic, applies to
+    // every session per the plan (a shell session simply never matches).
+    // See sessionLimitDetect.js for the regex/timezone-math and the
+    // limitDetectBuf field above for why raw bytes are accumulated instead
+    // of stripping each chunk independently.
+    session.limitDetectBuf = (session.limitDetectBuf + data).slice(-LIMIT_DETECT_BUF_MAX_CHARS);
+    const limitMatch = findSessionLimitReset(stripAnsi(session.limitDetectBuf));
+    if (limitMatch && limitMatch.resetAtMs !== session.lastAutoLimitResetAt) {
+      // Identify this limit event by its resetAtMs so the TUI redrawing the
+      // same status line (which keeps re-matching every chunk) doesn't
+      // re-arm the schedule on every redraw.
+      session.lastAutoLimitResetAt = limitMatch.resetAtMs;
+      // Independent of the auto-schedule lifecycle below (which can be
+      // skipped when a manual schedule already exists) -- the scheduler
+      // panel's default-time hint should still learn about this detection.
+      recordSessionLimitReset({
+        resetAtMs: limitMatch.resetAtMs,
+        timeZone: limitMatch.timeZone,
+        source: 'session-output',
+      });
+      const existingSid = scheduleForSession(session.id);
+      const existing = existingSid ? schedules.get(existingSid) : null;
+      // A manual schedule (set via the browser's clock panel) is never
+      // clobbered by the auto-detector, even if it looks stale relative to
+      // the new reset time -- the user's explicit intent wins. An existing
+      // 'auto-session-limit' schedule is safe to replace with this fresher
+      // detection (normally unreachable here, since the resetAtMs guard
+      // above already filters out same-event redraws).
+      if (!existing || existing.source === 'auto-session-limit') {
+        const scheduled = setScheduledPrompt(
+          session.id,
+          limitMatch.resetAtMs + SESSION_LIMIT_RESUME_DELAY_MS,
+          SESSION_LIMIT_RESUME_MESSAGE,
+          { source: 'auto-session-limit' },
+        );
+        if (scheduled) {
+          notifyScheduleState(session);
+        } else {
+          console.warn(`[session-limit] could not auto-schedule a resume for session ${session.id} (reset ${new Date(limitMatch.resetAtMs).toISOString()})`);
+        }
+      } else {
+        console.warn(`[session-limit] session ${session.id} hit its limit, but a manual schedule already exists -- not overriding it`);
+      }
+    }
+
+    // Keep the virtual screen model in parallel with the buffer: it only
+    // stamps screenLastChangeAt when the visible screen actually changes,
+    // so a spinner redrawing the same line registers as activity while a
+    // byte flow that leaves the screen static does not.
+    const screenVersion = session.screen.version();
+    session.screen.feed(data);
+    if (session.screen.version() !== screenVersion) {
+      session.screenLastChangeAt = Date.now();
+    }
+
+    broadcast(session, { type: 'output', data });
+
+    // Idle detection: reset timer on every output chunk (Claude sessions only)
+    if (!session.shell) {
+      if (session.idleTimer) {
+        clearTimeout(session.idleTimer);
+      }
+      session.idleTimer = setTimeout(() => {
+        if (session.exited) return;
+        // The first idle gap means a freshly-launched TUI has finished its
+        // initialization burst: mark the session settled and wake anyone
+        // waiting on the settle gate (send_input's waitUntilSettled).
+        if (!session.settled) {
+          session.settled = true;
+          const waiters = session.settleWaiters;
+          session.settleWaiters = [];
+          for (const w of waiters) w();
+        }
+        // A scheduled prompt may be waiting for this (freshly auto-resumed)
+        // session to settle before typing its text. Deliver it once quiet.
+        if (session.pendingInjection) {
+          const inj = session.pendingInjection;
+          session.pendingInjection = null;
+          if (session.pendingInjectionTimer) {
+            clearTimeout(session.pendingInjectionTimer);
+            session.pendingInjectionTimer = null;
+          }
+          const delivered = injectIntoLiveSession(session, inj.text);
+          notifyFired(session, { at: inj.at, text: inj.text }, delivered);
+        }
+      }, IDLE_TIMEOUT_MS);
+
+      // Auto-yes detection for agent permission prompts. Claude uses Ink's
+      // Select UI, opencode renders a "Permission required" box, and Codex
+      // uses a numbered approval menu. Each selects its one-time approval by
+      // default, so Enter is the shared response.
+      if (session.autoYes) {
+        // Strip all ANSI escape sequences
+        const ansiRe = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Z0-9]|[>=<]|#[0-9])/g;
+        const stripped = data.replace(ansiRe, '');
+        // Accumulate stripped text since last auto-yes response (max 10KB)
+        session.autoYesBuf += stripped;
+        if (session.autoYesBuf.length > 10000) {
+          session.autoYesBuf = session.autoYesBuf.slice(-5000);
+        }
+        const buf = session.autoYesBuf;
+        // Ink renders text with cursor positioning, so spaces may be missing after ANSI strip
+        const bufNoSpace = buf.replace(/\s+/g, '');
+        const hasPermissionPrompt = detectPermissionPrompt(session.app, bufNoSpace);
+        if (hasPermissionPrompt) {
+          if (session.autoYesPending) clearTimeout(session.autoYesPending);
+          session.autoYesPending = setTimeout(() => {
+            session.autoYesPending = null;
+            if (session.exited || !session.autoYes) return;
+            // Clean up prompt text for display: re-insert spaces around known words
+            const cleanBuf = buf
+              .replace(/[^\x20-\x7E\n]/g, ' ')  // remove non-printable chars
+              .replace(/\s+/g, ' ').trim();
+            // Extract a meaningful description from the buffer
+            const noSpace = cleanBuf.replace(/\s/g, '');
+            let promptLine = 'permission prompt';
+            if (session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex' || session.app === 'commandcode') {
+              // Neither TUI's byte stream exposes which tool is being approved,
+              // so the label stays generic (claude's does carry tool names).
+              promptLine = 'Permission prompt (auto-approved)';
+            } else {
+              const editMatch = noSpace.match(/makethiseditto\s*(\S+)/i);
+              const fetchMatch = noSpace.match(/Claudewantstofetchcontentfrom\s*(\S+)/i);
+              const searchMatch = noSpace.match(/Claudewantstosearchthewebfor:\s*(.+?)(?:\}|$)/i);
+              if (editMatch) {
+                promptLine = `Edit: ${editMatch[1]}`;
+              } else if (fetchMatch) {
+                promptLine = `Fetch: ${fetchMatch[1]}`;
+              } else if (searchMatch) {
+                promptLine = `Web Search: ${searchMatch[1]}`;
+              } else if (/Doyouwanttoproceed/i.test(noSpace)) {
+                // Try to find tool name from nearby text like "Bash(...)" or "Read(...)"
+                const toolMatch = noSpace.match(/(Bash|Read|Write|Edit|Glob|Grep|WebFetch|WebSearch|NotebookEdit)\(/i);
+                promptLine = toolMatch ? `${toolMatch[1]} (auto-approved)` : 'Tool use (auto-approved)';
+              } else {
+                promptLine = cleanBuf.slice(0, 80) || 'permission prompt';
+              }
+            }
+            const entry = { time: Date.now(), prompt: promptLine };
+            session.autoYesLog.push(entry);
+            if (session.autoYesLog.length > 100) session.autoYesLog.shift();
+            // Reset buffer after responding — prevents re-matching old prompts
+            session.autoYesBuf = '';
+            // Send Enter key — default-focused option is "Yes"
+            session.ptyProcess.write('\r');
+            broadcast(session, { type: 'auto_yes', entry });
+          }, 500);
+        }
+      }
+    }
+  });
+
+  ptyProcess.onExit(({ exitCode, signal }) => {
+    session.exited = true;
+    session.exitCode = exitCode;
+    session.exitSignal = signal;
+    if (!session.shell) {
+      session.claudeSessionId = extractResumeSessionId(
+        session.app,
+        session.outputBuffer.slice(-50).join('')
+      );
+    }
+
+    // Keep any pending scheduled prompt alive across this exit: refresh its
+    // resume id and detach it so it auto-resumes the conversation at fire time.
+    refreshScheduleOnExit(session);
+
+    for (const fn of sessionExitListeners) {
+      try {
+        fn(session);
+      } catch {
+        // a listener must never break the pty exit path
+      }
+    }
+
+    // Until this landed nothing recorded WHY a session went away, so a pty
+    // that died while the tab was closed was indistinguishable from a
+    // server restart -- both just surfaced as SESSION_NOT_FOUND on the next
+    // open. Log the exit itself, and see destroySession for the teardown.
+    console.log(
+      `[session] ${session.id} pty exited (code=${exitCode}, signal=${signal ?? 'none'}, `
+      + `app=${session.app || (session.shell ? 'shell' : 'unknown')}, cwd=${session.cwd}, `
+      + `viewers=${session.sockets.size}, uptime=${Date.now() - session.createdAt}ms)`
+    );
+
+    broadcast(session, {
+      type: 'exit',
+      exitCode,
+      signal,
+      claudeSessionId: session.claudeSessionId,
+    });
+
+    if (session.sockets.size === 0 && sessions.has(session.id)) {
+      startTimeout(session, SESSION_EXITED_TIMEOUT_MS);
+    }
+  });
+
+  sessions.set(id, session);
+
+  for (const fn of sessionCreateListeners) {
+    try {
+      fn(session);
+    } catch {
+      // a listener must never break session creation
+    }
+  }
+
+  return session;
 }
 
 export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
@@ -629,6 +943,31 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       // commitGuardDir fix, the commit-message guard's runtime dir too (see
       // server/pty-host/ptyStore.js) -- server本体 has no handle to any of
       // it and must not try.
+      //
+      // Step3 (plan5): persist exactly the "launch input" fields pty-host's
+      // own list() can never return (it deliberately holds none of this --
+      // see ptyStore.js's header comment) so a restart can rebuild this
+      // session's `session` record via restorePtyHostSessions() instead of
+      // losing it. Written only on success -- an id that never reaches this
+      // point never spawned on pty-host's side, so there would be nothing to
+      // restore.
+      setPtyHostSessionMeta(id, {
+        cwd,
+        shell: !!shell,
+        app: sessionApp,
+        model: sessionModel,
+        permissionMode: sessionPermissionMode,
+        groupId,
+        groupRole,
+        customLabel: normalizeCustomLabel(customLabel),
+        isMetaAgent: !!isMetaAgent,
+        sandbox: useSandbox,
+        sandboxOpts: useSandbox ? (sandboxOpts || null) : null,
+        docker: sandboxDocker,
+        sandboxStateDir,
+        reuseSandboxHome,
+        startedClaudeSessionId: claudeSessionId || null,
+      });
     } catch (err) {
       // pty-host's own errors already carry the "Failed to build sandbox" /
       // "Failed to spawn" prefixes INFRA_ERROR_PREFIXES expects (see
@@ -728,301 +1067,28 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     }
   }
 
-  const session = {
-    id,
+  const session = buildSessionRecord(id, ptyProcess, {
     cwd,
-    shell: !!shell,
+    shell,
     app: sessionApp,
     model: sessionModel,
     permissionMode: sessionPermissionMode,
     groupId,
     groupRole,
-    // Operator-assigned display name (null = none; the UI falls back to the
-    // directory basename). Set post-launch via setSessionLabel (PATCH
-    // /api/sessions/:id), never from launch input -- launch bodies are
-    // forwarded nearly as-is across trust boundaries (REST, MCP, federation),
-    // so a display string must not ride along with them.
-    customLabel: normalizeCustomLabel(customLabel),
-    // True only for sessions launched with the explicit isMetaAgent flag (the
-    // privileged self-management agent). Display/debug bookkeeping -- the
-    // authorization boundary is the meta broker socket, not this flag.
-    isMetaAgent: !!isMetaAgent,
+    customLabel,
+    isMetaAgent,
     sandbox: useSandbox,
-    sandboxOpts: useSandbox ? (sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
-    docker: sandboxDocker, // whether THIS session's sandbox launched with docker (see dockerAvailability)
-    dockerTag: sandboxDocker && sandboxStateDir ? basename(sandboxStateDir) : null, // matches CCSANDBOX_DOCKERD_TAG (sandbox.js), identifies this session's dockerd in the status file
-    sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
-    sandboxGitBrokerProc, // host-side git-broker child process, killed on teardown
-    sandboxGitBrokerDir, // its runtime dir (socket + allow-list), removed on teardown
-    sandboxCommitGuardDir, // commit-msg guard's runtime dir (config json only, no process), removed on teardown
-    reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
-    ptyProcess,
-    // Every attached viewer, mapped to the viewport it last reported. A
-    // session is shared: opening it from a second device adds a socket here
-    // instead of evicting the first (see attachSocket). The viewport values
-    // feed negotiateSize -- the pty is sized to the smallest of them.
-    sockets: new Map(),
-    outputBuffer: [],
-    bufferSize: 0,
+    sandboxOpts,
+    docker: sandboxDocker,
+    sandboxStateDir,
+    sandboxGitBrokerProc,
+    sandboxGitBrokerDir,
+    sandboxCommitGuardDir,
+    reuseSandboxHome,
     cols,
     rows,
-    createdAt: Date.now(), // for the uptime figure in the teardown log
-    exited: false,
-    exitCode: null,
-    exitSignal: null,
-    timeoutTimer: null,
-    claudeSessionId: null,
-    idleTimer: null,
-    settled: false, // reached the first idle gap (TUI init burst over) -- the send_input settle gate
-    settleWaiters: [], // resolvers waiting on `settled` (see waitUntilSettled)
-    lastOutputAt: null, // epoch ms of the most recent output chunk; null until the first one (activity timestamp, Issue #16)
-    // Workers (groupRole in 'workerX' form) always run inside the sandbox, so
-    // start them with Auto-Y enabled. The orchestrator (groupRole ===
-    // 'orchestrator') and standalone sessions (groupRole === null) keep the
-    // historical off default. groupRole is already validated server-side
-    // (WORKER_ROLE_RE in groupManager), so "anything but the fixed
-    // 'orchestrator' string is a worker" is a safe check here.
-    autoYes: !!groupRole && groupRole !== 'orchestrator',
-    autoYesLog: [],
-    autoYesPending: null,
-    autoYesBuf: '',
-    // Session-limit auto-resume detection (see sessionLimitDetect.js).
-    // limitDetectBuf holds a sliding window of RAW bytes, not yet
-    // ANSI-stripped: a pty chunk boundary can split an escape sequence
-    // mid-sequence, and stripping each chunk independently would leak the
-    // tail of a split sequence as bare control bytes. Accumulating raw
-    // bytes and stripping the whole window each time lets the next chunk's
-    // arrival complete a sequence the previous chunk left dangling.
-    // lastAutoLimitResetAt is the resetAtMs already scheduled for, so a TUI
-    // redraw of the same status line doesn't re-arm the schedule every chunk.
-    limitDetectBuf: '',
-    lastAutoLimitResetAt: null,
     startedClaudeSessionId: claudeSessionId || null,
-    scheduleId: null, // key into the module-level `schedules` map, if any
-    pendingInjection: null, // { text, at } — scheduled prompt awaiting a freshly-resumed session
-    pendingInjectionTimer: null, // RESUME_INJECT_FALLBACK_MS safety net; cleared on teardown
-    // Lightweight virtual screen (see screenModel.js): fed every output
-    // chunk, exposing the current visible screen and a change counter so
-    // read_output can tell "spinner still drawing" from "static screen".
-    // screenLastChangeAt is stamped when the screen visibly changes (not on
-    // every byte) -- the basis of read_output's screenIdleMs / get_tab_status.
-    screen: createScreenModel({ cols, rows: SCREEN_ROWS }),
-    screenLastChangeAt: null,
-  };
-
-  ptyProcess.onData((rawData) => {
-    const data = rawData;
-    // Activity timestamp: every output chunk counts, shells included (unlike
-    // the agent-only idle detection below). Pure activity bookkeeping.
-    session.lastOutputAt = Date.now();
-    appendToBuffer(session, data);
-
-    // Session-limit auto-resume detection -- role/app agnostic, applies to
-    // every session per the plan (a shell session simply never matches).
-    // See sessionLimitDetect.js for the regex/timezone-math and the
-    // limitDetectBuf field above for why raw bytes are accumulated instead
-    // of stripping each chunk independently.
-    session.limitDetectBuf = (session.limitDetectBuf + data).slice(-LIMIT_DETECT_BUF_MAX_CHARS);
-    const limitMatch = findSessionLimitReset(stripAnsi(session.limitDetectBuf));
-    if (limitMatch && limitMatch.resetAtMs !== session.lastAutoLimitResetAt) {
-      // Identify this limit event by its resetAtMs so the TUI redrawing the
-      // same status line (which keeps re-matching every chunk) doesn't
-      // re-arm the schedule on every redraw.
-      session.lastAutoLimitResetAt = limitMatch.resetAtMs;
-      // Independent of the auto-schedule lifecycle below (which can be
-      // skipped when a manual schedule already exists) -- the scheduler
-      // panel's default-time hint should still learn about this detection.
-      recordSessionLimitReset({
-        resetAtMs: limitMatch.resetAtMs,
-        timeZone: limitMatch.timeZone,
-        source: 'session-output',
-      });
-      const existingSid = scheduleForSession(session.id);
-      const existing = existingSid ? schedules.get(existingSid) : null;
-      // A manual schedule (set via the browser's clock panel) is never
-      // clobbered by the auto-detector, even if it looks stale relative to
-      // the new reset time -- the user's explicit intent wins. An existing
-      // 'auto-session-limit' schedule is safe to replace with this fresher
-      // detection (normally unreachable here, since the resetAtMs guard
-      // above already filters out same-event redraws).
-      if (!existing || existing.source === 'auto-session-limit') {
-        const scheduled = setScheduledPrompt(
-          session.id,
-          limitMatch.resetAtMs + SESSION_LIMIT_RESUME_DELAY_MS,
-          SESSION_LIMIT_RESUME_MESSAGE,
-          { source: 'auto-session-limit' },
-        );
-        if (scheduled) {
-          notifyScheduleState(session);
-        } else {
-          console.warn(`[session-limit] could not auto-schedule a resume for session ${session.id} (reset ${new Date(limitMatch.resetAtMs).toISOString()})`);
-        }
-      } else {
-        console.warn(`[session-limit] session ${session.id} hit its limit, but a manual schedule already exists -- not overriding it`);
-      }
-    }
-
-    // Keep the virtual screen model in parallel with the buffer: it only
-    // stamps screenLastChangeAt when the visible screen actually changes,
-    // so a spinner redrawing the same line registers as activity while a
-    // byte flow that leaves the screen static does not.
-    const screenVersion = session.screen.version();
-    session.screen.feed(data);
-    if (session.screen.version() !== screenVersion) {
-      session.screenLastChangeAt = Date.now();
-    }
-
-    broadcast(session, { type: 'output', data });
-
-    // Idle detection: reset timer on every output chunk (Claude sessions only)
-    if (!session.shell) {
-      if (session.idleTimer) {
-        clearTimeout(session.idleTimer);
-      }
-      session.idleTimer = setTimeout(() => {
-        if (session.exited) return;
-        // The first idle gap means a freshly-launched TUI has finished its
-        // initialization burst: mark the session settled and wake anyone
-        // waiting on the settle gate (send_input's waitUntilSettled).
-        if (!session.settled) {
-          session.settled = true;
-          const waiters = session.settleWaiters;
-          session.settleWaiters = [];
-          for (const w of waiters) w();
-        }
-        // A scheduled prompt may be waiting for this (freshly auto-resumed)
-        // session to settle before typing its text. Deliver it once quiet.
-        if (session.pendingInjection) {
-          const inj = session.pendingInjection;
-          session.pendingInjection = null;
-          if (session.pendingInjectionTimer) {
-            clearTimeout(session.pendingInjectionTimer);
-            session.pendingInjectionTimer = null;
-          }
-          const delivered = injectIntoLiveSession(session, inj.text);
-          notifyFired(session, { at: inj.at, text: inj.text }, delivered);
-        }
-      }, IDLE_TIMEOUT_MS);
-
-      // Auto-yes detection for agent permission prompts. Claude uses Ink's
-      // Select UI, opencode renders a "Permission required" box, and Codex
-      // uses a numbered approval menu. Each selects its one-time approval by
-      // default, so Enter is the shared response.
-      if (session.autoYes) {
-        // Strip all ANSI escape sequences
-        const ansiRe = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Z0-9]|[>=<]|#[0-9])/g;
-        const stripped = data.replace(ansiRe, '');
-        // Accumulate stripped text since last auto-yes response (max 10KB)
-        session.autoYesBuf += stripped;
-        if (session.autoYesBuf.length > 10000) {
-          session.autoYesBuf = session.autoYesBuf.slice(-5000);
-        }
-        const buf = session.autoYesBuf;
-        // Ink renders text with cursor positioning, so spaces may be missing after ANSI strip
-        const bufNoSpace = buf.replace(/\s+/g, '');
-        const hasPermissionPrompt = detectPermissionPrompt(session.app, bufNoSpace);
-        if (hasPermissionPrompt) {
-          if (session.autoYesPending) clearTimeout(session.autoYesPending);
-          session.autoYesPending = setTimeout(() => {
-            session.autoYesPending = null;
-            if (session.exited || !session.autoYes) return;
-            // Clean up prompt text for display: re-insert spaces around known words
-            const cleanBuf = buf
-              .replace(/[^\x20-\x7E\n]/g, ' ')  // remove non-printable chars
-              .replace(/\s+/g, ' ').trim();
-            // Extract a meaningful description from the buffer
-            const noSpace = cleanBuf.replace(/\s/g, '');
-            let promptLine = 'permission prompt';
-            if (session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex' || session.app === 'commandcode') {
-              // Neither TUI's byte stream exposes which tool is being approved,
-              // so the label stays generic (claude's does carry tool names).
-              promptLine = 'Permission prompt (auto-approved)';
-            } else {
-              const editMatch = noSpace.match(/makethiseditto\s*(\S+)/i);
-              const fetchMatch = noSpace.match(/Claudewantstofetchcontentfrom\s*(\S+)/i);
-              const searchMatch = noSpace.match(/Claudewantstosearchthewebfor:\s*(.+?)(?:\}|$)/i);
-              if (editMatch) {
-                promptLine = `Edit: ${editMatch[1]}`;
-              } else if (fetchMatch) {
-                promptLine = `Fetch: ${fetchMatch[1]}`;
-              } else if (searchMatch) {
-                promptLine = `Web Search: ${searchMatch[1]}`;
-              } else if (/Doyouwanttoproceed/i.test(noSpace)) {
-                // Try to find tool name from nearby text like "Bash(...)" or "Read(...)"
-                const toolMatch = noSpace.match(/(Bash|Read|Write|Edit|Glob|Grep|WebFetch|WebSearch|NotebookEdit)\(/i);
-                promptLine = toolMatch ? `${toolMatch[1]} (auto-approved)` : 'Tool use (auto-approved)';
-              } else {
-                promptLine = cleanBuf.slice(0, 80) || 'permission prompt';
-              }
-            }
-            const entry = { time: Date.now(), prompt: promptLine };
-            session.autoYesLog.push(entry);
-            if (session.autoYesLog.length > 100) session.autoYesLog.shift();
-            // Reset buffer after responding — prevents re-matching old prompts
-            session.autoYesBuf = '';
-            // Send Enter key — default-focused option is "Yes"
-            session.ptyProcess.write('\r');
-            broadcast(session, { type: 'auto_yes', entry });
-          }, 500);
-        }
-      }
-    }
   });
-
-  ptyProcess.onExit(({ exitCode, signal }) => {
-    session.exited = true;
-    session.exitCode = exitCode;
-    session.exitSignal = signal;
-    if (!session.shell) {
-      session.claudeSessionId = extractResumeSessionId(
-        session.app,
-        session.outputBuffer.slice(-50).join('')
-      );
-    }
-
-    // Keep any pending scheduled prompt alive across this exit: refresh its
-    // resume id and detach it so it auto-resumes the conversation at fire time.
-    refreshScheduleOnExit(session);
-
-    for (const fn of sessionExitListeners) {
-      try {
-        fn(session);
-      } catch {
-        // a listener must never break the pty exit path
-      }
-    }
-
-    // Until this landed nothing recorded WHY a session went away, so a pty
-    // that died while the tab was closed was indistinguishable from a
-    // server restart -- both just surfaced as SESSION_NOT_FOUND on the next
-    // open. Log the exit itself, and see destroySession for the teardown.
-    console.log(
-      `[session] ${session.id} pty exited (code=${exitCode}, signal=${signal ?? 'none'}, `
-      + `app=${session.app || (session.shell ? 'shell' : 'unknown')}, cwd=${session.cwd}, `
-      + `viewers=${session.sockets.size}, uptime=${Date.now() - session.createdAt}ms)`
-    );
-
-    broadcast(session, {
-      type: 'exit',
-      exitCode,
-      signal,
-      claudeSessionId: session.claudeSessionId,
-    });
-
-    if (session.sockets.size === 0 && sessions.has(session.id)) {
-      startTimeout(session, SESSION_EXITED_TIMEOUT_MS);
-    }
-  });
-
-  sessions.set(id, session);
-
-  for (const fn of sessionCreateListeners) {
-    try {
-      fn(session);
-    } catch {
-      // a listener must never break session creation
-    }
-  }
 
   if (usePtyHost) {
     // Subscribe for this session's entire lifetime, independent of browser
@@ -1977,6 +2043,14 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
         // best effort
       }
     }
+  } else {
+    // Step3 (plan5): this session's restore metadata (see
+    // setPtyHostSessionMeta in createSession()'s usePtyHost branch) is only
+    // useful while the pty-host session it describes is still alive --
+    // destroySession() tearing it down here (or restorePtyHostSessions()
+    // finding it already gone at the next boot) both mean there is nothing
+    // left to reattach to.
+    deletePtyHostSessionMeta(id);
   }
 
   sessions.delete(id);
@@ -2020,6 +2094,10 @@ export function initPtyHostDestroyedHandler() {
     }
     console.log(`[session] ${sessionId} destroyed by pty-host (reason=${reason || 'unknown'}, viewers=${session.sockets.size})`);
     sessions.delete(sessionId);
+    // Same reasoning as destroySession()'s else-branch: pty-host tore this
+    // session down on its own, so there is nothing left to reattach to at the
+    // next restore.
+    deletePtyHostSessionMeta(sessionId);
   });
 }
 
@@ -2028,6 +2106,113 @@ export function initPtyHostDestroyedHandler() {
 // PtyHostClient (see ptyHostClient.js's resetPtyHostClientForTests()).
 export function resetPtyHostDestroyedHandlerForTests() {
   ptyHostDestroyedHandlerArmed = false;
+}
+
+// Plan5 Step3: rebuilds `sessions` Map entries for pty-host sessions that
+// survived a server本体 restart (pty-host is a separate process/systemd unit
+// -- see server/pty-host/'s header docs -- so its ptys keep running across a
+// server本体 crash or `systemctl restart ccserver` even though this Map does
+// not). A no-op when CCSERVER_PTY_HOST is unset.
+//
+// Call this BEFORE restoreGroups() (see server/index.js): a group's
+// memberSaved fallback only kicks in when sessionApi.getSession(sessionId)
+// finds nothing, so restoring live pty-host sessions into `sessions` first
+// lets a still-running group member be found as a live session instead of
+// being (wrongly) treated as gone.
+//
+// Matches pty-host's list() against this module's own restore metadata (see
+// ptyHostSessionMeta.js) by id, three-way:
+//   - both agree (and the pty hasn't exited) -> reattach + restore.
+//   - pty-host has it, metadata doesn't -> never restore from partial/guessed
+//     fields (see plan5 Step3: "無理に最小構成で復元しない"); leave it for
+//     pty-host's own idle/exited timeout to eventually reap.
+//   - metadata has it, pty-host doesn't (pty-host itself restarted/crashed,
+//     or the pty already exited) -> the metadata entry describes nothing
+//     restorable any more; drop it.
+// An already-exited-but-not-yet-reaped pty-host session (still inside its
+// post-exit grace window) is deliberately treated as the third case, not
+// restored: Step3 hands a live, attachable terminal back to the browser --
+// there's no running process to hand back for one that's already exited, and
+// replaying whether the group/schedule machinery should react to an exit
+// that happened in the PREVIOUS server本体 process is out of scope here (see
+// this file's gracefulShutdown()/destroySession() for how a live exit is
+// normally handled).
+export async function restorePtyHostSessions() {
+  if (process.env.CCSERVER_PTY_HOST !== '1') {
+    return { restored: 0, orphanedLive: 0, orphanedMeta: 0, alreadyExited: 0 };
+  }
+
+  const metaAll = loadPtyHostSessionMeta();
+  let liveList;
+  try {
+    liveList = await getPtyHostClient().list();
+  } catch (err) {
+    console.error(`[session] restorePtyHostSessions: could not reach pty-host (${err.message}) -- skipping restore`);
+    return { restored: 0, orphanedLive: 0, orphanedMeta: 0, alreadyExited: 0 };
+  }
+
+  const liveById = new Map(liveList.map((s) => [s.id, s]));
+  let restored = 0;
+  let orphanedLive = 0;
+  let alreadyExited = 0;
+
+  for (const live of liveList) {
+    const meta = metaAll[live.id];
+    if (!meta) {
+      console.warn(`[session] pty-host session ${live.id} has no restore metadata -- leaving it to pty-host's own idle/exited timeout`);
+      orphanedLive++;
+      continue;
+    }
+    if (live.exited) {
+      deletePtyHostSessionMeta(live.id);
+      alreadyExited++;
+      continue;
+    }
+
+    const rpty = await getPtyHostClient().attach(live.id, {
+      cols: live.cols,
+      rows: live.rows,
+      pid: live.pid,
+      sandbox: { active: live.sandbox?.active, docker: live.sandbox?.docker, stateDir: meta.sandboxStateDir },
+    });
+
+    buildSessionRecord(live.id, rpty, {
+      ...meta,
+      cols: live.cols,
+      rows: live.rows,
+      // Reattaching, not launching: this session is by definition already
+      // past whatever TUI init burst it once had (see buildSessionRecord's
+      // header comment on `settled`).
+      settled: true,
+    });
+
+    // Replays the retained backlog through the exact same onData path a live
+    // session uses (buildSessionRecord wired it above) -- a still-pending
+    // permission prompt gets AutoYes'd exactly as it would on a live
+    // session, and outputBuffer/screenModel end up in the state a browser
+    // reconnecting expects. Same call shape as createSession()'s own
+    // post-spawn subscribe (sinceSeq 0 = full retained backlog).
+    try {
+      await getPtyHostClient().subscribe(rpty, 0);
+    } catch (err) {
+      console.warn(`[session] ${live.id}: restore subscribe failed (will retry on reconnect): ${err.message}`);
+    }
+
+    restored++;
+  }
+
+  // A metadata entry whose id pty-host no longer lists describes nothing
+  // restorable any more (pty-host itself restarted/crashed between this
+  // entry's write and this boot) -- drop it rather than let it accumulate.
+  let orphanedMeta = 0;
+  for (const id of Object.keys(metaAll)) {
+    if (!liveById.has(id)) {
+      deletePtyHostSessionMeta(id);
+      orphanedMeta++;
+    }
+  }
+
+  return { restored, orphanedLive, orphanedMeta, alreadyExited };
 }
 
 export function destroyAllSessions() {

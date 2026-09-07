@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxAvailable, persistentHomeDir } from './sandbox.js';
+import * as ptyHostSessionMeta from './ptyHostSessionMeta.js';
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -44,6 +45,7 @@ before(async () => {
   process.env.XDG_RUNTIME_DIR = runtimeDir;
   process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
   process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT = join(runtimeDir, 'orchestrator-generated');
+  process.env.CCSERVER_PTY_HOST_SESSION_META_PATH = join(runtimeDir, 'pty-host-session-meta.json');
   process.env.CCSERVER_PTY_HOST_SOCK = join(sockDir, 'pty-host.sock');
   process.env.CCSERVER_PTY_HOST = '1';
 
@@ -61,6 +63,7 @@ after(async () => {
   await host.stop();
   delete process.env.CCSERVER_PTY_HOST;
   delete process.env.CCSERVER_PTY_HOST_SOCK;
+  delete process.env.CCSERVER_PTY_HOST_SESSION_META_PATH;
   try { rmSync(sockDir, { recursive: true, force: true }); } catch { /* best effort */ }
   try { rmSync(runtimeDir, { recursive: true, force: true }); } catch { /* best effort */ }
 });
@@ -252,4 +255,103 @@ test('a pty-host-hosted session\'s pty actually dies with the shell process (rea
   } finally {
     await destroySessionAndWait(sessionId);
   }
+});
+
+// Step3 (plan5): restorePtyHostSessions() is what a real server本体 restart
+// calls at boot to reattach to pty-host sessions that survived it. There is
+// no seam to actually clear the module-level `sessions` Map the way a real
+// process restart would (it's private, and destroyAllSessions() would tear
+// down the pty-host session too, defeating the point) -- these tests instead
+// drop the CLIENT-side state only (resetPtyHostClientForTests(), exactly the
+// plan's own suggested rig) and verify restorePtyHostSessions() rebuilds a
+// live, functional session from pty-host's list() + this file's own restore
+// metadata, attaching a genuinely fresh RemotePty (the reset client's
+// _remotePtys cache starts empty, so attach() can't be a cache hit).
+test('restorePtyHostSessions reattaches a live session, replays its backlog, and keeps it functional', async () => {
+  const res = await sessionManager.createSession({
+    cwd: '/tmp', cols: 90, rows: 30, shell: true, sandbox: false,
+    groupId: 'test-group-restore', groupRole: 'worker1', customLabel: 'Restore Me',
+  });
+  const { sessionId } = res;
+  const oldPtyProcess = res.session.ptyProcess;
+  try {
+    const marker1 = `PRE_RESTORE_${Date.now()}`;
+    sessionManager.writeToSession(sessionId, `echo ${marker1}`, { submit: true });
+    await waitFor(() => res.session.outputBuffer.join('').includes(marker1), { timeoutMs: 5000 });
+
+    // Simulate the client-side half of a server本体 restart: a fresh
+    // PtyHostClient (armed exactly as server/index.js arms it at boot) with
+    // no memory of any previously-attached RemotePty.
+    ptyHostClientMod.resetPtyHostClientForTests();
+    sessionManager.resetPtyHostDestroyedHandlerForTests();
+    sessionManager.initPtyHostDestroyedHandler();
+
+    const info = await sessionManager.restorePtyHostSessions();
+    assert.ok(info.restored >= 1, 'at least this session was reattached');
+
+    const restored = sessionManager.getSession(sessionId);
+    assert.ok(restored, 'session is back in the local sessions Map');
+    assert.notEqual(restored.ptyProcess, oldPtyProcess, 'a fresh RemotePty was attached, not the stale one');
+    assert.equal(restored.cwd, '/tmp');
+    assert.equal(restored.shell, true);
+    assert.equal(restored.groupId, 'test-group-restore');
+    assert.equal(restored.groupRole, 'worker1');
+    assert.equal(restored.customLabel, 'Restore Me');
+    assert.equal(restored.settled, true, 'a reattached session is not mid init-burst');
+    assert.ok(
+      restored.outputBuffer.join('').includes(marker1),
+      'pre-restore output was replayed into outputBuffer via subscribe()',
+    );
+
+    const marker2 = `POST_RESTORE_${Date.now()}`;
+    sessionManager.writeToSession(sessionId, `echo ${marker2}`, { submit: true });
+    await waitFor(() => restored.outputBuffer.join('').includes(marker2), { timeoutMs: 5000 });
+  } finally {
+    await destroySessionAndWait(sessionId);
+  }
+});
+
+test('restorePtyHostSessions leaves a pty-host session alone when its restore metadata is missing', async () => {
+  const res = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId } = res;
+  try {
+    // Simulates bullet 2 of restorePtyHostSessions' three-way match: pty-host
+    // still has the session, but its metadata entry is gone (never written,
+    // or lost some other way) -- restoring from partial/guessed fields is
+    // explicitly out per plan5 Step3, so this must be left alone rather than
+    // rebuilt with defaults.
+    ptyHostSessionMeta.deletePtyHostSessionMeta(sessionId);
+
+    const info = await sessionManager.restorePtyHostSessions();
+    assert.ok(info.orphanedLive >= 1, 'counted as a live session with no metadata');
+
+    // Untouched: still the original session this test created, still live.
+    const stillThere = sessionManager.getSession(sessionId);
+    assert.ok(stillThere, 'original session entry was left alone');
+    assert.equal(stillThere.exited, false);
+  } finally {
+    await destroySessionAndWait(sessionId);
+  }
+});
+
+test('restorePtyHostSessions drops a metadata entry whose pty-host session no longer exists', async () => {
+  // A synthetic orphan: no real pty-host session was ever spawned for this
+  // id, simulating bullet 3 (metadata survived a pty-host-side crash/restart
+  // that server本体 did not go through). Deliberately NOT routed through
+  // host.ptyStore.destroy() on a real session -- that fires the `destroyed`
+  // push event, which initPtyHostDestroyedHandler() (armed in `before()`)
+  // already cleans up on its own, making it impossible to isolate this
+  // function's own orphaned-metadata sweep from that unrelated cleanup path.
+  const fakeId = 'restore-test-orphan-meta-id';
+  ptyHostSessionMeta.setPtyHostSessionMeta(fakeId, {
+    cwd: '/tmp', shell: true, app: null, model: null, permissionMode: 'standard',
+    groupId: null, groupRole: null, customLabel: null, isMetaAgent: false,
+    sandbox: false, sandboxOpts: null, docker: false, sandboxStateDir: null,
+    reuseSandboxHome: true, startedClaudeSessionId: null,
+  });
+
+  const info = await sessionManager.restorePtyHostSessions();
+  assert.ok(info.orphanedMeta >= 1, 'the synthetic orphan was counted');
+  assert.equal(ptyHostSessionMeta.loadPtyHostSessionMeta()[fakeId], undefined, 'its metadata entry was dropped');
+  assert.equal(sessionManager.getSession(fakeId), undefined, 'nothing was ever added to the sessions Map for it');
 });
