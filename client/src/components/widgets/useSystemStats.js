@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { authFetch } from '../../auth.js';
+import { useVisiblePolling } from '../../hooks/useVisiblePolling.js';
 
 const DEFAULT_INTERVAL = 2000;
 const MIN_INTERVAL = 1000;
@@ -31,7 +32,6 @@ export function useSystemStats(active) {
       return true;
     }
   });
-  const timerRef = useRef(null);
   const showIpmiRef = useRef(showIpmi);
   useEffect(() => { showIpmiRef.current = showIpmi; }, [showIpmi]);
   // 応答が周期を超えた際の多重発行・逆転を防ぐ (遅延時は1周期分古くなる)。
@@ -54,18 +54,7 @@ export function useSystemStats(active) {
     }
   }, []);
 
-  useEffect(() => {
-    if (!active) {
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = null;
-      return;
-    }
-    fetchStats();
-    timerRef.current = setInterval(fetchStats, interval);
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [active, interval, fetchStats]);
+  useVisiblePolling(fetchStats, interval, active);
 
   const setIntervalAndSave = useCallback((v) => {
     const normalized = normalizeInterval(v);

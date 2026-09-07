@@ -391,6 +391,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   }, []);
 
   useEffect(() => {
+    // StrictMode's dev-only mount→cleanup→remount (and a plain [cwd] remount)
+    // would otherwise leave this true forever: cleanup below sets it, and
+    // nothing else ever clears it, permanently disabling reconnection.
+    intentionalCloseRef.current = false;
+
     // Narrow screens: keep the terminal wide enough for the TUI's bottom
     // chrome (opencode's prompt meta row — agent · model · provider — wraps
     // to 2-3 lines below ~65 columns, eating most of the screen), shrinking
@@ -726,7 +731,44 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       };
     }
 
+    // Set by writeToTerm below whenever it drops a frame while hidden, and
+    // consumed by handleVisibilityChange to know a resync is needed.
+    let hiddenWriteDropped = false;
+
+    // Output/replay frames go through here so both cases can share the same
+    // "don't grow xterm's internal write queue while the tab is in the
+    // background" guard (issue #123): xterm keeps unparsed writes queued in
+    // memory until its throttled drain loop catches up, and a hidden tab's
+    // drain budget is cut way down by the browser while a live TUI keeps
+    // pushing output, so the queue -- and this process's memory -- grows
+    // without bound over a multi-day session. Dropped frames are made up by
+    // a clear() + reconnect (server replay) once the tab is visible again,
+    // see handleVisibilityChange below.
+    function writeToTerm(data) {
+      if (document.hidden) {
+        hiddenWriteDropped = true;
+        return;
+      }
+      term.write(osc52.process(data));
+      pinToBottom();
+    }
+
     function connect() {
+      // A pending reconnect timer or a stray visibilitychange firing after
+      // this tab's session already exited/detached intentionally must not
+      // spawn a new connection (see the 'exit' and 'detached' cases below).
+      if (intentionalCloseRef.current) return;
+
+      // A previous socket can still be OPEN/CONNECTING here (reconnect races
+      // between onclose's timer and handleVisibilityChange, or the
+      // hidden-resync path below) -- close it before replacing wsRef so it
+      // can recognize itself as stale via the `wsRef.current !== ws` checks
+      // in onmessage/onclose instead of lingering as an orphaned socket that
+      // keeps receiving (and duplicating) every output frame.
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       // A remote (federated) tab talks to /ws/remote-terminal instead, which
       // relays the exact same message vocabulary to the paired peer over its
@@ -767,6 +809,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       };
 
       ws.onmessage = (event) => {
+        // A newer connection has already taken over wsRef (see connect()
+        // above) -- this socket is an orphan of a reconnect race. Close it
+        // instead of letting it keep delivering (and duplicating) output
+        // forever, and don't touch any state below.
+        if (wsRef.current !== ws) {
+          ws.close();
+          return;
+        }
+
         let msg;
         try {
           msg = JSON.parse(event.data);
@@ -812,11 +863,13 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             if (!selectionModeRef.current) term.focus();
             break;
           case 'output':
-            term.write(osc52.process(msg.data));
-            pinToBottom();
+            writeToTerm(msg.data);
             break;
           case 'auto_yes':
-            setAutoYesLog((prev) => [...prev, msg.entry]);
+            // Capped to match the server's own cap on session.autoYesLog
+            // (sessionManager.js) so a long-lived tab can't grow this
+            // unboundedly (issue #123 #7).
+            setAutoYesLog((prev) => [...prev, msg.entry].slice(-100));
             break;
           case 'auto_yes_state':
             setAutoYes(msg.enabled);
@@ -849,8 +902,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             break;
           }
           case 'replay':
-            term.write(osc52.process(msg.data));
-            pinToBottom();
+            writeToTerm(msg.data);
             break;
           case 'exit': {
             term.writeln('');
@@ -858,6 +910,13 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             pinToBottom();
             sessionStorage.removeItem(storageKey);
             sessionIdRef.current = null;
+            // The pty is gone -- a later WS drop (server restart, network
+            // blip) must not auto-reconnect via connect()'s init path, which
+            // would silently spawn a brand-new agent process the user never
+            // asked for (issue #123 #3). The 'error'/SESSION_NOT_FOUND path
+            // below re-inits explicitly over the still-open socket and is
+            // unaffected by this flag.
+            intentionalCloseRef.current = true;
             if (onExitedRef.current) onExitedRef.current(true);
             const app = appRef.current;
             const resumeKey = `ccserver-resume:${app}:${cwd}`;
@@ -947,6 +1006,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       };
 
       ws.onclose = () => {
+        // A newer connection has already superseded this one (see connect()
+        // above) -- this close is just the orphan finishing teardown, not a
+        // real disconnect. Don't schedule a second, redundant reconnect.
+        if (wsRef.current !== ws) return;
         if (intentionalCloseRef.current) return;
 
         if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
@@ -979,6 +1042,18 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         const ws = wsRef.current;
         if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
           if (intentionalCloseRef.current) return;
+          reconnectAttemptsRef.current = 0;
+          clearTimeout(reconnectTimerRef.current);
+          connect();
+        } else if (hiddenWriteDropped && !intentionalCloseRef.current) {
+          // The socket stayed open the whole time the tab was hidden, so no
+          // reconnect would otherwise happen -- but writeToTerm dropped
+          // output while hidden to keep xterm's write queue bounded (issue
+          // #123 #1), so the screen is now stale. Force a clean resync via
+          // reconnect: connect() closes this socket itself, and the
+          // server's replay buffer (terminal.js attach case) fills the gap.
+          hiddenWriteDropped = false;
+          term.clear();
           reconnectAttemptsRef.current = 0;
           clearTimeout(reconnectTimerRef.current);
           connect();

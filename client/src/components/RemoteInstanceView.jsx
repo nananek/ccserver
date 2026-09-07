@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch } from '../auth.js';
+import { useVisiblePolling } from '../hooks/useVisiblePolling.js';
 
 // "Remote" tab (plan Phase 1, section 9): browse an ACTIVE paired peer's
 // sessions/groups, launch new ones, and open a terminal tab that relays
@@ -74,11 +75,10 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
     }
   }, []);
 
-  useEffect(() => {
-    refreshInstances();
-    const timer = setInterval(refreshInstances, INSTANCES_POLL_MS);
-    return () => clearInterval(timer);
-  }, [refreshInstances]);
+  // Previously ran unconditionally regardless of `visible`/tab focus, firing
+  // every 4s even when the Remote tab was never opened and the browser tab
+  // itself was backgrounded for days (issue #123 #9).
+  useVisiblePolling(refreshInstances, INSTANCES_POLL_MS, visible);
 
   const refreshContent = useCallback(async () => {
     if (!selectedId || contentRefreshingRef.current) return;
@@ -101,11 +101,9 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
     setSessions([]);
     setGroups([]);
     setExpandedGroupId(null);
-    if (!selectedId) return undefined;
-    refreshContent();
-    const timer = setInterval(refreshContent, CONTENT_POLL_MS);
-    return () => clearInterval(timer);
-  }, [selectedId, refreshContent]);
+  }, [selectedId]);
+
+  useVisiblePolling(refreshContent, CONTENT_POLL_MS, visible && !!selectedId);
 
   const toggleGroup = useCallback(async (groupId) => {
     if (expandedGroupId === groupId) {

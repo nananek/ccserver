@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch } from '../auth.js';
+import { useVisiblePolling } from '../hooks/useVisiblePolling.js';
 
 // Global banner for cross-instance federation pairing requests (plan Phase
 // 1). Polls GET /api/federation/pending and lets the user approve/reject
@@ -51,11 +52,7 @@ export default function PairingRequestBanner() {
     }
   }, []);
 
-  useEffect(() => {
-    refresh();
-    const timer = setInterval(refresh, POLL_MS);
-    return () => clearInterval(timer);
-  }, [refresh]);
+  useVisiblePolling(refresh, POLL_MS);
 
   const decide = useCallback(async (id, decision) => {
     if (busyId) return;
