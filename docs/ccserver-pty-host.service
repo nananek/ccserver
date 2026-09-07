@@ -1,0 +1,15 @@
+[Unit]
+Description=ccserver pty-host — persistent PTY session daemon (used when CCSERVER_PTY_HOST=1)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/ccserver
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node server/pty-host/index.js
+Restart=on-failure
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=default.target

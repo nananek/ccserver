@@ -71,3 +71,43 @@ systemctl --user restart ccserver
 # 停止
 systemctl --user stop ccserver
 ```
+
+## 6. (実験的) pty-host 分離でサーバー再起動をまたいでセッションを維持する
+
+通常の構成では、`systemctl --user restart ccserver` のたびに、実行中の全ターミナルセッション（Claude Code / opencode / codex などの子プロセス）が終了します。実行中の長時間コマンドやバックグラウンドジョブの状態はこの再起動で失われます（会話自体は resume 機能で再開できますが、プロセスの状態は失われます）。
+
+これを緩和するため、PTY プロセスの生成・管理を `ccserver` 本体から切り離した常駐プロセス **pty-host** に分離できます。`ccserver` を再起動しても pty-host 側のプロセスには触れないため、再起動後に既存セッションへ再接続できます。
+
+ただし現時点では以下の制約が残ります。
+
+- pty-host 自体がクラッシュ・再起動した場合、その時点で管理していた全セッションは失われます（自動 resume の仕組みは未実装）。
+- そのため本機能は実験的な位置づけです。デフォルトでは無効になっています。
+
+### 手順
+
+1. `ccserver-pty-host.service` を配置し、`ccserver` より先に有効化します。
+
+   ```bash
+   cp docs/ccserver-pty-host.service ~/.config/systemd/user/ccserver-pty-host.service
+   systemctl --user daemon-reload
+   systemctl --user enable --now ccserver-pty-host
+   ```
+
+2. `~/.config/systemd/user/ccserver.service` の `Environment=CCSERVER_PTY_HOST=1` の行のコメントアウトを外します（`docs/ccserver.service` には無効化された状態でコメント付きの例が入っています）。
+
+3. 設定を反映して `ccserver` を再起動します。
+
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user restart ccserver
+   ```
+
+### 動作確認
+
+```bash
+# pty-host のログ表示
+journalctl --user -u ccserver-pty-host -f
+
+# ccserver 本体を再起動しても既存セッションに再接続できることを確認
+systemctl --user restart ccserver
+```

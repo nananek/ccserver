@@ -162,6 +162,8 @@ systemctl --user enable --now ccserver
 systemctl --user status ccserver
 ```
 
+Pour la séparation expérimentale pty-host (conserve les sessions de terminal actives lors d'un redémarrage de `ccserver`), voir le [guide de déploiement](https://nananek.github.io/ccserver/deployment/systemd/) (en japonais).
+
 ## HTTPS avec Tailscale Serve
 
 Une fois ccserver démarré, exposez le port 3001 à votre Tailnet :

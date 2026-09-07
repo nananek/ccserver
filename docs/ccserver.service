@@ -1,12 +1,18 @@
 [Unit]
 Description=ccserver — Context & Coordination Server
-After=network.target
+After=network.target ccserver-pty-host.service
+Wants=ccserver-pty-host.service
 
 [Service]
 Type=simple
 WorkingDirectory=/path/to/ccserver
 Environment=NODE_ENV=production
 Environment=PORT=3001
+# Uncomment to keep terminal sessions alive across `systemctl --user restart
+# ccserver` (requires ccserver-pty-host.service, see docs/ccserver-pty-host.service).
+# Still experimental as of Issue #119 Step4 -- pty-host itself crashing still
+# loses every session it holds until Step5/6 land.
+# Environment=CCSERVER_PTY_HOST=1
 ExecStart=/usr/bin/node server/index.js
 Restart=on-failure
 RestartSec=5
