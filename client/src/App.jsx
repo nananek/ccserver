@@ -48,6 +48,9 @@ export default function App() {
   // exists for the project: { cwd, sandbox, sandboxOpts, app, model,
   // permissionMode, resume, skipResumePrompt, reuseSandboxHome, inUse }.
   const [sandboxPrompt, setSandboxPrompt] = useState(null);
+  // Duplicate-launch guard (issue #132): { cwd, opts, session } when a live
+  // session already runs in the directory being opened.
+  const [duplicateSessionPrompt, setDuplicateSessionPrompt] = useState(null);
   const [themeId, setThemeId] = useState(loadThemeId);
   const [closeConfirm, setCloseConfirm] = useState(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
@@ -211,7 +214,9 @@ export default function App() {
   // Sandboxed agent launch: before opening, ask the server whether a previous
   // persistent sandbox exists for this project; if so, show the reuse dialog
   // (existing resume prompt takes a back seat until the choice is made).
-  const handleOpen = useCallback(async (dirPath, opts = {}) => {
+  // Renamed from `handleOpen` -- the duplicate-session check below now runs
+  // first and calls this once cleared / overridden by the user.
+  const proceedOpen = useCallback(async (dirPath, opts = {}) => {
     if (opts.sandbox) {
       try {
         const res = await authFetch(`/api/sandbox/status?cwd=${encodeURIComponent(dirPath)}`);
@@ -227,6 +232,30 @@ export default function App() {
     }
     continueOpen(dirPath, opts);
   }, [continueOpen]);
+
+  // Before actually launching, warn when a live (non-shell, non-meta-agent)
+  // session already runs in this exact directory -- e.g. it was opened from
+  // another browser tab/window/device this tab's own `tabs` state knows
+  // nothing about (see issue #132). Meta-agent opens keep their own
+  // fixed-directory reuse dialog (via proceedOpen's sandbox-status step) and
+  // skip this check.
+  const handleOpen = useCallback(async (dirPath, opts = {}) => {
+    if (!opts.isMetaAgent) {
+      try {
+        const res = await authFetch('/api/sessions');
+        const data = res.ok ? await res.json() : null;
+        const dup = (data?.sessions || []).find((s) => !s.shell && !s.isMetaAgent && s.cwd === dirPath);
+        if (dup) {
+          pendingOpenRef.current = dirPath;
+          setDuplicateSessionPrompt({ cwd: dirPath, opts, session: dup });
+          return;
+        }
+      } catch {
+        // unreachable: proceed without the duplicate check
+      }
+    }
+    await proceedOpen(dirPath, opts);
+  }, [proceedOpen]);
 
   const handleSandboxReuse = useCallback(() => {
     if (!sandboxPrompt) return;
@@ -387,6 +416,29 @@ export default function App() {
       resume: session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex' || session.app === 'commandcode',
     });
   }, [tabs, openTerminalTab]);
+
+  // Duplicate-launch prompt actions (issue #132). Placed after
+  // handleSessionClick/proceedOpen since both are referenced here.
+  const handleOpenExistingDuplicate = useCallback(() => {
+    if (!duplicateSessionPrompt) return;
+    const { session } = duplicateSessionPrompt;
+    setDuplicateSessionPrompt(null);
+    pendingOpenRef.current = null;
+    handleSessionClick(session);
+  }, [duplicateSessionPrompt, handleSessionClick]);
+
+  const handleForceNewDuplicate = useCallback(() => {
+    if (!duplicateSessionPrompt) return;
+    const { cwd, opts } = duplicateSessionPrompt;
+    setDuplicateSessionPrompt(null);
+    pendingOpenRef.current = null;
+    proceedOpen(cwd, opts);
+  }, [duplicateSessionPrompt, proceedOpen]);
+
+  const cancelDuplicateSessionPrompt = useCallback(() => {
+    setDuplicateSessionPrompt(null);
+    pendingOpenRef.current = null;
+  }, []);
 
   const handleResume = useCallback(() => {
     if (resumePrompt) {
@@ -1033,6 +1085,26 @@ export default function App() {
           onSubmit={(name) => handleRenameSession(renameTarget.id, name)}
           onClose={() => setRenameTarget(null)}
         />
+      )}
+      {duplicateSessionPrompt && (
+        <div className="resume-overlay" onClick={cancelDuplicateSessionPrompt}>
+          <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>同じディレクトリで既にセッションが起動しています</h3>
+            <p className="resume-session-id">{duplicateSessionPrompt.cwd}</p>
+            <p>既存のセッションを開くか、そのまま新しいセッションを起動するか選んでください。</p>
+            <div className="resume-actions">
+              <button className="btn btn-primary" onClick={handleOpenExistingDuplicate}>
+                既存セッションを開く
+              </button>
+              <button className="btn btn-secondary" onClick={handleForceNewDuplicate}>
+                そのまま新規起動する
+              </button>
+              <button className="btn btn-secondary" onClick={cancelDuplicateSessionPrompt}>
+                キャンセル
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {sandboxPrompt && (
         <div className="resume-overlay" onClick={cancelSandboxPrompt}>
