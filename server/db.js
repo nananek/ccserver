@@ -297,6 +297,55 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    // v7: new auth system (Issue #141, plan doc "auth-design" / Step1 plan).
+    // Single-user deployment -- no user_id column anywhere (plan decision).
+    // No auth_settings table: CCSERVER_AUTH_MODE stays env-var-only, there is
+    // deliberately no DB-backed dynamic mode switch (plan decision 3).
+    version: 7,
+    up(db) {
+      db.exec(`
+        -- SSH-issued one-time login token (recovery / first login). Plaintext
+        -- never touches the DB -- only its SHA-256 hex digest (token_hash),
+        -- same "never store the secret itself" shape as
+        -- paired_instances.remote_fingerprint above. used_at is set the
+        -- instant the token is redeemed (use-once); expires_at is short-lived
+        -- (~15 min, see server/loginTokens.js).
+        CREATE TABLE login_tokens (
+          id          TEXT PRIMARY KEY,
+          token_hash  TEXT NOT NULL UNIQUE,
+          created_at  INTEGER NOT NULL,
+          expires_at  INTEGER NOT NULL,
+          used_at     INTEGER
+        );
+        CREATE INDEX idx_login_tokens_hash ON login_tokens(token_hash);
+
+        -- Registered WebAuthn passkeys. No cap on how many a single
+        -- (the only) user may register (plan decision 4) -- one row per
+        -- device/authenticator.
+        CREATE TABLE webauthn_credentials (
+          id             TEXT PRIMARY KEY,
+          public_key     BLOB NOT NULL,
+          counter        INTEGER NOT NULL DEFAULT 0,
+          label          TEXT,
+          created_at     INTEGER NOT NULL,
+          last_used_at   INTEGER
+        );
+
+        -- Browser session behind the httpOnly session cookie. Sliding
+        -- expiration (plan decision 2): expires_at is pushed to now+30d on
+        -- each authenticated request, throttled by last_seen_at so it isn't
+        -- an UPDATE on every single request (see server/authSessions.js).
+        CREATE TABLE auth_sessions (
+          id            TEXT PRIMARY KEY,
+          created_at    INTEGER NOT NULL,
+          expires_at    INTEGER NOT NULL,
+          last_seen_at  INTEGER
+        );
+        CREATE INDEX idx_auth_sessions_expires ON auth_sessions(expires_at);
+      `);
+    },
+  },
 ];
 
 // Runs pending migrations in order. Each one executes inside BEGIN IMMEDIATE

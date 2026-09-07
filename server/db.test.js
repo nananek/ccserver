@@ -62,6 +62,20 @@ test('fresh open runs migrations to the latest version', () => {
       VALUES (?,?,?,?,?,?,?,?)`)
     .run('r1', '/srv/proj', 'origin/master', 'feature/x', 'branch', 'claude', 'running', 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM pr_reviews').get().c, 1);
+  // v7 tables exist and are usable (Issue #141 Step1: new auth system).
+  db.prepare('INSERT INTO login_tokens (id, token_hash, created_at, expires_at, used_at) VALUES (?,?,?,?,NULL)')
+    .run('lt1', 'HASH:X', 1, 2);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM login_tokens').get().c, 1);
+  assert.throws(() => {
+    db.prepare('INSERT INTO login_tokens (id, token_hash, created_at, expires_at, used_at) VALUES (?,?,?,?,NULL)')
+      .run('lt2', 'HASH:X', 3, 4);
+  }, /UNIQUE/, 'token_hash must be unique -- a stolen/replayed hash cannot pass as a second live token');
+  db.prepare('INSERT INTO webauthn_credentials (id, public_key, counter, label, created_at) VALUES (?,?,?,?,?)')
+    .run('cred1', Buffer.from('pubkey'), 0, 'YubiKey', 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM webauthn_credentials').get().c, 1);
+  db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?,?,?,NULL)')
+    .run('sess1', 1, 2);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM auth_sessions').get().c, 1);
 });
 
 test('reopening is idempotent (migrations do not re-apply) and data survives', () => {

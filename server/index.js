@@ -35,13 +35,52 @@ import { warmCodexUsage } from './codexUsage.js';
 import { warmOpencodeUsage } from './opencodeUsage.js';
 import { initDb, dbPath } from './db.js';
 import { selectableAppIds, installedApps } from './ws/sandbox.js';
+import { verifySessionCookie } from './authSessions.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
 
-// Optional token auth (Jupyter-style): set CCSERVER_TOKEN to enable
+// SQLite (worker presets today, more stores in later phases): open + migrate
+// before anything that might touch it -- notably the CCSERVER_AUTH_MODE=passkey
+// hook below, which queries auth_sessions on every request (Issue #141 Step1
+// moved this above the auth hook registration; it used to sit right before
+// fastify.listen()). A failed migration refuses boot with a clear log instead
+// of a systemd Restart=on-failure loop -- fail fast by design (see db.js).
+try {
+  initDb();
+  fastify.log.info(`SQLite database ready at ${dbPath()}`);
+  // Approvals whose waiter died with a previous process can never be decided:
+  // expire them (fail-safe -- nothing runs just because the server restarted).
+  const swept = expireStalePendingApprovals();
+  if (swept > 0) fastify.log.warn(`Expired ${swept} stale pending approval(s) left by a previous run`);
+  // Federation pairing requests older than the 7-day window (see
+  // federationPairing.js) never had a waiter to lose, so unlike the sweep
+  // above this isn't a crash-recovery step -- just the same boot-time
+  // opportunity to catch up before the first browser poll does.
+  const expiredPairings = sweepExpiredPending();
+  if (expiredPairings > 0) fastify.log.info(`Expired ${expiredPairings} stale federation pairing request(s)`);
+} catch (err) {
+  fastify.log.error({ err }, `Failed to initialize SQLite database (${dbPath()}): ${err.message}`);
+  process.exit(1);
+}
+
+// Auth mode (Issue #141): CCSERVER_AUTH_MODE exclusively picks one of
+// none (default) / token (legacy CCSERVER_TOKEN, unchanged) / passkey (new
+// session-cookie based auth). Never mixed -- passkey mode does not accept
+// CCSERVER_TOKEN at all (plan decision 5).
+const AUTH_MODE = process.env.CCSERVER_AUTH_MODE || 'none';
 const AUTH_TOKEN = process.env.CCSERVER_TOKEN;
-if (AUTH_TOKEN) {
+
+// Login/WebAuthn endpoints (server/routes/auth.js, Step2/Step3) must never be
+// gated by the very auth hook they exist to satisfy.
+const isAuthRoute = (url) => url.startsWith('/api/auth');
+
+if (AUTH_MODE === 'token') {
+  // Legacy Jupyter-style shared-secret auth, unmodified from before Issue #141.
+  if (!AUTH_TOKEN) {
+    fastify.log.error('CCSERVER_AUTH_MODE=token requires CCSERVER_TOKEN to be set');
+    process.exit(1);
+  }
   fastify.addHook('onRequest', async (request, reply) => {
     // Allow static assets through
     if (!request.url.startsWith('/api') && !request.url.startsWith('/ws')) return;
@@ -53,6 +92,25 @@ if (AUTH_TOKEN) {
     }
   });
   fastify.log.info('Token authentication enabled');
+} else if (AUTH_MODE === 'passkey') {
+  if (AUTH_TOKEN) {
+    fastify.log.warn('CCSERVER_TOKEN is set but ignored because CCSERVER_AUTH_MODE=passkey');
+  }
+  fastify.addHook('onRequest', async (request, reply) => {
+    if (!request.url.startsWith('/api') && !request.url.startsWith('/ws')) return;
+    if (isAuthRoute(request.url)) return;
+    if (!verifySessionCookie(request)) {
+      reply.code(401).send({ error: 'Not authenticated' });
+    }
+  });
+  fastify.log.info('Passkey authentication enabled');
+} else if (AUTH_MODE === 'none') {
+  if (AUTH_TOKEN) {
+    fastify.log.warn("CCSERVER_TOKEN is set but ignored because CCSERVER_AUTH_MODE is 'none' (set CCSERVER_AUTH_MODE=token to enable it)");
+  }
+} else {
+  fastify.log.error(`Unknown CCSERVER_AUTH_MODE: ${AUTH_MODE} (expected none, token, or passkey)`);
+  process.exit(1);
 }
 
 await fastify.register(websocket);
@@ -99,28 +157,6 @@ const cleanup = () => {
 };
 process.on('SIGTERM', cleanup);
 process.on('SIGINT', cleanup);
-
-// SQLite (worker presets today, more stores in later phases): open + migrate
-// before the server accepts connections. A failed migration refuses boot with
-// a clear log instead of a systemd Restart=on-failure loop -- fail fast by
-// design (see db.js).
-try {
-  initDb();
-  fastify.log.info(`SQLite database ready at ${dbPath()}`);
-  // Approvals whose waiter died with a previous process can never be decided:
-  // expire them (fail-safe -- nothing runs just because the server restarted).
-  const swept = expireStalePendingApprovals();
-  if (swept > 0) fastify.log.warn(`Expired ${swept} stale pending approval(s) left by a previous run`);
-  // Federation pairing requests older than the 7-day window (see
-  // federationPairing.js) never had a waiter to lose, so unlike the sweep
-  // above this isn't a crash-recovery step -- just the same boot-time
-  // opportunity to catch up before the first browser poll does.
-  const expiredPairings = sweepExpiredPending();
-  if (expiredPairings > 0) fastify.log.info(`Expired ${expiredPairings} stale federation pairing request(s)`);
-} catch (err) {
-  fastify.log.error({ err }, `Failed to initialize SQLite database (${dbPath()}): ${err.message}`);
-  process.exit(1);
-}
 
 // Refuse to boot only if sandbox.config.json's hiddenApps (issue #105) has
 // hidden every agent CLI actually installed on this host: every one of the 5
