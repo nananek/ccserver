@@ -412,7 +412,14 @@ export default function App() {
       // If we're closing the active tab, switch to an adjacent tab
       if (tabId === activeTabId) {
         const newActive = next[Math.min(idx, next.length - 1)];
-        setActiveTabId(newActive ? newActive.id : 'browser');
+        // doCloseTab is only ever called for a dynamic (terminal/group) tab
+        // -- static tabs (browser/remote/settings) have no close button.
+        // Closing the last dynamic tab makes the "adjacent" pick above spill
+        // over into the static tabs (settings, being last, since it became
+        // always-on); land on Files instead of whichever static tab happens
+        // to sit at that index.
+        const isDynamic = (t) => t?.type === 'terminal' || t?.type === 'group';
+        setActiveTabId(isDynamic(newActive) ? newActive.id : 'browser');
       }
       return next;
     });

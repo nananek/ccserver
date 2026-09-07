@@ -259,3 +259,57 @@ test('remote tab keeps the detach-only "閉じる" button and never issues a loc
 
   await page.unroute('**/api/sessions/*');
 });
+
+test('closing the last session tab falls back to the Files tab, not Settings', async ({ page }) => {
+  // Regression guard: doCloseTab picks "the tab at the closed tab's old
+  // index" as the next active tab. Settings became an always-on tab sitting
+  // right after Files/Remote (PR #116), so once it's the only tab left at
+  // that index, closing the last terminal tab used to land on Settings
+  // instead of Files. See App.jsx's doCloseTab isDynamic guard.
+  await usePopupMode(page);
+  await gotoApp(page);
+  await openShellTab(page);
+
+  await openMenu(page);
+  await menuCloseButtons(page).first().click();
+  await expect(modal(page)).toBeVisible();
+  await modal(page).getByRole('button', { name: 'セッションを終了', exact: true }).click();
+  await expect(modal(page)).toBeHidden();
+  await expect(sessionBadge(page)).toHaveCount(0);
+
+  await expect(page.locator('.tab-list').getByTitle('Files')).toHaveClass(/active/);
+  await expect(openTerminalBtn(page)).toBeVisible();
+  await expect(page.locator('.settings-view')).toBeHidden();
+});
+
+test('closing one of several open session tabs still selects an adjacent session tab, not Files', async ({ page }) => {
+  // Regression guard for the same doCloseTab fix above: with more than one
+  // dynamic (terminal/group) tab left, the existing "pick the adjacent one"
+  // behavior must be unaffected -- only spilling over into the static tabs
+  // should fall back to Files.
+  await usePopupMode(page);
+  await gotoApp(page);
+
+  await openShellTab(page); // tab 1
+  await openShellTab(page); // tab 2, becomes active
+  await expect(sessionBadge(page)).toHaveText('2');
+
+  // Close the active (2nd, last-opened) tab via its own close button.
+  await openMenu(page);
+  await menuCloseButtons(page).last().click();
+  await expect(modal(page)).toBeVisible();
+  await modal(page).getByRole('button', { name: 'セッションを終了', exact: true }).click();
+  await expect(modal(page)).toBeHidden();
+  await expect(sessionBadge(page)).toHaveText('1');
+
+  // The remaining terminal tab (tab 1) is now active, not Files.
+  await expect(page.locator('.terminal-container')).toBeVisible();
+  await expect(page.locator('.tab-list').getByTitle('Files')).not.toHaveClass(/active/);
+
+  // Clean up so the session doesn't linger for later tests.
+  await openMenu(page);
+  await menuCloseButtons(page).first().click();
+  await expect(modal(page)).toBeVisible();
+  await modal(page).getByRole('button', { name: 'セッションを終了', exact: true }).click();
+  await expect(sessionBadge(page)).toHaveCount(0);
+});
