@@ -2169,12 +2169,24 @@ export async function restorePtyHostSessions() {
       continue;
     }
 
-    const rpty = await getPtyHostClient().attach(live.id, {
-      cols: live.cols,
-      rows: live.rows,
-      pid: live.pid,
-      sandbox: { active: live.sandbox?.active, docker: live.sandbox?.docker, stateDir: meta.sandboxStateDir },
-    });
+    // attach() can throw if pty-host has become unreachable since the list()
+    // call above (e.g. it was restarted mid-loop while restoring many
+    // sessions) -- caught per-session so one bad reattach doesn't abort the
+    // whole restore (leaving every subsequent live session unrestored for
+    // the rest of this process's lifetime) or skip the orphaned-meta sweep
+    // below.
+    let rpty;
+    try {
+      rpty = await getPtyHostClient().attach(live.id, {
+        cols: live.cols,
+        rows: live.rows,
+        pid: live.pid,
+        sandbox: { active: live.sandbox?.active, docker: live.sandbox?.docker, stateDir: meta.sandboxStateDir },
+      });
+    } catch (err) {
+      console.warn(`[session] ${live.id}: restore attach failed, skipping (${err.message})`);
+      continue;
+    }
 
     buildSessionRecord(live.id, rpty, {
       ...meta,
