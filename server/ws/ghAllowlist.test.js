@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyGhInvocation } from './ghAllowlist.js';
+import { classifyGhInvocation, extractGhTextFields } from './ghAllowlist.js';
 
 const ORIGIN = 'https://github.com/testowner/testrepo.git';
 const cwdOrigin = () => ORIGIN;
@@ -438,5 +438,61 @@ describe('classifyGhInvocation: workflow run/enable/disable require explicit rep
   test('regression: workflow view/list still fall back to cwd origin (no explicit-repo gate)', () => {
     assert.deepEqual(classifyGhInvocation(['workflow', 'view', '1'], cwdOrigin), { allowed: true, repos: [REPO], reason: null });
     assert.deepEqual(classifyGhInvocation(['workflow', 'list'], cwdOrigin), { allowed: true, repos: [REPO], reason: null });
+  });
+});
+
+describe('extractGhTextFields (plan8 PR-body guard)', () => {
+  test('pr create: -t/-b space-separated forms', () => {
+    const r = extractGhTextFields(['pr', 'create', '-t', 'My title', '-b', 'My body']);
+    assert.deepEqual(r, [
+      { field: 'title', kind: 'literal', value: 'My title' },
+      { field: 'body', kind: 'literal', value: 'My body' },
+    ]);
+  });
+
+  test('pr create: --title/--body space-separated and --body= attached forms', () => {
+    const r = extractGhTextFields(['pr', 'create', '--title', 'My title', '--body=inline body']);
+    assert.deepEqual(r, [
+      { field: 'title', kind: 'literal', value: 'My title' },
+      { field: 'body', kind: 'literal', value: 'inline body' },
+    ]);
+  });
+
+  test('pr create: -F/--body-file "-" is tagged as a stdin source', () => {
+    const r = extractGhTextFields(['pr', 'create', '-F', '-']);
+    assert.deepEqual(r, [{ field: 'body-file', kind: 'file', value: '-' }]);
+  });
+
+  test('pr edit: --body-file <path> is tagged as a file source', () => {
+    const r = extractGhTextFields(['pr', 'edit', '1', '--body-file', 'notes/body.md']);
+    assert.deepEqual(r, [{ field: 'body-file', kind: 'file', value: 'notes/body.md' }]);
+  });
+
+  test('pr comment: only body/body-file, no title field', () => {
+    const r = extractGhTextFields(['pr', 'comment', '5', '-b', 'nice work']);
+    assert.deepEqual(r, [{ field: 'body', kind: 'literal', value: 'nice work' }]);
+  });
+
+  test('pr review: -b is a review comment body', () => {
+    const r = extractGhTextFields(['pr', 'review', '5', '-c', '-b', 'looks good']);
+    assert.deepEqual(r, [{ field: 'body', kind: 'literal', value: 'looks good' }]);
+  });
+
+  test('repeated flags surface every value, not just the first', () => {
+    const r = extractGhTextFields(['pr', 'create', '-b', 'first', '-b', 'second']);
+    assert.deepEqual(r, [
+      { field: 'body', kind: 'literal', value: 'first' },
+      { field: 'body', kind: 'literal', value: 'second' },
+    ]);
+  });
+
+  test('a subcommand not in TEXT_FIELDS yields no fields', () => {
+    assert.deepEqual(extractGhTextFields(['pr', 'view', '1']), []);
+    assert.deepEqual(extractGhTextFields(['issue', 'create', '--body', 'x']), []);
+    assert.deepEqual(extractGhTextFields(['api', 'repos/o/r/actions/runs']), []);
+  });
+
+  test('a trailing flag with no following token contributes nothing', () => {
+    assert.deepEqual(extractGhTextFields(['pr', 'create', '-b']), []);
   });
 });

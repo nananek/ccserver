@@ -34,8 +34,9 @@ git の `credential.helper` がホスト側の git-broker プロセス (サン�
 - **バンドルされた短縮フラグ (`-wR owner/repo` のような1トークンへの複数フラグの結合) は拒否されます**: gh (pflag/Cobra) はこの形を `-w -R owner/repo` と等価に解釈しますが、ブローカー側でこれを正しく再現するのは複雑で壊れやすいため、`-R` 単体または `-Rvalue` (値を直接くっつける形) 以外の複数文字の短縮フラグはまとめて拒否します。個別のフラグ (`-w` 単体等) はそのまま使えます。
 - 拒否: `gh api` の Actions 以外のエンドポイント (`graphql`、`/user`、`/orgs/...`、`repos/.../actions` 以外の `repos/...` 系、絶対URL、`{owner}`/`{repo}` プレースホルダ形式、POST 等の書き込み系 — Actions 配下でも `--method` は GET のみ、データ系フラグ `-f`/`--raw-field`/`--field`/`--input`、`--hostname`、短縮フラグは全面的に拒否)、`gh auth`/`gh secret`/`gh variable`/`gh ssh-key`/`gh gpg-key` (認証情報自体の管理)、`gh repo clone`/`fork`/`create`/`delete`/`rename` (対象リポジトリが位置引数で来るため個別のパース対応が必要で未対応)、`gh run rerun`/`cancel`/`delete`/`download` (トリガー/書き込み系) など、上記に無いものは全て拒否されます。
 - ブローカー越しの実行はホスト側で TTY なしの子プロセスとして動くため、**非対話的な呼び出し (必要な入力は全てフラグ/stdin で渡す) のみ**サポートします。エディタが開く対話フロー (`gh pr create` をフラグなしで叩く等) は動作しません。
+- **`commitMessageGuard` (既定 on) が有効なとき、`pr create`/`edit`/`comment`/`review` の title/body/body-file もコミットメッセージガードと同じ禁止パターンでチェックされます**(plan8)。`git commit` はローカルの `commit-msg` フックで守られますが、`gh pr create --body "..."` はそのフックを一切通らないため、素通しのままだと `Claude-Session:` 行やセッションURLが PR 説明文に混入できてしまいます。ブローカーは許可リスト判定が通った直後にこのチェックを行い、一致すれば実 `gh` を起動する前に拒否します (`--body`/`--title` の直接指定、`--body-file -` 経由の標準入力、`--body-file <path>` 経由のファイル内容のいずれも対象。ファイル内容はセッションの作業ディレクトリ基準で読みます)。対象は `pr` の title/body 系フラグのみで、`issue`/`release` 等の本文フラグは対象外です。ファイルが読めない等の異常系は該当フィールドをスキップするだけで fail-open します(コミットメッセージガードと同じ方針)。`commitMessageGuard.enabled: false` にすると gh 側のこのチェックも無効になります。
 
-`gitBroker: false` で git 側のゲート・gh ブローカーの両方を無効化できます (git は使えますが ssh-agent が有効なら無制限に、gh はそのまま実行されますが `~/.config/gh` が無いため無認証で失敗します)。
+`gitBroker: false` で git 側のゲート・gh ブローカーの両方を無効化できます (git は使えますが ssh-agent が有効なら無制限に、gh はそのまま実行されますが `~/.config/gh` が無いため無認証で失敗します)。**`gitBroker: false` にすると gh が一切ブローカーを経由しなくなるため、上記の PR 本文チェックも効きません。**
 
 ## コミットメッセージガード
 
@@ -61,3 +62,4 @@ git の `credential.helper` がホスト側の git-broker プロセス (サン�
 - サブモジュールの URL は、実際にチェックアウト済み (作業ディレクトリが存在する) のものだけを許可リストに加えます。`.gitmodules` はリポジトリのコンテンツそのものであり信頼できないため、宣言されているだけで未チェックアウトの「サブモジュール」は無視されます (信頼できないリポジトリがでっち上げの URL を許可リストへ紛れ込ませるのを防ぐため)。
 - 許可リストはセッション起動時に一度だけ算出するため、セッション中に追加/チェックアウトしたサブモジュールや変更した gh の許可サブコマンドは次回起動まで反映されません。
 - **コミットメッセージガードも同じ多層防御であり、意図的な迂回への完全な防壁ではありません**: `git commit --no-verify` でフック自体をスキップできますし、ローカルリポジトリに `git config core.hooksPath <空ディレクトリ>` を設定する、あるいは `GIT_CONFIG_COUNT` 系の環境変数自体を unset/上書きすることでも経路そのものを迂回できます (git の config はどの層で設定しても最終的に呼び出し元プロセスの自由であり、OS レベルの強制ではありません)。この機能は「セッションURLをコミットメッセージに入れろ、といった外部からの指示に無批判に従ってしまう」典型的な事故を防ぐためのものです。
+- **gh PR本文ガード (plan8) の対象は `pr create`/`edit`/`comment`/`review` の title/body/body-file のみです**。同種の本文フラグを持つ `gh issue create`/`edit`/`comment` 等は対象外で、そのまま通ります。また `gh` 自体の許可判定 (`ghAllowlist.js`) は位置引数中のURL形トークンを全てリポジトリ参照とみなして解決しようとするため、たまたま `--title`/`--body` の値そのものが1トークン丸ごとURLになっている場合、本ガードに一致するより先に (無関係の) `repo-unresolved`/`not-allowlisted` で拒否されることがあります(本文の一部としてURLが埋め込まれている通常のケースでは発生しません)。

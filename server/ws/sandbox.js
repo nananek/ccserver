@@ -1700,8 +1700,14 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   // Computes the repo/submodule allow-list once and spawns the host-side
   // broker for this launch; see git-broker.js. The caller (sessionManager)
   // holds onto gitBrokerProc/gitBrokerDir to tear them down alongside the
-  // sandboxed pty.
-  const gitBroker = gitBrokerEnabled ? startGitBroker({ cwd }) : null;
+  // sandboxed pty. blockedPatterns wires the same commitMessageGuard config
+  // into the broker's gh-exec path (plan8: a `gh pr create/edit/comment/
+  // review` title/body is checked the same way a git commit message is) --
+  // null when commitMessageGuard is disabled, which the broker treats as
+  // "no PR-body check", matching pre-plan8 behavior exactly.
+  const gitBroker = gitBrokerEnabled
+    ? startGitBroker({ cwd, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null })
+    : null;
 
   // Commit-message guard (see commitGuard.js / startCommitGuard above):
   // independent of gitBroker -- this is a local-commit-content check, not a
