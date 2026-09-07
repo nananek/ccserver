@@ -182,13 +182,7 @@ test('spawn({sandbox:true}) delegates sandbox construction to pty-host and actua
 
     // sandboxHomeConflict() only counts LIVE sandboxed sessions -- the fake
     // agent above already exited (it just echoes and returns), so exercise
-    // this against a still-running one instead. Must still be an agent
-    // session (app set), not shell:true -- pty-host's spawn() refuses
-    // sandbox:true without an app (server/pty-host/ptyStore.js), a
-    // constraint the pre-pty-host direct-spawn path never enforced. Whether
-    // that gap matters in practice (does any real caller launch a sandboxed
-    // shell?) is a question for whoever reviews this, not something to paper
-    // over here.
+    // this against a still-running one instead.
     const longLivedBin = join(cwd, 'fake-claude-longlived');
     writeFileSync(longLivedBin, '#!/bin/bash\necho SANDBOXED_MARKER2_$$\nsleep 30\n', { mode: 0o755 });
     process.env.CCSERVER_CLAUDE_BIN = longLivedBin;
@@ -206,6 +200,41 @@ test('spawn({sandbox:true}) delegates sandbox construction to pty-host and actua
     if (res?.session) await destroySessionAndWait(res.sessionId);
     if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
     else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+// Regression test: sessionManager.js forces sessionApp to null for shell:true
+// launches (see its `shell ? null : ...` computation), but pty-host's own
+// spawn() refuses sandbox:true without an "app" (server/pty-host/ptyStore.js)
+// -- stricter than buildSandboxSpawn's resolveApp(), which already treats a
+// null/unrecognized app as "resolve the claude binary" and never threw. shell
+// + sandbox is a real, reachable combination (plain POST /api/sessions, and
+// RemoteInstanceView.jsx's independently-toggleable シェル/サンドボックス
+// checkboxes both being on), so createSession() must keep it working under
+// usePtyHost exactly as it did before pty-host existed -- see this file's
+// createSession() usePtyHost branch, which now falls back to a non-null
+// "app" value for pty-host's spawn() call specifically to satisfy this.
+test('spawn({shell:true, sandbox:true}) still works through pty-host (session.app stays null)', { skip: !sandboxAvailable() }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-sm-ptyhost-shellsandbox-proj-'));
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sm-ptyhost-shellsandbox-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, persistentHome: false }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  let res;
+  try {
+    res = await sessionManager.createSession({ cwd, cols: 80, rows: 24, shell: true, sandbox: true });
+    assert.ok(res.session, `sandboxed shell session should spawn via pty-host, got error: ${res.error}`);
+    assert.equal(res.session.sandbox, true);
+    assert.equal(res.session.app, null, 'session.app stays null for shell launches, sandboxed or not');
+    sessionManager.writeToSession(res.sessionId, 'echo SHELL_SANDBOX_MARKER_$$', { submit: true });
+    await waitFor(() => res.session.outputBuffer.join('').includes('SHELL_SANDBOX_MARKER'), { timeoutMs: 8000 });
+  } finally {
+    if (res?.session) await destroySessionAndWait(res.sessionId);
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
     try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }

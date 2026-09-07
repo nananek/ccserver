@@ -595,7 +595,18 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         env: ptyEnv,
         sandbox: !!sandboxRequested,
         sandboxOpts,
-        app: sessionApp,
+        // pty-host's ptyStore.spawn() refuses sandbox:true without an "app"
+        // (server/pty-host/ptyStore.js) -- stricter than buildSandboxSpawn's
+        // own resolveApp(app), which already treats a null/unrecognized app
+        // as "resolve the claude binary" (none of its app-specific branches
+        // match). shell:true forces sessionApp to null above, and shell +
+        // sandbox is a real, reachable combination (plain POST /api/sessions,
+        // and RemoteInstanceView.jsx's independently-toggleable シェル/
+        // サンドボックス checkboxes) that worked before pty-host existed.
+        // Falling back to the same default here (only used inside pty-host's
+        // sandbox branch -- session.app itself stays sessionApp, i.e. null,
+        // for shell sessions) keeps that combination working unchanged.
+        app: sessionApp || 'claude',
         mcpSocketPath,
         notifySocketPath,
         usageSocketPath,
@@ -1982,6 +1993,15 @@ export function initPtyHostDestroyedHandler() {
     if (session.idleTimer) {
       clearTimeout(session.idleTimer);
       session.idleTimer = null;
+    }
+    // Same as destroySession()'s teardown: a dead session must not keep this
+    // RESUME_INJECT_FALLBACK_MS safety-net timer armed (see fireSchedule()'s
+    // comment on it) -- it would no-op harmlessly once fired, but there is
+    // no reason to let it linger holding the event loop / referencing a
+    // session already gone from the sessions Map.
+    if (session.pendingInjectionTimer) {
+      clearTimeout(session.pendingInjectionTimer);
+      session.pendingInjectionTimer = null;
     }
     console.log(`[session] ${sessionId} destroyed by pty-host (reason=${reason || 'unknown'}, viewers=${session.sockets.size})`);
     sessions.delete(sessionId);
