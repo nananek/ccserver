@@ -36,7 +36,14 @@ function calcUsage(prev, curr) {
   return ((curr.busy - prev.busy) / totalDelta) * 100;
 }
 
-function cpuStatsFromOs() {
+// Whether a /proc read failure should fall back to node:os instead of
+// propagating the error. /proc does not exist on macOS/BSD, and some
+// restricted Linux environments lack it as well (ENOENT).
+function shouldUseOsFallback(err) {
+  return process.platform !== 'linux' || err?.code === 'ENOENT';
+}
+
+export function cpuStatsFromOs() {
   const cpus = os.cpus();
   const cores = [];
   let totalIdle = 0;
@@ -59,11 +66,7 @@ async function getCpuUsage() {
     stats = parseCpuStats(content);
     if (!stats.total) throw new Error('unparseable /proc/stat');
   } catch (err) {
-    // macOS / BSD には /proc が無いため os.cpus() にフォールバックする。
-    // /proc が読めない Linux 環境でも同様にフォールバックする。
-    if (process.platform !== 'linux') {
-      stats = cpuStatsFromOs();
-    } else if (err?.code === 'ENOENT') {
+    if (shouldUseOsFallback(err)) {
       stats = cpuStatsFromOs();
     } else {
       throw err;
@@ -90,7 +93,7 @@ async function getCpuUsage() {
   };
 }
 
-function memoryFromOs() {
+export function memoryFromOs() {
   const toMb = (b) => Math.round(b / 1024 / 1024);
   const total = os.totalmem();
   const free = os.freemem();
@@ -110,8 +113,7 @@ async function getMemory() {
   try {
     content = await readFile('/proc/meminfo', 'utf-8');
   } catch (err) {
-    // macOS には /proc/meminfo が無いため os モジュールにフォールバックする。
-    if (process.platform !== 'linux' || err?.code === 'ENOENT') {
+    if (shouldUseOsFallback(err)) {
       return memoryFromOs();
     }
     throw err;
@@ -278,8 +280,7 @@ async function getLoadAndUptime() {
       uptime: Math.floor(uptime),
     };
   } catch (err) {
-    // macOS には /proc/uptime・/proc/loadavg が無いため os モジュールにフォールバックする。
-    if (process.platform !== 'linux' || err?.code === 'ENOENT') {
+    if (shouldUseOsFallback(err)) {
       return {
         loadAvg: os.loadavg(),
         uptime: Math.floor(os.uptime()),
@@ -295,7 +296,7 @@ function getCpuModel() {
     const m = content.match(/model name\s*:\s*(.+)/);
     if (m) return m[1].trim();
   } catch {
-    // fall through to os.cpus() below (macOS には /proc/cpuinfo が無い)
+    // fall through to os.cpus() below (/proc/cpuinfo does not exist on macOS)
   }
   try {
     const model = os.cpus()?.[0]?.model;
@@ -314,8 +315,8 @@ const EXCLUDE_FS = new Set(['tmpfs', 'devtmpfs', 'udev', 'squashfs', 'overlay', 
 
 async function getStorageInfo() {
   try {
-    // -B1 は GNU df 専用のため BSD/macOS では失敗する。
-    // -k (1Kブロック) は両対応のため、1024倍してバイト換算する。
+    // -B1 is GNU-df-only and fails on BSD/macOS.
+    // -k (1K blocks) works on both, so multiply by 1024 for byte conversion.
     const { stdout } = await execFileAsync('df', ['-P', '-k'], { timeout: 5000 });
     const lines = stdout.trim().split('\n').slice(1);
     const entries = [];
@@ -347,10 +348,11 @@ async function getStorageInfo() {
 
 export async function systemRoute(fastify, opts) {
   fastify.get('/system-stats', async (request) => {
-    // 1項目の失敗で全体を500にしない。取得できた項目は返し、
-    // 失敗した項目は null/空値 + errors に理由を詰めて常に200を返す。
-    // (gpu/temperatures/storage は元から失敗時フォールバック済みのため
-    // errors には含めない。存在しないGPU等は正常系の欠測として扱う)
+    // Never fail the whole response with a 500 because of one section.
+    // Return what could be collected and report failures as null/empty
+    // values plus an errors object, always with HTTP 200.
+    // (gpu/temperatures/storage already degrade gracefully, so they are
+    // excluded from errors. A missing GPU etc. is a normal absence.)
     const [cpuRes, memRes, gpuRes, loadRes, storageRes] = await Promise.allSettled([
       getCpuUsage(),
       getMemory(),

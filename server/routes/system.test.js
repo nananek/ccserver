@@ -5,7 +5,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
-import { systemRoute } from './system.js';
+import { systemRoute, cpuStatsFromOs, memoryFromOs } from './system.js';
 
 let app;
 before(async () => {
@@ -34,4 +34,28 @@ test('GET /system-stats?ipmi=1 returns 200 without ENABLE_IPMI', async () => {
   assert.equal(res.statusCode, 200);
   const body = res.json();
   assert.equal(body.ipmi, null);
+});
+
+test('cpuStatsFromOs matches the /proc shape used for usage deltas', () => {
+  const stats = cpuStatsFromOs();
+  assert.ok(stats.total, 'total present');
+  for (const key of ['idle', 'busy', 'total']) {
+    assert.equal(typeof stats.total[key], 'number');
+  }
+  assert.equal(stats.total.total, stats.total.idle + stats.total.busy);
+  assert.ok(Array.isArray(stats.cores));
+  for (const core of stats.cores) {
+    assert.equal(core.total, core.idle + core.busy);
+  }
+});
+
+test('memoryFromOs keeps the response contract (numbers, swap zeros)', () => {
+  const mem = memoryFromOs();
+  for (const key of ['total', 'used', 'free', 'available']) {
+    assert.equal(typeof mem[key], 'number', key);
+  }
+  assert.ok(mem.total >= mem.used, 'used does not exceed total');
+  // No swap/buffer detail available via node:os; frontend renders these as hidden/placeholder.
+  assert.equal(mem.swapTotal, 0);
+  assert.equal(mem.swapUsed, 0);
 });
