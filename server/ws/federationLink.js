@@ -255,11 +255,24 @@ export function _resetRouteDepsForTests() {
 // completes and the peer's certificate has been read. Mirrors
 // federationClient.js's connectTls (duplicated -- see this file's header
 // comment on why).
-async function dialTls({ host, port, selfIdentity }) {
+async function dialTls({
+  host, port, selfIdentity, connectTimeoutMs = CONNECT_TIMEOUT_MS,
+}) {
   return new Promise((resolve, reject) => {
     const socket = tlsConnect({
-      host, port, key: selfIdentity.key, cert: selfIdentity.cert, rejectUnauthorized: false, timeout: CONNECT_TIMEOUT_MS,
+      host, port, key: selfIdentity.key, cert: selfIdentity.cert, rejectUnauthorized: false, timeout: connectTimeoutMs,
     }, () => {
+      // `timeout` above is meant to bound only the handshake itself. Node's
+      // socket-level idle timer does not stop once connected, though -- it
+      // fires again (and the 'timeout' handler below would destroy() the
+      // socket) after any CONNECT_TIMEOUT_MS-long gap with zero bytes in
+      // either direction. That is fatal for a persistent link: unlike the
+      // one-shot RPCs this dial helper was duplicated from, a healthy link
+      // is expected to sit idle between calls far longer than 10s. Disable
+      // the idle timer now that the handshake succeeded; liveness past this
+      // point is governed by TCP keepalive (see setKeepAlive below) and the
+      // revoke-check timer, not socket inactivity.
+      socket.setTimeout(0);
       const info = peerCertInfo(socket);
       if (!info) {
         try { socket.destroy(); } catch { /* ignore */ }
@@ -282,11 +295,14 @@ async function dialTls({ host, port, selfIdentity }) {
 // federationPairing.rowToPublic), same shape federationClient.js's existing
 // functions already key off of (row.fingerprint, row.addr).
 export class FederationLink {
-  constructor(row, { selfIdentity, log, revokeCheckIntervalMs = REVOKE_CHECK_INTERVAL_MS } = {}) {
+  constructor(row, {
+    selfIdentity, log, revokeCheckIntervalMs = REVOKE_CHECK_INTERVAL_MS, connectTimeoutMs = CONNECT_TIMEOUT_MS,
+  } = {}) {
     this.row = row;
     this.selfIdentity = selfIdentity;
     this.log = log || null;
     this.revokeCheckIntervalMs = revokeCheckIntervalMs;
+    this.connectTimeoutMs = connectTimeoutMs;
     // Fixed for this link's lifetime: which direction wins a simultaneous
     // double-connect is a pure function of the two fingerprints alone.
     this._preferSelfAsDialer = winningDialerIsSelf(selfIdentity.fingerprint, row.fingerprint);
@@ -351,7 +367,9 @@ export class FederationLink {
       return; // a malformed stored address will never parse -- no point retrying
     }
     try {
-      const { socket, info } = await dialTls({ host, port, selfIdentity: this.selfIdentity });
+      const { socket, info } = await dialTls({
+        host, port, selfIdentity: this.selfIdentity, connectTimeoutMs: this.connectTimeoutMs,
+      });
       this._dialing = false;
       if (this.destroyed) {
         try { socket.destroy(); } catch { /* ignore */ }

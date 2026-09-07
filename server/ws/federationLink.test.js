@@ -267,6 +267,37 @@ test('revoking the pair permanently closes the link and stops reconnecting', { s
   assert.equal(linkA.destroyed, true);
 });
 
+test('a link survives sitting idle past its own connect timeout (no RPC/terminal traffic)', { skip }, async () => {
+  // Regression test: node's `tls.connect({ timeout })` option sets a
+  // socket-level IDLE timer that keeps firing for the socket's whole life,
+  // not just during the handshake -- dialTls used to leave it armed after
+  // connecting, so a link with zero RPC/terminal traffic for
+  // connectTimeoutMs would self-destruct and reconnect in a loop even
+  // though nothing was actually wrong. connectTimeoutMs is set far below
+  // the reconnect backoff's own initial delay so a spurious disconnect
+  // would show up here as `linkA.connected === false` well before this test
+  // times out.
+  const rowForBFromA = approve(pairing.recordOutboundRequest({
+    fingerprint: identityB.fingerprint, certPem: identityB.cert, hostnameClaimed: 'b', addr: `127.0.0.1:${serverB.address().port}`,
+  }));
+  const rowForAFromB = approve(pairing.recordInboundRequest({
+    fingerprint: identityA.fingerprint, certPem: identityA.cert, hostnameClaimed: 'a', addr: `127.0.0.1:${serverA.address().port}`,
+  }));
+
+  linkA = new FederationLink(rowForBFromA, { selfIdentity: identityA, connectTimeoutMs: 100 });
+  linkB = new FederationLink(rowForAFromB, { selfIdentity: identityB });
+  inboundTargetB = linkB;
+
+  linkA.connect();
+  await waitFor(() => linkA.connected && linkB.connected);
+
+  await new Promise((r) => setTimeout(r, 400)); // 4x connectTimeoutMs, zero traffic
+
+  assert.equal(linkA.connected, true, 'link must not self-destruct from idling past connectTimeoutMs');
+  assert.equal(linkB.connected, true);
+  assert.equal((await linkA.rpc('sessions.list', {})).ok, true, 'link is still usable after the idle period');
+});
+
 test('a dropped connection reconnects automatically via the backoff timer', { skip }, async () => {
   const rowForBFromA = approve(pairing.recordOutboundRequest({
     fingerprint: identityB.fingerprint, certPem: identityB.cert, hostnameClaimed: 'b', addr: `127.0.0.1:${serverB.address().port}`,
