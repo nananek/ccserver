@@ -1,26 +1,67 @@
 // Wire framing for the federation TLS transport (server/ws/federationServer.js
-// / server/ws/federationClient.js): newline-delimited JSON, one object per
-// line, both directions.
+// / server/ws/federationClient.js / server/ws/federationLink.js):
+// newline-delimited JSON, one object per line, both directions.
 //
-// Deliberate simplification vs. the plan's section 5.3 sketch (one
-// multiplexed mTLS connection per peer carrying many rpc/stream channels by
-// channelId): here every federation TLS connection carries exactly ONE
-// purpose for its entire lifetime -- either a single RPC request/response
-// (then it closes) or one long-lived terminal relay (reusing the existing
-// /ws/terminal message vocabulary verbatim, one JSON message per line). This
-// gives up connection reuse for RPC calls (each one pays a fresh mTLS
-// handshake) in exchange for a much smaller surface: there is no
-// channel-multiplexing state machine to get wrong, and -- more importantly --
-// every connection independently re-runs the full fingerprint+status
-// authorization check (see federationServer.js's onConnection), so a
-// revocation takes effect on the very next connection attempt with no extra
-// "kill live channels" bookkeeping. Given the plan explicitly left the exact
-// wire protocol to the implementer, this trade favors the security-review
-// surface over saving TLS handshakes for what are, in Phase 1, low-frequency
-// admin calls (session/group list + launch) plus one relay per open terminal
-// tab.
+// ---------------------------------------------------------------------
+// Issue #142 supersedes the one-shot design below: a one-way-reachability
+// network (e.g. Tailscale ACLs allowing A->B but not B->A) can never
+// complete the bidirectional pairing handshake under one-shot connections,
+// because the unreachable side's paired_instances row is stuck at
+// pending_remote_approval forever -- it has no connection over which to ever
+// learn the peer's decision. server/ws/federationLink.js replaces one-shot
+// connections with ONE persistent, multiplexed mTLS link per pair (both
+// sides periodically try to (re)dial; whichever direction is actually
+// reachable wins and carries all traffic). The two concerns the original
+// design below traded connection-reuse away for are addressed differently
+// under multiplexing rather than dropped:
+//   - Revocation latency: a persistent link cannot re-run the
+//     fingerprint+status check on "the next connection attempt" the way a
+//     one-shot connection could, since there may not be a next attempt for a
+//     long time. federationLink.js instead reuses the exact revokeCheckTimer
+//     pattern this file's terminal relay already had (30s periodic DB
+//     status recheck, close on revoke) for the whole link, RPC traffic
+//     included -- the same bound (max 30s) this codebase already accepted
+//     for terminal relays, just widened to cover RPC too.
+//   - Channel-multiplexing complexity: kept deliberately narrow. A link
+//     tracks exactly two kinds of in-flight state: RPC correlation ids (an
+//     id -> pending-promise map, symmetric in both directions -- see the
+//     `rpc`/`rpc-response` kinds below) and terminal channel ids (a
+//     channelId -> handler map). No other state machine exists on top of
+//     that.
+// ---------------------------------------------------------------------
+//
+// Frame `kind`s carried by a link (see federationLink.js):
+//   - 'link-hello': the very first frame either side sends once the TLS
+//     handshake completes, carrying the sender's own fingerprint256. Used to
+//     confirm both ends speak this protocol and to trigger duplicate-link
+//     resolution (see federationLink.js's winningDialerIsSelf) when both
+//     directions happen to connect at once.
+//   - 'rpc' / 'rpc-response': request/response correlated by `id`, exactly
+//     like the original one-shot design's single request per connection --
+//     but symmetric now: EITHER endpoint may send a 'rpc' frame at any time
+//     over the link (the original design only let the dialing side send
+//     'rpc' and the accepting side send 'rpc-response').
+//   - 'terminal-open' / 'terminal-data' / 'terminal-close': one link
+//     multiplexes any number of terminal relays, one per open browser tab,
+//     distinguished by a `channelId` (a UUID minted by whichever side calls
+//     federationLink's openTerminalChannel-equivalent). 'terminal-data'
+//     wraps one original /ws/terminal protocol message verbatim under `msg`
+//     (see server/ws/terminal.js's attachTerminalHandler, which this reuses
+//     unchanged on the receiving end).
 
 export const PROTOCOL_VERSION = 1;
+
+// Frame `kind` string constants, shared by federationLink.js (and, from
+// Step2 onward, federationServer.js/federationClient.js) so the wire
+// vocabulary lives in exactly one place.
+export const FRAME_KINDS = Object.freeze({
+  LINK_HELLO: 'link-hello',
+  RPC: 'rpc',
+  RPC_RESPONSE: 'rpc-response',
+  TERMINAL_OPEN: 'terminal-open',
+  TERMINAL_DATA: 'terminal-data',
+  TERMINAL_CLOSE: 'terminal-close',
+});
 
 // Bounds a single buffered (newline-incomplete) frame. Generous for a
 // terminal replay burst or a sessions/groups listing, still finite -- a peer

@@ -10,12 +10,13 @@
 // Trust gate (every single connection, no exceptions): CA validation is
 // disabled (`rejectUnauthorized: false`); the peer's certificate is still
 // exchanged during the handshake (mutual TLS -- `requestCert: true`), and
-// authorizeRequest() below decides what it may do purely from an exact
-// fingerprint match against paired_instances, never from the certificate's
-// CA chain, subject, or any self-reported field. Because every connection in
-// this design is short-lived and single-purpose (see federationProtocol.js's
-// header comment), there is no separate "is this still allowed" recheck --
-// a revoked peer is refused on its very next connection attempt.
+// authorizeRequest() (federationLink.js) decides what it may do purely from
+// an exact fingerprint match against paired_instances, never from the
+// certificate's CA chain, subject, or any self-reported field. Because every
+// connection in this design is short-lived and single-purpose (see
+// federationProtocol.js's header comment), there is no separate "is this
+// still allowed" recheck -- a revoked peer is refused on its very next
+// connection attempt.
 //
 // Dynamic imports of routes/sessions.js, routes/groups.js and routes/dirs.js
 // mirror metaAgent.js's ensureMetaAgentBroker(): server/ws/ modules never
@@ -24,31 +25,20 @@
 // comment for the acyclic-import-graph rationale this follows.
 
 import { createServer as createTlsServer } from 'node:tls';
-import { hostname as osHostname } from 'node:os';
 import { ensureIdentity, peerCertInfo } from './federationIdentity.js';
 import * as pairing from './federationPairing.js';
 import { LineFramer } from './federationProtocol.js';
-import { federationConfig } from './federationConfig.js';
-import { resolvedHostname } from './notify.js';
+import { RPC_METHODS, authorizeRequest, _resetRouteDepsForTests } from './federationLink.js';
 import { attachTerminalHandler } from './terminal.js';
+
+// Re-exported for federationServer.test.js (and any other existing caller)
+// -- authorizeRequest's home moved to federationLink.js in Issue #142 Step 1
+// but this file's public surface stays the same.
+export { authorizeRequest };
 
 const FEDERATION_KEEPALIVE_MS = 30_000;
 
 let tlsServer = null;
-let routeDeps = null;
-
-async function loadRouteDeps() {
-  if (routeDeps) return routeDeps;
-  const [sessionsMod, groupsMod, dirsMod, gmMod, smMod] = await Promise.all([
-    import('../routes/sessions.js'),
-    import('../routes/groups.js'),
-    import('../routes/dirs.js'),
-    import('./groupManager.js'),
-    import('./sessionManager.js'),
-  ]);
-  routeDeps = { sessionsMod, groupsMod, dirsMod, gmMod, smMod };
-  return routeDeps;
-}
 
 export function federationPort() {
   const raw = process.env.CCSERVER_FEDERATION_PORT;
@@ -60,157 +50,11 @@ export function federationEnabled() {
   return federationPort() != null;
 }
 
-function myHostnameLabel() {
-  return resolvedHostname() || osHostname();
-}
-
-// ---- RPC method handlers ------------------------------------------------
-// Each returns a plain result object (never throws for expected failures --
-// only a genuine bug should reject); the connection handler wraps it into
-// the {v:1,kind:'rpc-response',...} envelope and writes it back.
-
-async function rpcPairingPropose(params, ctx) {
-  if (ctx.selfPairing) return { ok: false, error: 'cannot pair with yourself' };
-  const cfg = federationConfig();
-  if (cfg.requireTokenForPairing && process.env.CCSERVER_TOKEN) {
-    if (params?.federationToken !== process.env.CCSERVER_TOKEN) {
-      return { ok: false, error: 'federation token required' };
-    }
-  }
-  const hostnameClaimed = typeof params?.hostnameLabel === 'string' && params.hostnameLabel
-    ? params.hostnameLabel.slice(0, 200) : null;
-  const claimedAddr = typeof params?.claimedAddr === 'string' && params.claimedAddr
-    ? params.claimedAddr.slice(0, 200) : ctx.remoteAddr;
-  const row = pairing.recordInboundRequest({
-    fingerprint: ctx.peerFingerprint,
-    certPem: ctx.peerPem,
-    hostnameClaimed,
-    addr: claimedAddr,
-  });
-  if (!row) return { ok: false, error: 'this instance previously revoked the pairing' };
-  return {
-    ok: true,
-    requestId: row.id,
-    myFingerprint: ctx.selfIdentity.fingerprint,
-    myHostnameLabel: myHostnameLabel(),
-    myDecision: row.localDecision,
-    myStatus: row.status,
-  };
-}
-
-async function rpcPairingStatus(_params, ctx) {
-  pairing.touchLastSeen(ctx.existingRow.id);
-  const fresh = pairing.getInstance(ctx.existingRow.id);
-  return {
-    ok: true,
-    myFingerprint: ctx.selfIdentity.fingerprint,
-    myHostnameLabel: myHostnameLabel(),
-    myDecision: fresh.localDecision,
-    myStatus: fresh.status,
-  };
-}
-
-async function rpcSessionsList(_params) {
-  const { smMod } = await loadRouteDeps();
-  return { ok: true, sessions: smMod.listSessions() };
-}
-
-async function rpcSessionsCreate(params, ctx) {
-  const { sessionsMod } = await loadRouteDeps();
-  const requestedBy = `federation:${ctx.existingRow.label || ctx.peerFingerprint.slice(0, 8)}`;
-  // `params` comes straight from a remote (if paired/active) peer, same
-  // trust level as an HTTP body. It is spread into createSessionViaApi's
-  // BODY argument only -- isReviewJob is that function's separate, trusted
-  // 2nd parameter (never read from body), so a peer setting params.isReviewJob
-  // cannot force reviewer MCP injection here even though this line does not
-  // filter params itself. See createSessionViaApi's header comment.
-  // permissionMode is intentionally NOT capped here either -- federation
-  // peers are already fully trusted for equally/more dangerous fields
-  // (isMetaAgent, sandboxOpts, app) pre-existing this path; singling out
-  // permissionMode for capping would not meaningfully raise the trust
-  // boundary. See PR#108 review.
-  const res = await sessionsMod.createSessionViaApi({ ...(params || {}), requestedBy });
-  if (!res.ok) return { ok: false, error: res.message };
-  return { ok: true, session: res.body };
-}
-
-async function rpcSessionsDestroy(params) {
-  const { smMod } = await loadRouteDeps();
-  const id = params?.id;
-  const session = id ? smMod.getSession(id) : null;
-  if (!session) return { ok: false, error: 'session not found' };
-  smMod.destroySession(id, { keepSchedule: false, reason: 'federation' });
-  return { ok: true };
-}
-
-async function rpcGroupsList() {
-  const { gmMod } = await loadRouteDeps();
-  return { ok: true, groups: gmMod.listGroups() };
-}
-
-async function rpcGroupMembers(params) {
-  const { gmMod } = await loadRouteDeps();
-  if (!params?.groupId || !gmMod.getGroup(params.groupId)) return { ok: false, error: 'group not found' };
-  return { ok: true, members: gmMod.listGroupMembers(params.groupId) };
-}
-
-async function rpcGroupsCreate(params) {
-  const { groupsMod } = await loadRouteDeps();
-  const res = await groupsMod.launchGroupFromSpec(params || {});
-  if (!res.ok) return { ok: false, error: res.message };
-  return { ok: true, group: res.body };
-}
-
-async function rpcGroupsDestroy(params) {
-  const { gmMod } = await loadRouteDeps();
-  const id = params?.groupId;
-  if (!id || !gmMod.getGroup(id)) return { ok: false, error: 'group not found' };
-  gmMod.destroyGroup(id);
-  return { ok: true };
-}
-
-async function rpcDirsList(params) {
-  const { dirsMod } = await loadRouteDeps();
-  const res = await dirsMod.browseDirectory(params?.path || '/', !!params?.showHidden);
-  if (!res.ok) return { ok: false, error: res.message };
-  return { ok: true, listing: res.data };
-}
-
-// Which methods are reachable before a pair reaches 'active' is decided by
-// authorizeRequest() below (by literal method name -- only the two pairing
-// plumbing methods are pre-active-reachable); this table is just method name
-// -> handler.
-const RPC_METHODS = {
-  'pairing.propose': rpcPairingPropose,
-  'pairing.status': rpcPairingStatus,
-  'sessions.list': rpcSessionsList,
-  'sessions.create': rpcSessionsCreate,
-  'sessions.destroy': rpcSessionsDestroy,
-  'groups.list': rpcGroupsList,
-  'groups.members': rpcGroupMembers,
-  'groups.create': rpcGroupsCreate,
-  'groups.destroy': rpcGroupsDestroy,
-  'dirs.list': rpcDirsList,
-};
-
-// Pure authorization decision, exported for unit testing without a real TLS
-// connection. `existingRow` is the raw paired_instances row (or null/
-// undefined for an unknown fingerprint) -- see federationPairing.getRawByFingerprint.
-export function authorizeRequest({ kind, method }, existingRow, selfPairing) {
-  if (selfPairing) return { ok: false, error: 'cannot federate with yourself' };
-  if (kind === 'rpc' && method === 'pairing.propose') {
-    if (existingRow && existingRow.status === 'revoked') return { ok: false, error: 'peer is revoked' };
-    return { ok: true };
-  }
-  if (!existingRow || existingRow.status === 'revoked') {
-    return { ok: false, error: existingRow ? 'peer is revoked' : 'unknown peer -- pair first' };
-  }
-  if (kind === 'rpc' && method === 'pairing.status') return { ok: true };
-  if (existingRow.status !== 'active') {
-    return { ok: false, error: `peer is not an active pair yet (status=${existingRow.status})` };
-  }
-  return { ok: true };
-}
+// RPC_METHODS and authorizeRequest now live in federationLink.js (Issue
+// #142 Step 1: the dispatch table is shared by both ends of a persistent
+// link from the start, per the plan). Re-imported above -- this file's own
+// one-shot handleConnection below is unchanged and still uses them exactly
+// as before; Step 2 replaces this function's body with link-based dispatch.
 
 function closeChanFor(socket) {
   return {
@@ -351,9 +195,10 @@ export function stopFederationServer() {
   tlsServer = null;
 }
 
-// Test seam: force the next ensureFederationServer() to rebuild routeDeps
-// (a test may need a different set of mocked route modules).
+// Test seam: force the next RPC dispatch to rebuild routeDeps (a test may
+// need a different set of mocked route modules). The cache itself now lives
+// in federationLink.js alongside the handlers that use it.
 export function _resetFederationServerForTests() {
   stopFederationServer();
-  routeDeps = null;
+  _resetRouteDepsForTests();
 }
