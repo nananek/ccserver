@@ -283,6 +283,41 @@ test('spawn({sandbox:true}) runs the real command inside a bwrap sandbox', { ski
   }
 });
 
+// Regression test (plan8 integration): buildSandboxSpawn's return value
+// grew a commitGuardDir field (server/ws/sandbox.js's startCommitGuard) when
+// PR#122 added the commit-message guard, well after this store's spawn()
+// was written to only capture stateDir/gitBrokerProc/gitBrokerDir from that
+// same return value. Without picking up commitGuardDir too, every sandboxed
+// pty-host launch (commitMessageGuard defaults to enabled) would silently
+// leak one runtime dir under XDG_RUNTIME_DIR per launch, forever.
+test('destroy() removes the commit-message guard\'s runtime dir', { skip: !sandboxAvailable() }, async () => {
+  const store = new PtyStore();
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-pty-host-commitguard-proj-'));
+  try {
+    const { id } = store.spawn({
+      cwd,
+      cols: 80,
+      rows: 24,
+      command: '/bin/echo',
+      args: ['x'],
+      env: { PATH: '/usr/bin:/bin' },
+      sandbox: true,
+      app: 'claude',
+    });
+    // No public accessor exposes commitGuardDir (list()/spawn()'s own return
+    // value deliberately don't -- server本体 has no business holding a
+    // handle to it, see sessionManager.js's createSession() usePtyHost
+    // branch), so reach into the store's internal record directly.
+    const { commitGuardDir } = store._sessions.get(id).sandbox;
+    assert.ok(commitGuardDir, 'commitMessageGuard defaults to enabled, so a runtime dir should have been created');
+    assert.equal(existsSync(commitGuardDir), true, 'the guard config dir should exist right after spawn');
+    store.destroy(id);
+    assert.equal(existsSync(commitGuardDir), false, 'destroy() must remove it -- otherwise it leaks on every sandboxed pty-host launch');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('spawn({sandbox:true}) without "app" is refused before touching the sandbox builder', () => {
   const store = new PtyStore();
   assert.throws(
