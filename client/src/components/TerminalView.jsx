@@ -305,6 +305,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   useEffect(() => { notifyRef.current = notify; }, [notify]);
   const onFocusTabRef = useRef(onFocusTab);
   useEffect(() => { onFocusTabRef.current = onFocusTab; }, [onFocusTab]);
+  const visibleRef = useRef(visible);
+  useEffect(() => { visibleRef.current = visible; }, [visible]);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   // $HOME from /api/dirs/home, only for display: `displayPath` turns the
   // prefix into `~` in the title/notifications while the raw cwd is kept
@@ -1075,6 +1077,18 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     }, PING_INTERVAL_MS);
 
     const handleResize = () => {
+      // Skip resizing while this tab is hidden (ancestor display:none).
+      // terminalRef.current reports zero size there, and whether that lets
+      // fitAddon shrink the terminal to a degenerate size is
+      // getComputedStyle-implementation-dependent (issue #136): Chromium
+      // resolves an unrendered element's width/height to "auto" (so
+      // proposeDimensions() computes NaN and FitAddon.fit() already no-ops,
+      // verified empirically), but an engine that resolves it to 0px instead
+      // would let fit() apply a destructive resize/reflow that evicts
+      // scrollback. The [visible] effect below re-fits to the correct size
+      // once this tab is shown again, so skipping here loses nothing either
+      // way.
+      if (!visibleRef.current) return;
       // Recompute the font first so the fit sees the corrected columns.
       const fs = pickFontSize(terminalRef.current?.clientWidth);
       if (fs !== term.options.fontSize) {
