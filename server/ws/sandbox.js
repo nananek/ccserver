@@ -16,7 +16,7 @@
 // outer layer. See memory: sandbox-dind-recipe.
 
 import { homedir } from 'node:os';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { chmod as chmodP, readdir as readdirP, rm as rmP, stat as statP } from 'node:fs/promises';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -24,6 +24,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker } from './git-broker.js';
+import { buildGuardConfig } from './commitGuard.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 
@@ -35,6 +36,7 @@ const PROVISION_SCRIPT = join(__dirname, 'sandbox-provision.sh');
 const GH_WRAPPER_SCRIPT = join(__dirname, 'sandbox-gh-wrapper.cjs');
 const CRED_HELPER_SCRIPT = join(__dirname, 'sandbox-git-credential-helper.cjs');
 const SSH_WRAPPER_SCRIPT = join(__dirname, 'sandbox-ssh-wrapper.cjs');
+const COMMIT_MSG_HOOK_SCRIPT = join(__dirname, 'sandbox-commit-msg-hook.cjs');
 const GENERATED_GITCONFIG = join(__dirname, 'sandbox-gitconfig');
 const DEFAULT_KNOWN_HOSTS = join(__dirname, 'sandbox-known-hosts');
 const SSH_CONFIG_FILE = join(__dirname, 'sandbox-ssh-config');
@@ -52,6 +54,18 @@ const SANDBOX_REAL_SSH_PATH = '/ccserver-sandbox-real-ssh';
 const SANDBOX_SSH_CONFIG_PATH = '/ccserver-sandbox-ssh-config';
 const SANDBOX_KNOWN_HOSTS_USER_PATH = '/ccserver-sandbox-known-hosts-user';
 const SANDBOX_KNOWN_HOSTS_DEFAULT_PATH = '/ccserver-sandbox-known-hosts-default';
+
+// Fixed in-sandbox paths for the commit-message guard (see commitGuard.js /
+// sandbox-commit-msg-hook.cjs / loadSandboxConfig's commitMessageGuard).
+// core.hooksPath is pointed at SANDBOX_COMMIT_GUARD_HOOKS_DIR via the
+// GIT_CONFIG_COUNT/KEY/VALUE env mechanism (see buildBwrapArgs) rather than
+// by overwriting ~/.gitconfig -- unlike gitBroker's credential.helper, this
+// feature has its own independent enable flag and must keep working even
+// when gitBroker is off, without clobbering an agent-written ~/.gitconfig
+// in a persistent HOME.
+const SANDBOX_COMMIT_GUARD_HOOKS_DIR = '/ccserver-sandbox-git-hooks';
+const SANDBOX_COMMIT_GUARD_HOOK_PATH = `${SANDBOX_COMMIT_GUARD_HOOKS_DIR}/commit-msg`;
+const SANDBOX_COMMIT_GUARD_CONFIG_PATH = '/ccserver-sandbox-commit-guard.json';
 
 // Fixed in-sandbox paths for the MCP bridge (see mcpBroker.js / mcpConfig.js):
 // the group's control or handoff socket is bound at SANDBOX_MCP_SOCK_PATH and
@@ -576,6 +590,24 @@ export function loadSandboxConfig() {
   // ~/.config/gh exposure, which is blocked unconditionally regardless of
   // this flag (see the extraBinds filter below).
   const gitBroker = raw.gitBroker !== false;
+  // Blocks a `git commit` inside the sandbox whose message matches a
+  // pattern that must never land in real history -- built in: a
+  // Claude-Session: trailer or a claude.ai/code/session_ URL, either of
+  // which would hand out live access to the conversation that produced the
+  // commit (see commitGuard.js). Independent of gitBroker above: this is
+  // about what a local commit records, not about network credential scope,
+  // so it stays effective even with gitBroker:false, and vice versa. Default
+  // on (secure-by-default, same posture as gitBroker). blockedPatterns lets
+  // the operator opt additional trailers into being blocked too (e.g.
+  // `Co-Authored-By: Claude ... noreply@anthropic.com`) -- none of those are
+  // built in, since plenty of workflows want them kept.
+  const rawCommitGuard = (raw.commitMessageGuard && typeof raw.commitMessageGuard === 'object') ? raw.commitMessageGuard : {};
+  const commitMessageGuard = {
+    enabled: rawCommitGuard.enabled !== false,
+    blockedPatterns: Array.isArray(rawCommitGuard.blockedPatterns)
+      ? rawCommitGuard.blockedPatterns.filter((p) => typeof p === 'string' && p)
+      : [],
+  };
   // Forbid launching the agent (or a shell) outside the sandbox: every session
   // is forced sandboxed, and a launch is refused -- instead of falling back to
   // a direct (unsandboxed) spawn -- when bwrap is unavailable (or on Windows).
@@ -695,7 +727,7 @@ export function loadSandboxConfig() {
     ? [...new Set(raw.hiddenApps.filter((a) => APP_IDS.includes(a)))]
     : [];
   return {
-    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps,
+    docker, persistentHome, gpg, sshAgent, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -1059,6 +1091,29 @@ export function sandboxAvailable() {
   return existsSync(BWRAP);
 }
 
+// Writes this launch's commit-message guard config (built-in patterns +
+// sandbox.config.json's commitMessageGuard.blockedPatterns, see
+// commitGuard.js) to a fresh runtime-dir JSON file that
+// sandbox-commit-msg-hook.cjs ro-binds and reads. Unlike startGitBroker,
+// there's no live process/socket to keep running -- once the file exists on
+// disk, setup is done -- so this is a plain sync write, not a spawn+probe.
+// Returns null on any failure (fail-open: the caller then skips wiring the
+// commit-msg hook into bwrap entirely rather than fail the whole session
+// launch over a guard that only ever adds an extra local commit check).
+function startCommitGuard(blockedPatterns) {
+  const dir = join(XDG_RUNTIME_DIR, `ccserver-commit-guard-${randomUUID()}`);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const configPath = join(dir, 'commit-guard.json');
+    writeFileSync(configPath, JSON.stringify(buildGuardConfig(blockedPatterns)));
+    return { dir, configPath };
+  } catch (e) {
+    console.warn(`[sandbox] failed to set up commit-message guard: ${e.message}`);
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* nothing to clean up */ }
+    return null;
+  }
+}
+
 // Build the bwrap arguments (everything after the `bwrap` executable, up to
 // but not including the trailing `-- <cmd...>`).
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
@@ -1067,7 +1122,9 @@ export function sandboxAvailable() {
 //   tools   - resolved opt-in tool specs (see resolveTools), or null when no
 //             tool is enabled. Binds the provisioner and hands it the specs
 //             via env (see the tail of this function).
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null }) {
+//   commitGuard - { dir, configPath } from startCommitGuard(), or null when
+//             the commit-message guard is disabled/unavailable for this launch.
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1334,8 +1391,10 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // /usr/bin/node exists, mirroring how resolveApp follows the real
   // agent binary instead of assuming a host layout. Shared between the
   // git-broker machinery and the MCP bridge wrapper. command-code's launcher
-  // is also a Node script (#!/usr/bin/env node), so it needs node too.
-  if (gitBroker || mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath || reviewerSocketPath || app === 'commandcode') {
+  // is also a Node script (#!/usr/bin/env node), so it needs node too. The
+  // commit-msg hook (below) is the same kind of Node script bound at a fixed
+  // shebang path, so it needs this bind as well.
+  if (gitBroker || commitGuard || mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath || reviewerSocketPath || app === 'commandcode') {
     const nodeBin = realpathSync(process.execPath);
     args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
   }
@@ -1397,6 +1456,36 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
       '--setenv', 'GIT_CONFIG_NOSYSTEM', '1',
       '--setenv', 'CCSANDBOX_GIT_BROKER_SOCK', SANDBOX_BROKER_SOCK_PATH,
       '--setenv', 'CCSANDBOX_GIT_ALLOWLIST', SANDBOX_ALLOWLIST_PATH,
+    );
+  }
+
+  // Commit-message guard: an independently-toggled commit-msg hook (see
+  // commitGuard.js / sandbox-commit-msg-hook.cjs) that blocks a `git commit`
+  // whose message matches a blocked pattern (built-in: a Claude-Session:
+  // trailer or a claude.ai/code/session_ URL -- see loadSandboxConfig's
+  // commitMessageGuard). Unlike gitBroker above, this only concerns what a
+  // LOCAL commit records -- no network/credential scope involved -- so it's
+  // wired independently and stays active even when gitBroker is disabled.
+  //
+  // core.hooksPath is set via the GIT_CONFIG_COUNT/KEY/VALUE env mechanism
+  // (git 2.31+) instead of overwriting ~/.gitconfig the way GENERATED_GITCONFIG
+  // does above: gitBroker's ro-bind is safe to always apply (it replaces a
+  // file this feature already fully owns, credential.helper), but doing the
+  // same thing here -- with commitMessageGuard enabled and gitBroker
+  // disabled -- would newly clobber an agent-written ~/.gitconfig (e.g.
+  // user.name/user.email set inside a persistent HOME) that this feature has
+  // no business touching. GIT_CONFIG_COUNT/KEY_0/VALUE_0 is unused elsewhere
+  // in this codebase (verified) -- a future feature reusing the same
+  // mechanism must extend this block (bump the count) rather than add a
+  // second, colliding one.
+  if (commitGuard) {
+    args.push('--ro-bind', COMMIT_MSG_HOOK_SCRIPT, SANDBOX_COMMIT_GUARD_HOOK_PATH);
+    args.push('--ro-bind', commitGuard.configPath, SANDBOX_COMMIT_GUARD_CONFIG_PATH);
+    args.push(
+      '--setenv', 'GIT_CONFIG_COUNT', '1',
+      '--setenv', 'GIT_CONFIG_KEY_0', 'core.hooksPath',
+      '--setenv', 'GIT_CONFIG_VALUE_0', SANDBOX_COMMIT_GUARD_HOOKS_DIR,
+      '--setenv', 'CCSANDBOX_COMMIT_GUARD_CONFIG', SANDBOX_COMMIT_GUARD_CONFIG_PATH,
     );
   }
 
@@ -1495,6 +1584,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
     stateDir: null,
     claudeDir: installDir,
     gitBroker: null,
+    commitGuard: null,
     mcpSocketPath: null,
     notifySocketPath: null,
     usageSocketPath: null,
@@ -1512,6 +1602,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
     stateDir: null,
     gitBrokerProc: null,
     gitBrokerDir: null,
+    commitGuardDir: null,
   };
 }
 
@@ -1558,7 +1649,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
 //                 Display only; never an authorization input.
 export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, commitMessageGuard, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
   const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
@@ -1612,6 +1703,12 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   // sandboxed pty.
   const gitBroker = gitBrokerEnabled ? startGitBroker({ cwd }) : null;
 
+  // Commit-message guard (see commitGuard.js / startCommitGuard above):
+  // independent of gitBroker -- this is a local-commit-content check, not a
+  // network credential scope, so it's toggled by its own config flag and
+  // wired into buildBwrapArgs separately below.
+  const commitGuard = commitMessageGuard.enabled ? startCommitGuard(commitMessageGuard.blockedPatterns) : null;
+
   // The git broker only gates /usr/bin/ssh and gh as seen by bwrap's own
   // filesystem. When docker is also on, code inside the sandbox can run its
   // own containers via the nested dockerd (see sandbox-entrypoint.sh); those
@@ -1632,7 +1729,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools });
   // command-code's launcher is a Node script. Run it explicitly via the
   // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
   // otherwise require /usr/bin/node to be present inside the sandbox's PATH.
@@ -1646,6 +1743,9 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   const gitBrokerFields = {
     gitBrokerProc: gitBroker ? gitBroker.proc : null,
     gitBrokerDir: gitBroker ? gitBroker.dir : null,
+    // No proc for the commit guard (see startCommitGuard) -- just a runtime
+    // dir to remove on teardown, same as gitBrokerDir but with no process to kill.
+    commitGuardDir: commitGuard ? commitGuard.dir : null,
   };
 
   if (docker) {

@@ -18,6 +18,10 @@ cp server/sandbox.config.example.json server/sandbox.config.json
   "gpg": true,
   "sshAgent": false,
   "gitBroker": true,
+  "commitMessageGuard": {
+    "enabled": true,
+    "blockedPatterns": []
+  },
   "forceSandbox": false,
   "defaultApp": "claude",
   "showUsage": true,
@@ -42,6 +46,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `gpg` | `false` | コミット署名用に gpg-agent を転送 ([認証情報の受け渡し](/ccserver/sandbox/credentials/) 参照)。UI で上書き可。 |
 | `sshAgent` | `false` | ssh-agent を転送 (同上)。UI で上書き可。 |
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (同上)。 |
+| `commitMessageGuard` | `{ enabled: true, blockedPatterns: [] }` | サンドボックス内の `git commit` を、メッセージが禁止パターンに一致する場合ブロックする commit-msg フック ([認証情報の受け渡し](/ccserver/sandbox/credentials/) 参照)。組み込みパターン (常時有効、設定不要): `Claude-Session:` 行、`https://claude.ai/code/session_...` の裸URL。`gitBroker` とは独立のフラグで、`gitBroker: false` でも有効なまま。`blockedPatterns` に正規表現の文字列を追加すると (例: `Co-Authored-By: ... noreply@anthropic.com` の行)、組み込みパターンに加えてブロックできる。 |
 | `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (Claude の `/usage` / Codex のレート制限取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 |
 | `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (コンボのロール別選択は別途ブラウザの `localStorage` に記憶され、copilot はそもそも選択不可)。 |
 | `showUsage` | `true` | タブバー右端の Usage ボタンを表示するか。`false` で非表示。**claude/codex のどちらもサーバーに無く、Go タブも利用不可の場合は設定に関わらず自動的に非表示**になります (利用可能なソースが 1 つだけならボタンは表示され、ポップオーバーはそのソースのみ表示)。 |
