@@ -25,7 +25,7 @@ import {
 import { stripAnsi } from './mcpTools.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { recordSessionLimitReset } from '../sessionLimitState.js';
-import { getPtyHostClient } from './ptyHostClient.js';
+import { getPtyHostClient, getAllPtyHostClients, shardIndexForKey, shardKeyForSession } from './ptyHostClient.js';
 import { setPtyHostSessionMeta, deletePtyHostSessionMeta, loadPtyHostSessionMeta } from './ptyHostSessionMeta.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -278,6 +278,15 @@ function buildSessionRecord(id, ptyProcess, meta) {
     sandboxGitBrokerDir: meta.sandboxGitBrokerDir ?? null, // its runtime dir (socket + allow-list), removed on teardown
     sandboxCommitGuardDir: meta.sandboxCommitGuardDir ?? null, // commit-msg guard's runtime dir (config json only, no process), removed on teardown
     reuseSandboxHome: meta.reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
+    // Plan5 Step5: which pty-host instance this session's pty actually lives
+    // on. Decided once at creation (createSession()'s usePtyHost branch) and
+    // never recomputed -- see ptyHostClient.js's shardIndexForKey() header
+    // comment on why reshuffling on every call would be wrong. null outside
+    // usePtyHost mode. Callers pass the already-resolved value (createSession
+    // passes null for direct-spawn sessions, restorePtyHostSessions()
+    // resolves a pre-Step5 restore-metadata entry's missing shardIndex to 0
+    // -- see its own comment), so this is a plain readthrough.
+    ptyHostShardIndex: meta.shardIndex ?? null,
     ptyProcess,
     // Every attached viewer, mapped to the viewport it last reported. A
     // session is shared: opening it from a second device adds a socket here
@@ -847,8 +856,20 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxGitBrokerDir = null;
   let sandboxCommitGuardDir = null;
   let ptyProcess;
+  // Plan5 Step5 (partitioning): decided once here and reused for BOTH the
+  // spawn() call below and the subscribe() call after buildSessionRecord --
+  // never re-derived via a second getPtyHostClient() call in between. Doing
+  // so would risk shardCount() having changed (env var read at call time) or
+  // simply reading less clearly as "the same client", either of which could
+  // silently send subscribe() to a different pty-host instance than the one
+  // spawn() actually landed on, RPC-ing for a session id that instance has
+  // never heard of. See ptyHostClient.js's header comment on this exact trap.
+  let ptyHostShardIndex = null;
+  let ptyHostShardClient = null;
 
   if (usePtyHost) {
+    ptyHostShardIndex = shardIndexForKey(shardKeyForSession({ groupId, cwd }));
+    ptyHostShardClient = getPtyHostClient(ptyHostShardIndex);
     if (sandboxRequested) {
       // Same conflict backstop as the direct-spawn branch below (see its
       // comment) -- this check is server本体-only state, so it can't move
@@ -900,7 +921,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     };
 
     try {
-      const rpty = await getPtyHostClient().spawn({
+      const rpty = await ptyHostShardClient.spawn({
         id,
         cwd,
         cols,
@@ -967,6 +988,10 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         sandboxStateDir,
         reuseSandboxHome,
         startedClaudeSessionId: claudeSessionId || null,
+        // Plan5 Step5: persisted, not recomputed on restore -- see this
+        // file's restorePtyHostSessions() and ptyHostClient.js's
+        // shardIndexForKey() header comment.
+        shardIndex: ptyHostShardIndex,
       });
     } catch (err) {
       // pty-host's own errors already carry the "Failed to build sandbox" /
@@ -1088,6 +1113,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     cols,
     rows,
     startedClaudeSessionId: claudeSessionId || null,
+    shardIndex: ptyHostShardIndex,
   });
 
   if (usePtyHost) {
@@ -1098,9 +1124,11 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     // session.outputBuffer accumulation must keep running with zero viewers
     // attached, exactly the scenario AutoYes exists for). onData/onExit are
     // already wired above, so nothing here can be missed even if pty-host
-    // has already produced output by the time this resolves.
+    // has already produced output by the time this resolves. Reuses
+    // ptyHostShardClient (the same client spawn() used above), not a fresh
+    // getPtyHostClient() call -- see this function's own comment on why.
     try {
-      await getPtyHostClient().subscribe(ptyProcess, 0);
+      await ptyHostShardClient.subscribe(ptyProcess, 0);
     } catch (err) {
       console.warn(`[session] ${id}: initial pty-host subscribe failed (will retry on reconnect): ${err.message}`);
     }
@@ -2068,37 +2096,45 @@ let ptyHostDestroyedHandlerArmed = false;
 // local `sessions` Map entry for that case. When destroySession() got there
 // first (the common case), `sessions.get(sessionId)` is already gone and
 // this is a no-op.
+//
+// Plan5 Step5: registers against every currently-configured shard
+// (getAllPtyHostClients()), not just shard 0 -- a session destroyed on its
+// own by ANY instance must still be noticed. shardCount() is read once here,
+// at boot; it is not expected to change over this process's lifetime (see
+// ptyHostClient.js's shardCount() comment).
 export function initPtyHostDestroyedHandler() {
   if (process.env.CCSERVER_PTY_HOST !== '1') return;
   if (ptyHostDestroyedHandlerArmed) return;
   ptyHostDestroyedHandlerArmed = true;
-  getPtyHostClient().onDestroyed((sessionId, reason) => {
-    const session = sessions.get(sessionId);
-    if (!session) return;
-    if (session.timeoutTimer) {
-      clearTimeout(session.timeoutTimer);
-      session.timeoutTimer = null;
-    }
-    if (session.idleTimer) {
-      clearTimeout(session.idleTimer);
-      session.idleTimer = null;
-    }
-    // Same as destroySession()'s teardown: a dead session must not keep this
-    // RESUME_INJECT_FALLBACK_MS safety-net timer armed (see fireSchedule()'s
-    // comment on it) -- it would no-op harmlessly once fired, but there is
-    // no reason to let it linger holding the event loop / referencing a
-    // session already gone from the sessions Map.
-    if (session.pendingInjectionTimer) {
-      clearTimeout(session.pendingInjectionTimer);
-      session.pendingInjectionTimer = null;
-    }
-    console.log(`[session] ${sessionId} destroyed by pty-host (reason=${reason || 'unknown'}, viewers=${session.sockets.size})`);
-    sessions.delete(sessionId);
-    // Same reasoning as destroySession()'s else-branch: pty-host tore this
-    // session down on its own, so there is nothing left to reattach to at the
-    // next restore.
-    deletePtyHostSessionMeta(sessionId);
-  });
+  for (const client of getAllPtyHostClients()) {
+    client.onDestroyed((sessionId, reason) => {
+      const session = sessions.get(sessionId);
+      if (!session) return;
+      if (session.timeoutTimer) {
+        clearTimeout(session.timeoutTimer);
+        session.timeoutTimer = null;
+      }
+      if (session.idleTimer) {
+        clearTimeout(session.idleTimer);
+        session.idleTimer = null;
+      }
+      // Same as destroySession()'s teardown: a dead session must not keep this
+      // RESUME_INJECT_FALLBACK_MS safety-net timer armed (see fireSchedule()'s
+      // comment on it) -- it would no-op harmlessly once fired, but there is
+      // no reason to let it linger holding the event loop / referencing a
+      // session already gone from the sessions Map.
+      if (session.pendingInjectionTimer) {
+        clearTimeout(session.pendingInjectionTimer);
+        session.pendingInjectionTimer = null;
+      }
+      console.log(`[session] ${sessionId} destroyed by pty-host (reason=${reason || 'unknown'}, viewers=${session.sockets.size})`);
+      sessions.delete(sessionId);
+      // Same reasoning as destroySession()'s else-branch: pty-host tore this
+      // session down on its own, so there is nothing left to reattach to at the
+      // next restore.
+      deletePtyHostSessionMeta(sessionId);
+    });
+  }
 }
 
 // Test seam: re-arm initPtyHostDestroyedHandler() for a test that starts its
@@ -2137,91 +2173,126 @@ export function resetPtyHostDestroyedHandlerForTests() {
 // that happened in the PREVIOUS server本体 process is out of scope here (see
 // this file's gracefulShutdown()/destroySession() for how a live exit is
 // normally handled).
+//
+// Plan5 Step5 (partitioning): loops this whole three-way match once per
+// shard (getAllPtyHostClients()), attach()ing/subscribe()ing through that
+// SAME shard's client both times (the exact trap ptyHostClient.js's header
+// comment warns about -- see also createSession()'s ptyHostShardClient
+// reuse). liveById accumulates every shard's list() into one shared Map
+// before the final orphaned-metadata sweep runs, so an entry legitimately
+// living on shard 2 isn't mistaken for orphaned just because shard 0 was
+// scanned first.
+//
+// A single unreachable shard must NOT make the orphaned-metadata sweep wrong
+// for every OTHER shard: unlike the pre-Step5 single-instance version (which
+// could safely bail out of the whole function on one failure), here that
+// would mean one instance being briefly unreachable wipes out restore
+// metadata that legitimately lives on healthy shards' still-alive sessions.
+// So each unreachable shard's index is tracked, and the sweep skips any
+// metadata entry whose (possibly pre-Step5-missing, defaulted to 0) shardIndex
+// names an unreachable shard -- that entry is left alone to be resolved on a
+// future restore attempt once its shard comes back, rather than guessed at
+// now.
 export async function restorePtyHostSessions() {
   if (process.env.CCSERVER_PTY_HOST !== '1') {
     return { restored: 0, orphanedLive: 0, orphanedMeta: 0, alreadyExited: 0 };
   }
 
   const metaAll = loadPtyHostSessionMeta();
-  let liveList;
-  try {
-    liveList = await getPtyHostClient().list();
-  } catch (err) {
-    console.error(`[session] restorePtyHostSessions: could not reach pty-host (${err.message}) -- skipping restore`);
-    return { restored: 0, orphanedLive: 0, orphanedMeta: 0, alreadyExited: 0 };
-  }
-
-  const liveById = new Map(liveList.map((s) => [s.id, s]));
+  const liveById = new Map();
+  const unreachableShards = new Set();
   let restored = 0;
   let orphanedLive = 0;
   let alreadyExited = 0;
 
-  for (const live of liveList) {
-    const meta = metaAll[live.id];
-    if (!meta) {
-      console.warn(`[session] pty-host session ${live.id} has no restore metadata -- leaving it to pty-host's own idle/exited timeout`);
-      orphanedLive++;
-      continue;
-    }
-    if (live.exited) {
-      deletePtyHostSessionMeta(live.id);
-      alreadyExited++;
+  const shardClients = getAllPtyHostClients();
+  for (let shardIndex = 0; shardIndex < shardClients.length; shardIndex++) {
+    const client = shardClients[shardIndex];
+    let liveList;
+    try {
+      liveList = await client.list();
+    } catch (err) {
+      console.error(`[session] restorePtyHostSessions: could not reach pty-host shard ${shardIndex} (${err.message}) -- skipping restore for this shard`);
+      unreachableShards.add(shardIndex);
       continue;
     }
 
-    // attach() can throw if pty-host has become unreachable since the list()
-    // call above (e.g. it was restarted mid-loop while restoring many
-    // sessions) -- caught per-session so one bad reattach doesn't abort the
-    // whole restore (leaving every subsequent live session unrestored for
-    // the rest of this process's lifetime) or skip the orphaned-meta sweep
-    // below.
-    let rpty;
-    try {
-      rpty = await getPtyHostClient().attach(live.id, {
+    for (const live of liveList) liveById.set(live.id, live);
+
+    for (const live of liveList) {
+      const meta = metaAll[live.id];
+      if (!meta) {
+        console.warn(`[session] pty-host session ${live.id} (shard ${shardIndex}) has no restore metadata -- leaving it to pty-host's own idle/exited timeout`);
+        orphanedLive++;
+        continue;
+      }
+      if (live.exited) {
+        deletePtyHostSessionMeta(live.id);
+        alreadyExited++;
+        continue;
+      }
+
+      // attach() can throw if pty-host has become unreachable since the
+      // list() call above (e.g. it was restarted mid-loop while restoring
+      // many sessions) -- caught per-session so one bad reattach doesn't
+      // abort the whole restore (leaving every subsequent live session
+      // unrestored for the rest of this process's lifetime) or skip the
+      // orphaned-meta sweep below.
+      let rpty;
+      try {
+        rpty = await client.attach(live.id, {
+          cols: live.cols,
+          rows: live.rows,
+          pid: live.pid,
+          sandbox: { active: live.sandbox?.active, docker: live.sandbox?.docker, stateDir: meta.sandboxStateDir },
+        });
+      } catch (err) {
+        console.warn(`[session] ${live.id}: restore attach failed, skipping (${err.message})`);
+        continue;
+      }
+
+      buildSessionRecord(live.id, rpty, {
+        ...meta,
         cols: live.cols,
         rows: live.rows,
-        pid: live.pid,
-        sandbox: { active: live.sandbox?.active, docker: live.sandbox?.docker, stateDir: meta.sandboxStateDir },
+        // Reattaching, not launching: this session is by definition already
+        // past whatever TUI init burst it once had (see buildSessionRecord's
+        // header comment on `settled`).
+        settled: true,
+        // Absorbs restore-metadata entries written before Step5 existed (no
+        // shardIndex field at all): every such entry was necessarily created
+        // by the sole pre-Step5 instance, i.e. shard 0.
+        shardIndex: meta.shardIndex ?? 0,
       });
-    } catch (err) {
-      console.warn(`[session] ${live.id}: restore attach failed, skipping (${err.message})`);
-      continue;
+
+      // Replays the retained backlog through the exact same onData path a
+      // live session uses (buildSessionRecord wired it above) -- a
+      // still-pending permission prompt gets AutoYes'd exactly as it would
+      // on a live session, and outputBuffer/screenModel end up in the state
+      // a browser reconnecting expects. Same call shape as createSession()'s
+      // own post-spawn subscribe (sinceSeq 0 = full retained backlog).
+      try {
+        await client.subscribe(rpty, 0);
+      } catch (err) {
+        console.warn(`[session] ${live.id}: restore subscribe failed (will retry on reconnect): ${err.message}`);
+      }
+
+      restored++;
     }
-
-    buildSessionRecord(live.id, rpty, {
-      ...meta,
-      cols: live.cols,
-      rows: live.rows,
-      // Reattaching, not launching: this session is by definition already
-      // past whatever TUI init burst it once had (see buildSessionRecord's
-      // header comment on `settled`).
-      settled: true,
-    });
-
-    // Replays the retained backlog through the exact same onData path a live
-    // session uses (buildSessionRecord wired it above) -- a still-pending
-    // permission prompt gets AutoYes'd exactly as it would on a live
-    // session, and outputBuffer/screenModel end up in the state a browser
-    // reconnecting expects. Same call shape as createSession()'s own
-    // post-spawn subscribe (sinceSeq 0 = full retained backlog).
-    try {
-      await getPtyHostClient().subscribe(rpty, 0);
-    } catch (err) {
-      console.warn(`[session] ${live.id}: restore subscribe failed (will retry on reconnect): ${err.message}`);
-    }
-
-    restored++;
   }
 
-  // A metadata entry whose id pty-host no longer lists describes nothing
-  // restorable any more (pty-host itself restarted/crashed between this
-  // entry's write and this boot) -- drop it rather than let it accumulate.
+  // A metadata entry whose id no shard's list() returned describes nothing
+  // restorable any more (its pty-host instance itself restarted/crashed
+  // between this entry's write and this boot) -- drop it rather than let it
+  // accumulate. Skipped for entries whose own shard was unreachable this
+  // round (see this function's header comment) -- those get another chance
+  // next restore instead of being guessed at now.
   let orphanedMeta = 0;
-  for (const id of Object.keys(metaAll)) {
-    if (!liveById.has(id)) {
-      deletePtyHostSessionMeta(id);
-      orphanedMeta++;
-    }
+  for (const [id, meta] of Object.entries(metaAll)) {
+    if (liveById.has(id)) continue;
+    if (unreachableShards.has(meta.shardIndex ?? 0)) continue;
+    deletePtyHostSessionMeta(id);
+    orphanedMeta++;
   }
 
   return { restored, orphanedLive, orphanedMeta, alreadyExited };
@@ -2289,7 +2360,9 @@ export function gracefulShutdown() {
       }
       sessions.delete(id);
     }
-    getPtyHostClient().close();
+    // Plan5 Step5: close every shard's client, not just shard 0 -- sessions
+    // may be spread across any of them.
+    for (const client of getAllPtyHostClients()) client.close();
     return Promise.resolve();
   }
 

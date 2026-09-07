@@ -111,3 +111,10 @@ journalctl --user -u ccserver-pty-host -f
 # ccserver 本体を再起動しても既存セッションに再接続できることを確認
 systemctl --user restart ccserver
 ```
+
+### (実験的) 複数の pty-host インスタンスに分散する
+
+pty-host が1インスタンスだけの場合、そのインスタンス自体がクラッシュ・再起動すると管理下の全セッションが失われます。`ccserver.service` に `Environment=CCSERVER_PTY_HOST_SHARDS=<N>`（`N` は2以上の整数）を設定すると、プロジェクト単位（`groupId` があればグループ単位、なければ cwd 単位）で最大 `N` 個の pty-host インスタンスにセッションを分散し、1インスタンスの障害範囲を局所化できます。未設定時は常に1（分散なし、上記の手順のまま）です。
+
+分散させる場合、`ccserver` 側の設定だけでは不十分で、シャード番号ごとに pty-host インスタンスをあらかじめ起動しておく必要があります（シャード0は上記手順の `ccserver-pty-host.service` のまま、シャード1以降はソケットパスが `ccserver-pty-host-<N>.sock` になる別インスタンス）。systemd のテンプレートunit化など複数インスタンスの具体的な起動構成自体は本ガイドの対象外です。
+

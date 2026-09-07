@@ -14,11 +14,18 @@
 // `id`, not `sessionId`; push events arrive as `{ type: 'event', event:
 // 'data'|'exit'|'destroyed', id, ... }` rather than a bare top-level type;
 // and `destroyed` carries no `reason` field.
+//
+// Plan5 Step5 (partitioning): this file also owns routing sessions across
+// multiple pty-host instances ("shards"), so pty-host itself stays
+// completely unaware of partitioning (see getPtyHostSockPath() in
+// server/pty-host/index.js). See shardKeyForSession()/shardIndexForKey()/
+// getPtyHostClient(shardIndex)/getAllPtyHostClients() below.
 
 import { createConnection } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { encodeFrame, FrameDecoder } from '../pty-host/protocol.js';
 import { getPtyHostSockPath } from '../pty-host/index.js';
+import { projectHashForCwd } from './projectHash.js';
 
 const RPC_TIMEOUT_MS = 5000;
 const CONNECT_TIMEOUT_MS = 5000;
@@ -386,25 +393,83 @@ export class PtyHostClient {
   }
 }
 
-let singleton = null;
+// shardIndex -> PtyHostClient. A plain Map (not a single `singleton`)
+// since plan5 Step5: with CCSERVER_PTY_HOST_SHARDS unset (the default), only
+// index 0 is ever populated, so this is a strict superset of the old
+// single-client behavior -- every pre-Step5 call site that never thought
+// about shards keeps hitting the exact same client it always did.
+const clients = new Map();
 
-// Lazily creates the shared client -- never opens the UDS socket until first
-// called. When CCSERVER_PTY_HOST is unset, sessionManager.js's usePtyHost
-// branches never call this, so this module has zero runtime effect (plan5
-// 5.2.5).
-export function getPtyHostClient() {
-  if (!singleton) singleton = new PtyHostClient();
-  return singleton;
+// Reads CCSERVER_PTY_HOST_SHARDS once per call (cheap, and lets tests flip it
+// between runs without a module reload). Unset/non-positive/non-integer all
+// mean "no partitioning" -- 1 shard, matching every deployment that predates
+// Step5.
+export function shardCount() {
+  const raw = process.env.CCSERVER_PTY_HOST_SHARDS;
+  if (!raw) return 1;
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : 1;
+}
+
+// Picks the key a session's shard is derived from (plan5 Step5): groupId
+// wins when present, so every member of a group -- one collaborative unit --
+// lands in the same shard and shares a single instance's fate. A
+// groupId-less standalone session falls back to its project identity via the
+// shared projectHashForCwd() (server/ws/projectHash.js) instead of hashing
+// the raw resolved path again here -- reusing it keeps "which project is
+// this" answered exactly one way across the codebase (see that file's header
+// comment), not forked into a second hash domain just for sharding.
+export function shardKeyForSession({ groupId, cwd }) {
+  return groupId ? `group:${groupId}` : `cwd:${projectHashForCwd(cwd)}`;
+}
+
+// Deterministic key -> shard index. Plain mod-hash, NOT consistent hashing:
+// changing shard count reshuffles every key's assignment. That's fine only
+// because callers decide a session's shardIndex exactly once, at creation
+// (sessionManager.js's createSession()), and persist it (session record +
+// ptyHostSessionMeta.json) rather than ever recomputing it on restore -- see
+// this file's header and restorePtyHostSessions() in sessionManager.js.
+export function shardIndexForKey(key, count = shardCount()) {
+  if (count <= 1) return 0;
+  const digest = createHash('sha256').update(key).digest();
+  return digest.readUInt32BE(0) % count;
+}
+
+// Lazily creates the shard's client -- never opens the UDS socket until
+// first called. When CCSERVER_PTY_HOST is unset, sessionManager.js's
+// usePtyHost branches never call this, so this module has zero runtime
+// effect (plan5 5.2.5). Defaulting shardIndex to 0 keeps every pre-Step5
+// call site (which never passes an argument) pointed at the same single
+// client it always got.
+export function getPtyHostClient(shardIndex = 0) {
+  let client = clients.get(shardIndex);
+  if (!client) {
+    client = new PtyHostClient(getPtyHostSockPath(shardIndex));
+    clients.set(shardIndex, client);
+  }
+  return client;
+}
+
+// Every currently-configured shard's client, indexed 0..shardCount()-1 (also
+// lazily creating any not yet touched by getPtyHostClient()). For the
+// handful of call sites that must reach every instance regardless of
+// per-session routing: initPtyHostDestroyedHandler(), restorePtyHostSessions(),
+// gracefulShutdown() (all in sessionManager.js).
+export function getAllPtyHostClients() {
+  const count = shardCount();
+  const result = [];
+  for (let i = 0; i < count; i++) result.push(getPtyHostClient(i));
+  return result;
 }
 
 export function isPtyHostEnabled() {
   return process.env.CCSERVER_PTY_HOST === '1';
 }
 
-// Test seam: drop the shared client so the next getPtyHostClient() call
+// Test seam: drop every shard's client so the next getPtyHostClient() call
 // builds a fresh one (e.g. against a different sockPath, or after a previous
 // test's in-process pty-host was torn down).
 export function resetPtyHostClientForTests() {
-  if (singleton) singleton.close();
-  singleton = null;
+  for (const client of clients.values()) client.close();
+  clients.clear();
 }

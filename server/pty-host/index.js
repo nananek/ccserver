@@ -17,11 +17,27 @@ const SOCK_NAME = 'ccserver-pty-host.sock';
 
 // Same convention as server/ws/notify.js's getNotifySockPath(): prefer
 // XDG_RUNTIME_DIR, fall back to /run/user/<uid>, then /tmp.
-export function getPtyHostSockPath() {
-  if (process.env.CCSERVER_PTY_HOST_SOCK) return process.env.CCSERVER_PTY_HOST_SOCK;
+//
+// Plan5 Step5 (partitioning): shardIndex 0 (the default, and the only value
+// that existed before Step5) resolves to exactly the same path as before --
+// single-instance deployments and every existing CCSERVER_PTY_HOST_SOCK
+// override keep working unchanged. A non-zero shardIndex derives a sibling
+// path so multiple pty-host instances (one systemd unit per shard, started
+// with different CCSERVER_PTY_HOST_SOCK/CCSERVER_PTY_HOST_SHARD_INDEX values)
+// never collide on the same socket. This function itself is the only piece
+// of pty-host aware of sharding -- startPtyHost() below still just binds
+// whatever single sockPath it's given, so pty-host's own code stays
+// partition-count-agnostic (routing across shards lives entirely in
+// server本体's ptyHostClient.js).
+export function getPtyHostSockPath(shardIndex = 0) {
+  if (process.env.CCSERVER_PTY_HOST_SOCK) {
+    return shardIndex === 0
+      ? process.env.CCSERVER_PTY_HOST_SOCK
+      : `${process.env.CCSERVER_PTY_HOST_SOCK}-${shardIndex}`;
+  }
   const base = process.env.XDG_RUNTIME_DIR
     || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, SOCK_NAME);
+  return join(base, shardIndex === 0 ? SOCK_NAME : `ccserver-pty-host-${shardIndex}.sock`);
 }
 
 // Starts pty-host and returns its live handles. Exported (rather than only

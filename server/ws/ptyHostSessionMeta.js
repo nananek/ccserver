@@ -8,6 +8,14 @@
 // record for an already-running pty-host session after a server本体 restart
 // (plan5 Step3).
 //
+// Also carries `shardIndex` (plan5 Step5): which pty-host instance this
+// session's pty lives on, decided once at creation and never recomputed (see
+// ptyHostClient.js's shardIndexForKey() header comment) -- restorePtyHostSessions()
+// needs it to know which shard's client to attach()/subscribe() through. An
+// entry written before Step5 existed has no such field; that always meant
+// the sole pre-Step5 instance, i.e. shard 0 (restorePtyHostSessions()
+// defaults a missing value to 0 itself, not this file).
+//
 // Deliberately NOT the same file as .saved-sessions.json (SAVED_SESSIONS_PATH
 // in sessionManager.js): that one is written once at graceful shutdown and
 // means "the pty is dead, here's how to resume a fresh one". This file means
