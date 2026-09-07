@@ -346,7 +346,7 @@ export async function launchGroupFromSpec(body) {
     }
   }
 
-  const orchRes = createSession({
+  const orchRes = await createSession({
     cwd: orchestratorDir,
     cols: 80,
     rows: 24,
@@ -477,7 +477,7 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(500).send({ error: 'failed to generate orchestrator instructions: no CLAUDE.md overlay was produced' });
     }
 
-    const res = createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, orchestratorClaudeMdSrc }));
+    const res = await createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, orchestratorClaudeMdSrc }));
     if (res.error || !res.session) {
       // Infra faults (sandbox build / spawn) are 500; request-as-given
       // rejections stay 400 -- see orchestratorRestartFailureStatus().

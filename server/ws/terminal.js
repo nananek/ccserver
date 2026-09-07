@@ -89,7 +89,7 @@ export function attachTerminalHandler(chan) {
         const group = groupId ? getGroup(groupId) : null;
         const projectName = group?.cwd ? basename(group.cwd) : undefined;
 
-        const result = createSession({
+        const result = await createSession({
           cwd: resolvedCwd || msg.cwd || homedir(),
           cols: msg.cols || 80,
           rows: msg.rows || 24,

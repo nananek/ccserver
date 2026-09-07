@@ -910,7 +910,7 @@ export async function addMember(groupId, role, options = {}) {
     if (prevChannel) await ensureHandoffChannel(group, role).catch(() => { /* best effort */ });
     return { error: 'channel-failed', message: 'failed to create handoff channel' };
   }
-  const res = sessionApi.createSession({
+  const res = await sessionApi.createSession({
     cwd,
     cols: 80,
     rows: 24,

@@ -25,6 +25,7 @@ import {
 import { stripAnsi } from './mcpTools.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { recordSessionLimitReset } from '../sessionLimitState.js';
+import { getPtyHostClient } from './ptyHostClient.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
@@ -234,7 +235,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
+export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
@@ -516,99 +517,199 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // Optionally wrap the target in a filesystem sandbox (Linux only) so it can
   // only see the project directory plus configured paths, with an isolated
   // rootless docker inside. See sandbox.js.
+  //
+  // usePtyHost (plan5 Step2, section 2.1): pty-host's own spawn() builds the
+  // sandbox itself (server/pty-host/ptyStore.js already imports
+  // buildSandboxSpawn), so this branch sends it the raw command/args plus the
+  // sandbox parameters instead of calling buildSandboxSpawn() here. Only the
+  // checks that depend on server本体's OWN state (the live `sessions` Map,
+  // this project's group-files dir) still run here -- pty-host has no
+  // visibility into either.
+  const usePtyHost = process.env.CCSERVER_PTY_HOST === '1';
   let useSandbox = false;
   let sandboxDocker = false;
   let sandboxStateDir = null;
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
-  if (sandboxRequested) {
-    // A fresh (wipe) sandbox is refused while another sandbox of the same
-    // project is still using the same persistent HOME -- deleting the host dir
-    // under a live bind mount would corrupt that session. The client disables
-    // the "new" option in the same situation (GET /api/sandbox/status), so
-    // this is the authoritative backstop.
-    if (cfg.persistentHome && !reuseSandboxHome) {
-      const targetPath = persistentHomeDir(cwd);
-      if (sandboxHomeConflict(targetPath, [...sessions.values()])) {
-        return {
-          sessionId: id,
-          session: null,
-          error: 'このプロジェクトのサンドボックスを利用中のセッションがあるため、新規作成（前回環境の破棄）できません。先にタブを閉じてください。',
-        };
+  let ptyProcess;
+
+  if (usePtyHost) {
+    if (sandboxRequested) {
+      // Same conflict backstop as the direct-spawn branch below (see its
+      // comment) -- this check is server本体-only state, so it can't move
+      // into pty-host.
+      if (cfg.persistentHome && !reuseSandboxHome) {
+        const targetPath = persistentHomeDir(cwd);
+        if (sandboxHomeConflict(targetPath, [...sessions.values()])) {
+          return {
+            sessionId: id,
+            session: null,
+            error: 'このプロジェクトのサンドボックスを利用中のセッションがあるため、新規作成（前回環境の破棄）できません。先にタブを閉じてください。',
+          };
+        }
       }
+    } else if (forceSandbox) {
+      const reason = process.platform === 'win32'
+        ? 'the sandbox is Linux-only'
+        : 'bwrap is not available on this host';
+      return {
+        sessionId: id,
+        session: null,
+        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. Install bwrap (bubblewrap) or disable forceSandbox.`,
+      };
     }
-    // Group file exchange: every sandboxed group member gets its group's
-    // blob directory read-only at /ccserver-group-files.
     let resolvedGroupFilesDir = groupFilesDir;
-    if (!resolvedGroupFilesDir && groupId) {
+    if (sandboxRequested && !resolvedGroupFilesDir && groupId) {
       try {
         resolvedGroupFilesDir = getGroupFilesDir(groupId);
         ensureGroupFilesDir(groupId);
       } catch { resolvedGroupFilesDir = null; }
     }
-    try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
-      command = spawn.command;
-      args = spawn.args;
-      sandboxDocker = !!spawn.docker;
-      sandboxStateDir = spawn.stateDir || null;
-      sandboxGitBrokerProc = spawn.gitBrokerProc || null;
-      sandboxGitBrokerDir = spawn.gitBrokerDir || null;
-      useSandbox = true;
-    } catch (err) {
-      return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
-    }
-  } else if (forceSandbox) {
-    const reason = process.platform === 'win32'
-      ? 'the sandbox is Linux-only'
-      : 'bwrap is not available on this host';
-    return {
-      sessionId: id,
-      session: null,
-      error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. Install bwrap (bubblewrap) or disable forceSandbox.`,
-    };
-  }
 
-  let ptyProcess;
-  try {
-    ptyProcess = pty.spawn(command, args, {
-    name: 'xterm-256color',
-    cols,
-    rows,
-    cwd,
-    env: {
+    // Same env recipe as the direct-spawn branch below, computed against
+    // sandboxRequested instead of the (not-yet-known) useSandbox -- pty-host
+    // hasn't attempted the sandbox build yet at this point, but a launch that
+    // requested one and fails is reported as an error below rather than
+    // silently falling through, so this can never end up materially wrong.
+    const ptyEnv = {
       ...cleanEnv,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       FORCE_COLOR: '1',
-      // For claude sessions, keep it drawing to the main buffer instead of the
-      // alternate screen (DECSET 1049). The alt-screen has no scrollback, so
-      // xterm.js's scrollLines()/scroll buttons do nothing while it's active;
-      // disabling it lets scrollback accumulate again. DISABLE_MOUSE_CLICKS
-      // additionally hands the scroll wheel back to xterm.js. Only affects
-      // ccserver-launched claude; shells are left untouched.
       ...(shell || sessionApp !== 'claude' ? {} : {
         CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1',
         CLAUDE_CODE_DISABLE_MOUSE_CLICKS: '1',
       }),
-      // opencode is left with full mouse capture (its default): the TUI keeps
-      // the whole conversation in an internal scrollable area that the wheel
-      // scrolls natively, and its own drag-selection + copy-on-select writes
-      // to the browser clipboard via OSC 52 (handled client-side).
       ...mcpEnv,
-      // /tmp being mounted noexec makes Bun fail to unpack + dlopen its
-      // embedded libopentui.so, so opencode's TUI dies at startup (opencode
-      // #26136/#27580). Direct host launches switch BUN_TMPDIR to
-      // ~/.cache/opencode/tmp when the host TMPDIR is noexec. Sandboxed
-      // launches don't: the sandbox's /tmp is a fresh tmpfs that is always
-      // executable, and the host-side cache dir is not bound into bwrap (with
-      // a fresh HOME it would not even exist), so setting it there would
-      // break what it is meant to fix.
-      ...(shell || sessionApp !== 'opencode' || useSandbox ? {} : bunTmpdirEnv()),
-    },
-  });
-  } catch (err) {
-    return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
+      ...(shell || sessionApp !== 'opencode' || sandboxRequested ? {} : bunTmpdirEnv()),
+    };
+
+    try {
+      const rpty = await getPtyHostClient().spawn({
+        id,
+        cwd,
+        cols,
+        rows,
+        command,
+        args,
+        env: ptyEnv,
+        sandbox: !!sandboxRequested,
+        sandboxOpts,
+        app: sessionApp,
+        mcpSocketPath,
+        notifySocketPath,
+        usageSocketPath,
+        metaSocketPath,
+        reviewerSocketPath,
+        reuseSandboxHome,
+        orchestratorClaudeMdSrc,
+        gitCommonDir,
+        groupFilesDir: resolvedGroupFilesDir,
+        sandboxHomeCreatedBy,
+      });
+      ptyProcess = rpty;
+      useSandbox = !!sandboxRequested;
+      sandboxDocker = !!rpty.sandboxInfo?.docker;
+      sandboxStateDir = rpty.sandboxInfo?.stateDir || null;
+      // sandboxGitBrokerProc/sandboxGitBrokerDir stay null: pty-host itself
+      // owns and tears down the git-broker process/dir it spawned (plan5
+      // 2.1) -- server本体 has no handle to it and must not try.
+    } catch (err) {
+      // pty-host's own errors already carry the "Failed to build sandbox" /
+      // "Failed to spawn" prefixes INFRA_ERROR_PREFIXES expects (see
+      // server/pty-host/ptyStore.js); ptyHostClient.spawn() mints the same
+      // "Failed to spawn" prefix for the unreachable case. Forward verbatim.
+      return { sessionId: id, session: null, error: err.message };
+    }
+  } else {
+    if (sandboxRequested) {
+      // A fresh (wipe) sandbox is refused while another sandbox of the same
+      // project is still using the same persistent HOME -- deleting the host dir
+      // under a live bind mount would corrupt that session. The client disables
+      // the "new" option in the same situation (GET /api/sandbox/status), so
+      // this is the authoritative backstop.
+      if (cfg.persistentHome && !reuseSandboxHome) {
+        const targetPath = persistentHomeDir(cwd);
+        if (sandboxHomeConflict(targetPath, [...sessions.values()])) {
+          return {
+            sessionId: id,
+            session: null,
+            error: 'このプロジェクトのサンドボックスを利用中のセッションがあるため、新規作成（前回環境の破棄）できません。先にタブを閉じてください。',
+          };
+        }
+      }
+      // Group file exchange: every sandboxed group member gets its group's
+      // blob directory read-only at /ccserver-group-files.
+      let resolvedGroupFilesDir = groupFilesDir;
+      if (!resolvedGroupFilesDir && groupId) {
+        try {
+          resolvedGroupFilesDir = getGroupFilesDir(groupId);
+          ensureGroupFilesDir(groupId);
+        } catch { resolvedGroupFilesDir = null; }
+      }
+      try {
+        const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
+        command = spawn.command;
+        args = spawn.args;
+        sandboxDocker = !!spawn.docker;
+        sandboxStateDir = spawn.stateDir || null;
+        sandboxGitBrokerProc = spawn.gitBrokerProc || null;
+        sandboxGitBrokerDir = spawn.gitBrokerDir || null;
+        useSandbox = true;
+      } catch (err) {
+        return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
+      }
+    } else if (forceSandbox) {
+      const reason = process.platform === 'win32'
+        ? 'the sandbox is Linux-only'
+        : 'bwrap is not available on this host';
+      return {
+        sessionId: id,
+        session: null,
+        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. Install bwrap (bubblewrap) or disable forceSandbox.`,
+      };
+    }
+
+    try {
+      ptyProcess = pty.spawn(command, args, {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      cwd,
+      env: {
+        ...cleanEnv,
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+        FORCE_COLOR: '1',
+        // For claude sessions, keep it drawing to the main buffer instead of the
+        // alternate screen (DECSET 1049). The alt-screen has no scrollback, so
+        // xterm.js's scrollLines()/scroll buttons do nothing while it's active;
+        // disabling it lets scrollback accumulate again. DISABLE_MOUSE_CLICKS
+        // additionally hands the scroll wheel back to xterm.js. Only affects
+        // ccserver-launched claude; shells are left untouched.
+        ...(shell || sessionApp !== 'claude' ? {} : {
+          CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1',
+          CLAUDE_CODE_DISABLE_MOUSE_CLICKS: '1',
+        }),
+        // opencode is left with full mouse capture (its default): the TUI keeps
+        // the whole conversation in an internal scrollable area that the wheel
+        // scrolls natively, and its own drag-selection + copy-on-select writes
+        // to the browser clipboard via OSC 52 (handled client-side).
+        ...mcpEnv,
+        // /tmp being mounted noexec makes Bun fail to unpack + dlopen its
+        // embedded libopentui.so, so opencode's TUI dies at startup (opencode
+        // #26136/#27580). Direct host launches switch BUN_TMPDIR to
+        // ~/.cache/opencode/tmp when the host TMPDIR is noexec. Sandboxed
+        // launches don't: the sandbox's /tmp is a fresh tmpfs that is always
+        // executable, and the host-side cache dir is not bound into bwrap (with
+        // a fresh HOME it would not even exist), so setting it there would
+        // break what it is meant to fix.
+        ...(shell || sessionApp !== 'opencode' || useSandbox ? {} : bunTmpdirEnv()),
+      },
+    });
+    } catch (err) {
+      return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
+    }
   }
 
   const session = {
@@ -903,6 +1004,22 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       fn(session);
     } catch {
       // a listener must never break session creation
+    }
+  }
+
+  if (usePtyHost) {
+    // Subscribe for this session's entire lifetime, independent of browser
+    // viewer count (a deliberate departure from plan5 5.2.3's original
+    // "subscribe on 0->1 viewers" sketch -- see this file's onData handler
+    // above: AutoYes auto-response, session-limit detection, and
+    // session.outputBuffer accumulation must keep running with zero viewers
+    // attached, exactly the scenario AutoYes exists for). onData/onExit are
+    // already wired above, so nothing here can be missed even if pty-host
+    // has already produced output by the time this resolves.
+    try {
+      await getPtyHostClient().subscribe(ptyProcess, 0);
+    } catch (err) {
+      console.warn(`[session] ${id}: initial pty-host subscribe failed (will retry on reconnect): ${err.message}`);
     }
   }
 
@@ -1395,7 +1512,7 @@ async function fireSchedule(scheduleId) {
     cwd = cwdRes.cwd;
     gitCommonDir = cwdRes.gitCommonDir;
   }
-  const res = createSession({
+  const res = await createSession({
     cwd,
     cols: 80,
     rows: 24,
@@ -1799,37 +1916,83 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
     // already torn down
   }
 
-  // Remove the sandbox's unique rootlesskit state dir. The --unshare-pid tree is
-  // torn down by the kill above (kernel reaps dockerd with the namespace); this
-  // just clears the leftover socket dir under /run. Best effort — the dir is
-  // unique per launch, so a stale one never blocks a future sandbox anyway.
-  if (session.sandboxStateDir) {
-    try {
-      rmSync(session.sandboxStateDir, { recursive: true, force: true });
-    } catch {
-      // nothing to remove / still held — harmless
+  // Remove the sandbox's unique rootlesskit state dir, and tear down the
+  // host-side git-broker (a plain child process, not part of the
+  // --unshare-pid tree the kill above reaps).
+  //
+  // usePtyHost: skipped entirely -- pty-host's own `destroy` RPC handler
+  // already does both (plan5 2.1: it owns teardown for whatever it built).
+  // session.sandboxStateDir is still populated in this mode (see
+  // createSession -- needed for dockerAvailability()'s dockerTag lookup), so
+  // this guard is required, not just redundant-but-harmless: server本体 must
+  // not race pty-host to remove the same directory out from under it.
+  // session.sandboxGitBrokerProc/Dir stay null in this mode, so those two
+  // blocks would already no-op even without the guard.
+  if (process.env.CCSERVER_PTY_HOST !== '1') {
+    if (session.sandboxStateDir) {
+      try {
+        rmSync(session.sandboxStateDir, { recursive: true, force: true });
+      } catch {
+        // nothing to remove / still held — harmless
+      }
     }
-  }
 
-  // Tear down the host-side git-broker alongside the sandboxed pty: it's a
-  // plain child process (not part of the bwrap/rootlesskit tree), so it
-  // isn't reaped by the pty kill above and must be stopped explicitly.
-  if (session.sandboxGitBrokerProc) {
-    try {
-      session.sandboxGitBrokerProc.kill('SIGTERM');
-    } catch {
-      // already dead
+    if (session.sandboxGitBrokerProc) {
+      try {
+        session.sandboxGitBrokerProc.kill('SIGTERM');
+      } catch {
+        // already dead
+      }
     }
-  }
-  if (session.sandboxGitBrokerDir) {
-    try {
-      rmSync(session.sandboxGitBrokerDir, { recursive: true, force: true });
-    } catch {
-      // best effort
+    if (session.sandboxGitBrokerDir) {
+      try {
+        rmSync(session.sandboxGitBrokerDir, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
     }
   }
 
   sessions.delete(id);
+}
+
+let ptyHostDestroyedHandlerArmed = false;
+
+// Registers pty-host's `destroyed` push-event handler exactly once
+// (idempotent -- server/index.js calls this unconditionally at boot; a no-op
+// when the feature flag is off, so it never opens the UDS socket in that
+// case). See plan5 5.2.3: pty-host can tear a session down on its own (its
+// own idle/exited timeout, or as a crash-recovery backstop once server本体's
+// connection drops and never comes back) without server本体 having called
+// destroySession() itself -- this is the only path that then cleans up the
+// local `sessions` Map entry for that case. When destroySession() got there
+// first (the common case), `sessions.get(sessionId)` is already gone and
+// this is a no-op.
+export function initPtyHostDestroyedHandler() {
+  if (process.env.CCSERVER_PTY_HOST !== '1') return;
+  if (ptyHostDestroyedHandlerArmed) return;
+  ptyHostDestroyedHandlerArmed = true;
+  getPtyHostClient().onDestroyed((sessionId, reason) => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    if (session.timeoutTimer) {
+      clearTimeout(session.timeoutTimer);
+      session.timeoutTimer = null;
+    }
+    if (session.idleTimer) {
+      clearTimeout(session.idleTimer);
+      session.idleTimer = null;
+    }
+    console.log(`[session] ${sessionId} destroyed by pty-host (reason=${reason || 'unknown'}, viewers=${session.sockets.size})`);
+    sessions.delete(sessionId);
+  });
+}
+
+// Test seam: re-arm initPtyHostDestroyedHandler() for a test that starts its
+// own in-process pty-host and needs the handler registered against a fresh
+// PtyHostClient (see ptyHostClient.js's resetPtyHostClientForTests()).
+export function resetPtyHostDestroyedHandlerForTests() {
+  ptyHostDestroyedHandlerArmed = false;
 }
 
 export function destroyAllSessions() {

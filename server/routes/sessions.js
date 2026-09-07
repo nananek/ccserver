@@ -134,7 +134,7 @@ export async function createSessionViaApi(body, { isReviewJob = false } = {}) {
   // enables the feature AND the broker is listening (see shouldInjectMetaAgent).
   // isReviewJob is deliberately NOT read from `body` here -- see this
   // function's header comment. It comes only from the trusted 2nd parameter.
-  const result = createSession({
+  const result = await createSession({
     cwd,
     cols: 80,
     rows: 24,

@@ -331,7 +331,7 @@ test('sendInput: an already-settled session writes without waiting (no latency r
 // after spawn to activate the agent-only idle path).
 test('sendInput (real session): holds the write until the idle gap opens the settle gate', async () => {
   const sm = await import('./sessionManager.js');
-  const res = sm.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const res = await sm.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
   const s = res.session;
   assert.ok(s, 'shell session should spawn');
   const g = await makeGroupAsync();
@@ -409,7 +409,7 @@ test('getTabStatus: no output yet (lastOutputAt null) yields idleForMs null', as
 test('getTabStatus / listGroupSessions: dockerAvailable/dockerReason come from the real dockerAvailability, not a stub', async () => {
   const g = await makeGroupAsync();
   const sm = await import('./sessionManager.js');
-  const res = sm.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const res = await sm.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
   assert.ok(res.session, 'shell session should spawn');
   try {
     groupManager.registerMember(g, 'workerA', res.sessionId);
@@ -1119,7 +1119,7 @@ test('session created with groupId/groupRole is auto-registered to its role', as
   groupManager.registerMember(g, 'workerA', 'dead-old-session');
 
   const sm = await import('./sessionManager.js');
-  const res = sm.createSession({
+  const res = await sm.createSession({
     cwd: '/tmp', cols: 80, rows: 24,
     shell: true, sandbox: false,
     groupId: g, groupRole: 'workerA',

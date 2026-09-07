@@ -480,7 +480,7 @@ test('checkCompletion fallback: a session that exited before calling finish_revi
 test('checkCompletion fallback: a live session that never calls finish_review times out after ABSOLUTE_TIMEOUT_MS', async () => {
   // A real (shell, no agent CLI needed) session so `exited` is false and the
   // timeout branch specifically is what fires -- not the exited one above.
-  const shell = sessionManagerMod.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const shell = await sessionManagerMod.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
   assert.ok(shell.session, 'sanity: the shell session actually spawned');
   insertRunningJob('job-fallback-timeout', { sessionId: shell.sessionId });
   try {
@@ -505,7 +505,7 @@ test('checkCompletion fallback: a live session that never calls finish_review ti
 });
 
 test('checkCompletion fallback: does nothing while a job is neither exited nor past the timeout', async () => {
-  const shell = sessionManagerMod.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const shell = await sessionManagerMod.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
   assert.ok(shell.session);
   insertRunningJob('job-fallback-still-running', { sessionId: shell.sessionId });
   try {
@@ -532,7 +532,7 @@ test('checkCompletion fallback: does nothing while a job is neither exited nor p
 // first, so finish_review's claim always lands before checkCompletion's own
 // completeReviewJob call can even check the Set.
 test('completeReviewJob: a finish_review vs fallback-poller race is won by finish_review, and completingJobs is not leaked', async () => {
-  const shell = sessionManagerMod.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const shell = await sessionManagerMod.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
   assert.ok(shell.session);
   insertRunningJob('job-race', { sessionId: shell.sessionId });
   const before = reviewer._completingJobsSizeForTests();

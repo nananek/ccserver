@@ -94,7 +94,7 @@ test('resolveExitedTimeoutMs: defaults to 5min and can never be disabled', () =>
 });
 
 test('with the idle timeout disabled, a session with no viewers is left alone', async () => {
-  const res = sessionManager.createSession({
+  const res = await sessionManager.createSession({
     cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false,
   });
   assert.ok(res.session, 'shell session should spawn');
@@ -116,7 +116,7 @@ test('with the idle timeout disabled, a session with no viewers is left alone', 
 });
 
 test('an exited session is still reaped, even with the idle timeout disabled', async () => {
-  const res = sessionManager.createSession({
+  const res = await sessionManager.createSession({
     cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false,
   });
   assert.ok(res.session, 'shell session should spawn');

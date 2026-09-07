@@ -21,7 +21,7 @@ import { sandboxesRoute } from './routes/sandboxes.js';
 import { federationRoute } from './routes/federation.js';
 import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
-import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
+import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
@@ -152,6 +152,12 @@ try {
 }
 
 const PORT = process.env.PORT || 3001;
+
+// pty-host adapter (plan5 Step2): registers the `destroyed` push-event
+// handler that cleans up server本体's local sessions Map when pty-host tears
+// a session down on its own. A no-op (never opens the UDS socket) unless
+// CCSERVER_PTY_HOST=1.
+initPtyHostDestroyedHandler();
 
 // ccserver-notify: restore the subscription registry, then host the
 // process-global MCP socket if the feature is enabled (Discord webhook or

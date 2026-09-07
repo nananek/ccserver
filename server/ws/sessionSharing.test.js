@@ -43,8 +43,8 @@ function fakeSocket() {
   };
 }
 
-function newShell() {
-  const res = sessionManager.createSession({
+async function newShell() {
+  const res = await sessionManager.createSession({
     cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false,
   });
   assert.ok(res.session, 'shell session should spawn');
@@ -87,7 +87,7 @@ after(() => {
 });
 
 test('a second client joins the session instead of evicting the first', async () => {
-  const { sessionId, session } = newShell();
+  const { sessionId, session } = await newShell();
   const desktop = fakeSocket();
   const phone = fakeSocket();
   try {
@@ -111,7 +111,7 @@ test('a second client joins the session instead of evicting the first', async ()
 });
 
 test('the destroy timer is armed only once the LAST client detaches', async () => {
-  const { sessionId, session } = newShell();
+  const { sessionId, session } = await newShell();
   const a = fakeSocket();
   const b = fakeSocket();
   try {
@@ -137,7 +137,7 @@ test('the destroy timer is armed only once the LAST client detaches', async () =
 });
 
 test('detaching a socket that was never attached leaves the session alone', async () => {
-  const { sessionId, session } = newShell();
+  const { sessionId, session } = await newShell();
   const attached = fakeSocket();
   const stranger = fakeSocket();
   try {
@@ -155,7 +155,7 @@ test('detaching a socket that was never attached leaves the session alone', asyn
 });
 
 test('the pty runs at the smallest attached viewport, and widens when that client leaves', async () => {
-  const { sessionId, session } = newShell();
+  const { sessionId, session } = await newShell();
   const desktop = fakeSocket();
   const phone = fakeSocket();
   try {
@@ -186,7 +186,7 @@ test('the pty runs at the smallest attached viewport, and widens when that clien
 });
 
 test('setSocketViewport reports the size in force even when the request loses', async () => {
-  const { sessionId } = newShell();
+  const { sessionId } = await newShell();
   const desktop = fakeSocket();
   const phone = fakeSocket();
   try {
@@ -209,7 +209,7 @@ test('setSocketViewport reports the size in force even when the request loses', 
 });
 
 test('viewer count is broadcast on join and on leave', async () => {
-  const { sessionId } = newShell();
+  const { sessionId } = await newShell();
   const a = fakeSocket();
   const b = fakeSocket();
   try {
@@ -229,7 +229,7 @@ test('viewer count is broadcast on join and on leave', async () => {
 });
 
 test('listSessions reports connected/viewers from the attached set', async () => {
-  const { sessionId } = newShell();
+  const { sessionId } = await newShell();
   const a = fakeSocket();
   const b = fakeSocket();
   const row = () => sessionManager.listSessions().find((s) => s.id === sessionId);
@@ -251,7 +251,7 @@ test('listSessions reports connected/viewers from the attached set', async () =>
 });
 
 test('a dead client does not stop the others from receiving output', async () => {
-  const { sessionId, session } = newShell();
+  const { sessionId, session } = await newShell();
   const alive = fakeSocket();
   const broken = fakeSocket();
   broken.send = () => { throw new Error('socket is gone'); };
@@ -335,7 +335,7 @@ test('pty exit, viewer loss and teardown are all logged with enough to diagnose 
   console.log = (...args) => { lines.push(args.map(String).join(' ')); };
   let sessionId = null;
   try {
-    const res = newShell();
+    const res = await newShell();
     sessionId = res.sessionId;
     const socket = fakeSocket();
     sessionManager.attachSocket(sessionId, socket);
@@ -375,7 +375,7 @@ test('pty exit, viewer loss and teardown are all logged with enough to diagnose 
 // destroy timer, so a socket that dies without a 'close' handler would keep
 // the pty alive forever.
 test('a socket that dies without detaching is pruned, releasing the destroy timer', async () => {
-  const { sessionId, session } = newShell();
+  const { sessionId, session } = await newShell();
   const abandoned = fakeSocket();
   try {
     sessionManager.attachSocket(sessionId, abandoned, { cols: 80, rows: 24 });
@@ -397,7 +397,7 @@ test('a socket that dies without detaching is pruned, releasing the destroy time
 });
 
 test('pruning a dead viewer restores the pty size for the client still attached', async () => {
-  const { sessionId, session } = newShell();
+  const { sessionId, session } = await newShell();
   const desktop = fakeSocket();
   const phone = fakeSocket();
   try {
