@@ -27,22 +27,35 @@
 //   executed, and only for repos already in the git allow-list.
 //     -> {"op":"gh-exec","argv":["pr","view","123"],"stdin":"<base64>"}
 //     <- {"ok":true,"exitCode":0,"stdout":"<base64>","stderr":"<base64>"}
-//     <- {"ok":false,"reason":"subcommand-not-allowed"|"ambiguous-flags"|"repo-unresolved"|"repo-must-be-explicit"|"not-allowlisted"|"bad-request"|"exec-failed"|"timeout"}
+//     <- {"ok":false,"reason":"subcommand-not-allowed"|"ambiguous-flags"|"repo-unresolved"|"repo-must-be-explicit"|"not-allowlisted"|"blocked-message"|"bad-request"|"exec-failed"|"timeout"}
 //
 // SSH allow/deny does NOT go through this socket — the allow-list isn't
 // secret, so it's ro-bound into the sandbox as a plain file and checked
 // directly by sandbox-ssh-wrapper.cjs. That means a crashed/killed broker
 // only breaks HTTPS credential vending and gh (fail closed — nothing is
 // printed / gh appears unavailable), not SSH access to already-allowed repos.
+//
+// gh-exec also runs a second check once the allow/deny decision above says
+// yes: plan8's PR-body guard (findBlockedGhText below). A `pr create`/`edit`/
+// `comment`/`review` invocation's title/body text is checked against the
+// same Claude-Session:/session-URL patterns commitGuard.js already blocks
+// for local git commits (see sandbox-commit-msg-hook.cjs) -- gh's own
+// free-form PR text never goes through a git hook at all, so without this a
+// naive `gh pr create --body "...Claude-Session: ..."` would sail straight
+// through the allow-list check above untouched. Only active when the caller
+// (sandbox.js) passes startGitBroker() a non-null blockedPatterns (i.e.
+// commitMessageGuard.enabled); omitted entirely, this is a no-op, same as
+// before plan8.
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeGitAllowlist, normalizeGitUrl, resolveOriginUrl } from './gitAllowlist.js';
-import { classifyGhInvocation } from './ghAllowlist.js';
+import { classifyGhInvocation, extractGhTextFields } from './ghAllowlist.js';
+import { buildGuardConfig, compilePatterns, findBlockedMatch } from './commitGuard.js';
 
 const GH_EXEC_TIMEOUT_MS = 30_000;
 const GH_EXEC_MAX_BYTES = 10 * 1024 * 1024;
@@ -132,6 +145,58 @@ function execGh(argv, cwd, stdinBuf) {
   });
 }
 
+// Checks a `pr create`/`edit`/`comment`/`review` invocation's title/body
+// text (see ghAllowlist.js's extractGhTextFields) against ctx.guardPatterns
+// (compiled once in runServer from the same commitMessageGuard config used
+// for local commits -- see commitGuard.js). Returns {field, match} for the
+// first blocked value found, or null.
+//
+// 'file' entries ("-" for --body-file) resolve to real text here: "-" means
+// "read from stdin", which the gh wrapper already forwarded as req.stdin
+// (base64) regardless of subcommand; anything else is a path, read relative
+// to ctx.cwd -- the exact same cwd execGh() below runs the real gh in (see
+// sandbox.js: cwd is bind-mounted at the same absolute path inside and
+// outside the sandbox), so this sees exactly what gh itself would read.
+// Fails OPEN on any read error (missing file, not UTF-8, whatever) by
+// skipping just that one field -- an unreadable --body-file must not block
+// an otherwise-legitimate gh call outright; only an actual pattern match
+// ever denies the command.
+function findBlockedGhText(req, ctx) {
+  if (!ctx.guardPatterns || !ctx.guardPatterns.length) return null;
+  const fields = extractGhTextFields(req.argv);
+  if (!fields.length) return null;
+
+  let stdinText;
+  const decodeStdin = () => {
+    if (stdinText !== undefined) return stdinText;
+    try {
+      stdinText = req.stdin ? Buffer.from(req.stdin, 'base64').toString('utf-8') : '';
+    } catch {
+      stdinText = '';
+    }
+    return stdinText;
+  };
+
+  for (const f of fields) {
+    let text;
+    if (f.kind === 'literal') {
+      text = f.value;
+    } else if (f.value === '-') {
+      text = decodeStdin();
+    } else {
+      try {
+        const path = isAbsolute(f.value) ? f.value : join(ctx.cwd, f.value);
+        text = readFileSync(path, 'utf-8');
+      } catch {
+        continue; // fail open: unreadable body-file, skip this field only
+      }
+    }
+    const match = findBlockedMatch(text, ctx.guardPatterns);
+    if (match) return { field: f.field, match };
+  }
+  return null;
+}
+
 async function handleGhExec(req, conn, ctx) {
   if (!Array.isArray(req.argv) || !req.argv.every((a) => typeof a === 'string')) {
     conn.end(`${JSON.stringify({ ok: false, reason: 'bad-request' })}\n`);
@@ -156,6 +221,13 @@ async function handleGhExec(req, conn, ctx) {
   if (denied) {
     process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (repo ${denied} not-allowlisted)\n`);
     conn.end(`${JSON.stringify({ ok: false, reason: 'not-allowlisted' })}\n`);
+    return;
+  }
+
+  const blocked = findBlockedGhText(req, ctx);
+  if (blocked) {
+    process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (blocked pattern in --${blocked.field}: ${blocked.match.source})\n`);
+    conn.end(`${JSON.stringify({ ok: false, reason: 'blocked-message', field: blocked.field })}\n`);
     return;
   }
 
@@ -184,14 +256,28 @@ function handleRequest(line, conn, ctx) {
   conn.end(`${JSON.stringify({ ok: false, reason: 'bad-request' })}\n`);
 }
 
-function runServer({ sock, allowlist, cwd }) {
+function runServer({ sock, allowlist, cwd, commitGuard }) {
   let allowSet;
   try {
     allowSet = new Set(JSON.parse(readFileSync(allowlist, 'utf-8')));
   } catch {
     allowSet = new Set(); // fail closed if the allow-list can't be read
   }
-  const ctx = { allowSet, cwd };
+  // PR-body guard patterns (see findBlockedGhText above): unlike the
+  // allow-list, this fails OPEN -- a missing/unreadable/corrupt commitGuard
+  // file means no PR-body check at all, not "block every gh-exec". This
+  // guard exists to catch accidental leaks, not to gate access; an
+  // availability failure here must never take gh down entirely.
+  let guardPatterns = [];
+  if (commitGuard) {
+    try {
+      const { patterns } = JSON.parse(readFileSync(commitGuard, 'utf-8'));
+      guardPatterns = compilePatterns(Array.isArray(patterns) ? patterns : []);
+    } catch {
+      guardPatterns = [];
+    }
+  }
+  const ctx = { allowSet, cwd, guardPatterns };
 
   try { unlinkSync(sock); } catch { /* fresh dir, usually not present */ }
 
@@ -270,7 +356,18 @@ function probeBrokerSync(sockPath, timeoutMs = 700) {
 // propagate it to createSession (launch fails clearly instead of leaving a
 // sandboxed session with an unmounted broker socket showing
 // "gh broker unreachable").
-export function startGitBroker({ cwd }) {
+//
+// blockedPatterns (plan8): the operator's own commitMessageGuard.
+// blockedPatterns from sandbox.config.json, or null when commitMessageGuard
+// is disabled. Passing null (the default) skips the PR-body guard file
+// entirely -- gh-exec behaves exactly as before plan8. When given (even an
+// empty array, meaning "just the commitGuard.js built-ins"), it's merged via
+// buildGuardConfig() and written next to allowlist.json so the spawned
+// --serve instance can load it; a write failure here only disables the
+// PR-body guard for this launch (logged, not thrown) -- unlike the
+// allow-list above, this is a best-effort accident-prevention layer, not a
+// credential-scoping boundary the launch must refuse to proceed without.
+export function startGitBroker({ cwd, blockedPatterns = null }) {
   const allowlist = computeGitAllowlist(cwd);
   if (!allowlist || allowlist.length === 0) return null;
 
@@ -289,9 +386,20 @@ export function startGitBroker({ cwd }) {
     throw new Error(`git broker failed to start for ${cwd}: ${e.message}`);
   }
 
-  const proc = spawn(process.execPath, [
-    __filename, '--serve', '--sock', sockPath, '--allowlist', allowlistPath, '--cwd', cwd,
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let commitGuardPath = null;
+  if (blockedPatterns !== null) {
+    try {
+      commitGuardPath = join(dir, 'commit-guard.json');
+      writeFileSync(commitGuardPath, JSON.stringify(buildGuardConfig(blockedPatterns)));
+    } catch (e) {
+      console.warn(`[git-broker] failed to write PR-body guard config for ${cwd}: ${e.message} (gh PR bodies will not be checked this session)`);
+      commitGuardPath = null;
+    }
+  }
+
+  const serveArgs = [__filename, '--serve', '--sock', sockPath, '--allowlist', allowlistPath, '--cwd', cwd];
+  if (commitGuardPath) serveArgs.push('--commit-guard', commitGuardPath);
+  const proc = spawn(process.execPath, serveArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
 
   proc.stdout.on('data', (d) => process.stdout.write(`[git-broker] ${d}`));
   proc.stderr.on('data', (d) => process.stderr.write(`[git-broker] ${d}`));
@@ -338,7 +446,7 @@ export function startGitBroker({ cwd }) {
     throw new Error(`git broker readiness probe failed for ${cwd}: no response on ${sockPath}`);
   }
 
-  return { proc, dir, sockPath, allowlistPath, allowlist };
+  return { proc, dir, sockPath, allowlistPath, allowlist, commitGuardPath };
 }
 
 // Entry point when this file is spawned directly by startGitBroker().
@@ -348,6 +456,7 @@ function parseServeArgs(argv) {
     if (argv[i] === '--sock') out.sock = argv[++i];
     else if (argv[i] === '--allowlist') out.allowlist = argv[++i];
     else if (argv[i] === '--cwd') out.cwd = argv[++i];
+    else if (argv[i] === '--commit-guard') out.commitGuard = argv[++i];
   }
   return out;
 }

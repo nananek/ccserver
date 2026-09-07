@@ -86,6 +86,7 @@ const DENY_MESSAGES = {
   'repo-unresolved': () => 'sandbox: could not resolve a target repo for this gh command (pass --repo owner/repo, or run inside a repo with an origin remote)',
   'repo-must-be-explicit': () => 'sandbox: this gh command requires an explicit --repo/-R (cwd is not used for gh workflow run/enable/disable)',
   'not-allowlisted': () => 'sandbox: gh access to this repo is not allow-listed for this session',
+  'blocked-message': (argv, field) => `sandbox: this gh command's --${field || 'body'} matches a blocked pattern (see sandbox.config.json's commitMessageGuard.blockedPatterns) -- likely a Claude-Session: trailer or claude.ai/code/session_ URL, which must not leak into a PR`,
   'bad-request': () => 'sandbox: malformed gh-broker request',
   'exec-failed': () => 'sandbox: gh-broker failed to run gh on the host',
   timeout: () => 'sandbox: gh-broker timed out running this gh command',
@@ -115,7 +116,7 @@ async function main() {
   }
   if (!result.ok) {
     const describe = DENY_MESSAGES[result.reason];
-    process.stderr.write(`${describe ? describe(argv) : `sandbox: gh command denied (${result.reason})`}\n`);
+    process.stderr.write(`${describe ? describe(argv, result.field) : `sandbox: gh command denied (${result.reason})`}\n`);
     process.exit(1);
   }
 

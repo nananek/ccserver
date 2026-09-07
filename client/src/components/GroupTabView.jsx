@@ -133,9 +133,16 @@ export default function GroupTabView({
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
+    let inFlight = false;
     const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const res = await authFetch(`/api/groups/${groupId}`);
+        // Check before any setState: a slow/stale response for a poll that
+        // started before the tab switched away or the group changed must
+        // not touch state after this effect's cleanup ran (issue #123 #8).
+        if (cancelled) return;
         if (res.status === 404) {
           // The group is gone server-side (torn down from another client /
           // the server restarted and the group was destroyed): nothing left
@@ -164,6 +171,8 @@ export default function GroupTabView({
         }
       } catch {
         // poll is best effort; the next tick retries
+      } finally {
+        inFlight = false;
       }
     };
     poll();
@@ -175,7 +184,10 @@ export default function GroupTabView({
   }, [visible, groupId]);
 
   // Files polling (badge cadence: 10s while the modal is closed, 3s while open)
+  const filesRefreshingRef = useRef(false);
   const fetchFiles = useCallback(async () => {
+    if (filesRefreshingRef.current) return;
+    filesRefreshingRef.current = true;
     try {
       const res = await authFetch(`/api/groups/${groupId}/files`);
       if (res.status === 404) { setFiles([]); return; }
@@ -185,6 +197,8 @@ export default function GroupTabView({
       setFilesError(null);
     } catch (err) {
       setFilesError(err.message);
+    } finally {
+      filesRefreshingRef.current = false;
     }
   }, [groupId]);
 
@@ -197,7 +211,10 @@ export default function GroupTabView({
   }, [visible, fetchFiles, isFilesOpen]);
 
   // Docs polling (same badge cadence as Files: 10s closed / 3s open)
+  const docsRefreshingRef = useRef(false);
   const fetchDocs = useCallback(async () => {
+    if (docsRefreshingRef.current) return;
+    docsRefreshingRef.current = true;
     try {
       const res = await authFetch(`/api/groups/${groupId}/docs`);
       if (res.status === 404) { setDocs([]); return; }
@@ -207,6 +224,8 @@ export default function GroupTabView({
       setDocsError(null);
     } catch (err) {
       setDocsError(err.message);
+    } finally {
+      docsRefreshingRef.current = false;
     }
   }, [groupId]);
 

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch } from '../auth.js';
+import { useVisiblePolling } from '../hooks/useVisiblePolling.js';
 
 // Global banner for meta-agent destructive-operation approvals (ccserver-meta).
 // Polls GET /api/approvals?status=pending every few seconds and lets the user
@@ -75,11 +76,7 @@ export default function ApprovalBanner() {
     }
   }, []);
 
-  useEffect(() => {
-    refresh();
-    const timer = setInterval(refresh, POLL_MS);
-    return () => clearInterval(timer);
-  }, [refresh]);
+  useVisiblePolling(refresh, POLL_MS);
 
   // Keep the countdown live between polls while something is pending.
   const hasPending = approvals.length > 0;

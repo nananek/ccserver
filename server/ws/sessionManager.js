@@ -531,6 +531,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxStateDir = null;
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
+  let sandboxCommitGuardDir = null;
   let ptyProcess;
 
   if (usePtyHost) {
@@ -622,9 +623,12 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       useSandbox = !!sandboxRequested;
       sandboxDocker = !!rpty.sandboxInfo?.docker;
       sandboxStateDir = rpty.sandboxInfo?.stateDir || null;
-      // sandboxGitBrokerProc/sandboxGitBrokerDir stay null: pty-host itself
-      // owns and tears down the git-broker process/dir it spawned (plan5
-      // 2.1) -- server本体 has no handle to it and must not try.
+      // sandboxGitBrokerProc/sandboxGitBrokerDir/sandboxCommitGuardDir stay
+      // null: pty-host itself owns and tears down whatever it built --
+      // git-broker's process/dir (plan5 2.1) and, since this branch's own
+      // commitGuardDir fix, the commit-message guard's runtime dir too (see
+      // server/pty-host/ptyStore.js) -- server本体 has no handle to any of
+      // it and must not try.
     } catch (err) {
       // pty-host's own errors already carry the "Failed to build sandbox" /
       // "Failed to spawn" prefixes INFRA_ERROR_PREFIXES expects (see
@@ -666,6 +670,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         sandboxStateDir = spawn.stateDir || null;
         sandboxGitBrokerProc = spawn.gitBrokerProc || null;
         sandboxGitBrokerDir = spawn.gitBrokerDir || null;
+        sandboxCommitGuardDir = spawn.commitGuardDir || null;
         useSandbox = true;
       } catch (err) {
         return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
@@ -749,6 +754,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
     sandboxGitBrokerProc, // host-side git-broker child process, killed on teardown
     sandboxGitBrokerDir, // its runtime dir (socket + allow-list), removed on teardown
+    sandboxCommitGuardDir, // commit-msg guard's runtime dir (config json only, no process), removed on teardown
     reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
     ptyProcess,
     // Every attached viewer, mapped to the viewport it last reported. A
@@ -1927,18 +1933,20 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
     // already torn down
   }
 
-  // Remove the sandbox's unique rootlesskit state dir, and tear down the
+  // Remove the sandbox's unique rootlesskit state dir, tear down the
   // host-side git-broker (a plain child process, not part of the
-  // --unshare-pid tree the kill above reaps).
+  // --unshare-pid tree the kill above reaps), and remove the commit-message
+  // guard's runtime dir (see startCommitGuard, sandbox.js -- just a JSON
+  // config file, no process, unlike gitBroker there's nothing to kill).
   //
   // usePtyHost: skipped entirely -- pty-host's own `destroy` RPC handler
-  // already does both (plan5 2.1: it owns teardown for whatever it built).
-  // session.sandboxStateDir is still populated in this mode (see
+  // already does all of it (plan5 2.1: it owns teardown for whatever it
+  // built). session.sandboxStateDir is still populated in this mode (see
   // createSession -- needed for dockerAvailability()'s dockerTag lookup), so
   // this guard is required, not just redundant-but-harmless: server本体 must
   // not race pty-host to remove the same directory out from under it.
-  // session.sandboxGitBrokerProc/Dir stay null in this mode, so those two
-  // blocks would already no-op even without the guard.
+  // session.sandboxGitBrokerProc/Dir/CommitGuardDir stay null in this mode,
+  // so those blocks would already no-op even without the guard.
   if (process.env.CCSERVER_PTY_HOST !== '1') {
     if (session.sandboxStateDir) {
       try {
@@ -1958,6 +1966,13 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
     if (session.sandboxGitBrokerDir) {
       try {
         rmSync(session.sandboxGitBrokerDir, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
+    }
+    if (session.sandboxCommitGuardDir) {
+      try {
+        rmSync(session.sandboxCommitGuardDir, { recursive: true, force: true });
       } catch {
         // best effort
       }

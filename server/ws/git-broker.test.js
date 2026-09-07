@@ -10,7 +10,7 @@
 // hang/return nothing. The credential-request tests alone would NOT have
 // caught this (they respond synchronously, in the same tick).
 
-import { test, before, after } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { execFileSync } from 'node:child_process';
@@ -214,4 +214,90 @@ test('broker readiness probe: socket responds to probe op', async () => {
   // any JSON response means broker is speaking; probe op is not a real op so bad-request is expected
   assert.equal(typeof r.ok, 'boolean');
   assert.ok('reason' in r || 'ok' in r);
+});
+
+// plan8: PR-body guard. `broker` above was started without blockedPatterns
+// (the pre-plan8 call shape), so it never checks PR text -- these tests use
+// their own instance with the guard enabled to cover both "guard on" and,
+// via `broker` itself in the tests above (e.g. plain 'pr view'), "guard off"
+// behaves identically to before.
+describe('gh-exec PR-body guard (plan8)', () => {
+  let guardedBroker;
+
+  before(() => {
+    guardedBroker = startGitBroker({ cwd: repoDir, blockedPatterns: [] });
+  });
+
+  after(async () => {
+    if (guardedBroker) {
+      guardedBroker.proc.kill('SIGTERM');
+      await new Promise((r) => setTimeout(r, 200));
+      rmSync(guardedBroker.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('pr create --body containing a Claude-Session: trailer is denied, fake gh never runs', async () => {
+    const r = await request(guardedBroker.sockPath, {
+      op: 'gh-exec',
+      argv: ['pr', 'create', '--title', 'x', '--body', 'See also.\nClaude-Session: https://claude.ai/code/session_abc123\n'],
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'blocked-message');
+    assert.equal(r.field, 'body');
+  });
+
+  test('pr create --title containing a session URL is denied', async () => {
+    // The URL is embedded mid-string (not the whole token) so this doesn't
+    // also trip classifyGhInvocation's own "a bare URL token is a repo
+    // reference" scan (a pre-existing, unrelated quirk -- see plan8 section
+    // 2.4 -- that a title/body value which IS itself exactly one bare URL
+    // token can hit).
+    const r = await request(guardedBroker.sockPath, {
+      op: 'gh-exec',
+      argv: ['pr', 'create', '--title', 'Leaked: https://claude.ai/code/session_abc123', '--body', 'fine'],
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'blocked-message');
+    assert.equal(r.field, 'title');
+  });
+
+  test('a clean pr create is allowed and reaches the fake gh', async () => {
+    const r = await request(guardedBroker.sockPath, {
+      op: 'gh-exec',
+      argv: ['pr', 'create', '--title', 'Fix bug', '--body', 'Nothing sensitive here.'],
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.exitCode, 0);
+  });
+
+  test('pr comment --body-file - reads the blocked pattern from stdin', async () => {
+    const stdin = Buffer.from('Claude-Session: https://claude.ai/code/session_xyz\n').toString('base64');
+    const r = await request(guardedBroker.sockPath, { op: 'gh-exec', argv: ['pr', 'comment', '1', '--body-file', '-'], stdin });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'blocked-message');
+    assert.equal(r.field, 'body-file');
+  });
+
+  test('pr edit --body-file <path> reads the blocked pattern from the repo cwd', async () => {
+    writeFileSync(join(repoDir, 'pr-body.txt'), 'Claude-Session: https://claude.ai/code/session_frompath\n');
+    const r = await request(guardedBroker.sockPath, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', 'pr-body.txt'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'blocked-message');
+    assert.equal(r.field, 'body-file');
+  });
+
+  test('an unreadable --body-file fails open (skips that field, does not deny the command)', async () => {
+    const r = await request(guardedBroker.sockPath, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', 'does-not-exist.txt'] });
+    assert.equal(r.ok, true);
+  });
+
+  test('startGitBroker without blockedPatterns (pre-plan8 call shape) never checks PR text', async () => {
+    // `broker` (module-level, started as `startGitBroker({ cwd: repoDir })`
+    // in this file's before()) has no guard config at all.
+    const r = await request(broker.sockPath, {
+      op: 'gh-exec',
+      argv: ['pr', 'create', '--title', 'x', '--body', 'Claude-Session: https://claude.ai/code/session_should-not-matter'],
+    });
+    assert.equal(r.ok, true);
+  });
 });

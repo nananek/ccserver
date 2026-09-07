@@ -322,3 +322,82 @@ export function classifyGhInvocation(argv, resolveCwdOrigin) {
 
   return { allowed: true, repos: [...repos], reason: null };
 }
+
+// ---------------------------------------------------------------------------
+// PR title/body content guard (plan8, layered on top of the allow/deny
+// decision above -- see git-broker.js's findBlockedGhText). Once a gh
+// invocation is allow-listed, some `pr` subcommands carry free-form text
+// (title/body) that could itself smuggle a `Claude-Session:` trailer or
+// session URL into a shared PR -- the exact leak commitGuard.js already
+// blocks for local git commits, but gh's own title/body text never goes
+// through a git commit-msg hook. This section only locates WHERE that text
+// lives in argv (and, for --body-file, what kind of source it names); the
+// actual pattern match reuses commitGuard.js's compiled patterns, in
+// git-broker.js.
+//
+// Scoped deliberately narrow: only the `pr` subcommands already on ALLOWED
+// above whose flags were confirmed against `gh <cmd> --help` (see git
+// history for the exact transcripts). Anything not listed here (e.g. `gh
+// issue create`'s --body) is simply not checked -- extending coverage means
+// adding another TEXT_FIELDS entry, not new parsing logic.
+const TEXT_FIELDS = {
+  'pr:create': [
+    { field: 'title', short: '-t', long: '--title' },
+    { field: 'body', short: '-b', long: '--body' },
+    { field: 'body-file', short: '-F', long: '--body-file', file: true },
+  ],
+  'pr:edit': [
+    { field: 'title', short: '-t', long: '--title' },
+    { field: 'body', short: '-b', long: '--body' },
+    { field: 'body-file', short: '-F', long: '--body-file', file: true },
+  ],
+  'pr:comment': [
+    { field: 'body', short: '-b', long: '--body' },
+    { field: 'body-file', short: '-F', long: '--body-file', file: true },
+  ],
+  'pr:review': [
+    { field: 'body', short: '-b', long: '--body' },
+    { field: 'body-file', short: '-F', long: '--body-file', file: true },
+  ],
+};
+
+// Collects every value passed to `short`/`long` in argv. Only the
+// space-separated ("-b value", "--body value") and "--body=value" forms are
+// recognized -- an attached short form ("-bvalue") is already refused
+// upstream by hasAmbiguousShortFlag (only "-R"/"-Rvalue" are ever accepted
+// attached; every other multi-letter short-dash token is denied outright),
+// so by the time this runs argv can't contain one. All occurrences are
+// returned, not just the first/last -- same reasoning as parseRepoFlags
+// above: which one gh actually uses is gh's business, ours is not to
+// silently skip checking one of them.
+function extractFlagValues(argv, short, long) {
+  const values = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === short || a === long) {
+      if (argv[i + 1] !== undefined) values.push(argv[i + 1]);
+      continue;
+    }
+    if (a.startsWith(`${long}=`)) values.push(a.slice(long.length + 1));
+  }
+  return values;
+}
+
+// Returns every title/body-bearing value found in argv, tagged with where it
+// came from: {field, kind:'literal', value} for a value given directly in
+// argv, or {field, kind:'file', value: <"-"-or-path>} for --body-file ("-"
+// means "read from stdin", anything else is a path to resolve against the
+// session cwd). Resolving 'file' entries into actual text is the caller's
+// job (git-broker.js has the stdin buffer and cwd; this module never touches
+// the filesystem or decodes anything).
+export function extractGhTextFields(argv) {
+  const fields = TEXT_FIELDS[`${argv[0]}:${argv[1]}`];
+  if (!fields) return [];
+  const out = [];
+  for (const f of fields) {
+    for (const value of extractFlagValues(argv, f.short, f.long)) {
+      out.push(f.file ? { field: f.field, kind: 'file', value } : { field: f.field, kind: 'literal', value });
+    }
+  }
+  return out;
+}
