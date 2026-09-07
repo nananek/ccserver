@@ -242,16 +242,26 @@ export default function App() {
   const handleOpen = useCallback(async (dirPath, opts = {}) => {
     if (!opts.isMetaAgent) {
       try {
+        // A fresh fetch, not the `serverSessions` state: that's only kept
+        // current while the session sidebar/menu is open (see
+        // fetchServerSessions below), so it can be stale or empty here.
         const res = await authFetch('/api/sessions');
         const data = res.ok ? await res.json() : null;
-        const dup = (data?.sessions || []).find((s) => !s.shell && !s.isMetaAgent && s.cwd === dirPath);
+        // groupId != null excluded: combo-group members are only ever meant
+        // to be reached through the group's own sub-tab UI (same rule
+        // fetchServerSessions applies below) -- surfacing one here would let
+        // "既存セッションを開く" attach a bare terminal tab directly to a
+        // live group worker/orchestrator, and later closing that tab would
+        // terminate it out from under the still-running group.
+        const dup = (data?.sessions || []).find((s) => !s.shell && !s.isMetaAgent && s.groupId == null && s.cwd === dirPath);
         if (dup) {
           pendingOpenRef.current = dirPath;
           setDuplicateSessionPrompt({ cwd: dirPath, opts, session: dup });
           return;
         }
       } catch {
-        // unreachable: proceed without the duplicate check
+        // server unreachable (offline, DNS, etc.): proceed without the
+        // duplicate check rather than blocking the launch entirely.
       }
     }
     await proceedOpen(dirPath, opts);
