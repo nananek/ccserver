@@ -2205,12 +2205,25 @@ export function initPtyHostDisconnectedHandler() {
           session.pendingInjectionTimer = null;
         }
         session.exited = true;
-        // Same reason buildSessionRecord's ptyProcess.onExit calls this: a
-        // pending scheduled prompt must not resume against a stale
-        // claudeSessionId. entry.sessionId itself doesn't need the same care
-        // -- fireSchedule() already treats a missing sessions.get() entry as
-        // "no live target" -- but claudeSessionId is only ever refreshed
-        // here, and sessions.delete() below is this session's last chance.
+        // session.claudeSessionId starts life as null (buildSessionRecord)
+        // and is otherwise refreshed only by a real pty exit (same
+        // extraction as buildSessionRecord's ptyProcess.onExit, above) --
+        // never while the session is merely running. Skipping this here
+        // would broadcast a null claudeSessionId below, and the frontend's
+        // 'exit' handler treats a falsy claudeSessionId as "nothing to
+        // resume" and WIPES the browser's stored resume key for this
+        // app/cwd, even though the conversation itself is still resumable
+        // (only this shard's connection died, not the underlying session).
+        if (!session.shell) {
+          session.claudeSessionId = extractResumeSessionId(
+            session.app,
+            session.outputBuffer.slice(-50).join('')
+          );
+        }
+        // Keep any pending scheduled prompt alive across this exit: refresh
+        // its resume id and detach it so it auto-resumes the conversation at
+        // fire time (same reason buildSessionRecord's ptyProcess.onExit
+        // calls this).
         refreshScheduleOnExit(session);
         for (const fn of sessionExitListeners) {
           try {

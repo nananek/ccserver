@@ -20,7 +20,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRpcServer } from '../pty-host/rpcServer.js';
@@ -293,6 +293,65 @@ test('restorePtyHostSessions preserves a healthy shard\'s restore metadata when 
   } finally {
     await destroySessionAndWait(res0.sessionId, 0);
     await destroySessionAndWait(res1.sessionId, 1);
+  }
+});
+
+// Self-review of Issue #143 problem 2's fix: the disconnected handler's exit
+// broadcast must carry the claudeSessionId the pty last printed, not the null
+// session.claudeSessionId starts life as (buildSessionRecord) and is
+// otherwise only ever refreshed by a REAL pty exit. A real exit runs the same
+// extraction (extractResumeSessionId over the last of outputBuffer) before
+// broadcasting -- skipping it here would send a falsy claudeSessionId, and
+// the frontend's 'exit' handler treats that as "nothing to resume" and wipes
+// the browser's stored resume key, even though the conversation itself
+// (unlike this shard) is still perfectly resumable. Uses shard 0 (every
+// other test in this file that stops a shard uses shard 1) so it can run
+// anywhere relative to the shard-1 tests without interfering with them.
+test("a shard disconnecting broadcasts the claudeSessionId its session's pty last printed, not null", async () => {
+  const binDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-claude-'));
+  const fakeBin = join(binDir, 'fake-claude');
+  writeFileSync(fakeBin, '#!/bin/bash\nprintf "claude --resume test-resume-id-123\\n"\nsleep 100\n', { mode: 0o755 });
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false }));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const cwd0 = findCwdForShard(0);
+    const res = await sessionManager.createSession({
+      cwd: cwd0, cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
+    });
+    const { sessionId, session } = res;
+    assert.equal(session.ptyHostShardIndex, 0);
+    await waitFor(() => session.outputBuffer.join('').includes('test-resume-id-123'));
+
+    const received = [];
+    const fakeSocket = { readyState: 1, send: (str) => received.push(str) };
+    session.sockets.set(fakeSocket, { cols: 80, rows: 24 });
+
+    const shard0PtyStore = hosts[0].ptyStore;
+    await hosts[0].stop();
+    try {
+      await waitFor(() => sessionManager.getSession(sessionId) === undefined, { timeoutMs: 2000 });
+      const exitMsg = JSON.parse(received[received.length - 1]);
+      assert.equal(exitMsg.type, 'exit');
+      assert.equal(
+        exitMsg.claudeSessionId,
+        'test-resume-id-123',
+        'the resume id the pty printed before its shard died must reach the broadcast, not come through as null',
+      );
+    } finally {
+      shard0PtyStore.destroy(sessionId);
+    }
+  } finally {
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(binDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 

@@ -30,7 +30,7 @@
 // underneath it.
 
 import { createServer } from 'node:net';
-import { rmSync, existsSync, mkdirSync } from 'node:fs';
+import { rmSync, rmdirSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildMetaMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
 
@@ -328,6 +328,23 @@ export function stopBroker({ server, sockPath, connections }) {
       rmSync(sockPath, { force: true });
     } catch {
       // best effort
+    }
+    // Issue #143 problem 1: production sockPaths (sockPathFor/
+    // getNotifySockPath and friends) each live alone in a directory dedicated
+    // to that one socket, so it can be bound into a sandbox as a directory --
+    // once the file above is gone, reclaim that directory too, or every
+    // group's control/handoff directory (unique per groupId+tag) would
+    // accumulate forever across this server本体 process's uptime (group
+    // brokers are stopped here, not restarted in place the way listenMcp()'s
+    // own rmSync, which only ever drops the file, is for). rmdirSync only
+    // removes an EMPTY directory and throws otherwise -- this module's own
+    // tests supply bare sockPaths under a shared tmp dir with siblings still
+    // in it, and this must never touch those. mkdirSync(recursive) in
+    // listenMcp() recreates a reclaimed directory on demand.
+    try {
+      rmdirSync(dirname(sockPath));
+    } catch {
+      // not empty, doesn't exist, or shared with other files -- leave it
     }
   }
 }
