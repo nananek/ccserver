@@ -88,13 +88,20 @@ function tempEnvPaths(dir) {
 test('server falls back to direct spawn and logs a warning when pty-host is unreachable at boot (CCSERVER_PTY_HOST left unset)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-startup-ptyhost-fallback-'));
   try {
+    // checkPtyHostReachable() now retries across its whole ~3000ms budget
+    // before giving up on a genuinely-absent socket (Issue #119 Step7-3
+    // follow-up: a single fail-fast attempt made that budget pointless
+    // against a pty-host that's still starting up, see ptyHostClient.js) --
+    // this test's default aliveForMs=4000 leaves too little margin for the
+    // rest of boot (module load, SQLite init) on top of that under load, so
+    // give it more room here specifically.
     const result = await runServerAndCapture({
       ...tempEnvPaths(dir),
       // A path that will never have anything listening on it -- CCSERVER_PTY_HOST
       // itself is deliberately left UNSET so isPtyHostEnabled()'s new
       // default-ON is what's actually under test here.
       CCSERVER_PTY_HOST_SOCK: join(dir, 'nothing-listens-here.sock'),
-    });
+    }, { aliveForMs: 7000 });
     assert.equal(result.exitedEarly, false, `server must stay up despite the unreachable pty-host; stdout=${result.stdout}\nstderr=${result.stderr}`);
     assert.match(
       result.stdout + result.stderr,

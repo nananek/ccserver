@@ -409,21 +409,50 @@ test('checkPtyHostReachable resolves true against a real, running pty-host', asy
   }
 });
 
-test('checkPtyHostReachable resolves false quickly (well under its timeout) when nothing is listening', async () => {
+test('checkPtyHostReachable resolves false only once its timeout elapses when nothing is ever listening', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-ptyhostclient-unreachable-'));
-  // A path in a real, existing directory that nothing ever listens on --
-  // the connection is refused/ENOENT almost immediately, not via the
-  // timeout, which is exactly the common "pty-host was never set up" case
-  // this function exists to detect cheaply.
+  // A path in a real, existing directory that nothing ever listens on. Each
+  // individual connection attempt is refused/ENOENT near-instantly, but
+  // checkPtyHostReachable() must keep retrying across its whole timeoutMs
+  // budget rather than give up on that first instant failure -- see its own
+  // comment: a single attempt failing fast is indistinguishable from "the
+  // pty-host that will bind this exact path in another second is still
+  // starting up" (the boot-race case this function exists to survive), so
+  // this genuinely-never-there case is expected to cost close to the full
+  // timeout, not return early.
   const sockPath = join(dir, 'nothing-here.sock');
   const client = new PtyHostClient(sockPath);
   const startedAt = Date.now();
   try {
-    const reachable = await checkPtyHostReachable(client, 3000);
+    const reachable = await checkPtyHostReachable(client, 500);
     assert.equal(reachable, false);
-    assert.ok(Date.now() - startedAt < 1000, 'an absent socket must fail fast, not wait out the 3000ms timeout');
+    assert.ok(Date.now() - startedAt >= 450, 'an absent socket must retry across the full timeout, not fail on the first attempt');
   } finally {
     client.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkPtyHostReachable detects a pty-host that finishes starting up partway through the probe window', async () => {
+  // Reproduces Issue #119 Step7-3's boot race: server本体 and pty-host start
+  // together (systemd's After= only orders unit starts, it does not wait for
+  // pty-host to actually finish initializing -- see docs/ccserver.service),
+  // so the very first connection attempt can hit a socket path that doesn't
+  // exist YET, not one that will never exist. checkPtyHostReachable() must
+  // keep polling and pick up pty-host once it does bind, well before its
+  // overall timeout elapses.
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-ptyhostclient-boot-race-'));
+  const sockPath = join(dir, 'pty-host.sock');
+  const client = new PtyHostClient(sockPath);
+  let host;
+  try {
+    const probe = checkPtyHostReachable(client, 3000);
+    await sleep(300);
+    host = await startPtyHost({ sockPath });
+    assert.equal(await probe, true);
+  } finally {
+    client.close();
+    if (host) await host.stop();
     rmSync(dir, { recursive: true, force: true });
   }
 });

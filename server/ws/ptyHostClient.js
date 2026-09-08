@@ -31,19 +31,24 @@ const RPC_TIMEOUT_MS = 5000;
 const CONNECT_TIMEOUT_MS = 5000;
 const RECONNECT_BASE_MS = 100;
 const RECONNECT_MAX_MS = 5000;
-// Issue #119 Step7-3: how long checkPtyHostReachable() below waits before
-// giving up. Deliberately shorter than RPC_TIMEOUT_MS/CONNECT_TIMEOUT_MS
-// above -- those exist for steady-state reconnects, where waiting longer
-// costs nothing (an unref'd background timer). This one instead runs once,
-// synchronously, in server本体's own boot sequence: a pty-host that is
-// actually up accepts the connection and answers `list` near-instantly
-// (Step6's own auto-resume already finished before pty-host ever opens its
-// RPC listener, see server/pty-host/index.js), and one that was simply never
-// started refuses the connection (or fails on a missing socket path)
-// essentially immediately too -- this timeout is only ever actually spent
-// waiting on the rare case of a process that's up but wedged, so it stays
-// short enough not to meaningfully delay boot in either common case.
+// Issue #119 Step7-3: the overall budget checkPtyHostReachable() below
+// retries within before giving up. This runs once, synchronously, in
+// server本体's own boot sequence, racing pty-host's own startup: systemd's
+// After=ccserver-pty-host.service (docs/ccserver.service) only orders the
+// two units' starts, it does NOT wait for pty-host to finish initializing
+// (git-broker orphan reaping, PtyStore setup, and -- critically -- Step6's
+// own crash-recovery auto-resume, which runs before pty-host ever opens its
+// RPC listener/socket file, see server/pty-host/index.js) before starting
+// server本体. On a simultaneous boot/restart of both units this is a real
+// race, not a rare one: a shard resuming several sandboxed sessions can
+// plausibly take longer than a single connection attempt's near-instant
+// ENOENT/ECONNREFUSED. checkPtyHostReachable() therefore must retry across
+// this whole window rather than give up on the first failed attempt --
+// see its own comment for why a single attempt used to make this budget
+// pointless in exactly this scenario.
 const STARTUP_PROBE_TIMEOUT_MS = 3000;
+// Delay between checkPtyHostReachable()'s retries below.
+const STARTUP_PROBE_RETRY_MS = 150;
 // Cap on buffered fire-and-forget frames (write/resize/kill/destroy) while
 // disconnected -- a human types slowly, so a multi-second reconnect gap never
 // comes close to this; it only guards against an unbounded leak if pty-host
@@ -559,28 +564,63 @@ export function isPtyHostEnabled(env = process.env) {
   return raw !== '0';
 }
 
-// Issue #119 Step7-3: probes whether `client`'s pty-host is actually up,
-// without joining its normal reconnect-forever lifecycle (_scheduleReconnect()
-// above keeps trying in the background on any ordinary failure) -- this is a
-// one-shot check, used at boot (server/index.js) to decide whether
-// isPtyHostEnabled()'s new default-ON needs to fall back to direct spawn for
-// this run. A deployment that has never started ccserver-pty-host.service
-// must still be able to create sessions after upgrading to this default.
-// Never throws: true means a `list` RPC actually round-tripped, false means
-// anything else (unreachable, timed out, RPC error) -- the caller only cares
-// about the boolean, not why.
+// Issue #119 Step7-3: probes whether `client`'s pty-host is actually up, used
+// at boot (server/index.js) to decide whether isPtyHostEnabled()'s new
+// default-ON needs to fall back to direct spawn for this run. A deployment
+// that has never started ccserver-pty-host.service must still be able to
+// create sessions after upgrading to this default.
+//
+// Retries on failure (ENOENT/ECONNREFUSED against a socket pty-host hasn't
+// bound yet, or any other rejection from client.list()) rather than giving up
+// on the very first attempt: a single attempt is NOT the same as "waiting up
+// to timeoutMs" -- connecting to a UDS path that doesn't exist yet fails
+// near-instantly, not after a delay, so without retrying here this function
+// would return false the moment it's called during the boot race described
+// on STARTUP_PROBE_TIMEOUT_MS above, never actually spending the time budget
+// its own timeoutMs parameter promises. Each retry goes through client's
+// normal (fresh) _connect() rather than joining its background
+// reconnect-forever lifecycle (_scheduleReconnect() above), so this stays a
+// bounded, one-shot-overall check driven entirely by this loop -- not by
+// however client's own steady-state backoff happens to be paced.
+// Never throws: true means a `list` RPC actually round-tripped before
+// timeoutMs elapsed, false means it never did (unreachable the whole time,
+// or a single in-flight attempt itself hung past the deadline) -- the caller
+// only cares about the boolean, not why.
 export async function checkPtyHostReachable(client, timeoutMs = STARTUP_PROBE_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  const poll = async () => {
+    for (;;) {
+      try {
+        await client.list();
+        return true;
+      } catch {
+        // fall through to the deadline check / retry delay below
+      }
+      if (Date.now() >= deadline) return false;
+      // Deliberately NOT unref'd, unlike this file's other timers: this
+      // whole function is meant to block server本体's own boot sequence
+      // (it's awaited at the top level in server/index.js, before
+      // fastify.listen() or anything else is holding the event loop open),
+      // so an unref'd timer here lets Node decide the event loop is empty
+      // between retries and exit early -- silently short-circuiting this
+      // function with a "Detected unsettled top-level await" warning instead
+      // of actually waiting out the retry window. Bounded to at most
+      // timeoutMs total by the deadline check above and the race below, so
+      // this can never hang boot indefinitely.
+      await new Promise((resolve) => setTimeout(resolve, STARTUP_PROBE_RETRY_MS));
+    }
+  };
+  // Also deliberately ref'd (see poll()'s comment above), and explicitly
+  // cleared once settled so it doesn't linger holding the event loop open
+  // for the rest of timeoutMs after an early success.
+  let outerTimer;
+  const timeoutPromise = new Promise((resolve) => {
+    outerTimer = setTimeout(() => resolve(false), timeoutMs);
+  });
   try {
-    await Promise.race([
-      client.list(),
-      new Promise((_, reject) => {
-        const timer = setTimeout(() => reject(new Error(`no response within ${timeoutMs}ms`)), timeoutMs);
-        timer.unref?.();
-      }),
-    ]);
-    return true;
-  } catch {
-    return false;
+    return await Promise.race([poll(), timeoutPromise]);
+  } finally {
+    clearTimeout(outerTimer);
   }
 }
 
