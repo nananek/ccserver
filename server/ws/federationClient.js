@@ -164,6 +164,18 @@ export async function initiatePairing({ remoteAddr, remoteToken, label }) {
     try { socket.destroy(); } catch { /* ignore */ }
     throw new Error(frame.error || 'pairing request was refused');
   }
+  // connectTls armed `socket`'s idle timer (tls.connect's `timeout` option)
+  // to bound how long a one-shot RPC may sit unanswered -- fine for the
+  // propose/response wait above (already independently bounded by this
+  // function's own RPC_TIMEOUT_MS timer), but fatal from here on: this
+  // socket is about to become the pair's persistent link, and a healthy
+  // link can legitimately sit idle between calls far longer than
+  // CONNECT_TIMEOUT_MS. Disable it now, exactly like federationLink.js's
+  // own dialTls does for every later reconnect -- without this, the very
+  // first link a fresh pairing creates gets destroyed out from under it
+  // ~10s after the last byte flowed, self-healing only because the normal
+  // reconnect backoff then kicks in.
+  socket.setTimeout(0);
   const row = pairing.recordOutboundRequest({
     fingerprint: info.fingerprint,
     certPem: info.pem,

@@ -17,6 +17,7 @@ import * as pairing from '../ws/federationPairing.js';
 import * as client from '../ws/federationClient.js';
 import { ensureIdentity, keyPermissionsAreSafe } from '../ws/federationIdentity.js';
 import { federationEnabled } from '../ws/federationServer.js';
+import { removeLink } from '../ws/federationLink.js';
 
 async function reconcileBestEffort() {
   try {
@@ -101,7 +102,18 @@ export async function federationRoute(fastify, opts) {
     if (!pairing.getInstance(request.params.id)) {
       return reply.code(404).send({ error: 'instance not found' });
     }
-    return { instance: pairing.revoke(request.params.id) };
+    const instance = pairing.revoke(request.params.id);
+    // Issue #142 Step 2: a revoked pair's FederationLink (if one was ever
+    // created for it -- getOrCreateLink is keyed by fingerprint, from any
+    // prior callInstanceRpc/reconcilePending/openTerminalChannel/
+    // initiatePairing call) must stop trying to reach that peer right away.
+    // Without this, a link that is currently LIVE would still self-close
+    // via its own revokeCheckTimer within 30s (see federationLink.js), but
+    // one that is still dialing or backed off after a failed attempt has no
+    // other way to learn about the revocation and would keep redialing this
+    // address forever.
+    removeLink(instance.fingerprint);
+    return { instance };
   });
 
   fastify.get('/federation/pending', async () => {

@@ -24,6 +24,7 @@ import { federationRoute } from './federation.js';
 import * as pairing from '../ws/federationPairing.js';
 import { opensslAvailable, _resetIdentityCacheForTests } from '../ws/federationIdentity.js';
 import { ensureFederationServer, stopFederationServer, _resetFederationServerForTests } from '../ws/federationServer.js';
+import { getLink } from '../ws/federationLink.js';
 
 const skip = !opensslAvailable();
 let tmpRoot;
@@ -98,6 +99,21 @@ test('full pairing + proxy lifecycle over the REST surface', { skip }, async () 
   assert.equal(aRow.status, 'pending_local_approval');
   assert.equal(aRow.label, 'my-peer');
 
+  // Regression: initiatePairing's one-shot bootstrap dial becomes this
+  // pair's persistent FederationLink (federationClient.js's initiatePairing
+  // -> adoptBootstrapSocket), reusing the very socket that carried the
+  // propose/response exchange. That socket was opened with tls.connect's
+  // `timeout` option armed (fine for a one-shot RPC bounded by its own
+  // response wait) -- if initiatePairing forgot to disable it before
+  // handing the socket off, Node would destroy this link out from under it
+  // ~10s after the last byte flows, well within how long a healthy,
+  // barely-used link is expected to sit idle. `socket.timeout` reads back
+  // the currently armed value directly, so this catches it without an
+  // actual 10s wait.
+  const bootstrapLink = getLink(aRow.fingerprint);
+  assert.equal(bootstrapLink?.connected, true, 'sanity: initiatePairing promoted its socket into a live link');
+  assert.equal(bootstrapLink.live.socket.timeout, 0, 'the promoted bootstrap socket\'s idle timeout must be disabled');
+
   // It shows up in GET /pending too (reconciled, but neither side has
   // decided yet so it stays pending).
   const pendingList = (await app.inject({ method: 'GET', url: '/api/federation/pending' })).json().pending;
@@ -150,9 +166,17 @@ test('full pairing + proxy lifecycle over the REST surface', { skip }, async () 
 
   // 6. Revoke, then every proxy call is refused locally (404) without even
   // dialing the peer.
+  assert.ok(getLink(aRow.fingerprint)?.connected, 'sanity: step 4 above left a live FederationLink to the peer');
+
   const revoke = await app.inject({ method: 'DELETE', url: `/api/federation/instances/${aRow.id}` });
   assert.equal(revoke.statusCode, 200);
   assert.equal(revoke.json().instance.status, 'revoked');
+
+  // Regression: revoking must also drop the peer's FederationLink right
+  // away (see routes/federation.js's DELETE handler) rather than leaving it
+  // registered to keep retrying/idling until its own 30s revoke-check timer
+  // (or, for a link that never made it live, forever).
+  assert.equal(getLink(aRow.fingerprint), null, 'revoke must remove the peer\'s FederationLink from the registry');
 
   const afterRevoke = await app.inject({ method: 'GET', url: `/api/federation/instances/${aRow.id}/sessions` });
   assert.equal(afterRevoke.statusCode, 404);
