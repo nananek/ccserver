@@ -4,7 +4,7 @@
 //                     i.e. when `groupMcp` is true and mcpSocketPath was set).
 //                     The CLI runs the bridge script at the fixed in-sandbox
 //                     path; which broker it reaches is decided solely by which
-//                     host socket got bound to /ccserver-sandbox-mcp.sock in
+//                     host socket got bound to /ccserver-sandbox-mcp.d/sock in
 //                     the sandbox (see sandbox.js / mcpBroker.js). Absent for
 //                     standalone sessions -- they have no group socket, so
 //                     registering it would hand the agent a broken server.

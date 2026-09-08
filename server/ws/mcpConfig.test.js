@@ -157,7 +157,7 @@ test('notify descriptor without identity -> no CCSERVER_NOTIFY_IDENTITY env key'
 
 // Standalone notify session (no group socket, mcpSocketPath null): only
 // ccserver-notify is registered -- a ccserver entry would point its bridge at
-// /ccserver-sandbox-mcp.sock which is never bound for a standalone session
+// /ccserver-sandbox-mcp.d/sock which is never bound for a standalone session
 // (the wrapper would exit "not configured", or the host path would not exist).
 test('notify(host) without a group socket registers ccserver-notify only (no ccserver)', () => {
   const { args } = buildMcpConfigArgsAndEnv('claude', {

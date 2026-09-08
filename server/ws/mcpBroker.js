@@ -302,7 +302,23 @@ export async function startReviewerBroker({ reviewerApi, sockPath }) {
   });
 }
 
-export function stopBroker({ server, sockPath, connections }) {
+// removeDir must stay opt-in (default false), never the default: the four
+// process-global brokers (notify/usage/meta/reviewer) call this from their
+// stopXBroker() at server本体 shutdown -- exactly the restart Issue #143
+// problem 1 is about -- and a pty-host-owned sandbox that survives the
+// restart still holds a directory bind to the dedicated `.d` dir this would
+// remove. rmdirSync-ing it here would unlink that directory from the host's
+// namespace; listenMcp()'s mkdirSync on the next startup then creates a
+// BRAND NEW directory (a new inode) at the same path, which the surviving
+// sandbox's bind mount never sees -- reintroducing this Issue's own bug one
+// level up (directory identity instead of socket-file identity). Only pass
+// removeDir:true from a call site that can prove no OTHER live sandbox can
+// still be depending on this exact directory (see groupManager.js's call
+// sites for which ones qualify -- notably NOT the role-replacement flow's
+// prevChannel, whose whole point is that the retiring occupant's sandbox is
+// still alive and may need this same directory back if the replacement
+// fails).
+export function stopBroker({ server, sockPath, connections }, { removeDir = false } = {}) {
   // Drop established connections too: server.close() only stops accepting
   // new ones, and a lingering connected socket would keep its McpServer
   // (and its queued handoffs/waits) alive for as long as the client holds
@@ -329,22 +345,24 @@ export function stopBroker({ server, sockPath, connections }) {
     } catch {
       // best effort
     }
-    // Issue #143 problem 1: production sockPaths (sockPathFor/
-    // getNotifySockPath and friends) each live alone in a directory dedicated
-    // to that one socket, so it can be bound into a sandbox as a directory --
-    // once the file above is gone, reclaim that directory too, or every
-    // group's control/handoff directory (unique per groupId+tag) would
-    // accumulate forever across this server本体 process's uptime (group
-    // brokers are stopped here, not restarted in place the way listenMcp()'s
-    // own rmSync, which only ever drops the file, is for). rmdirSync only
-    // removes an EMPTY directory and throws otherwise -- this module's own
-    // tests supply bare sockPaths under a shared tmp dir with siblings still
-    // in it, and this must never touch those. mkdirSync(recursive) in
-    // listenMcp() recreates a reclaimed directory on demand.
-    try {
-      rmdirSync(dirname(sockPath));
-    } catch {
-      // not empty, doesn't exist, or shared with other files -- leave it
+    if (removeDir) {
+      // Issue #143 problem 1: production sockPaths (sockPathFor/
+      // getNotifySockPath and friends) each live alone in a directory
+      // dedicated to that one socket, so it can be bound into a sandbox as a
+      // directory -- once the file above is gone AND the caller has proven
+      // this directory is truly done for good (see the removeDir contract
+      // above), reclaim it too, or a dead role/group's control/handoff
+      // directory would accumulate forever across this server本体 process's
+      // uptime. rmdirSync only removes an EMPTY directory and throws
+      // otherwise -- this module's own tests supply bare sockPaths under a
+      // shared tmp dir with siblings still in it, and this must never touch
+      // those. mkdirSync(recursive) in listenMcp() recreates a reclaimed
+      // directory on demand.
+      try {
+        rmdirSync(dirname(sockPath));
+      } catch {
+        // not empty, doesn't exist, or shared with other files -- leave it
+      }
     }
   }
 }

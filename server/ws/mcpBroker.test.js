@@ -6,7 +6,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -409,6 +409,69 @@ test('stopBroker destroys established connections', async () => {
   broker.stopBroker(channel);
   await closedByServer;
   groupManager.destroyGroup(gid);
+});
+
+// Self-review regression: stopBroker's removeDir option must default to
+// false. notify/usage/meta/reviewer's stopXBroker() calls this bare (no
+// removeDir) from server本体's SIGTERM cleanup -- exactly the restart Issue
+// #143 problem 1 is about -- and a pty-host-owned sandbox surviving that
+// restart still holds a directory bind to this exact path. If stopBroker
+// reclaimed the directory by default, the next startup's listenMcp()
+// (mkdirSync) would recreate it as a brand new directory (a different
+// inode) at the same path, which that surviving sandbox's bind mount would
+// never see -- reintroducing this Issue's own bug one layer up, at
+// directory granularity instead of socket-file granularity. Asserting the
+// directory's inode is unchanged (not just "still exists") is the point:
+// recreating an empty directory of the same name would pass an
+// existsSync-only check while still breaking every bind mount that predates
+// it.
+test('stopBroker without removeDir preserves the socket directory (inode) across a stop + re-listen cycle', async () => {
+  const notifyApi = {
+    sendNotification: async () => ({ ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } }),
+    subscribe: () => ({ ok: true, subscription: { id: 'sub-1' } }),
+    unsubscribe: () => ({ ok: true }),
+    listSubscriptions: () => [],
+  };
+  const sockPath = join(runtimeDir, 'restart-sim.d', 'sock');
+  const first = await broker.startNotifyBroker({ notifyApi, sockPath });
+  const dir = join(runtimeDir, 'restart-sim.d');
+  const inoBeforeStop = statSync(dir).ino;
+
+  broker.stopBroker(first); // no removeDir -- must behave like server本体's real stopNotifyBroker() call
+  assert.equal(existsSync(sockPath), false, 'the socket file itself is still removed');
+  assert.ok(existsSync(dir), 'the directory a sandbox may still be bind-mounted to must survive');
+  assert.equal(statSync(dir).ino, inoBeforeStop, 'the directory must be the SAME inode, not a same-named replacement');
+
+  // Simulate the restart's ensureNotifyBroker() re-listening at the same path.
+  const second = await broker.startNotifyBroker({ notifyApi, sockPath });
+  try {
+    assert.equal(statSync(dir).ino, inoBeforeStop, 'the directory a pre-restart sandbox is bound to must still be the one holding the new socket');
+    assert.ok(existsSync(sockPath), 'the new listener\'s socket file exists inside that same directory');
+  } finally {
+    broker.stopBroker(second);
+  }
+});
+
+// The other half of the removeDir contract: a caller that has proven no live
+// sandbox can still depend on this directory (groupManager.js's
+// onOrchestratorExit / destroyGroup / cleanupMemberChannels -- all of which
+// only run once the directory's one-and-only consumer session is already
+// gone) opts in explicitly to reclaim it, so a long-lived group with a dead
+// role doesn't leak this directory forever.
+test('stopBroker with removeDir:true reclaims the now-empty socket directory', async () => {
+  const notifyApi = {
+    sendNotification: async () => ({ ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } }),
+    subscribe: () => ({ ok: true, subscription: { id: 'sub-1' } }),
+    unsubscribe: () => ({ ok: true }),
+    listSubscriptions: () => [],
+  };
+  const sockPath = join(runtimeDir, 'reclaim-sim.d', 'sock');
+  const broker1 = await broker.startNotifyBroker({ notifyApi, sockPath });
+  const dir = join(runtimeDir, 'reclaim-sim.d');
+
+  broker.stopBroker(broker1, { removeDir: true });
+  assert.equal(existsSync(sockPath), false, 'the socket file is removed');
+  assert.equal(existsSync(dir), false, 'the now-empty dedicated directory is reclaimed');
 });
 
 // The process-global notification broker (ccserver-notify, see notify.js /

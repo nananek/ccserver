@@ -911,6 +911,15 @@ export async function addMember(groupId, role, options = {}) {
   // channels use the same path), orphaning the new listener's file. If the
   // replacement fails, the old channel is re-listened -- the old session is
   // never touched until the new one exists.
+  //
+  // Neither stopBroker() call below passes removeDir: prevSessionId's
+  // sandbox is STILL ALIVE and still holds a directory bind to this exact
+  // path through both failure branches (ensureHandoffChannel's rollback
+  // re-listens the SAME deterministic path) -- removing the directory here
+  // would orphan that still-running sandbox's MCP connection the same way
+  // Issue #143 problem 1 orphaned it at the file level, just one layer up.
+  // On success the path is reused immediately by the very next listenMcp()
+  // below (same groupId+role), so nothing actually leaks either way.
   if (prevChannel) stopBroker(prevChannel);
 
   const channel = await createMemberHandoffChannel(groupId, role).catch(() => null);
@@ -1144,7 +1153,15 @@ export function onOrchestratorExit(groupId) {
     settlePendingTakes(group, { timedOut: true });
   }
   if (group.controlBroker) {
-    stopBroker(group.controlBroker);
+    // removeDir:true is safe here: this control broker's directory is used
+    // exclusively by the orchestrator's own sandbox, and this function only
+    // runs once that sandbox has actually exited -- nothing else can still
+    // be holding a bind to it. Without this, a group whose orchestrator
+    // exited but which survives with workers still running (see this
+    // function's own header comment) would leak this directory forever:
+    // destroyGroup()'s own reclaim is skipped once group.controlBroker is
+    // already null below.
+    stopBroker(group.controlBroker, { removeDir: true });
     group.controlBroker = null;
   }
 }
@@ -1178,11 +1195,16 @@ export function destroyGroup(groupId) {
     cleanupMemberWorktree(group, role);
   }
   if (group.controlBroker) {
-    stopBroker(group.controlBroker);
+    // removeDir:true is safe here: every member session (including the
+    // orchestrator) was just destroyed above, so nothing can still hold a
+    // bind to either the control broker's or any handoff channel's
+    // directory -- and this groupId is retired for good (a new group gets a
+    // fresh UUID), so there is no later reuse to preserve it for either.
+    stopBroker(group.controlBroker, { removeDir: true });
     group.controlBroker = null;
   }
   for (const channel of [...group.handoffChannels.values()]) {
-    stopBroker(channel);
+    stopBroker(channel, { removeDir: true });
   }
   group.handoffChannels.clear();
   group.handoffQueue = [];
@@ -1735,7 +1757,15 @@ function onSessionCreate(session) {
 function cleanupMemberChannels(group, sessionId) {
   for (const [role, channel] of [...group.handoffChannels]) {
     if (channel.sessionId === sessionId) {
-      stopBroker(channel);
+      // removeDir:true is safe: both call sites (removeMember's explicit
+      // close-tab, onSessionExit's "worker died on its own") only run once
+      // `sessionId`'s sandbox is already gone/being torn down for good, so
+      // nothing can still hold a bind to this channel's directory. Without
+      // this, a role that stays dead for a long-lived group (the comment at
+      // this function's onSessionExit call site: "keep the member
+      // registered so the orchestrator can still inspect its status") would
+      // leak this directory forever.
+      stopBroker(channel, { removeDir: true });
       group.handoffChannels.delete(role);
     }
   }
