@@ -109,6 +109,12 @@ export function memoryFromOs() {
 }
 
 async function getMemory() {
+  // macOS has no /proc/meminfo, and node:os freemem() only counts truly-free
+  // pages (inactive/cached are reclaimable), so `total - free` overstates
+  // usage vs Activity Monitor. Use vm_stat accounting instead.
+  if (process.platform === 'darwin') {
+    return getMemoryDarwin();
+  }
   let content;
   try {
     content = await readFile('/proc/meminfo', 'utf-8');
@@ -140,6 +146,82 @@ async function getMemory() {
     swapTotal: toMb(swapTotalKb),
     swapUsed: toMb(swapTotalKb - swapFreeKb),
   };
+}
+
+// --- macOS memory (vm_stat + sysctl hw.memsize) ---
+//
+// Activity Monitor definitions:
+//   used      = wired down + active + compressor-occupied
+//   available = free + inactive + speculative + purgeable
+// Unknown/missing keys count as 0 so older/newer macOS output still parses.
+export function parseVmStat(vmStatText, memBytes, fallbackPageSize = 4096) {
+  const toMb = (b) => Math.round(b / 1024 / 1024);
+  const psMatch = /page size of (\d+) bytes/.exec(vmStatText);
+  const pageSize = psMatch ? parseInt(psMatch[1], 10) : fallbackPageSize;
+  const pages = (label) => {
+    const m = vmStatText.match(new RegExp(`^${label}:\\s+([\\d,]+)`, 'm'));
+    return m ? parseInt(m[1].replace(/,/g, ''), 10) : 0;
+  };
+  const usedPages = pages('Pages wired down') + pages('Pages active')
+    + pages('Pages occupied by compressor');
+  const availPages = pages('Pages free') + pages('Pages inactive')
+    + pages('Pages speculative') + pages('Pages purgeable');
+  return {
+    total: toMb(memBytes),
+    used: toMb(usedPages * pageSize),
+    free: toMb(pages('Pages free') * pageSize),
+    available: toMb(availPages * pageSize),
+    bufferCache: null,
+    swapTotal: 0,
+    swapUsed: 0,
+  };
+}
+
+// `vm.swapusage: total = 1024.00M  used = 345.50M  free = 678.50M  (encrypted)`
+export function parseSwapUsage(text) {
+  const toMb = (value, unit) => {
+    const mult = { K: 1024, M: 1024 ** 2, G: 1024 ** 3 }[String(unit).toUpperCase()];
+    if (!mult) return 0;
+    return Math.round((parseFloat(value) * mult) / 1024 / 1024);
+  };
+  const get = (key) => {
+    const m = String(text).match(new RegExp(`${key}\\s*=\\s*([\\d.]+)\\s*([KMG])`, 'i'));
+    return m ? toMb(m[1], m[2]) : 0;
+  };
+  return { swapTotal: get('total'), swapUsed: get('used') };
+}
+
+async function getMemoryDarwin() {
+  try {
+    const [{ stdout: vmOut }, { stdout: memOut }] = await Promise.all([
+      execFileAsync('vm_stat', { timeout: 5000 }),
+      execFileAsync('sysctl', ['-n', 'hw.memsize'], { timeout: 5000 }),
+    ]);
+    const memBytes = parseInt(String(memOut).trim(), 10);
+    if (!Number.isFinite(memBytes) || memBytes <= 0) return memoryFromOs();
+    let fallbackPageSize = 4096;
+    if (!/page size of \d+ bytes/.test(vmOut)) {
+      try {
+        const { stdout: psOut } = await execFileAsync('sysctl', ['-n', 'hw.pagesize'], { timeout: 5000 });
+        const ps = parseInt(String(psOut).trim(), 10);
+        if (Number.isFinite(ps) && ps > 0) fallbackPageSize = ps;
+      } catch {
+        // keep 4096
+      }
+    }
+    const mem = parseVmStat(vmOut, memBytes, fallbackPageSize);
+    try {
+      const { stdout: swapOut } = await execFileAsync('sysctl', ['vm.swapusage'], { timeout: 5000 });
+      const { swapTotal, swapUsed } = parseSwapUsage(swapOut);
+      mem.swapTotal = swapTotal;
+      mem.swapUsed = swapUsed;
+    } catch {
+      // swap stays 0
+    }
+    return mem;
+  } catch {
+    return memoryFromOs();
+  }
 }
 
 function getTemperatures() {
@@ -320,34 +402,47 @@ const cpuModel = getCpuModel();
 
 const EXCLUDE_FS = new Set(['tmpfs', 'devtmpfs', 'udev', 'squashfs', 'overlay', 'ramfs', 'cgroup', 'cgroup2', 'sysfs', 'proc', 'devpts', 'securityfs', 'pstore', 'efivarfs', 'bpf', 'autofs', 'mqueue', 'hugetlbfs', 'fusectl', 'configfs', 'debugfs', 'tracefs']);
 
+// Mount points that are never useful as storage rows. macOS APFS exposes the
+// sealed system volume group here (/System/Volumes/*); showing them duplicates
+// the same pool next to `/` and leaks OS-internal mounts into the UI.
+const EXCLUDE_MOUNT_PREFIXES = ['/System/'];
+const EXCLUDE_MOUNTS = new Set(['/System']);
+
+export function parseDfOutput(stdout) {
+  const entries = [];
+  for (const line of String(stdout).trim().split('\n').slice(1)) {
+    const parts = line.split(/\s+/);
+    if (parts.length < 6) continue;
+    const [device, total, used, available] = parts;
+    // df -P prints the mount point last, so rejoin to keep spaces in it
+    // (e.g. /Volumes/External SSD).
+    const mount = parts.slice(5).join(' ');
+    if (EXCLUDE_MOUNTS.has(mount) || EXCLUDE_MOUNT_PREFIXES.some((p) => mount.startsWith(p))) continue;
+    const fsType = device.startsWith('/dev/') ? null : device;
+    if (fsType && EXCLUDE_FS.has(fsType)) continue;
+    if (!device.startsWith('/dev/')) continue;
+    const toMb = (k) => Math.round((parseInt(k, 10) * 1024) / 1024 / 1024);
+    const totalMb = toMb(total);
+    if (totalMb === 0) continue;
+    const usedMb = toMb(used);
+    entries.push({
+      mount,
+      device: device.replace('/dev/', ''),
+      total: totalMb,
+      used: usedMb,
+      available: toMb(available),
+      usedPct: Math.round((usedMb / totalMb) * 1000) / 10,
+    });
+  }
+  return entries;
+}
+
 async function getStorageInfo() {
   try {
     // -B1 is GNU-df-only and fails on BSD/macOS.
     // -k (1K blocks) works on both, so multiply by 1024 for byte conversion.
     const { stdout } = await execFileAsync('df', ['-P', '-k'], { timeout: 5000 });
-    const lines = stdout.trim().split('\n').slice(1);
-    const entries = [];
-    for (const line of lines) {
-      const parts = line.split(/\s+/);
-      if (parts.length < 6) continue;
-      const [device, total, used, available, , mount] = parts;
-      const fsType = device.startsWith('/dev/') ? null : device;
-      if (fsType && EXCLUDE_FS.has(fsType)) continue;
-      if (!device.startsWith('/dev/')) continue;
-      const toMb = (k) => Math.round((parseInt(k, 10) * 1024) / 1024 / 1024);
-      const totalMb = toMb(total);
-      if (totalMb === 0) continue;
-      const usedMb = toMb(used);
-      entries.push({
-        mount,
-        device: device.replace('/dev/', ''),
-        total: totalMb,
-        used: usedMb,
-        available: toMb(available),
-        usedPct: Math.round((usedMb / totalMb) * 1000) / 10,
-      });
-    }
-    return entries;
+    return parseDfOutput(stdout);
   } catch {
     return [];
   }
