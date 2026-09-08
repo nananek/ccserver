@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -138,6 +138,31 @@ test('patchPtyHostSessionMeta on an id with no existing entry is a silent no-op,
   withTempMetaPath(() => {
     patchPtyHostSessionMeta('does-not-exist', { latestClaudeSessionId: 'resume-id-1' });
     assert.deepEqual(loadPtyHostSessionMeta(), {}, 'nothing was created from a partial patch');
+  });
+});
+
+// Issue #119 Step6-1's `env` field can carry near-enough this whole process's
+// environment (buildSessionEnv() only strips a small server-only denylist),
+// so a real secret (API key, token) picked up from a launching shell's env
+// can land in this file -- unlike every other field this store has ever
+// held. Skipped on non-POSIX platforms (Windows file permissions don't map
+// onto a POSIX mode bitmask the same way).
+const isPosix = process.platform !== 'win32';
+test('setPtyHostSessionMeta writes the file with 0600 permissions, not the umask default', { skip: !isPosix }, () => {
+  withTempMetaPath((path) => {
+    setPtyHostSessionMeta('sess-1', { cwd: '/a', env: { SOME_SECRET: 'sh-1-abc' } });
+    const mode = statSync(path).mode & 0o777;
+    assert.equal(mode, 0o600);
+  });
+});
+
+test('writing again re-tightens permissions even if the file already existed looser (e.g. pre-Step6 install)', { skip: !isPosix }, () => {
+  withTempMetaPath((path) => {
+    setPtyHostSessionMeta('sess-1', { cwd: '/a' });
+    chmodSync(path, 0o644);
+    setPtyHostSessionMeta('sess-1', { cwd: '/a-updated' });
+    const mode = statSync(path).mode & 0o777;
+    assert.equal(mode, 0o600);
   });
 });
 

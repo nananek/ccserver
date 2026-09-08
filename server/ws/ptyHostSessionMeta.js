@@ -29,7 +29,7 @@
 // -- every mutation is immediately durable, and a reader always sees the
 // latest state even across module reloads (e.g. in tests).
 
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -52,7 +52,17 @@ function readAll() {
 function writeAll(all) {
   try {
     if (Object.keys(all).length > 0) {
-      writeFileSync(metaPath(), JSON.stringify(all));
+      const path = metaPath();
+      // Issue #119 Step6-1 added a per-session `env` field carrying nearly
+      // this whole process's environment (buildSessionEnv() only strips a
+      // small server-only denylist -- see sessionEnv.js), so this file can
+      // now hold real secrets (API keys, tokens) that a launching shell's
+      // env happened to carry. `mode` only takes effect when writeFileSync
+      // itself creates the file; chmodSync also re-tightens a file that
+      // already existed (e.g. upgraded from a pre-Step6 install, or created
+      // under a looser umask) on every write, not just the first.
+      writeFileSync(path, JSON.stringify(all), { mode: 0o600 });
+      try { chmodSync(path, 0o600); } catch { /* best effort */ }
     } else {
       try { unlinkSync(metaPath()); } catch { /* nothing to remove */ }
     }
