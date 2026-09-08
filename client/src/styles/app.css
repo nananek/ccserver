@@ -4211,15 +4211,6 @@ body {
 }
 
 /* AuthGate / LoginView (Issue #141 Step4, CCSERVER_AUTH_MODE=passkey only). */
-.authgate-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100vh;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
 .login-view {
   display: flex;
   align-items: center;
