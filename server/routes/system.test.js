@@ -114,7 +114,7 @@ tmpfs              100000     10000     90000    10%    /run
 `;
 
 test('parseDfOutput drops /System mounts but keeps / and spaced mounts', () => {
-  const rows = parseDfOutput(DF_MACOS);
+  const rows = parseDfOutput(DF_MACOS, 'darwin');
   const mounts = rows.map((r) => r.mount);
   assert.ok(!mounts.some((m) => m === '/System' || m.startsWith('/System/')), `no /System rows: ${mounts}`);
   assert.ok(mounts.includes('/'), 'root kept');
@@ -127,7 +127,7 @@ test('parseDfOutput drops /System mounts but keeps / and spaced mounts', () => {
 });
 
 test('parseDfOutput reports Data volume numbers on / (macOS firmlink view)', () => {
-  const rows = parseDfOutput(DF_MACOS);
+  const rows = parseDfOutput(DF_MACOS, 'darwin');
   const root = rows.find((r) => r.mount === '/');
   // /System/Volumes/Data row (used 309672600K) wins over the sealed
   // system snapshot row (used 22190104K); device follows the numbers.
@@ -140,8 +140,24 @@ test('parseDfOutput reports Data volume numbers on / (macOS firmlink view)', () 
 test('parseDfOutput keeps / as-is without a Data row (Linux)', () => {
   const rows = parseDfOutput(`Filesystem     1024-blocks      Used Available Capacity  Mounted on
 /dev/sda1         10000000   2000000   8000000    20%    /
-`);
+`, 'linux');
   assert.equal(rows.length, 1);
   assert.equal(rows[0].mount, '/');
   assert.equal(rows[0].device, 'sda1');
+});
+
+test('parseDfOutput on linux keeps /System rows and root as-is', () => {
+  const rows = parseDfOutput(`Filesystem     1024-blocks      Used Available Capacity  Mounted on
+/dev/sda1         10000000   2000000   8000000    20%    /
+/dev/sdb1        478724992 309672600 117794720    73%    /System/Volumes/Data
+/dev/sdc1          5000000   1000000   4000000    20%    /System/archive
+`, 'linux');
+  const mounts = rows.map((r) => r.mount);
+  const root = rows.find((r) => r.mount === '/');
+  const toMb = (k) => Math.round((k * 1024) / 1024 / 1024);
+  assert.equal(root.device, 'sda1');
+  assert.equal(root.total, toMb(10000000));
+  assert.equal(root.used, toMb(2000000));
+  assert.ok(mounts.includes('/System/Volumes/Data'), 'Data row kept as normal mount on linux');
+  assert.ok(mounts.includes('/System/archive'), '/System/archive not excluded on linux');
 });

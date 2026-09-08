@@ -408,7 +408,8 @@ const EXCLUDE_FS = new Set(['tmpfs', 'devtmpfs', 'udev', 'squashfs', 'overlay', 
 const EXCLUDE_MOUNT_PREFIXES = ['/System/'];
 const EXCLUDE_MOUNTS = new Set(['/System']);
 
-export function parseDfOutput(stdout) {
+export function parseDfOutput(stdout, platform = process.platform) {
+  const isDarwin = platform === 'darwin';
   const entries = [];
   // On macOS the `/` row is the sealed read-only system snapshot while the
   // writable, user-visible capacity lives on /System/Volumes/Data (same pool,
@@ -421,7 +422,7 @@ export function parseDfOutput(stdout) {
     // df -P prints the mount point last, so rejoin to keep spaces in it
     // (e.g. /Volumes/External SSD).
     const mount = parts.slice(5).join(' ');
-    if (EXCLUDE_MOUNTS.has(mount) || EXCLUDE_MOUNT_PREFIXES.some((p) => mount.startsWith(p))) {
+    if (isDarwin && (EXCLUDE_MOUNTS.has(mount) || EXCLUDE_MOUNT_PREFIXES.some((p) => mount.startsWith(p)))) {
       if (mount === '/System/Volumes/Data') dataRow = { device, total, used, available };
       continue;
     }
@@ -441,7 +442,7 @@ export function parseDfOutput(stdout) {
       usedPct: Math.round((usedMb / totalMb) * 1000) / 10,
     });
   }
-  if (dataRow) {
+  if (isDarwin && dataRow) {
     const root = entries.find((e) => e.mount === '/');
     if (root) {
       const toMb = (k) => Math.round((parseInt(k, 10) * 1024) / 1024 / 1024);
@@ -464,7 +465,7 @@ async function getStorageInfo() {
     // -B1 is GNU-df-only and fails on BSD/macOS.
     // -k (1K blocks) works on both, so multiply by 1024 for byte conversion.
     const { stdout } = await execFileAsync('df', ['-P', '-k'], { timeout: 5000 });
-    return parseDfOutput(stdout);
+    return parseDfOutput(stdout, process.platform);
   } catch {
     return [];
   }
