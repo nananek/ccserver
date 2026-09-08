@@ -126,6 +126,36 @@ test('POST /api/auth/login-token: a token can only be redeemed once', async () =
 });
 
 // ---------------------------------------------------------------------------
+// /api/auth/mode, /api/auth/session (Issue #141 Step4)
+//
+// Both routes' actual unauthenticated-vs-session-gated behavior lives in
+// server/index.js's onRequest hook (mode is on UNAUTHENTICATED_AUTH_ROUTES,
+// session deliberately is not) -- this test app registers authRoute() alone
+// with no such hook, so what's verified here is only the handlers'
+// bodies, not the gating. There's no existing test harness in this repo that
+// boots the full server/index.js app (it also opens ports, restores
+// sessions, etc.), so that gating is verified by code review instead.
+
+test('GET /api/auth/mode: reports the current CCSERVER_AUTH_MODE', async () => {
+  const res = await app.inject({ method: 'GET', url: '/api/auth/mode' });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { mode: 'passkey' });
+});
+
+test('GET /api/auth/mode: reflects a non-passkey mode too (no requirePasskeyMode gate on this route)', async () => {
+  process.env.CCSERVER_AUTH_MODE = 'token';
+  const res = await app.inject({ method: 'GET', url: '/api/auth/mode' });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { mode: 'token' });
+});
+
+test('GET /api/auth/session: 200 with no body requirement (gating happens in server/index.js, not here)', async () => {
+  const res = await app.inject({ method: 'GET', url: '/api/auth/session' });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { success: true });
+});
+
+// ---------------------------------------------------------------------------
 // /api/auth/webauthn/* (Issue #141 Step3)
 
 function findCookie(res, name) {
@@ -176,6 +206,32 @@ async function registerCredential({ label } = {}) {
   assert.equal(verifyRes.statusCode, 200, `register-verify failed: ${verifyRes.body}`);
   return { credentialId, privateKey, verifyRes };
 }
+
+test('GET /api/auth/webauthn/credentials: 400 when CCSERVER_AUTH_MODE is not passkey', async () => {
+  process.env.CCSERVER_AUTH_MODE = 'token';
+  const res = await app.inject({ method: 'GET', url: '/api/auth/webauthn/credentials' });
+  assert.equal(res.statusCode, 400);
+});
+
+test('GET /api/auth/webauthn/credentials: empty list when nothing is registered', async () => {
+  const res = await app.inject({ method: 'GET', url: '/api/auth/webauthn/credentials' });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { credentials: [] });
+});
+
+test('GET /api/auth/webauthn/credentials: lists registered credentials without exposing public_key/counter', async () => {
+  const { credentialId } = await registerCredential({ label: 'YubiKey' });
+  const res = await app.inject({ method: 'GET', url: '/api/auth/webauthn/credentials' });
+  assert.equal(res.statusCode, 200);
+  const { credentials } = res.json();
+  assert.equal(credentials.length, 1);
+  assert.equal(credentials[0].id, credentialId.toString('base64url'));
+  assert.equal(credentials[0].label, 'YubiKey');
+  assert.ok(Number.isFinite(credentials[0].createdAt));
+  assert.equal(credentials[0].lastUsedAt, null);
+  assert.equal(credentials[0].public_key, undefined);
+  assert.equal(credentials[0].counter, undefined);
+});
 
 test('POST /api/auth/webauthn/register-options: 400 when CCSERVER_AUTH_MODE is not passkey', async () => {
   process.env.CCSERVER_AUTH_MODE = 'token';

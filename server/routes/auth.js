@@ -1,11 +1,13 @@
-// Login/auth REST surface (Issue #141 Step2/Step3). Registered under /api,
-// so its full path is /api/auth/* -- server/index.js's onRequest hook
+// Login/auth REST surface (Issue #141 Step2/3/4). Registered under /api, so
+// its full path is /api/auth/* -- server/index.js's onRequest hook
 // allowlists specific paths under here (UNAUTHENTICATED_AUTH_ROUTES/
-// isAuthRoute) that must work with no session yet: login-token and the two
-// webauthn/authenticate-* endpoints below. webauthn/register-* is
+// isAuthRoute) that must work with no session yet: mode, login-token, and
+// the two webauthn/authenticate-* endpoints below. webauthn/register-* is
 // deliberately NOT on that allowlist -- registering a passkey requires
 // already being logged in, and omitting it there means it simply falls
-// through to the normal session check like any other route.
+// through to the normal session check like any other route. session (Step4)
+// is also deliberately not on it, for the opposite reason: it exists
+// specifically to answer "does the normal session check pass".
 //
 // register-verify/authenticate-verify's ceremony-completing endpoints stay
 // generic ("verification failed") on every failure path rather than echoing
@@ -46,6 +48,30 @@ function requirePasskeyMode(reply) {
 }
 
 export async function authRoute(fastify, opts) {
+  // Issue #141 Step4: lets the client (client/src/auth.js) know which auth
+  // mode it's dealing with before it can possibly have a session yet, so it
+  // can decide whether to render LoginView at all. Unauthenticated in every
+  // mode (server/index.js's UNAUTHENTICATED_AUTH_ROUTES) -- in `token` mode
+  // that onRequest hook has no allowlist of its own and gates this route
+  // like any other, so it only actually answers unauthenticated in `none`/
+  // `passkey`; the client treats a failed call the same as `token` mode
+  // (fall through to the pre-#141 prompt()-on-401 behavior), which is
+  // exactly correct there since a valid request would need the token anyway.
+  fastify.get('/auth/mode', async () => {
+    return { mode: resolveAuthMode() };
+  });
+
+  // Issue #141 Step4: cheap "am I still logged in" check for the client's
+  // AuthGate. Only meaningful in `passkey` mode (the only mode with a
+  // session concept) -- there it falls through to the normal onRequest
+  // session check like any other non-allowlisted route, so 200 vs 401 here
+  // *is* the answer. In `token`/`none` mode nothing gates this route, so it
+  // always returns 200, but the client never calls it there (mode !==
+  // 'passkey' skips the session check entirely).
+  fastify.get('/auth/session', async () => {
+    return { success: true };
+  });
+
   // Exchanges a CLI-issued one-time token (server/cli/issue-login-token.js,
   // フロー1) for a session cookie.
   fastify.post('/auth/login-token', async (request, reply) => {
@@ -73,6 +99,27 @@ export async function authRoute(fastify, opts) {
     const sessionId = createSession();
     reply.header('Set-Cookie', sessionCookieHeader(sessionId, { secure: request.protocol === 'https' }));
     return { success: true };
+  });
+
+  // Registered-passkey list for SettingsView's passkey section (Issue #141
+  // Step4). Requires an existing session, same reasoning as register-*
+  // below (falls through to the normal onRequest check, not on
+  // UNAUTHENTICATED_AUTH_ROUTES). Deliberately excludes public_key/counter
+  // (verification internals, not useful to display) -- id is included only
+  // as a stable React key on the client, not shown to the user.
+  fastify.get('/auth/webauthn/credentials', async (request, reply) => {
+    if (!requirePasskeyMode(reply)) return;
+    const rows = getDb().prepare(
+      'SELECT id, label, created_at, last_used_at FROM webauthn_credentials ORDER BY created_at ASC'
+    ).all();
+    return {
+      credentials: rows.map((row) => ({
+        id: row.id,
+        label: row.label,
+        createdAt: row.created_at,
+        lastUsedAt: row.last_used_at,
+      })),
+    };
   });
 
   // WebAuthn passkey registration (Issue #141 Step3, フロー2). Requires an

@@ -93,14 +93,18 @@ const AUTH_MODE = resolveAuthMode();
 
 // Endpoints under /api/auth that must work with NO session yet -- the ones
 // that exist to *create* one (login-token; WebAuthn authentication
-// options/verify). This is an explicit allowlist, not a blanket '/api/auth'
-// prefix exemption: Step3 also adds WebAuthn *registration*
-// (register-options/register-verify, for adding a passkey while already
-// logged in) under the same /api/auth/webauthn/* path, and that one must
-// require an existing session like any other route -- a prefix exemption
-// would silently bypass auth for it too. It's deliberately absent here so it
-// falls through to the normal session check below.
+// options/verify) plus Step4's mode probe, which the client needs before it
+// can know whether a session is even the right concept yet. This is an
+// explicit allowlist, not a blanket '/api/auth' prefix exemption: Step3 also
+// adds WebAuthn *registration* (register-options/register-verify, for
+// adding a passkey while already logged in) under the same
+// /api/auth/webauthn/* path, and that one must require an existing session
+// like any other route -- a prefix exemption would silently bypass auth for
+// it too. Likewise Step4's /api/auth/session (client.js's "am I still
+// logged in" check) is deliberately absent so it falls through to the
+// normal session check below -- that's the whole point of it.
 const UNAUTHENTICATED_AUTH_ROUTES = new Set([
+  '/api/auth/mode',
   '/api/auth/login-token',
   '/api/auth/webauthn/authenticate-options',
   '/api/auth/webauthn/authenticate-verify',

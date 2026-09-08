@@ -4209,3 +4209,72 @@ body {
 .markdown-body input[type="checkbox"] {
   margin-right: 6px;
 }
+
+/* AuthGate / LoginView (Issue #141 Step4, CCSERVER_AUTH_MODE=passkey only). */
+.authgate-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.login-view {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: var(--bg-primary);
+}
+
+.login-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 32px;
+  max-width: 360px;
+  width: 90%;
+}
+
+.login-title {
+  font-size: 20px;
+  margin-bottom: 4px;
+}
+
+.login-subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: 20px;
+}
+
+.login-passkey-btn {
+  width: 100%;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 20px 0;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.login-token-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.login-token-form button {
+  width: 100%;
+}
