@@ -25,7 +25,7 @@ import {
 import { stripAnsi } from './mcpTools.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { recordSessionLimitReset } from '../sessionLimitState.js';
-import { getPtyHostClient, getAllPtyHostClients, shardIndexForKey, shardKeyForSession } from './ptyHostClient.js';
+import { getPtyHostClient, getAllPtyHostClients, shardIndexForKey, shardKeyForSession, isPtyHostEnabled } from './ptyHostClient.js';
 import { setPtyHostSessionMeta, patchPtyHostSessionMeta, deletePtyHostSessionMeta, loadPtyHostSessionMeta } from './ptyHostSessionMeta.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -421,7 +421,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
     // no separate crash-recovery path for it to feed), and app==='claude'
     // gates the extraction itself (every other app's extractResumeSessionId
     // always returns null, see appLaunch.js).
-    if (process.env.CCSERVER_PTY_HOST === '1' && session.app === 'claude') {
+    if (isPtyHostEnabled() && session.app === 'claude') {
       session.resumeIdDetectBuf = (session.resumeIdDetectBuf + data).slice(-RESUME_ID_DETECT_BUF_MAX_CHARS);
       // extractResumeSessionId does its own ANSI-stripping internally (unlike
       // findSessionLimitReset above), so the raw window is passed straight
@@ -922,7 +922,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // checks that depend on server本体's OWN state (the live `sessions` Map,
   // this project's group-files dir) still run here -- pty-host has no
   // visibility into either.
-  const usePtyHost = process.env.CCSERVER_PTY_HOST === '1';
+  const usePtyHost = isPtyHostEnabled();
   let useSandbox = false;
   let sandboxDocker = false;
   let sandboxStateDir = null;
@@ -2196,7 +2196,7 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
   // not race pty-host to remove the same directory out from under it.
   // session.sandboxGitBrokerProc/Dir/CommitGuardDir stay null in this mode,
   // so those blocks would already no-op even without the guard.
-  if (process.env.CCSERVER_PTY_HOST !== '1') {
+  if (!isPtyHostEnabled()) {
     if (session.sandboxStateDir) {
       try {
         rmSync(session.sandboxStateDir, { recursive: true, force: true });
@@ -2258,7 +2258,7 @@ let ptyHostDestroyedHandlerArmed = false;
 // at boot; it is not expected to change over this process's lifetime (see
 // ptyHostClient.js's shardCount() comment).
 export function initPtyHostDestroyedHandler() {
-  if (process.env.CCSERVER_PTY_HOST !== '1') return;
+  if (!isPtyHostEnabled()) return;
   if (ptyHostDestroyedHandlerArmed) return;
   ptyHostDestroyedHandlerArmed = true;
   for (const client of getAllPtyHostClients()) {
@@ -2329,7 +2329,7 @@ let ptyHostDisconnectedHandlerArmed = false;
 // the existing orphaned-metadata path -- guessing now would destroy
 // information Step6 (auto-resume) will want.
 export function initPtyHostDisconnectedHandler() {
-  if (process.env.CCSERVER_PTY_HOST !== '1') return;
+  if (!isPtyHostEnabled()) return;
   if (ptyHostDisconnectedHandlerArmed) return;
   ptyHostDisconnectedHandlerArmed = true;
   for (const client of getAllPtyHostClients()) {
@@ -2517,7 +2517,7 @@ async function reattachLiveSession(live, meta, client, shardIndex) {
 // future restore attempt once its shard comes back, rather than guessed at
 // now.
 export async function restorePtyHostSessions() {
-  if (process.env.CCSERVER_PTY_HOST !== '1') {
+  if (!isPtyHostEnabled()) {
     return { restored: 0, orphanedLive: 0, orphanedMeta: 0, alreadyExited: 0 };
   }
 
@@ -2643,7 +2643,7 @@ async function reconcileShardAfterReconnect(shardIndex, client) {
 // CCSERVER_PTY_HOST is unset; idempotent the same way
 // initPtyHostDestroyedHandler/initPtyHostDisconnectedHandler are.
 export function initPtyHostReconnectedHandler() {
-  if (process.env.CCSERVER_PTY_HOST !== '1') return;
+  if (!isPtyHostEnabled()) return;
   if (ptyHostReconnectedHandlerArmed) return;
   ptyHostReconnectedHandlerArmed = true;
   const shardClients = getAllPtyHostClients();
@@ -2710,7 +2710,7 @@ export function gracefulShutdown() {
   // session.ptyProcess.kill()/.destroy(), which for a RemotePty is an actual
   // fire-and-forget kill/destroy RPC to pty-host (see ptyHostClient.js) --
   // exactly the "pty dies with the server本体 restart" bug this step fixes.
-  if (process.env.CCSERVER_PTY_HOST === '1') {
+  if (isPtyHostEnabled()) {
     for (const [id, session] of sessions) {
       if (session.timeoutTimer) {
         clearTimeout(session.timeoutTimer);
