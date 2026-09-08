@@ -413,7 +413,11 @@ export function parseDfOutput(stdout, platform = process.platform) {
   const entries = [];
   // On macOS the `/` row is the sealed read-only system snapshot while the
   // writable, user-visible capacity lives on /System/Volumes/Data (same pool,
-  // firmlinked view). Keep the Data row aside so `/` can report its numbers.
+  // firmlinked view). Keep the Data row aside so `/` can report container
+  // numbers. APFS shares Total/Available across the container and only Used
+  // is per-volume, so Data's Used alone undercounts vs Finder/Settings.
+  // Available matches `system_profiler` Free, so derive used as total -
+  // available.
   let dataRow = null;
   for (const line of String(stdout).trim().split('\n').slice(1)) {
     const parts = line.split(/\s+/);
@@ -448,11 +452,15 @@ export function parseDfOutput(stdout, platform = process.platform) {
       const toMb = (k) => Math.round((parseInt(k, 10) * 1024) / 1024 / 1024);
       const totalMb = toMb(dataRow.total);
       if (totalMb > 0) {
-        const usedMb = toMb(dataRow.used);
+        const availableMb = toMb(dataRow.available);
+        // Container-level usage. Data's own Used omits System/Preboot etc.
+        // sharing the same pool; Linux keeps its own Used field (reserved
+        // blocks), so this override stays darwin-only via isDarwin above.
+        const usedMb = toMb(parseInt(dataRow.total, 10) - parseInt(dataRow.available, 10));
         root.device = dataRow.device.replace('/dev/', '');
         root.total = totalMb;
         root.used = usedMb;
-        root.available = toMb(dataRow.available);
+        root.available = availableMb;
         root.usedPct = Math.round((usedMb / totalMb) * 1000) / 10;
       }
     }

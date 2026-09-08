@@ -126,15 +126,18 @@ test('parseDfOutput drops /System mounts but keeps / and spaced mounts', () => {
   }
 });
 
-test('parseDfOutput reports Data volume numbers on / (macOS firmlink view)', () => {
+test('parseDfOutput reports container usage on / (macOS firmlink view)', () => {
   const rows = parseDfOutput(DF_MACOS, 'darwin');
   const root = rows.find((r) => r.mount === '/');
-  // /System/Volumes/Data row (used 309672600K) wins over the sealed
-  // system snapshot row (used 22190104K); device follows the numbers.
+  // APFS shares Total/Available across the container; Data's own Used
+  // (309672600K) omits System/Preboot, so derive container used as
+  // total - available to match Finder/system_profiler. Device follows Data.
   const toMb = (k) => Math.round((k * 1024) / 1024 / 1024);
   assert.equal(root.device, 'disk3s1');
-  assert.equal(root.used, toMb(309672600));
+  assert.equal(root.total, toMb(478724992));
   assert.equal(root.available, toMb(117794720));
+  assert.equal(root.used, toMb(478724992 - 117794720));
+  assert.equal(root.used + root.available, root.total);
 });
 
 test('parseDfOutput keeps / as-is without a Data row (Linux)', () => {
