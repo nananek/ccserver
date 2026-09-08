@@ -40,7 +40,17 @@ import { verifySessionCookie } from './authSessions.js';
 import { resolveAuthMode } from './authMode.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const fastify = Fastify({ logger: true });
+// trustProxy scoped to loopback only (Issue #141 Step2): the documented HTTPS
+// deployment path (Tailscale Serve, docs-site deployment/tailscale.md) always
+// reverse-proxies from 127.0.0.1 to this process, and passkey mode's session
+// cookie decides its Secure attribute from request.protocol
+// (authSessions.js/routes/auth.js) -- without this, request.protocol sees the
+// plaintext hop from the proxy and never reports 'https', so Secure would
+// never be set even for a genuinely HTTPS-fronted deployment. Scoping to
+// loopback (rather than trustProxy: true) means a direct, non-proxied
+// connection -- this server also binds 0.0.0.0, so one is reachable -- can't
+// spoof X-Forwarded-Proto to influence its own response.
+const fastify = Fastify({ logger: true, trustProxy: ['127.0.0.1', '::1'] });
 
 // SQLite (worker presets today, more stores in later phases): open + migrate
 // before anything that might touch it -- notably the CCSERVER_AUTH_MODE=passkey
@@ -80,9 +90,18 @@ try {
 const AUTH_TOKEN = process.env.CCSERVER_TOKEN;
 const AUTH_MODE = resolveAuthMode();
 
-// Login/WebAuthn endpoints (server/routes/auth.js, Step2/Step3) must never be
-// gated by the very auth hook they exist to satisfy.
-const isAuthRoute = (url) => url.startsWith('/api/auth');
+// Endpoints under /api/auth that must work with NO session yet -- the ones
+// that exist to *create* one (login-token now; Step3's WebAuthn
+// authentication options/verify later). This is an explicit allowlist, not a
+// blanket '/api/auth' prefix exemption: Step3 also adds WebAuthn
+// *registration* (adding a passkey while already logged in) under the same
+// /api/auth/webauthn/* path, and that one must require an existing session
+// like any other route -- a prefix exemption would silently bypass auth for
+// it too. Step3 should add its unauthenticated routes here and leave
+// registration off this list so it falls through to the normal session
+// check below.
+const UNAUTHENTICATED_AUTH_ROUTES = new Set(['/api/auth/login-token']);
+const isAuthRoute = (url) => UNAUTHENTICATED_AUTH_ROUTES.has(url.split('?')[0]);
 
 if (AUTH_MODE === 'token') {
   // Legacy Jupyter-style shared-secret auth, unmodified from before Issue #141.

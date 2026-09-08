@@ -1,14 +1,14 @@
 // Login/auth REST surface (Issue #141 Step2). Registered under /api, so its
-// full path is /api/auth/* -- server/index.js's onRequest hook special-cases
-// that prefix (isAuthRoute) so this route is reachable without a session of
-// its own; it's the thing that *creates* one.
+// full path is /api/auth/* -- server/index.js's onRequest hook allowlists
+// this specific path (UNAUTHENTICATED_AUTH_ROUTES/isAuthRoute) so it's
+// reachable without a session of its own; it's the thing that *creates* one.
 //
 // Step3 will add /api/auth/webauthn/* here for passkey registration and
-// authentication. Note that registration (adding a passkey while already
-// logged in) is NOT covered by the same isAuthRoute exemption's rationale --
-// unlike login-token/webauthn-authentication, which must work with no
-// session yet, registration should require one. Step3 will need to either
-// narrow isAuthRoute or check verifySessionCookie() itself for that endpoint.
+// authentication. Registration (adding a passkey while already logged in)
+// must NOT be added to UNAUTHENTICATED_AUTH_ROUTES -- unlike
+// login-token/webauthn-authentication, which must work with no session yet,
+// registration should require one and will simply fall through to the normal
+// session check by being absent from that allowlist.
 
 import { hashLoginToken } from '../loginTokens.js';
 import { createSession, sessionCookieHeader } from '../authSessions.js';
