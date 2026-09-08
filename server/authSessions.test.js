@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { getDb, closeDb } from './db.js';
 import {
   verifySessionCookie,
+  createSession,
+  sessionCookieHeader,
   SESSION_COOKIE_NAME,
   SESSION_TTL_MS,
   SESSION_TOUCH_INTERVAL_MS,
@@ -84,4 +86,30 @@ test('verifySessionCookie: throttles the extending UPDATE when last_seen_at is r
   const row = db.prepare('SELECT expires_at, last_seen_at FROM auth_sessions WHERE id = ?').get('s3');
   assert.equal(row.expires_at, originalExpiry, 'still within the throttle window -- no extending write');
   assert.equal(row.last_seen_at, recentSeen);
+});
+
+test('createSession: inserts a row that verifySessionCookie then accepts', () => {
+  const id = createSession();
+  assert.equal(typeof id, 'string');
+  assert.ok(id.length > 0);
+  assert.equal(verifySessionCookie(requestWithCookie(`${SESSION_COOKIE_NAME}=${id}`)), true);
+});
+
+test('createSession: two calls never produce the same id', () => {
+  const a = createSession();
+  const b = createSession();
+  assert.notEqual(a, b);
+});
+
+test('sessionCookieHeader: includes HttpOnly/SameSite=Lax/Max-Age but not Secure by default', () => {
+  const header = sessionCookieHeader('abc');
+  assert.match(header, new RegExp(`^${SESSION_COOKIE_NAME}=abc; Path=/; HttpOnly; SameSite=Lax; Max-Age=\\d+$`));
+  assert.ok(!header.includes('Secure'));
+  const maxAge = Number(header.match(/Max-Age=(\d+)/)[1]);
+  assert.equal(maxAge, Math.floor(SESSION_TTL_MS / 1000));
+});
+
+test('sessionCookieHeader: adds Secure when asked', () => {
+  const header = sessionCookieHeader('abc', { secure: true });
+  assert.ok(header.includes('; Secure'));
 });

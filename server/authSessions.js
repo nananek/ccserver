@@ -1,15 +1,14 @@
-// CCSERVER_AUTH_MODE=passkey session verification (Issue #141 Step1). Reads
-// the httpOnly session cookie off an incoming request and checks it against
-// auth_sessions (db.js v7 migration), applying sliding expiration.
+// CCSERVER_AUTH_MODE=passkey session management (Issue #141). Step1 added the
+// read/verify/extend side (verifySessionCookie) that server/index.js's
+// onRequest hook needs; Step2 (server/routes/auth.js's login-token endpoint)
+// adds the creation side (createSession/sessionCookieHeader) below.
 //
-// Session *creation* (the login-token/WebAuthn endpoints that actually INSERT
-// into auth_sessions) is Step2/Step3 scope -- this module only implements the
-// read/verify/extend side that server/index.js's onRequest hook needs now.
-//
-// No @fastify/cookie dependency: we only ever need to read one cookie value
-// here, so a minimal manual parse avoids pulling in a plugin before Step2
-// actually needs reply.setCookie().
+// No @fastify/cookie dependency: creating a session only needs one
+// Set-Cookie header on one response, and verifying only needs to read one
+// cookie value back out later, so a minimal manual implementation of both
+// avoids pulling in a plugin for what's a handful of lines.
 
+import { randomBytes } from 'node:crypto';
 import { getDb } from './db.js';
 
 export const SESSION_COOKIE_NAME = 'ccserver_session';
@@ -60,4 +59,38 @@ export function verifySessionCookie(request) {
   const sessionId = cookies[SESSION_COOKIE_NAME];
   if (!sessionId) return false;
   return touchSession(sessionId);
+}
+
+// Creates a new row in auth_sessions and returns its id -- the value that
+// goes into the session cookie. 32 bytes of CSPRNG output, base64url-encoded,
+// same reasoning as loginTokens.js's generateLoginToken(): this id alone
+// grants access, so randomUUID()'s 128 bits (some fixed) would be weaker.
+export function createSession() {
+  const db = getDb();
+  const id = randomBytes(32).toString('base64url');
+  const now = Date.now();
+  db.prepare(
+    'INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, NULL)'
+  ).run(id, now, now + SESSION_TTL_MS);
+  return id;
+}
+
+// Serializes a Set-Cookie header value for a session id. `secure` should
+// reflect whether the request that will carry this response arrived over
+// HTTPS (request.protocol === 'https') -- WebAuthn's own rpID constraint
+// (see plan) means passkey-mode deployments are expected to be HTTPS
+// (Tailscale Serve) or localhost, but localhost dev/testing over plain HTTP
+// must still be able to log in, so this only asserts Secure when the
+// connection is actually encrypted rather than hardcoding it.
+export function sessionCookieHeader(sessionId, { secure = false } = {}) {
+  const maxAgeSeconds = Math.floor(SESSION_TTL_MS / 1000);
+  const attrs = [
+    `${SESSION_COOKIE_NAME}=${sessionId}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${maxAgeSeconds}`,
+  ];
+  if (secure) attrs.push('Secure');
+  return attrs.join('; ');
 }

@@ -19,6 +19,7 @@ import { groupDocsRoute } from './routes/groupDocs.js';
 import { sandboxRoute } from './routes/sandbox.js';
 import { sandboxesRoute } from './routes/sandboxes.js';
 import { federationRoute } from './routes/federation.js';
+import { authRoute } from './routes/auth.js';
 import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
 import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler, restorePtyHostSessions } from './ws/sessionManager.js';
@@ -138,6 +139,7 @@ await fastify.register(groupDocsRoute, { prefix: '/api' });
 await fastify.register(sandboxRoute, { prefix: '/api' });
 await fastify.register(sandboxesRoute, { prefix: '/api' });
 await fastify.register(federationRoute, { prefix: '/api' });
+await fastify.register(authRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
 await fastify.register(remoteTerminalWs);
 
