@@ -135,6 +135,8 @@ Set `CCSERVER_TOKEN` to protect all `/api` and `/ws` requests. Clients may provi
 CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 ```
 
+For a per-device passkey (WebAuthn) login with SSH-issued one-time-token recovery instead of a single shared token, set `CCSERVER_AUTH_MODE=passkey` (`none`/`token` remain unchanged and stay the default when unset). See the [auth guide](https://nananek.github.io/ccserver/guides/auth/) (Japanese) for the WebAuthn environment constraints.
+
 Available REST endpoints include:
 
 | Method | Path | Purpose |

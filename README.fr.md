@@ -133,6 +133,8 @@ Définissez `CCSERVER_TOKEN` pour protéger toutes les requêtes `/api` et `/ws`
 CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 ```
 
+Pour une connexion par passkey (WebAuthn) par appareil, avec récupération par jeton à usage unique émis via SSH plutôt qu'un unique jeton partagé, définissez `CCSERVER_AUTH_MODE=passkey` (`none`/`token` restent inchangés et demeurent la valeur par défaut si non définie). Voir le [guide d'authentification](https://nananek.github.io/ccserver/guides/auth/) (en japonais) pour les contraintes d'environnement de WebAuthn.
+
 Les endpoints REST principaux sont :
 
 | Méthode | Chemin | Fonction |

@@ -5,6 +5,8 @@ description: 認証、REST API、WebSocket プロトコルのリファレンス
 
 ## 認証 (任意)
 
+`CCSERVER_AUTH_MODE` 環境変数で `none` (既定、認証なし) / `token` (下記の固定共有トークン) / `passkey` (パスキー + ワンタイムトークン、[認証ガイド](/ccserver/guides/auth/) 参照) を切り替えます。未設定時は `CCSERVER_TOKEN` の有無で `token`/`none` のどちらかに解決されるため、この節で説明する `CCSERVER_TOKEN` 単体での有効化は従来通りそのまま使えます。
+
 `CCSERVER_TOKEN` 環境変数を設定すると、`/api` と `/ws` 配下の全リクエストに Jupyter 風のトークン認証がかかります (未設定なら無効)。`?token=<TOKEN>` クエリか `Authorization: Bearer <TOKEN>` ヘッダのどちらかで通ります。クライアントは 401 を受けると `prompt()` でトークンを聞き、`localStorage` (`ccserver-token`) に保存して以降のリクエストへ自動付与します (`client/src/auth.js`)。
 
 ```bash
@@ -43,6 +45,12 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | GET | `/api/federation/pending` | 未承認 (双方向承認の途中) のペアリング一覧 |
 | POST | `/api/federation/pending/:id/decide` | `{ decision: 'approved' \| 'rejected' }` — このインスタンス側の人間の承認/却下を記録する |
 | GET/POST/DELETE | `/api/federation/instances/:id/{sessions,groups,dirs}` | `active` なペアへの薄いプロキシ。ボディ/レスポンス形状はそれぞれ `/api/sessions`・`/api/groups`・`/api/dirs` と同一 |
+| GET | `/api/auth/mode` | `{ mode: 'none' \| 'token' \| 'passkey' }` — 現在の `CCSERVER_AUTH_MODE`。認証不要 (`token` モードのみ、他の `/api` と同様にトークン必須) |
+| GET | `/api/auth/session` | セッション Cookie の有効性確認専用 (200/401 のみが意味を持つ)。`passkey` モード限定 |
+| POST | `/api/auth/login-token` | `{ token }` — `node server/cli/issue-login-token.js` が発行したワンタイムトークンを検証し、セッション Cookie を発行する (`passkey` モード限定、use-once) |
+| POST | `/api/auth/webauthn/register-options` / `register-verify` | パスキー登録 (要セッション、[認証ガイド](/ccserver/guides/auth/) フロー2、`passkey` モード限定) |
+| POST | `/api/auth/webauthn/authenticate-options` / `authenticate-verify` | パスキー認証 (未ログインで許可、フロー3、`passkey` モード限定) |
+| GET | `/api/auth/webauthn/credentials` | 登録済みパスキー一覧 (要セッション、`{ id, label, createdAt, lastUsedAt }[]`、`passkey` モード限定) |
 
 `GET /api/dirs` のレスポンス例:
 

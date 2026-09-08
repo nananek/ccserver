@@ -17,10 +17,16 @@ ccserver/
 │   └── scroll-buttons.spec.js      # opencode TUI: スクロールボタン→メッセージスクロールキー (同上)
 ├── server/
 │   ├── package.json
-│   ├── index.js                    # Fastify エントリポイント (トークン認証・静的配信含む)
+│   ├── index.js                    # Fastify エントリポイント (認証フック・静的配信含む)
+│   ├── authMode.js                 # CCSERVER_AUTH_MODE (none/token/passkey) の解決 (Issue #141)
+│   ├── authSessions.js             # passkey モードのセッション Cookie 管理 (Issue #141)
+│   ├── loginTokens.js              # SSH 発行ワンタイムログイントークンの生成/ハッシュ (Issue #141)
+│   ├── webauthnChallenges.js       # WebAuthn 登録/認証チャレンジ管理 + rpID/origin 解決 (Issue #141)
 │   ├── usage.js                    # `claude --ax-screen-reader` を叩いて /usage をパース・キャッシュ
 │   ├── codexUsage.js               # `codex app-server` に JSON-RPC で account/rateLimits/read を投げてキャッシュ
 │   ├── sandbox.config.example.json
+│   ├── cli/
+│   │   └── issue-login-token.js    # `npm run login-token` — ワンタイムログイントークンをDB直接発行 (Issue #141)
 │   ├── routes/
 │   │   ├── dirs.js                 # GET/POST /api/dirs, GET /api/dirs/home
 │   │   ├── sessions.js             # GET/POST/DELETE /api/sessions (POST は単発セッション新規起動)
@@ -29,7 +35,8 @@ ccserver/
 │   │   ├── launchPresets.js        # GET/POST/PUT/DELETE /api/launch-presets (コンボ起動プリセット)
 │   │   ├── files.js                # GET/POST /api/files (アップロード/ダウンロード), GET /api/files/content (プレビュー)
 │   │   ├── system.js               # GET /api/system-stats (CPU/メモリ/温度/GPU/IPMI/ストレージ)
-│   │   └── usage.js                # GET /api/usage (?app=claude|codex)
+│   │   ├── usage.js                # GET /api/usage (?app=claude|codex)
+│   │   └── auth.js                 # GET/POST /api/auth/* — ワンタイムトークン/WebAuthn (Issue #141)
 │   └── ws/
 │       ├── terminal.js             # WebSocket + node-pty ブリッジ (/ws/terminal)
 │       ├── sessionManager.js       # セッション・予約プロンプトの状態管理/永続化
@@ -60,7 +67,8 @@ ccserver/
     ├── vite.config.js
     └── src/
         ├── main.jsx / App.jsx
-        ├── auth.js                 # トークン認証 (CCSERVER_TOKEN)
+        ├── auth.js                 # 認証ファサード。CCSERVER_AUTH_MODE (none/token/passkey) に応じて
+        │                           #   getToken/authFetch/authWsUrl の内部実装を切り替える (Issue #141)
         ├── themes.js
         ├── osc52.js                # OSC 52 クリップボード同期のパーサ (+ server/ws/osc52.test.js)
         ├── hooks/
@@ -69,7 +77,10 @@ ccserver/
         │   ├── DirectoryBrowser.jsx
         │   ├── TerminalView.jsx    # 遅延ロード (初期バンドル削減)
         │   ├── widgets/UsageWidget.jsx  # 右サイドバーの使用量表示
-        │   └── ApprovalBanner.jsx  # メタエージェント承認待ちグローバルバナー (ポーリング)
+        │   ├── ApprovalBanner.jsx  # メタエージェント承認待ちグローバルバナー (ポーリング)
+        │   ├── AuthGate.jsx        # passkey モードのログイン画面ゲート (Issue #141)
+        │   ├── LoginView.jsx       # ワンタイムトークン入力 + パスキー認証 (Issue #141)
+        │   └── PasskeysSection.jsx # SettingsView のパスキー登録セクション (Issue #141)
         └── styles/
             └── app.css
 ```
