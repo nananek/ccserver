@@ -31,6 +31,7 @@ import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/
 import { expireStalePendingApprovals } from './ws/approvals.js';
 import { ensureFederationServer, stopFederationServer, federationEnabled } from './ws/federationServer.js';
 import { sweepExpiredPending } from './ws/federationPairing.js';
+import { establishAllLinks } from './ws/federationLink.js';
 import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
 import { warmOpencodeUsage } from './opencodeUsage.js';
@@ -292,6 +293,17 @@ try {
   if (federationEnabled()) {
     await ensureFederationServer({ log: fastify.log });
     fastify.log.info(`ccserver federation listener started on port ${process.env.CCSERVER_FEDERATION_PORT}`);
+    // Issue #142 Step 3: kick every non-terminal pair's FederationLink into
+    // dialing right away, in case this process never otherwise calls
+    // connect() for it (no RPC/terminal call has happened yet, and this pair
+    // never went through the TOFU bootstrap in this process's lifetime).
+    // FederationLink.connect() is idempotent and keeps retrying forever on
+    // its own backoff once called, so a single fire-and-forget sweep at
+    // boot is enough -- not awaited, so an unreachable peer can never delay
+    // fastify.listen() below.
+    establishAllLinks({ log: fastify.log }).catch((err) => {
+      fastify.log.error({ err }, 'Failed to kick off federation link establishment');
+    });
   }
 } catch (err) {
   fastify.log.error({ err }, 'Failed to start ccserver federation listener');

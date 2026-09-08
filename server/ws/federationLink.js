@@ -764,6 +764,41 @@ export function removeLink(fingerprint) {
   }
 }
 
+// Issue #142 Step 3: called once at server startup (server/index.js, right
+// after ensureFederationServer() brings the inbound mTLS listener up) so
+// every still-relevant pair gets a FederationLink dialing from boot, not
+// just the ones some later RPC/terminal call or a fresh TOFU bootstrap
+// happens to touch. Without this, a pair sitting in paired_instances with
+// nobody having called callInstanceRpc/reconcilePending/openTerminalChannel
+// against it since the last restart would never get a connect() at all --
+// fatal in a one-directional-reachability environment where the OTHER side
+// is the only one that could ever dial in.
+//
+// 'revoked'/'expired'/'rejected' are excluded: these mean the relationship
+// is over (or never happened), and dialing a revoked peer in particular
+// would be a hole in the "pin the key" model this feature otherwise
+// enforces. 'pending_local_approval'/'pending_remote_approval' ARE
+// included: reconcilePending can only learn the peer's decision by actually
+// reaching it, which is exactly the reachability problem this whole issue
+// exists to solve.
+//
+// connect() is idempotent and keeps retrying forever on its own backoff
+// once called (see its own comment), so this is a one-shot sweep at boot,
+// not a recurring timer -- there is no separate safety net here by design;
+// if a link's own internal backoff ever stalls, that is a bug in
+// FederationLink itself, not something this function should paper over by
+// re-polling.
+export async function establishAllLinks({ log } = {}) {
+  const selfIdentity = await ensureIdentity();
+  const rows = pairing.listInstances()
+    .filter((row) => row.status !== 'revoked' && row.status !== 'expired' && row.status !== 'rejected');
+  for (const row of rows) {
+    getOrCreateLink(row, { selfIdentity, log }).connect();
+  }
+  log?.info?.(`[federation-link] establishAllLinks: kicked off connect() for ${rows.length} pair(s)`);
+  return rows.length;
+}
+
 export function _resetLinksForTests() {
   for (const link of links.values()) link.close();
   links.clear();
