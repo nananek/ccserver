@@ -1,5 +1,5 @@
 [Unit]
-Description=ccserver pty-host — persistent PTY session daemon (used when CCSERVER_PTY_HOST=1)
+Description=ccserver pty-host — persistent PTY session daemon (used automatically unless CCSERVER_PTY_HOST=0)
 After=network.target
 
 [Service]

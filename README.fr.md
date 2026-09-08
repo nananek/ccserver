@@ -162,7 +162,7 @@ systemctl --user enable --now ccserver
 systemctl --user status ccserver
 ```
 
-Pour la séparation expérimentale pty-host (conserve les sessions de terminal actives lors d'un redémarrage de `ccserver`), voir le [guide de déploiement](https://nananek.github.io/ccserver/deployment/systemd/) (en japonais).
+Pour la séparation pty-host (conserve les sessions de terminal actives lors d'un redémarrage de `ccserver` ; activée par défaut, avec repli automatique si le service pty-host n'est pas démarré), voir le [guide de déploiement](https://nananek.github.io/ccserver/deployment/systemd/) (en japonais).
 
 ## HTTPS avec Tailscale Serve
 

@@ -72,11 +72,13 @@ systemctl --user restart ccserver
 systemctl --user stop ccserver
 ```
 
-## 6. (実験的) pty-host 分離でサーバー再起動をまたいでセッションを維持する
+## 6. pty-host 分離でサーバー再起動をまたいでセッションを維持する（デフォルト有効）
 
 通常の構成では、`systemctl --user restart ccserver` のたびに、実行中の全ターミナルセッション（Claude Code / opencode / codex などの子プロセス）が終了します。実行中の長時間コマンドやバックグラウンドジョブの状態はこの再起動で失われます（会話自体は resume 機能で再開できますが、プロセスの状態は失われます）。
 
-これを緩和するため、PTY プロセスの生成・管理を `ccserver` 本体から切り離した常駐プロセス **pty-host** に分離できます。`ccserver` を再起動しても pty-host 側のプロセスには触れないため、再起動後に既存セッションへ再接続できます。
+これを緩和するため、PTY プロセスの生成・管理を `ccserver` 本体から切り離した常駐プロセス **pty-host** に分離しています。`ccserver` を再起動しても pty-host 側のプロセスには触れないため、再起動後に既存セッションへ再接続できます。この分離はデフォルトで有効です。`ccserver-pty-host.service` を起動していれば、`ccserver` は起動時に自動的にそれを検出して使い始めます（後述の「手順」参照）。
+
+`ccserver-pty-host.service` をまだ起動していない場合は、`ccserver` は起動時にそれを検出できず、自動的に従来どおりの直接 spawn 方式（`ccserver` 自身が PTY プロセスの親になる、再起動でセッションが失われる方式）にフォールバックします。ログに警告が出ますが、動作自体は既存デプロイと変わらず継続します。無効化を明示したい場合、または警告ログを止めたい場合は `Environment=CCSERVER_PTY_HOST=0` を設定してください（`docs/ccserver.service` にコメント付きの例が入っています）。
 
 pty-host 自体がクラッシュした場合（`Restart=on-failure` で自動再起動される想定）も、直前まで保持していたセッションをそのセッションIDのまま自動的に再起動時に再launchします（自動resume）。ただし現時点では以下の制約が残ります。
 
@@ -84,7 +86,6 @@ pty-host 自体がクラッシュした場合（`Restart=on-failure` で自動�
 - 正確な `--resume <id>` での再開が保証されるのは claude セッションのみです。claude はTUI出力に会話IDのヒント（`claude --resume <id>`）を継続的に出力するため、これを生存中に追跡して記録できますが、opencode/copilot/codex/commandcode のTUIは会話IDを一切出力しないため、`resumeLast`（同一cwdの直近の会話を再開）にフォールバックします。この場合、同一cwdで複数タブを開いていると、意図しない会話が再開される可能性があります。
 - `ccserver` 本体と pty-host が同時にクラッシュ・再起動するケース（サーバーごと再起動する等）では、MCP注入（notify/usage/meta/reviewer等)に使うソケットパスの整合性が取れなくなる可能性があります。通常運用（pty-hostだけが単独でcrashしてsystemdが再起動するケース）では問題ありません。
 - 自動resumeは launch 時の起動コマンド一式（環境変数を含む）を `.pty-host-session-meta.json` に保存して再現します。この環境変数には `ccserver` プロセス自身の環境（`NODE_ENV`/`PORT`/`CCSERVER_*`/`SSH_AUTH_SOCK` 系を除く全て）が含まれるため、シェルの起動時に export された APIキー等の秘匿情報がこのファイルに平文で書き込まれる可能性があります。ファイルは書き込みのたびに `0600` 権限へ強制されますが、同一ホスト上の root や同一ユーザーの他プロセスからは読めることに変わりないため、バックアップ・ログ収集の対象から除外する等、運用側でも配慮してください。
-- そのため本機能は実験的な位置づけです。デフォルトでは無効になっています。
 
 ### 手順
 
@@ -96,14 +97,14 @@ pty-host 自体がクラッシュした場合（`Restart=on-failure` で自動�
    systemctl --user enable --now ccserver-pty-host
    ```
 
-2. `~/.config/systemd/user/ccserver.service` の `Environment=CCSERVER_PTY_HOST=1` の行のコメントアウトを外します（`docs/ccserver.service` には無効化された状態でコメント付きの例が入っています）。
-
-3. 設定を反映して `ccserver` を再起動します。
+2. `ccserver` を（再）起動します。デフォルトで有効なので追加の設定変更は不要です。起動時に pty-host への到達性を確認し、到達できればそのまま使い始めます。
 
    ```bash
    systemctl --user daemon-reload
    systemctl --user restart ccserver
    ```
+
+   すでに `ccserver` が起動済みで、`ccserver-pty-host.service` を後から追加した場合も、`ccserver` 側を一度再起動すれば検出されます（起動時の一度きりのチェックのため、稼働中に自動検出されることはありません）。
 
 ### 動作確認
 

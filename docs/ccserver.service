@@ -8,11 +8,15 @@ Type=simple
 WorkingDirectory=/path/to/ccserver
 Environment=NODE_ENV=production
 Environment=PORT=3001
-# Uncomment to keep terminal sessions alive across `systemctl --user restart
-# ccserver` (requires ccserver-pty-host.service, see docs/ccserver-pty-host.service).
-# Still experimental as of Issue #119 Step4 -- pty-host itself crashing still
-# loses every session it holds until Step5/6 land.
-# Environment=CCSERVER_PTY_HOST=1
+# pty-host separation (keeps terminal sessions alive across `systemctl
+# --user restart ccserver`, see docs-site deployment/systemd.md) is enabled
+# by default as of Issue #119 Step7 -- no line needed here to turn it on.
+# ccserver probes pty-host's reachability once at boot and automatically
+# falls back to spawning ptys directly (the pre-Step7 behavior) if
+# ccserver-pty-host.service (docs/ccserver-pty-host.service) isn't up yet.
+# Uncomment to opt out entirely instead -- e.g. to silence that fallback
+# warning, or to roll back after an upgrade:
+# Environment=CCSERVER_PTY_HOST=0
 ExecStart=/usr/bin/node server/index.js
 Restart=on-failure
 RestartSec=5
