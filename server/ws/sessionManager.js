@@ -2205,6 +2205,13 @@ export function initPtyHostDisconnectedHandler() {
           session.pendingInjectionTimer = null;
         }
         session.exited = true;
+        // Same reason buildSessionRecord's ptyProcess.onExit calls this: a
+        // pending scheduled prompt must not resume against a stale
+        // claudeSessionId. entry.sessionId itself doesn't need the same care
+        // -- fireSchedule() already treats a missing sessions.get() entry as
+        // "no live target" -- but claudeSessionId is only ever refreshed
+        // here, and sessions.delete() below is this session's last chance.
+        refreshScheduleOnExit(session);
         for (const fn of sessionExitListeners) {
           try {
             fn(session);
