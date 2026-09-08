@@ -16,14 +16,15 @@
 //     federationServer.js's terminal relay already used, now covering RPC
 //     traffic too).
 //
-// Step 1 scope: this module is fully self-contained and unit-testable, but
-// nothing calls it yet. federationServer.js's inbound listener and
-// federationClient.js's one-shot RPC/terminal calls still run their
-// original code paths -- wiring those over to FederationLink (and deleting
-// oneShotRpc/callInstanceRpc/openTerminalChannel per the plan's decision 4)
-// is Step 2. The one exception is RPC_METHODS/authorizeRequest, which move
-// here now (federationServer.js re-imports them) since the plan calls for
-// the dispatch table to be shared by both ends of a link from the start.
+// Issue #142 Step 2: federationServer.js's inbound listener and
+// federationClient.js's RPC/terminal calls now run through this module --
+// oneShotRpc/callInstanceRpc(one-shot)/openTerminalChannel(one-shot) have
+// been deleted per the plan's decision 4. The one surviving one-shot
+// connection is the TOFU pairing.propose bootstrap dial (still in
+// federationClient.js's initiatePairing / federationServer.js's own
+// bootstrap handler for an unknown fingerprint) -- see adoptBootstrapSocket
+// below for how that single connection is promoted straight into a
+// FederationLink on both ends instead of being closed and re-dialed.
 //
 // Deliberately duplicates federationClient.js's tiny host:port parser and
 // TLS-dial helper rather than importing them: federationClient.js will
@@ -342,16 +343,44 @@ export class FederationLink {
   }
 
   // Registers an already-accepted inbound TLS socket (from
-  // federationServer.js's listener, in Step 2) as a connection candidate
-  // for this peer. `peerInfo` is federationIdentity.peerCertInfo(socket)'s
-  // result -- the caller has already matched peerInfo.fingerprint to this
-  // link's row.fingerprint before calling this.
+  // federationServer.js's listener) as a connection candidate for this
+  // peer. `peerInfo` is federationIdentity.peerCertInfo(socket)'s result --
+  // the caller has already matched peerInfo.fingerprint to this link's
+  // row.fingerprint before calling this.
   acceptInbound(socket, peerInfo) {
     if (this.destroyed) {
       try { socket.destroy(); } catch { /* ignore */ }
       return;
     }
     this._startCandidate(socket, peerInfo, { isDialer: false });
+  }
+
+  // Promotes a socket that has already completed one raw pairing.propose /
+  // rpc-response round trip (the TOFU bootstrap exchange -- see
+  // federationClient.js's initiatePairing and federationServer.js's
+  // bootstrap handler) directly into this link's live connection, instead
+  // of closing it and making both ends redial from scratch. `framer` must
+  // already be attached to `socket` (the very same LineFramer that carried
+  // the propose/response exchange) -- this reassigns its onLine/onError so
+  // every line from here on flows through the normal link dispatch. No
+  // separate link-hello round trip is needed: the propose exchange over
+  // this exact socket already proves both ends are live and speak this
+  // protocol version, so `helloReceived` is set true up front.
+  adoptBootstrapSocket(socket, framer, peerPem, { isDialer }) {
+    if (this.destroyed) {
+      try { socket.destroy(); } catch { /* ignore */ }
+      return;
+    }
+    const candidate = {
+      socket, framer, isDialer, discarded: false, peerPem, helloReceived: true,
+    };
+    framer.onError = (err) => {
+      this.log?.warn?.({ err }, '[federation-link] frame error, closing connection');
+      try { socket.destroy(); } catch { /* ignore */ }
+    };
+    framer.onLine = (frame) => this._onCandidateLine(candidate, frame);
+    socket.once('close', () => this._onSocketClose(candidate));
+    this._resolveCandidate(candidate);
   }
 
   async _dialOnce() {
@@ -705,9 +734,12 @@ export class FederationLink {
 }
 
 // ---- Registry: one FederationLink per peer fingerprint ------------------
-// Not yet consulted by federationServer.js/federationClient.js (Step 2) --
-// exists now so Step 2/3 have a single place to find-or-create a link for a
-// pair instead of each call site managing its own Map.
+// Consulted by federationServer.js's inbound listener and every
+// federationClient.js call site so all of them find-or-create the SAME link
+// for a given pair instead of each managing its own Map (and, on the
+// server side, so a fresh inbound connection from an already-linked peer
+// resolves the duplicate-connection dance in _resolveCandidate rather than
+// silently opening a second parallel link).
 
 const links = new Map(); // fingerprint -> FederationLink
 

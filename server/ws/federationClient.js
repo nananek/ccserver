@@ -1,31 +1,42 @@
 // Outbound half of cross-instance federation: dialing a peer's federation
-// port, running the pairing bootstrap, and proxying REST-shaped calls /
-// terminal I/O to an already-'active' pair. See federationProtocol.js for
-// the wire framing and its header comment for why every connection here is
-// short-lived and single-purpose rather than one long-lived multiplexed
-// connection per peer.
+// port to run the TOFU pairing bootstrap, and otherwise driving REST-shaped
+// calls / terminal I/O over a persistent, multiplexed FederationLink
+// (server/ws/federationLink.js) rather than a fresh connection per call --
+// see federationProtocol.js's header comment for why (Issue #142). The
+// bootstrap dial in initiatePairing() is the one exception: there is no
+// paired_instances row (and so no FederationLink) to speak over until that
+// very call creates one, so it still runs as a single raw request/response
+// round trip -- see that function for how its socket then gets promoted
+// into the pair's initial link instead of being closed.
 //
-// Trust on first contact (TOFU) only ever applies to ONE call:
+// Trust on first contact (TOFU) only ever applies to that ONE call:
 // initiatePairing(). Every other function here requires an already-pinned
 // fingerprint (from paired_instances, via federationPairing.getActiveInstance
-// or the row passed to reconcilePending) and refuses the connection outright
-// if the live peer certificate doesn't match it exactly -- see the
-// "fingerprint mismatch" throws below. This is what actually enforces "pin
-// the key, not a CA" on the outbound side; federationServer.js enforces the
-// same thing for inbound connections.
+// or the row passed to reconcilePending) -- FederationLink itself refuses to
+// treat a connection as live if the peer certificate doesn't match the
+// row's pinned fingerprint exactly (see federationLink.js's _dialOnce). This
+// is what actually enforces "pin the key, not a CA" on the outbound side;
+// federationServer.js enforces the same thing for inbound connections.
 
 import { connect as tlsConnect } from 'node:tls';
 import { hostname as osHostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { ensureIdentity, peerCertInfo } from './federationIdentity.js';
-import { LineFramer } from './federationProtocol.js';
+import { LineFramer, FRAME_KINDS } from './federationProtocol.js';
 import * as pairing from './federationPairing.js';
 import { resolvedHostname } from './notify.js';
 import { federationPort } from './federationServer.js';
+import { getOrCreateLink } from './federationLink.js';
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const RPC_TIMEOUT_MS = 15_000;
 const FEDERATION_KEEPALIVE_MS = 30_000;
+const LINK_READY_TIMEOUT_MS = 5_000;
+const LINK_READY_POLL_MS = 50;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export function parseRemoteAddr(remoteAddr) {
   if (typeof remoteAddr !== 'string' || !remoteAddr.includes(':')) {
@@ -89,32 +100,39 @@ async function connectTls({ host, port }) {
   });
 }
 
-// One request, one response, then the connection closes -- see
-// federationProtocol.js's header comment for why. Resolves with the full
-// {ok, ...} response body (plus peerInfo, for callers that need the freshly
-// observed fingerprint -- initiatePairing does). Throws on transport
-// failure, timeout, or a fingerprint mismatch against expectFingerprint.
-async function oneShotRpc({ host, port, method, params, expectFingerprint, timeoutMs = RPC_TIMEOUT_MS }) {
+// The one place TOFU is allowed: dial a never-before-seen address, learn its
+// certificate from the handshake itself, ask it to record us as a pending
+// inbound request, and record OUR side of the pair (direction
+// 'outbound_initiated', status starts pending_local_approval -- see
+// federationPairing.js's header comment on the symmetric approval model).
+// Returns the created/refreshed public row. Throws on any failure (network,
+// refusal, or a previously-revoked peer) -- the REST route turns that into a
+// 4xx/5xx for the browser.
+//
+// On success, this does NOT close the socket: the same connection that just
+// carried the propose/response exchange is handed to federationLink.js as
+// the new pair's initial live link (adoptBootstrapSocket), mirroring what
+// federationServer.js's own bootstrap handler does with its end of this
+// same TCP connection. No separate dial-and-reconnect is needed just to
+// start the persistent link.
+export async function initiatePairing({ remoteAddr, remoteToken, label }) {
+  const { host, port } = parseRemoteAddr(remoteAddr);
   const { socket, info } = await connectTls({ host, port });
-  if (expectFingerprint && info.fingerprint !== expectFingerprint) {
-    try { socket.destroy(); } catch { /* ignore */ }
-    throw new Error('peer certificate fingerprint no longer matches the pinned one -- refusing to trust this connection');
-  }
   const id = randomUUID();
-  return new Promise((resolve, reject) => {
+  const { frame, framer } = await new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       try { socket.destroy(); } catch { /* ignore */ }
-      reject(new Error(`federation rpc ${method} timed out`));
-    }, timeoutMs);
-    const framer = new LineFramer(socket, {
-      onLine: (frame) => {
-        if (settled || frame.kind !== 'rpc-response' || frame.id !== id) return;
+      reject(new Error('federation rpc pairing.propose timed out'));
+    }, RPC_TIMEOUT_MS);
+    const lineFramer = new LineFramer(socket, {
+      onLine: (line) => {
+        if (settled || line.kind !== FRAME_KINDS.RPC_RESPONSE || line.id !== id) return;
         settled = true;
         clearTimeout(timer);
-        resolve({ ...frame, peerInfo: info });
+        resolve({ frame: line, framer: lineFramer });
       },
       onError: (err) => {
         if (settled) return;
@@ -130,56 +148,85 @@ async function oneShotRpc({ host, port, method, params, expectFingerprint, timeo
       clearTimeout(timer);
       reject(new Error('connection closed before a response arrived'));
     });
-    framer.write({ v: 1, kind: 'rpc', id, method, params });
+    lineFramer.write({
+      v: 1,
+      kind: FRAME_KINDS.RPC,
+      id,
+      method: 'pairing.propose',
+      params: {
+        hostnameLabel: myHostnameLabel(),
+        claimedAddr: myClaimedAddr() || undefined,
+        federationToken: typeof remoteToken === 'string' && remoteToken ? remoteToken : undefined,
+      },
+    });
   });
-}
-
-// The one place TOFU is allowed: dial a never-before-seen address, learn its
-// certificate from the handshake itself, ask it to record us as a pending
-// inbound request, and record OUR side of the pair (direction
-// 'outbound_initiated', status starts pending_local_approval -- see
-// federationPairing.js's header comment on the symmetric approval model).
-// Returns the created/refreshed public row. Throws on any failure (network,
-// refusal, or a previously-revoked peer) -- the REST route turns that into a
-// 4xx/5xx for the browser.
-export async function initiatePairing({ remoteAddr, remoteToken, label }) {
-  const { host, port } = parseRemoteAddr(remoteAddr);
-  const resp = await oneShotRpc({
-    host, port, method: 'pairing.propose',
-    params: {
-      hostnameLabel: myHostnameLabel(),
-      claimedAddr: myClaimedAddr() || undefined,
-      federationToken: typeof remoteToken === 'string' && remoteToken ? remoteToken : undefined,
-    },
-  });
-  if (!resp.ok) throw new Error(resp.error || 'pairing request was refused');
+  if (!frame.ok) {
+    try { socket.destroy(); } catch { /* ignore */ }
+    throw new Error(frame.error || 'pairing request was refused');
+  }
   const row = pairing.recordOutboundRequest({
-    fingerprint: resp.peerInfo.fingerprint,
-    certPem: resp.peerInfo.pem,
-    hostnameClaimed: typeof resp.myHostnameLabel === 'string' ? resp.myHostnameLabel : null,
+    fingerprint: info.fingerprint,
+    certPem: info.pem,
+    hostnameClaimed: typeof frame.myHostnameLabel === 'string' ? frame.myHostnameLabel : null,
     addr: remoteAddr,
     label: typeof label === 'string' && label ? label : null,
   });
-  if (!row) throw new Error('this instance previously revoked a pairing with that fingerprint');
+  if (!row) {
+    try { socket.destroy(); } catch { /* ignore */ }
+    throw new Error('this instance previously revoked a pairing with that fingerprint');
+  }
+  const selfIdentity = await ensureIdentity();
+  getOrCreateLink(row, { selfIdentity }).adoptBootstrapSocket(socket, framer, info.pem, { isDialer: true });
   return row;
+}
+
+// Find-or-create the FederationLink for `row`, make sure it is at least
+// trying to connect (idempotent -- a no-op if it's already live or already
+// dialing), and give it a bounded chance to actually finish connecting
+// before giving up. This is NOT a fallback to a different connection
+// mechanism (plan decision 4 forbids that) -- it's patience for the SAME
+// link's own in-flight dial, typically well under a second on a real
+// network (and often already resolved by the time this runs, since a
+// pairing bootstrap's initiatePairing already adopted the pair's first live
+// connection). Without this, a request arriving the moment a pair goes
+// active -- or right after a process restart, before anything has
+// re-dialed -- would spuriously fail even though the link was about to
+// connect a moment later. Once a link is warm this returns immediately:
+// the loop's very first `.connected` check short-circuits it. Callers still
+// see a clear "not established" error if the link is still down once
+// timeoutMs elapses (an actually-unreachable peer, or one that takes longer
+// than that to answer) -- the REST layer's own polling (routes/federation.js's
+// header comment) is what turns that into "now connected" on a later call.
+async function getReadyLink(row, { timeoutMs = LINK_READY_TIMEOUT_MS } = {}) {
+  const selfIdentity = await ensureIdentity();
+  const link = getOrCreateLink(row, { selfIdentity });
+  link.connect();
+  const deadline = Date.now() + timeoutMs;
+  while (!link.connected && !link.destroyed && Date.now() < deadline) {
+    await sleep(LINK_READY_POLL_MS);
+  }
+  return link;
 }
 
 // Asks every not-yet-active pending row's peer what THEY decided, and folds
 // the answer into remote_decision (federationPairing.recordRemoteDecision),
 // which may flip the row to 'active' once both sides show 'approved' (see
 // federationPairing.deriveStatus). Best-effort per row: an unreachable peer
-// just leaves that row unchanged for the next poll. Called from the REST
-// polling path (routes/federation.js) rather than a background timer -- see
-// that file's header comment.
+// (or one whose link hasn't finished connecting yet) just leaves that row
+// unchanged for the next poll. Called from the REST polling path
+// (routes/federation.js) rather than a background timer -- see that file's
+// header comment.
 export async function reconcilePending() {
   const rows = pairing.listPending();
   const outcomes = [];
   for (const row of rows) {
+    const link = await getReadyLink(row);
+    if (!link.connected) {
+      outcomes.push({ id: row.id, reachable: false });
+      continue;
+    }
     try {
-      const { host, port } = parseRemoteAddr(row.addr);
-      const resp = await oneShotRpc({
-        host, port, method: 'pairing.status', params: {}, expectFingerprint: row.fingerprint, timeoutMs: 5000,
-      });
+      const resp = await link.rpc('pairing.status', {}, { timeoutMs: 5000 });
       if (resp.ok && (resp.myDecision === 'approved' || resp.myDecision === 'rejected')) {
         pairing.recordRemoteDecision(row.id, resp.myDecision);
       }
@@ -192,55 +239,33 @@ export async function reconcilePending() {
 }
 
 // REST-shaped call to an ALREADY-active peer (session/group list, launch,
-// destroy, dir browse -- see federationServer.js's RPC_METHODS). Throws if
-// the instance isn't active, is unreachable, or the peer's live certificate
-// no longer matches the pinned fingerprint.
+// destroy, dir browse -- see federationLink.js's RPC_METHODS). Throws if the
+// instance isn't active or its link isn't established (no fallback to a
+// fresh one-shot connection -- plan decision 4).
 export async function callInstanceRpc(instanceId, method, params, { timeoutMs } = {}) {
   const row = pairing.getActiveInstance(instanceId);
   if (!row) throw new Error('instance is not an active paired peer');
-  const { host, port } = parseRemoteAddr(row.addr);
-  const resp = await oneShotRpc({ host, port, method, params, expectFingerprint: row.fingerprint, timeoutMs });
+  const link = await getReadyLink(row);
+  if (!link.connected) throw new Error(`federation link to ${row.addr} is not established`);
+  const resp = await link.rpc(method, params, timeoutMs != null ? { timeoutMs } : {});
   if (!resp.ok) throw new Error(resp.error || `federation call ${method} failed`);
   pairing.touchLastSeen(row.id);
   return resp;
 }
 
-// Opens a long-lived relay connection for one browser terminal tab (see
-// server/ws/remoteTerminal.js). The returned handle stays open for as long
-// as the browser tab does; TerminalView.jsx's existing reconnect-on-close
-// logic is what recovers from this connection dying (a fresh browser
-// reconnect calls this again). TCP keepalive (FEDERATION_KEEPALIVE_MS via
-// socket.setKeepAlive in connectTls) keeps the underlying TLS socket alive
-// at the kernel level through NAT idle timeouts, complementing the terminal
-// protocol's own ping/pong which still flows through this relay unchanged
-// like every other terminal message. Kernel probes are not throttled when
-// JS timers are suspended in background tabs.
+// Opens one multiplexed terminal channel over the peer's persistent link
+// (see server/ws/remoteTerminal.js). The returned handle stays open for as
+// long as the browser tab does; TerminalView.jsx's existing
+// reconnect-on-close logic is what recovers if the underlying link itself
+// drops (a fresh browser reconnect calls this again, by which point the
+// link may have already reconnected via its own backoff). Throws if the
+// instance isn't active or its link isn't established -- no fallback to a
+// fresh one-shot connection (plan decision 4).
 export async function openTerminalChannel(instanceId) {
   const row = pairing.getActiveInstance(instanceId);
   if (!row) throw new Error('instance is not an active paired peer');
-  const { host, port } = parseRemoteAddr(row.addr);
-  const { socket, info } = await connectTls({ host, port });
-  if (info.fingerprint !== row.fingerprint) {
-    try { socket.destroy(); } catch { /* ignore */ }
-    throw new Error('peer certificate fingerprint no longer matches the pinned one -- refusing to trust this connection');
-  }
+  const link = await getReadyLink(row);
+  if (!link.connected) throw new Error(`federation link to ${row.addr} is not established`);
   pairing.touchLastSeen(row.id);
-
-  let messageCb = null;
-  let closeCb = null;
-  const framer = new LineFramer(socket, {
-    onLine: (frame) => { if (messageCb) messageCb(frame); },
-    onError: () => { try { socket.destroy(); } catch { /* ignore */ } },
-  });
-  socket.once('close', () => { if (closeCb) closeCb(); });
-  socket.once('error', () => { if (closeCb) closeCb(); });
-
-  framer.write({ v: 1, kind: 'terminal-open' });
-
-  return {
-    send(obj) { framer.write(obj); },
-    onMessage(cb) { messageCb = cb; },
-    onClose(cb) { closeCb = cb; },
-    close() { try { socket.end(); } catch { /* ignore */ } },
-  };
+  return link.openTerminalChannel();
 }

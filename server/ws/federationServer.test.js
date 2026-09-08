@@ -22,10 +22,11 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { closeDb } from '../db.js';
 import * as pairing from './federationPairing.js';
-import { opensslAvailable, _resetIdentityCacheForTests } from './federationIdentity.js';
+import { opensslAvailable, _resetIdentityCacheForTests, loadIdentity } from './federationIdentity.js';
 import {
   authorizeRequest, ensureFederationServer, stopFederationServer, _resetFederationServerForTests,
 } from './federationServer.js';
+import { FederationLink } from './federationLink.js';
 
 test('authorizeRequest: unknown peer may only call pairing.propose', () => {
   assert.equal(authorizeRequest({ kind: 'rpc', method: 'pairing.propose' }, null, false).ok, true);
@@ -93,6 +94,7 @@ before(async () => {
 
 after(() => {
   if (skip) return;
+  peerLink?.close();
   stopFederationServer();
   _resetFederationServerForTests();
   _resetIdentityCacheForTests();
@@ -152,6 +154,55 @@ function peerFingerprint() {
     .trim();
 }
 
+function waitFor(fn, { timeoutMs = 5000, intervalMs = 20 } = {}) {
+  const start = Date.now();
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      let ok;
+      try { ok = fn(); } catch { ok = false; }
+      if (ok) return resolve();
+      if (Date.now() - start > timeoutMs) return reject(new Error('timed out waiting for condition'));
+      setTimeout(tick, intervalMs);
+    };
+    tick();
+  });
+}
+
+// Issue #142 Step 2: once a peer is known (even still pending), every RPC
+// beyond the bootstrap pairing.propose goes over a persistent FederationLink
+// (server/ws/federationServer.js's handleConnection routes such an inbound
+// connection straight into getOrCreateLink(...).acceptInbound()), not a
+// fresh one-shot connection per call. This builds "the peer"'s own half of
+// that link -- a real second FederationLink instance dialing the server
+// under test -- for the tests below that need to exercise RPC dispatch
+// beyond the bootstrap handshake. Its own row (the peer's view of THIS
+// server) lives in the same shared test DB as the server's view of the
+// peer, exactly like federationLink.test.js's dual-perspective setup;
+// approved immediately since only the SERVER's row for the peer (asserted
+// on separately in each test below) is what actually gates authorization.
+let peerLink = null;
+
+function connectPeerLink() {
+  const server = loadIdentity();
+  const row = approvePeerRow(pairing.recordOutboundRequest({
+    fingerprint: server.fingerprint,
+    certPem: server.cert,
+    hostnameClaimed: 'server-under-test',
+    addr: `127.0.0.1:${serverPort}`,
+  }));
+  if (!peerKey) peerKey = readFileSync(join(tmpRoot, 'peer', 'peer.key'));
+  if (!peerCert) peerCert = readFileSync(join(tmpRoot, 'peer', 'peer.crt'), 'utf-8');
+  peerLink = new FederationLink(row, { selfIdentity: { key: peerKey, cert: peerCert, fingerprint: peerFingerprint() } });
+  peerLink.connect();
+  return waitFor(() => peerLink.connected).then(() => peerLink);
+}
+
+function approvePeerRow(row) {
+  pairing.recordLocalDecision(row.id, 'approved');
+  pairing.recordRemoteDecision(row.id, 'approved');
+  return pairing.getInstance(row.id);
+}
+
 test('a connection with no client certificate is closed without a response', { skip }, async () => {
   const socket = await dial({ withCert: false });
   await new Promise((resolve) => socket.once('close', resolve));
@@ -179,27 +230,29 @@ test('pairing.propose creates a pending_local_approval row for the peer, reachab
   assert.equal(row.direction, 'inbound_initiated');
 });
 
-test('sessions.list stays refused until BOTH decisions are approved, then works', { skip }, async () => {
+test('sessions.list stays refused until BOTH decisions are approved, then works, over one persistent link', { skip }, async () => {
+  // Issue #142 Step 2: a known (even still-pending) fingerprint's connection
+  // is routed into a FederationLink by handleConnection, so this dials ONCE
+  // via a real peer-side link and re-sends sessions.list over that SAME
+  // connection as the row's status changes underneath it -- authorization
+  // is re-checked fresh on every RPC (federationLink.js's
+  // _handleIncomingRpc re-fetches the row each time), so the persistent
+  // link itself never needs to be re-established for this to work.
   const row = pairing.getRawByFingerprint(peerFingerprint());
+  await connectPeerLink();
 
-  let socket = await dial();
-  let resp = await rpc(socket, 'sessions.list', {});
+  let resp = await peerLink.rpc('sessions.list', {});
   assert.equal(resp.ok, false, 'still pending -- not active yet');
-  socket.destroy();
 
   pairing.recordLocalDecision(row.id, 'approved');
-  socket = await dial();
-  resp = await rpc(socket, 'sessions.list', {});
+  resp = await peerLink.rpc('sessions.list', {});
   assert.equal(resp.ok, false, 'local approved but remote not yet learned -- still not active');
-  socket.destroy();
 
   pairing.recordRemoteDecision(row.id, 'approved');
   assert.equal(pairing.getInstance(row.id).status, 'active');
-  socket = await dial();
-  resp = await rpc(socket, 'sessions.list', {});
+  resp = await peerLink.rpc('sessions.list', {});
   assert.equal(resp.ok, true);
   assert.ok(Array.isArray(resp.sessions));
-  socket.destroy();
 });
 
 // Regression for the gap the REST-only fix (routes/sessions.js stripping
@@ -228,13 +281,11 @@ test('sessions.create over federation ignores a peer-supplied isReviewJob', { sk
   let sessionId = null;
   try {
     assert.equal(reviewer.reviewerEnabled(), false, 'sanity: reviewerMcp really is off in this config');
-    const socket = await dial();
-    const resp = await rpc(socket, 'sessions.create', {
+    const resp = await peerLink.rpc('sessions.create', {
       cwd: tmpRoot, shell: false, sandbox: false, app: 'claude', isReviewJob: true,
     });
     assert.equal(resp.ok, true, JSON.stringify(resp));
     sessionId = resp.session.sessionId;
-    socket.destroy();
     await sleep(500);
     const session = sessionManager.getSession(sessionId);
     assert.equal(
@@ -255,12 +306,16 @@ test('sessions.create over federation ignores a peer-supplied isReviewJob', { sk
 });
 
 test('a terminal-open relay on an active pair answers a plain ping/pong without spawning a session', { skip }, async () => {
-  const socket = await dial();
-  socket.write(`${JSON.stringify({ v: 1, kind: 'terminal-open' })}\n`);
-  socket.write(`${JSON.stringify({ type: 'ping' })}\n`);
-  const line = await readOneLine(socket);
-  assert.deepEqual(line, { type: 'pong' });
-  socket.destroy();
+  // Terminal relays multiplex over the same persistent link as RPC now
+  // (channelId-addressed terminal-data frames) rather than owning a whole
+  // one-shot connection -- see federationLink.js's openTerminalChannel.
+  const channel = peerLink.openTerminalChannel();
+  const pong = await new Promise((resolve) => {
+    channel.onMessage(resolve);
+    channel.send({ type: 'ping' });
+  });
+  assert.deepEqual(pong, { type: 'pong' });
+  channel.close();
 });
 
 test('after revoke, every RPC (including pairing.status) is refused', { skip }, async () => {

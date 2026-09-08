@@ -51,9 +51,9 @@
 
 export const PROTOCOL_VERSION = 1;
 
-// Frame `kind` string constants, shared by federationLink.js (and, from
-// Step2 onward, federationServer.js/federationClient.js) so the wire
-// vocabulary lives in exactly one place.
+// Frame `kind` string constants, shared by federationLink.js,
+// federationServer.js and federationClient.js so the wire vocabulary lives
+// in exactly one place.
 export const FRAME_KINDS = Object.freeze({
   LINK_HELLO: 'link-hello',
   RPC: 'rpc',
