@@ -22,7 +22,7 @@ import { federationRoute } from './routes/federation.js';
 import { authRoute } from './routes/auth.js';
 import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
-import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler, initPtyHostDisconnectedHandler, restorePtyHostSessions } from './ws/sessionManager.js';
+import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler, initPtyHostDisconnectedHandler, initPtyHostReconnectedHandler, restorePtyHostSessions } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
@@ -229,6 +229,14 @@ initPtyHostDestroyedHandler();
 // sessionManager.js's initPtyHostDisconnectedHandler). Also a no-op unless
 // CCSERVER_PTY_HOST=1.
 initPtyHostDisconnectedHandler();
+
+// Issue #119 Step6: registers the reconnect handler that, once a shard comes
+// back after the disconnect above, reattaches whatever pty-host itself
+// already auto-resumed on that shard (see sessionManager.js's
+// initPtyHostReconnectedHandler) -- without this, Step6's auto-resume would
+// keep those sessions alive on pty-host's side invisibly, with server本体
+// never noticing. Also a no-op unless CCSERVER_PTY_HOST=1.
+initPtyHostReconnectedHandler();
 
 // ccserver-notify: restore the subscription registry, then host the
 // process-global MCP socket if the feature is enabled (Discord webhook or

@@ -12,6 +12,13 @@ import { join } from 'node:path';
 import { PtyStore } from './ptyStore.js';
 import { createRpcServer } from './rpcServer.js';
 import { GitBrokerRegistry } from './gitBrokerRegistry.js';
+// Issue #119 Step6: both modules are pure/leaf (appLaunch.js has no imports
+// at all; ptyHostSessionMeta.js only node:fs/path/url) -- safe to import from
+// pty-host without risking the circular dependency this file's own header
+// comment guards against (sessionManager.js/groupManager.js/db.js stay off
+// limits, not every module server本体 happens to also use).
+import { appLaunchArgs } from '../ws/appLaunch.js';
+import { loadPtyHostSessionMeta } from '../ws/ptyHostSessionMeta.js';
 
 const SOCK_NAME = 'ccserver-pty-host.sock';
 
@@ -40,10 +47,110 @@ export function getPtyHostSockPath(shardIndex = 0) {
   return join(base, shardIndex === 0 ? SOCK_NAME : `ccserver-pty-host-${shardIndex}.sock`);
 }
 
+// Issue #119 Step6-2: pty-host's own identity within a sharded deployment.
+// Unlike getPtyHostSockPath() above (which server本体's ptyHostClient.js
+// calls, once per shard, to know WHERE each instance listens), THIS instance
+// has no other way to learn which shard it itself is -- it never sees
+// CCSERVER_PTY_HOST_SHARDS/shardIndexForKey (that routing logic lives
+// entirely in ptyHostClient.js, by design, see this file's own header
+// comment) and ptyHostSessionMeta.json is a single file shared by every
+// shard, keyed by session id with each entry separately carrying its own
+// shardIndex. Auto-resume (autoResumeSessions below) needs to know which of
+// those entries are actually its own to relaunch -- an operator running more
+// than one shard sets this explicitly per systemd unit (see docs-site's
+// systemd.md), the same way each shard's CCSERVER_PTY_HOST_SOCK is already
+// set today. Unset/invalid defaults to 0, matching every single-shard
+// deployment (and shardIndexForKey()'s own default) that predates sharding.
+export function getPtyHostShardIndex() {
+  const raw = process.env.CCSERVER_PTY_HOST_SHARD_INDEX;
+  if (!raw) return 0;
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n >= 0 ? n : 0;
+}
+
+// Issue #119 Step6-3: relaunches every session ptyHostSessionMeta.json says
+// belongs to THIS shard, reusing the exact same session id (so server本体's
+// EXISTING restorePtyHostSessions()/reconcileShardAfterReconnect() -- see
+// sessionManager.js -- reattach it exactly the way they already reattach any
+// other still-alive pty-host session; no new server本体-side matching logic
+// needed for this to work). Called once at startup, before the RPC listener
+// opens, so no client can observe a partially-resumed shard.
+//
+// Rebuilds the full spawn() call exactly as createSession()'s usePtyHost
+// branch (sessionManager.js) originally made it -- command/env/the socket
+// paths/orchestratorClaudeMdSrc/gitCommonDir/groupFilesDir/
+// sandboxHomeCreatedBy are replayed verbatim (see setPtyHostSessionMeta's own
+// call site comment for why a fresh buildSandboxSpawn() run against these,
+// rather than reusing a frozen already-sandboxed command/args pair, matters:
+// reapOrphans() above just killed whatever git-broker the crashed generation
+// had running, so anything short of rebuilding the sandbox from scratch
+// would bind a session into a git-broker socket nothing is listening on
+// anymore) -- only the resume portion of `args` is rebuilt fresh, preferring
+// the continuously-tracked latestClaudeSessionId (Step6-0) over the
+// ambiguous resumeLast fallback whenever it's known.
+function autoResumeSessions(ptyStore, shardIndex) {
+  const all = loadPtyHostSessionMeta();
+  let attempted = 0;
+  let succeeded = 0;
+  for (const [id, meta] of Object.entries(all)) {
+    if ((meta.shardIndex ?? 0) !== shardIndex) continue; // another shard's session -- not ours to resume
+    attempted++;
+    try {
+      const resumeArgs = meta.shell
+        ? []
+        : appLaunchArgs(meta.app, meta.latestClaudeSessionId
+          ? { resumeId: meta.latestClaudeSessionId, model: meta.model, permissionMode: meta.permissionMode }
+          : { resumeLast: true, model: meta.model, permissionMode: meta.permissionMode });
+      ptyStore.spawn({
+        id,
+        cwd: meta.cwd,
+        // The real cols/rows aren't persisted (no viewer is watching a
+        // just-crashed shard's sessions to negotiate against) -- same
+        // fixed-default convention already used for every other launch with
+        // no real viewport yet (groupManager.js's member launches, scheduled
+        // prompts); the first browser to reattach negotiates the real size
+        // immediately via resize.
+        cols: 80,
+        rows: 24,
+        command: meta.command,
+        args: [...resumeArgs, ...(meta.mcpArgs || [])],
+        env: meta.env || {},
+        sandbox: !!meta.sandbox,
+        sandboxOpts: meta.sandboxOpts,
+        // Same fallback sessionManager.js's own spawn() call already applies
+        // (see its own comment): a shell+sandbox session's `app` field is
+        // null (shells carry no app), but ptyStore.spawn() refuses
+        // sandbox:true without one.
+        app: meta.app || 'claude',
+        mcpSocketPath: meta.mcpSocketPath,
+        notifySocketPath: meta.notifySocketPath,
+        usageSocketPath: meta.usageSocketPath,
+        metaSocketPath: meta.metaSocketPath,
+        reviewerSocketPath: meta.reviewerSocketPath,
+        reuseSandboxHome: meta.reuseSandboxHome,
+        orchestratorClaudeMdSrc: meta.orchestratorClaudeMdSrc,
+        gitCommonDir: meta.gitCommonDir,
+        groupFilesDir: meta.groupFilesDir,
+        sandboxHomeCreatedBy: meta.sandboxHomeCreatedBy,
+      });
+      succeeded++;
+    } catch (err) {
+      // Left for the next restart/orphan sweep (restorePtyHostSessions()'s
+      // orphanedMeta case, sessionManager.js) rather than deleted here --
+      // pty-host itself never deletes ptyHostSessionMeta.json entries (see
+      // that file's own header comment: server本体 owns this file's
+      // lifecycle), and a transient failure (e.g. the sandbox's persistent
+      // HOME dir is mid-deletion) might succeed on a later attempt.
+      console.warn(`[pty-host] auto-resume: session ${id} (${meta.cwd}) failed to relaunch: ${err.message} -- leaving its metadata for server本体's next reconcile`);
+    }
+  }
+  return { attempted, succeeded };
+}
+
 // Starts pty-host and returns its live handles. Exported (rather than only
 // run via the bottom guard) so tests can start/stop an instance in-process
 // against a throwaway socket path.
-export async function startPtyHost({ sockPath = getPtyHostSockPath() } = {}) {
+export async function startPtyHost({ sockPath = getPtyHostSockPath(), shardIndex = getPtyHostShardIndex() } = {}) {
   const gitBrokerRegistry = new GitBrokerRegistry();
   const reaped = gitBrokerRegistry.reapOrphans();
   if (reaped.found > 0) {
@@ -51,6 +158,15 @@ export async function startPtyHost({ sockPath = getPtyHostSockPath() } = {}) {
   }
 
   const ptyStore = new PtyStore({ gitBrokerRegistry });
+
+  // Issue #119 Step6-3: before opening the RPC listener (so no client -- in
+  // particular server本体's own reconnect -- can see a partially-resumed
+  // shard), relaunch whatever this shard held before it crashed.
+  const resumed = autoResumeSessions(ptyStore, shardIndex);
+  if (resumed.attempted > 0) {
+    console.log(`[pty-host] auto-resume: ${resumed.succeeded}/${resumed.attempted} session(s) relaunched (shard ${shardIndex})`);
+  }
+
   const rpc = await createRpcServer(ptyStore, { sockPath });
   console.log(`[pty-host] listening at ${sockPath} (pid ${process.pid})`);
 
@@ -78,15 +194,20 @@ if (isMain()) {
     // kill cleanly" dance to do here that would change the outcome; this
     // handler exists only to log the tradeoff plainly instead of dying
     // silently, and to close the UDS listener so the socket file doesn't
-    // linger stale. Restart-triggered auto-resume (plan5 Step6) is the
-    // actual mitigation, not this handler.
+    // linger stale. Issue #119 Step6's auto-resume (autoResumeSessions
+    // above, run on the NEXT startPtyHost()) is what actually relaunches
+    // these sessions -- systemd's Restart=on-failure is what makes that next
+    // startup happen at all after a crash; this same shutdown() also runs
+    // for a deliberate `systemctl restart`, which Restart=on-failure has
+    // nothing to do with.
     const shutdown = (signal) => {
       const live = host.ptyStore.size();
       if (live > 0) {
         console.warn(
-          `[pty-host] received ${signal} with ${live} live session(s) -- they will be lost `
-          + '(pty-host restart is a data-loss event by design until plan5 Step6\'s auto-resume lands; '
-          + 'see docs/plan5 section 7.2/7.4). Restart the affected sessions after pty-host comes back up.'
+          `[pty-host] received ${signal} with ${live} live session(s) -- they will be relaunched via `
+          + 'auto-resume once this instance restarts (see docs-site/deployment/systemd.md), but any '
+          + 'command still running inside them at this moment is lost -- only the conversation/shell itself '
+          + 'comes back, not its in-flight process state.'
         );
       }
       host.stop().finally(() => process.exit(0));

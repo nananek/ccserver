@@ -26,7 +26,7 @@ import { stripAnsi } from './mcpTools.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { recordSessionLimitReset } from '../sessionLimitState.js';
 import { getPtyHostClient, getAllPtyHostClients, shardIndexForKey, shardKeyForSession } from './ptyHostClient.js';
-import { setPtyHostSessionMeta, deletePtyHostSessionMeta, loadPtyHostSessionMeta } from './ptyHostSessionMeta.js';
+import { setPtyHostSessionMeta, patchPtyHostSessionMeta, deletePtyHostSessionMeta, loadPtyHostSessionMeta } from './ptyHostSessionMeta.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
@@ -329,6 +329,25 @@ function buildSessionRecord(id, ptyProcess, meta) {
     limitDetectBuf: '',
     lastAutoLimitResetAt: null,
     startedClaudeSessionId: meta.startedClaudeSessionId ?? null,
+    // Issue #119 Step6: same sliding-window pattern as limitDetectBuf above,
+    // but for continuously tracking the most recent `claude --resume <id>`
+    // hint a live claude session prints (extractResumeSessionId, appLaunch.js)
+    // -- unlike session.claudeSessionId (only ever set once, from onExit,
+    // after the process has already died), this stays current WHILE the
+    // session is still running, so pty-host's own crash-recovery auto-resume
+    // (server/pty-host/index.js) can relaunch with the actual latest id
+    // instead of falling back to an ambiguous resumeLast. Seeded from
+    // meta.startedClaudeSessionId (not null): if this launch itself already
+    // knew an accurate id (a manual resume) and the pty dies before ever
+    // printing a NEW hint, that id is still the best known value, not
+    // "nothing detected yet". Only tracked/written back for app==='claude'
+    // (see the onData handler below) -- every other app's
+    // extractResumeSessionId always returns null (see appLaunch.js), so
+    // there is nothing to track for them.
+    lastKnownResumeId: meta.startedClaudeSessionId ?? null,
+    resumeIdDetectBuf: '',
+    resumeIdWriteTimer: null,
+    resumeIdLastWriteAt: 0,
     scheduleId: null, // key into the module-level `schedules` map, if any
     pendingInjection: null, // { text, at } — scheduled prompt awaiting a freshly-resumed session
     pendingInjectionTimer: null, // RESUME_INJECT_FALLBACK_MS safety net; cleared on teardown
@@ -390,6 +409,27 @@ function buildSessionRecord(id, ptyProcess, meta) {
         }
       } else {
         console.warn(`[session-limit] session ${session.id} hit its limit, but a manual schedule already exists -- not overriding it`);
+      }
+    }
+
+    // Issue #119 Step6-0: continuously track claude's latest `--resume <id>`
+    // hint (see lastKnownResumeId's field comment above) so pty-host's own
+    // crash-recovery auto-resume has an accurate id, not just resumeLast.
+    // Only worth the sliding-window bookkeeping when it can actually go
+    // anywhere: usePtyHost gates the whole point (a direct-spawned session
+    // dies with server本体 itself, same as before pty-host existed -- there is
+    // no separate crash-recovery path for it to feed), and app==='claude'
+    // gates the extraction itself (every other app's extractResumeSessionId
+    // always returns null, see appLaunch.js).
+    if (process.env.CCSERVER_PTY_HOST === '1' && session.app === 'claude') {
+      session.resumeIdDetectBuf = (session.resumeIdDetectBuf + data).slice(-RESUME_ID_DETECT_BUF_MAX_CHARS);
+      // extractResumeSessionId does its own ANSI-stripping internally (unlike
+      // findSessionLimitReset above), so the raw window is passed straight
+      // through.
+      const detected = extractResumeSessionId('claude', session.resumeIdDetectBuf);
+      if (detected && detected !== session.lastKnownResumeId) {
+        session.lastKnownResumeId = detected;
+        scheduleResumeIdWriteback(session);
       }
     }
 
@@ -514,6 +554,15 @@ function buildSessionRecord(id, ptyProcess, meta) {
     // Keep any pending scheduled prompt alive across this exit: refresh its
     // resume id and detach it so it auto-resumes the conversation at fire time.
     refreshScheduleOnExit(session);
+
+    // Issue #119 Step6-0: a debounced write-back pending when the pty exits
+    // is the last chance to get it onto disk -- no more onData chunks will
+    // ever arrive to trigger the next one, so anything still only in memory
+    // at this point would otherwise be lost the moment server本体 itself
+    // later restarts (or, for a pty-host-hosted session, is exactly the kind
+    // of gap flushResumeIdWriteback's own callers already guard elsewhere --
+    // see initPtyHostDisconnectedHandler below).
+    if (session.resumeIdWriteTimer) flushResumeIdWriteback(session);
 
     for (const fn of sessionExitListeners) {
       try {
@@ -810,6 +859,16 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // host node+bridge). The args must be in the target command before
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
+  // Issue #119 Step6-1: the MCP registration args (injected.args below),
+  // captured separately from the rest of `args` so pty-host's own
+  // crash-recovery auto-resume (server/pty-host/index.js) can replay them
+  // verbatim without re-deriving whether notify/usage/meta/reviewer/group-mcp
+  // apply or rebuilding their identity payloads -- only the resume/model/
+  // permission portion appLaunchArgs() produces needs to be regenerated
+  // fresh (a resume id that was accurate at THIS launch may not be by the
+  // time pty-host relaunches it). See setPtyHostSessionMeta's mcpArgs field
+  // below.
+  let mcpArgs = [];
   if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer || (sandboxRequested && tools.codeReviewGraph))) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       // ccserver (the group broker) only when the session has a group socket:
@@ -848,6 +907,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       cwd,
     });
     mcpEnv = injected.env;
+    mcpArgs = injected.args;
     args.push(...injected.args);
   }
 
@@ -1004,6 +1064,35 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         // file's restorePtyHostSessions() and ptyHostClient.js's
         // shardIndexForKey() header comment.
         shardIndex: ptyHostShardIndex,
+        // Issue #119 Step6-1: everything below lets pty-host's own
+        // crash-recovery auto-resume (server/pty-host/index.js) call
+        // ptyStore.spawn() again with the exact same shape this call itself
+        // used -- command/env/the socket paths/orchestratorClaudeMdSrc/
+        // gitCommonDir/groupFilesDir/sandboxHomeCreatedBy are replayed
+        // verbatim (a fresh buildSandboxSpawn() run there rebuilds the
+        // sandbox -- including a fresh git-broker -- from these exactly as
+        // this launch itself did; a git-broker started by the crashed
+        // pty-host generation does NOT survive to be reused, see
+        // gitBrokerRegistry.js's reapOrphans()), while only the resume
+        // portion of `args` (mcpArgs holds everything else already decided
+        // above) gets rebuilt fresh from whatever's known at RESUME time.
+        mcpArgs,
+        env: ptyEnv,
+        command,
+        mcpSocketPath,
+        notifySocketPath,
+        usageSocketPath,
+        metaSocketPath,
+        reviewerSocketPath,
+        orchestratorClaudeMdSrc,
+        gitCommonDir,
+        groupFilesDir: resolvedGroupFilesDir,
+        sandboxHomeCreatedBy,
+        // Step6-0's continuously-updated resume id (see buildSessionRecord's
+        // lastKnownResumeId field comment) starts here at the same value
+        // startedClaudeSessionId does -- the freshest accurate id known at
+        // this exact moment, before the pty has printed anything of its own.
+        latestClaudeSessionId: claudeSessionId || null,
       });
     } catch (err) {
       // pty-host's own errors already carry the "Failed to build sandbox" /
@@ -1289,6 +1378,30 @@ const LIMIT_DETECT_BUF_MAX_CHARS = 2048;
 const SESSION_LIMIT_RESUME_DELAY_MS = 60 * 1000; // fire 1 minute after reset
 const SESSION_LIMIT_RESUME_MESSAGE = 'セッション制限がリセットされました。作業を続けてください。';
 
+// Issue #119 Step6-0: claude's `claude --resume <id>` hint (~40-60 chars
+// including the uuid) is far shorter than the session-limit status line
+// above, but ANSI escapes can still interleave with it across redraws --
+// generously larger than the longest realistic hint while staying well
+// below LIMIT_DETECT_BUF_MAX_CHARS, since this signal needs nowhere near as
+// much context.
+const RESUME_ID_DETECT_BUF_MAX_CHARS = 512;
+// How long to hold a changed lastKnownResumeId in memory before writing it
+// to ptyHostSessionMeta.json (see scheduleResumeIdWriteback below). Chosen
+// as a starting point in the plan's suggested 5-10s range; claude is
+// expected to only reprint this hint on infrequent events (e.g.
+// compaction), so real write frequency is likely far below what even makes
+// this debounce necessary. Env-overridable (read fresh per call, like
+// ptyHostClient.js's shardCount()) both so an operator can tune it against
+// observed behavior without a code change, and so tests aren't stuck
+// waiting out a real 10s window.
+const DEFAULT_RESUME_ID_WRITE_DEBOUNCE_MS = 10_000;
+function resumeIdWriteDebounceMs() {
+  const raw = process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS;
+  if (raw == null || String(raw).trim() === '') return DEFAULT_RESUME_ID_WRITE_DEBOUNCE_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_RESUME_ID_WRITE_DEBOUNCE_MS;
+}
+
 // The server's IANA timezone (e.g. "Asia/Tokyo"). Claude Code prints its
 // rate-limit reset times in this zone, so scheduling is interpreted here too.
 let SERVER_TZ = 'UTC';
@@ -1472,6 +1585,38 @@ function refreshScheduleOnExit(session) {
   s.sessionId = null; // the pty is gone; force the resume path at fire time
   session.scheduleId = null;
   persistSchedules();
+}
+
+// Issue #119 Step6-0: writes session.lastKnownResumeId to
+// ptyHostSessionMeta.json's latestClaudeSessionId right now, clearing any
+// armed debounce timer. Called both when the debounce window has actually
+// elapsed (scheduleResumeIdWriteback below) and from the onExit/disconnect
+// paths that must not let a pending value die in memory only.
+function flushResumeIdWriteback(session) {
+  if (session.resumeIdWriteTimer) {
+    clearTimeout(session.resumeIdWriteTimer);
+    session.resumeIdWriteTimer = null;
+  }
+  session.resumeIdLastWriteAt = Date.now();
+  patchPtyHostSessionMeta(session.id, { latestClaudeSessionId: session.lastKnownResumeId });
+}
+
+// Issue #119 Step6-0: debounces the ptyHostSessionMeta.json write-back for a
+// newly-detected lastKnownResumeId. If the last actual write was long enough
+// ago (resumeIdWriteDebounceMs()), write immediately; otherwise hold the
+// value in memory (already updated by the caller) and let an already-armed
+// timer -- or a freshly armed one -- pick up whatever the LATEST value is
+// once it fires, rather than writing on every single detected change.
+function scheduleResumeIdWriteback(session) {
+  const debounceMs = resumeIdWriteDebounceMs();
+  const elapsed = Date.now() - session.resumeIdLastWriteAt;
+  if (elapsed >= debounceMs) {
+    flushResumeIdWriteback(session);
+    return;
+  }
+  if (session.resumeIdWriteTimer) return; // already armed; will flush the latest value when it fires
+  session.resumeIdWriteTimer = setTimeout(() => flushResumeIdWriteback(session), debounceMs - elapsed);
+  session.resumeIdWriteTimer.unref?.();
 }
 
 function injectIntoLiveSession(session, text) {
@@ -2225,6 +2370,14 @@ export function initPtyHostDisconnectedHandler() {
         // fire time (same reason buildSessionRecord's ptyProcess.onExit
         // calls this).
         refreshScheduleOnExit(session);
+        // Issue #119 Step6-0: this shard's pty-host process is gone -- no
+        // more onData chunks will ever arrive for THIS session record to
+        // debounce against, so any value still only pending in memory must
+        // reach ptyHostSessionMeta.json now. This is the scenario the
+        // pending-flush contract exists for: pty-host itself may already be
+        // auto-resuming this exact session id from that very file (see
+        // server/pty-host/index.js) by the time this handler runs.
+        if (session.resumeIdWriteTimer) flushResumeIdWriteback(session);
         for (const fn of sessionExitListeners) {
           try {
             fn(session);
@@ -2255,6 +2408,63 @@ export function initPtyHostDisconnectedHandler() {
 // fresh PtyHostClient (see ptyHostClient.js's resetPtyHostClientForTests()).
 export function resetPtyHostDisconnectedHandlerForTests() {
   ptyHostDisconnectedHandlerArmed = false;
+}
+
+// Shared by restorePtyHostSessions() (below, the whole-fleet boot-time
+// reconcile) and reconcileShardAfterReconnect() (Issue #119 Step6, a single
+// shard's post-crash reconcile): given one live() entry pty-host reports and
+// its matching restore metadata, reattaches + rebuilds this module's
+// `sessions` Map entry for it and resumes streaming its output. The caller
+// has already confirmed `live` isn't already exited. Returns true if the
+// session was restored, false if the attach itself failed (network blip
+// between list() and here -- the caller decides whether that's worth
+// retrying).
+async function reattachLiveSession(live, meta, client, shardIndex) {
+  // attach() can throw if pty-host has become unreachable since the list()
+  // call that found `live` (e.g. it was restarted mid-loop while restoring
+  // many sessions) -- caught per-session so one bad reattach doesn't abort
+  // the whole restore (leaving every subsequent live session unrestored) or
+  // skip whatever sweep the caller runs after this loop.
+  let rpty;
+  try {
+    rpty = await client.attach(live.id, {
+      cols: live.cols,
+      rows: live.rows,
+      pid: live.pid,
+      sandbox: { active: live.sandbox?.active, docker: live.sandbox?.docker, stateDir: meta.sandboxStateDir },
+    });
+  } catch (err) {
+    console.warn(`[session] ${live.id}: restore attach failed, skipping (${err.message})`);
+    return false;
+  }
+
+  buildSessionRecord(live.id, rpty, {
+    ...meta,
+    cols: live.cols,
+    rows: live.rows,
+    // Reattaching, not launching: this session is by definition already
+    // past whatever TUI init burst it once had (see buildSessionRecord's
+    // header comment on `settled`).
+    settled: true,
+    // Absorbs restore-metadata entries written before Step5 existed (no
+    // shardIndex field at all): every such entry was necessarily created
+    // by the sole pre-Step5 instance, i.e. shard 0.
+    shardIndex: meta.shardIndex ?? shardIndex,
+  });
+
+  // Replays the retained backlog through the exact same onData path a
+  // live session uses (buildSessionRecord wired it above) -- a
+  // still-pending permission prompt gets AutoYes'd exactly as it would
+  // on a live session, and outputBuffer/screenModel end up in the state
+  // a browser reconnecting expects. Same call shape as createSession()'s
+  // own post-spawn subscribe (sinceSeq 0 = full retained backlog).
+  try {
+    await client.subscribe(rpty, 0);
+  } catch (err) {
+    console.warn(`[session] ${live.id}: restore subscribe failed (will retry on reconnect): ${err.message}`);
+  }
+
+  return true;
 }
 
 // Plan5 Step3: rebuilds `sessions` Map entries for pty-host sessions that
@@ -2345,52 +2555,7 @@ export async function restorePtyHostSessions() {
         continue;
       }
 
-      // attach() can throw if pty-host has become unreachable since the
-      // list() call above (e.g. it was restarted mid-loop while restoring
-      // many sessions) -- caught per-session so one bad reattach doesn't
-      // abort the whole restore (leaving every subsequent live session
-      // unrestored for the rest of this process's lifetime) or skip the
-      // orphaned-meta sweep below.
-      let rpty;
-      try {
-        rpty = await client.attach(live.id, {
-          cols: live.cols,
-          rows: live.rows,
-          pid: live.pid,
-          sandbox: { active: live.sandbox?.active, docker: live.sandbox?.docker, stateDir: meta.sandboxStateDir },
-        });
-      } catch (err) {
-        console.warn(`[session] ${live.id}: restore attach failed, skipping (${err.message})`);
-        continue;
-      }
-
-      buildSessionRecord(live.id, rpty, {
-        ...meta,
-        cols: live.cols,
-        rows: live.rows,
-        // Reattaching, not launching: this session is by definition already
-        // past whatever TUI init burst it once had (see buildSessionRecord's
-        // header comment on `settled`).
-        settled: true,
-        // Absorbs restore-metadata entries written before Step5 existed (no
-        // shardIndex field at all): every such entry was necessarily created
-        // by the sole pre-Step5 instance, i.e. shard 0.
-        shardIndex: meta.shardIndex ?? 0,
-      });
-
-      // Replays the retained backlog through the exact same onData path a
-      // live session uses (buildSessionRecord wired it above) -- a
-      // still-pending permission prompt gets AutoYes'd exactly as it would
-      // on a live session, and outputBuffer/screenModel end up in the state
-      // a browser reconnecting expects. Same call shape as createSession()'s
-      // own post-spawn subscribe (sinceSeq 0 = full retained backlog).
-      try {
-        await client.subscribe(rpty, 0);
-      } catch (err) {
-        console.warn(`[session] ${live.id}: restore subscribe failed (will retry on reconnect): ${err.message}`);
-      }
-
-      restored++;
+      if (await reattachLiveSession(live, meta, client, shardIndex)) restored++;
     }
   }
 
@@ -2409,6 +2574,94 @@ export async function restorePtyHostSessions() {
   }
 
   return { restored, orphanedLive, orphanedMeta, alreadyExited };
+}
+
+let ptyHostReconnectedHandlerArmed = false;
+
+// Issue #119 Step6: without this, Step6's whole benefit is invisible from
+// the user's side. initPtyHostDisconnectedHandler (Issue #143) treats a
+// shard's PtyHostClient disconnecting as every session it held being lost --
+// correct when pty-host itself has no way to bring them back, but Step6
+// gives it exactly that way (see server/pty-host/index.js's own
+// auto-resume, keyed by the SAME session ids ptyHostSessionMeta.json already
+// names). Once that shard's client reconnects, pty-host may already be
+// running some of those same ids again; this reattaches this module's side
+// of the same reconciliation restorePtyHostSessions() does at boot, scoped
+// to just the one shard that came back (never a global rescan -- every OTHER
+// shard's sessions were never touched by this shard's crash, and re-running
+// the boot-time function verbatim would re-buildSessionRecord() every
+// currently-healthy session on every other shard too, silently replacing
+// their live records).
+// Known minor limitation, deliberately not handled here: unlike
+// restorePtyHostSessions(), this never sweeps metaAll for THIS shard's own
+// orphaned metadata (an entry whose auto-resume attempt failed on pty-host's
+// side, per autoResumeSessions' own try/catch in server/pty-host/index.js).
+// Such an entry lingers in ptyHostSessionMeta.json until the next full
+// server本体 restart's restorePtyHostSessions() sweep reaches it -- harmless
+// (it names nothing currently live, and is skipped safely at the next
+// reconcile too, since sessions.has()/metaAll lookups above just find no
+// match for it) but not actively cleaned up by a reconnect alone.
+async function reconcileShardAfterReconnect(shardIndex, client) {
+  const metaAll = loadPtyHostSessionMeta();
+  let liveList;
+  try {
+    liveList = await client.list();
+  } catch (err) {
+    // Already unreachable again by the time this ran -- its own next
+    // reconnect will retry this same reconcile.
+    console.warn(`[session] shard ${shardIndex} reconnected but is already unreachable again (${err.message})`);
+    return;
+  }
+
+  let restored = 0;
+  for (const live of liveList) {
+    // Defensive, should never actually trigger: every session this shard's
+    // disconnect handler held was already deleted from `sessions`, and no
+    // NEW session could have been created on this shard while it was
+    // unreachable (createSession()'s spawn() call would have failed
+    // outright) -- but never clobber an existing live record regardless.
+    if (sessions.has(live.id)) continue;
+    const meta = metaAll[live.id];
+    // pty-host has it, this module's metadata doesn't -- same as
+    // restorePtyHostSessions()'s orphanedLive case: never restore from
+    // guessed fields, leave it to pty-host's own idle/exited timeout.
+    if (!meta) continue;
+    if (live.exited) {
+      deletePtyHostSessionMeta(live.id);
+      continue;
+    }
+    if (await reattachLiveSession(live, meta, client, shardIndex)) restored++;
+  }
+  if (restored > 0) {
+    console.log(`[session] shard ${shardIndex} reconnected: reattached ${restored} session(s) pty-host auto-resumed while it was unreachable`);
+  }
+}
+
+// Registers, on every shard's client, a callback fired only on a RECONNECT
+// (never the first connect at boot -- see ptyHostClient.js's onReconnected)
+// that runs reconcileShardAfterReconnect() for that one shard. A no-op when
+// CCSERVER_PTY_HOST is unset; idempotent the same way
+// initPtyHostDestroyedHandler/initPtyHostDisconnectedHandler are.
+export function initPtyHostReconnectedHandler() {
+  if (process.env.CCSERVER_PTY_HOST !== '1') return;
+  if (ptyHostReconnectedHandlerArmed) return;
+  ptyHostReconnectedHandlerArmed = true;
+  const shardClients = getAllPtyHostClients();
+  for (let shardIndex = 0; shardIndex < shardClients.length; shardIndex++) {
+    const client = shardClients[shardIndex];
+    client.onReconnected(() => {
+      reconcileShardAfterReconnect(shardIndex, client).catch((err) => {
+        console.error(`[session] shard ${shardIndex} reconnect reconcile failed: ${err.message}`);
+      });
+    });
+  }
+}
+
+// Test seam: re-arm initPtyHostReconnectedHandler() for a test that starts
+// its own in-process pty-host and needs the handler registered against a
+// fresh PtyHostClient (see ptyHostClient.js's resetPtyHostClientForTests()).
+export function resetPtyHostReconnectedHandlerForTests() {
+  ptyHostReconnectedHandlerArmed = false;
 }
 
 export function destroyAllSessions() {

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   setPtyHostSessionMeta,
+  patchPtyHostSessionMeta,
   deletePtyHostSessionMeta,
   loadPtyHostSessionMeta,
 } from './ptyHostSessionMeta.js';
@@ -116,5 +117,37 @@ test('setPtyHostSessionMeta after a corrupt file starts fresh instead of throwin
     writeFileSync(path, '{not valid json');
     setPtyHostSessionMeta('sess-1', { cwd: '/a' });
     assert.deepEqual(loadPtyHostSessionMeta(), { 'sess-1': { cwd: '/a' } });
+  });
+});
+
+// Issue #119 Step6-0: patchPtyHostSessionMeta merges into an existing entry
+// (unlike setPtyHostSessionMeta, which replaces it wholesale) -- the debounced
+// claudeSessionId write-back must update just latestClaudeSessionId without
+// clobbering everything else setPtyHostSessionMeta wrote at spawn time.
+test('patchPtyHostSessionMeta merges into an existing entry without touching its other fields', () => {
+  withTempMetaPath(() => {
+    setPtyHostSessionMeta('sess-1', { cwd: '/a', app: 'claude', latestClaudeSessionId: null });
+    patchPtyHostSessionMeta('sess-1', { latestClaudeSessionId: 'resume-id-1' });
+    assert.deepEqual(loadPtyHostSessionMeta(), {
+      'sess-1': { cwd: '/a', app: 'claude', latestClaudeSessionId: 'resume-id-1' },
+    });
+  });
+});
+
+test('patchPtyHostSessionMeta on an id with no existing entry is a silent no-op, never creating a partial one', () => {
+  withTempMetaPath(() => {
+    patchPtyHostSessionMeta('does-not-exist', { latestClaudeSessionId: 'resume-id-1' });
+    assert.deepEqual(loadPtyHostSessionMeta(), {}, 'nothing was created from a partial patch');
+  });
+});
+
+test('patchPtyHostSessionMeta only touches the named entry, leaving siblings untouched', () => {
+  withTempMetaPath(() => {
+    setPtyHostSessionMeta('sess-1', { cwd: '/a', latestClaudeSessionId: null });
+    setPtyHostSessionMeta('sess-2', { cwd: '/b', latestClaudeSessionId: null });
+    patchPtyHostSessionMeta('sess-1', { latestClaudeSessionId: 'resume-id-1' });
+    const all = loadPtyHostSessionMeta();
+    assert.equal(all['sess-1'].latestClaudeSessionId, 'resume-id-1');
+    assert.equal(all['sess-2'].latestClaudeSessionId, null, 'sess-2 was never touched');
   });
 });

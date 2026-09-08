@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getPtyHostSockPath, startPtyHost } from './index.js';
+import { getPtyHostSockPath, getPtyHostShardIndex, startPtyHost } from './index.js';
+import { setPtyHostSessionMeta, loadPtyHostSessionMeta } from '../ws/ptyHostSessionMeta.js';
 
 test('getPtyHostSockPath: CCSERVER_PTY_HOST_SOCK wins, else XDG_RUNTIME_DIR, else /run/user/<uid>', () => {
   const prevSock = process.env.CCSERVER_PTY_HOST_SOCK;
@@ -54,6 +55,141 @@ test('startPtyHost: listens on the given path, serves a real session, and stop()
     }
   } finally {
     delete process.env.CCSERVER_PTY_HOST_GITBROKER_REGISTRY;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Issue #119 Step6-2.
+test('getPtyHostShardIndex: CCSERVER_PTY_HOST_SHARD_INDEX wins, else 0; invalid values also fall back to 0', () => {
+  const prev = process.env.CCSERVER_PTY_HOST_SHARD_INDEX;
+  try {
+    delete process.env.CCSERVER_PTY_HOST_SHARD_INDEX;
+    assert.equal(getPtyHostShardIndex(), 0);
+
+    process.env.CCSERVER_PTY_HOST_SHARD_INDEX = '2';
+    assert.equal(getPtyHostShardIndex(), 2);
+
+    process.env.CCSERVER_PTY_HOST_SHARD_INDEX = '0';
+    assert.equal(getPtyHostShardIndex(), 0);
+
+    process.env.CCSERVER_PTY_HOST_SHARD_INDEX = '-1';
+    assert.equal(getPtyHostShardIndex(), 0, 'a negative index is invalid, falls back to 0');
+
+    process.env.CCSERVER_PTY_HOST_SHARD_INDEX = 'not-a-number';
+    assert.equal(getPtyHostShardIndex(), 0, 'a non-numeric value is invalid, falls back to 0');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_PTY_HOST_SHARD_INDEX;
+    else process.env.CCSERVER_PTY_HOST_SHARD_INDEX = prev;
+  }
+});
+
+// Issue #119 Step6-3: startPtyHost() relaunches whatever ptyHostSessionMeta.json
+// says belongs to its own shard, under the SAME session id, before it ever
+// opens its RPC listener -- this is what lets server本体's existing
+// restorePtyHostSessions()/reconcileShardAfterReconnect() (sessionManager.js)
+// reattach it with zero new server本体-side matching logic. A shell entry
+// (app: null) is used here specifically because it needs no resume-args
+// reconstruction at all (see autoResumeSessions' `meta.shell ? [] : ...`
+// branch) and no real claude/agent binary -- this test is about the
+// mechanics of picking up and relaunching meta entries, not app-specific
+// resume behavior (see sessionManager.pty-host.test.js for the claude
+// --resume + reconnect-reconcile end-to-end coverage).
+test('startPtyHost auto-resumes a session belonging to its own shard, under the same id, before opening its RPC listener', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-pty-host-autoresume-test-'));
+  const sockPath = join(dir, 'pty-host.sock');
+  const metaPath = join(dir, 'pty-host-session-meta.json');
+  process.env.CCSERVER_PTY_HOST_GITBROKER_REGISTRY = join(dir, 'gitbroker-registry.json');
+  process.env.CCSERVER_PTY_HOST_SESSION_META_PATH = metaPath;
+  const sessionId = 'auto-resume-test-shell-session';
+  setPtyHostSessionMeta(sessionId, {
+    cwd: dir,
+    shell: true,
+    app: null,
+    model: null,
+    permissionMode: 'standard',
+    command: process.env.SHELL || '/bin/bash',
+    mcpArgs: [],
+    env: { PATH: process.env.PATH, HOME: process.env.HOME },
+    sandbox: false,
+    sandboxOpts: null,
+    reuseSandboxHome: true,
+    startedClaudeSessionId: null,
+    latestClaudeSessionId: null,
+    shardIndex: 0,
+  });
+  try {
+    const host = await startPtyHost({ sockPath, shardIndex: 0 });
+    try {
+      assert.ok(host.ptyStore.list().some((s) => s.id === sessionId), 'the meta entry for this shard was relaunched under its original id');
+    } finally {
+      host.ptyStore.destroy(sessionId);
+      await host.stop();
+    }
+  } finally {
+    delete process.env.CCSERVER_PTY_HOST_GITBROKER_REGISTRY;
+    delete process.env.CCSERVER_PTY_HOST_SESSION_META_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('startPtyHost does not auto-resume a meta entry belonging to a DIFFERENT shard', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-pty-host-autoresume-othershard-test-'));
+  const sockPath = join(dir, 'pty-host.sock');
+  const metaPath = join(dir, 'pty-host-session-meta.json');
+  process.env.CCSERVER_PTY_HOST_GITBROKER_REGISTRY = join(dir, 'gitbroker-registry.json');
+  process.env.CCSERVER_PTY_HOST_SESSION_META_PATH = metaPath;
+  const sessionId = 'auto-resume-test-other-shard-session';
+  setPtyHostSessionMeta(sessionId, {
+    cwd: dir, shell: true, app: null, command: process.env.SHELL || '/bin/bash',
+    mcpArgs: [], env: { PATH: process.env.PATH, HOME: process.env.HOME },
+    sandbox: false, sandboxOpts: null, reuseSandboxHome: true,
+    startedClaudeSessionId: null, latestClaudeSessionId: null,
+    shardIndex: 1, // this instance is shard 0 below -- not its session
+  });
+  try {
+    const host = await startPtyHost({ sockPath, shardIndex: 0 });
+    try {
+      assert.ok(!host.ptyStore.list().some((s) => s.id === sessionId), 'a different shard\'s entry was left alone');
+      // The metadata itself is untouched -- server本体's own reconcile (not
+      // this shard) decides its fate once ITS shard comes back.
+      assert.ok(loadPtyHostSessionMeta()[sessionId], 'the metadata entry survives, for whichever shard actually owns it');
+    } finally {
+      await host.stop();
+    }
+  } finally {
+    delete process.env.CCSERVER_PTY_HOST_GITBROKER_REGISTRY;
+    delete process.env.CCSERVER_PTY_HOST_SESSION_META_PATH;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A meta entry too broken to relaunch (here: no `command` at all, e.g. one
+// written before Step6-1's schema existed) must not crash pty-host's own
+// startup -- it's simply skipped, per plan, left for a later restart/orphan
+// sweep to resolve instead of guessed at.
+test('startPtyHost skips (without crashing) a meta entry that fails to relaunch, leaving its metadata alone', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-pty-host-autoresume-broken-test-'));
+  const sockPath = join(dir, 'pty-host.sock');
+  const metaPath = join(dir, 'pty-host-session-meta.json');
+  process.env.CCSERVER_PTY_HOST_GITBROKER_REGISTRY = join(dir, 'gitbroker-registry.json');
+  process.env.CCSERVER_PTY_HOST_SESSION_META_PATH = metaPath;
+  const sessionId = 'auto-resume-test-broken-session';
+  setPtyHostSessionMeta(sessionId, {
+    cwd: dir, shell: true, app: null,
+    // no `command` -- ptyStore.spawn() throws "command must be a non-empty string"
+    shardIndex: 0,
+  });
+  try {
+    const host = await startPtyHost({ sockPath, shardIndex: 0 });
+    try {
+      assert.equal(host.ptyStore.list().length, 0, 'nothing crashed the startup; the broken entry was simply skipped');
+      assert.ok(loadPtyHostSessionMeta()[sessionId], 'pty-host never deletes meta entries itself, even a failed one');
+    } finally {
+      await host.stop();
+    }
+  } finally {
+    delete process.env.CCSERVER_PTY_HOST_GITBROKER_REGISTRY;
+    delete process.env.CCSERVER_PTY_HOST_SESSION_META_PATH;
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -69,6 +69,21 @@ export function setPtyHostSessionMeta(id, meta) {
   writeAll(all);
 }
 
+// Merges `partial` into an already-recorded entry (Issue #119 Step6:
+// sessionManager.js's debounced claudeSessionId write-back updates only
+// `latestClaudeSessionId`, not the whole launch-input record setPtyHostSessionMeta
+// wrote at spawn time). Unlike setPtyHostSessionMeta, a missing entry is a
+// silent no-op rather than creating a partial one from scratch -- the session
+// may have been destroyed (and its entry deleted) between the debounce timer
+// being armed and firing, and there is nothing meaningful to patch onto in
+// that case.
+export function patchPtyHostSessionMeta(id, partial) {
+  const all = readAll();
+  if (!(id in all)) return;
+  all[id] = { ...all[id], ...partial };
+  writeAll(all);
+}
+
 // Drops one session's entry. Called from destroySession()'s usePtyHost branch
 // and from the `destroyed` push-event handler (a session pty-host tears down
 // on its own, e.g. its idle/exited timeout, also stops needing a restore

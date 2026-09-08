@@ -246,6 +246,42 @@ test('onDisconnected fires with every held sessionId when the connection drops, 
   }
 });
 
+// Issue #119 Step6: onReconnected is the pair to onDisconnected above, but
+// fires only on a RECONNECT (never the first connect at boot -- see
+// sessionManager.js's initPtyHostReconnectedHandler, which reconciles
+// whatever pty-host may have auto-resumed while its shard was unreachable;
+// nothing needs reconciling on a plain boot, restorePtyHostSessions()
+// already covers that).
+test('onReconnected never fires on the first connect, but fires exactly once after a real reconnect following a disconnect', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-ptyhostclient-reconnect-'));
+  const sp = join(dir, 'pty-host.sock');
+  const store = new PtyStore();
+  let rpc = await createRpcServer(store, { sockPath: sp });
+  const client = new PtyHostClient(sp);
+  const reconnections = [];
+  client.onReconnected(() => reconnections.push(Date.now()));
+  try {
+    // First connect, at "boot" -- spawn() is enough to force _ensureConnected().
+    const rpty = await client.spawn(shellSpawnParams());
+    assert.equal(reconnections.length, 0, 'the very first connect is not a reconnect');
+    store.destroy(rpty.sessionId);
+
+    // Stands in for pty-host's process dying (see onDisconnected's own test
+    // above for why rpc.close() is the right stand-in).
+    await rpc.close();
+
+    // Bring a listener back up on the same path -- the client's own backoff
+    // schedule should find it without any external nudge.
+    rpc = await createRpcServer(store, { sockPath: sp });
+    await waitFor(() => reconnections.length > 0, { timeoutMs: 5000 });
+    assert.equal(reconnections.length, 1, 'fired exactly once for this one reconnect');
+  } finally {
+    client.close();
+    await rpc.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Plan5 Step5 (partitioning): these are pure-function/lazy-construction
 // tests, no pty-host instance involved -- see sessionManager.pty-host-
 // shards.test.js for the end-to-end "actually routes to different real

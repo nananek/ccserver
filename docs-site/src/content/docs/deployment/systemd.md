@@ -78,9 +78,11 @@ systemctl --user stop ccserver
 
 これを緩和するため、PTY プロセスの生成・管理を `ccserver` 本体から切り離した常駐プロセス **pty-host** に分離できます。`ccserver` を再起動しても pty-host 側のプロセスには触れないため、再起動後に既存セッションへ再接続できます。
 
-ただし現時点では以下の制約が残ります。
+pty-host 自体がクラッシュした場合（`Restart=on-failure` で自動再起動される想定）も、直前まで保持していたセッションをそのセッションIDのまま自動的に再起動時に再launchします（自動resume）。ただし現時点では以下の制約が残ります。
 
-- pty-host 自体がクラッシュ・再起動した場合、その時点で管理していた全セッションは失われます（自動 resume の仕組みは未実装）。
+- 自動resumeが再現できるのは会話・シェルそのもの（`--resume <id>` での再開、または `resumeLast` によるフォールバック）までで、クラッシュ時点で実行中だった長時間コマンドやバックグラウンドジョブの**プロセス状態そのもの**は失われます。
+- 正確な `--resume <id>` での再開が保証されるのは claude セッションのみです。claude はTUI出力に会話IDのヒント（`claude --resume <id>`）を継続的に出力するため、これを生存中に追跡して記録できますが、opencode/copilot/codex/commandcode のTUIは会話IDを一切出力しないため、`resumeLast`（同一cwdの直近の会話を再開）にフォールバックします。この場合、同一cwdで複数タブを開いていると、意図しない会話が再開される可能性があります。
+- `ccserver` 本体と pty-host が同時にクラッシュ・再起動するケース（サーバーごと再起動する等）では、MCP注入（notify/usage/meta/reviewer等)に使うソケットパスの整合性が取れなくなる可能性があります。通常運用（pty-hostだけが単独でcrashしてsystemdが再起動するケース）では問題ありません。
 - そのため本機能は実験的な位置づけです。デフォルトでは無効になっています。
 
 ### 手順
@@ -117,4 +119,6 @@ systemctl --user restart ccserver
 pty-host が1インスタンスだけの場合、そのインスタンス自体がクラッシュ・再起動すると管理下の全セッションが失われます。`ccserver.service` に `Environment=CCSERVER_PTY_HOST_SHARDS=<N>`（`N` は2以上の整数）を設定すると、プロジェクト単位（`groupId` があればグループ単位、なければ cwd 単位）で最大 `N` 個の pty-host インスタンスにセッションを分散し、1インスタンスの障害範囲を局所化できます。未設定時は常に1（分散なし、上記の手順のまま）です。
 
 分散させる場合、`ccserver` 側の設定だけでは不十分で、シャード番号ごとに pty-host インスタンスをあらかじめ起動しておく必要があります（シャード0は上記手順の `ccserver-pty-host.service` のまま、シャード1以降はソケットパスが `ccserver-pty-host-<N>.sock` になる別インスタンス）。systemd のテンプレートunit化など複数インスタンスの具体的な起動構成自体は本ガイドの対象外です。
+
+シャード1以降の各インスタンスには、`CCSERVER_PTY_HOST_SOCK`（ソケットパス）に加えて `Environment=CCSERVER_PTY_HOST_SHARD_INDEX=<N>` も設定してください。pty-host自身は `ccserver` 側のパーティショニングロジック（`CCSERVER_PTY_HOST_SHARDS`/どのcwd・groupIdがどのシャードに属するか）を一切関知しない設計のため、このインスタンスが「自分はシャードNである」と認識する唯一の方法です。未設定時は0（シャード0）として動作するため、シャード0のインスタンスでは設定不要です。この値は自動resume（前節）が「`.pty-host-session-meta.json` 内のどのエントリが自分の担当か」を判定するのに使われます。
 

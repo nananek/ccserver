@@ -48,6 +48,11 @@ before(async () => {
   process.env.CCSERVER_PTY_HOST_SESSION_META_PATH = join(runtimeDir, 'pty-host-session-meta.json');
   process.env.CCSERVER_PTY_HOST_SOCK = join(sockDir, 'pty-host.sock');
   process.env.CCSERVER_PTY_HOST = '1';
+  // Issue #119 Step6-0: a short debounce so tests exercising the write-back
+  // don't need to wait out the real (10s default) window. Read fresh per
+  // call (see sessionManager.js's resumeIdWriteDebounceMs), so this is safe
+  // to set once for the whole file.
+  process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS = '300';
 
   const { startPtyHost } = await import('../pty-host/index.js');
   host = await startPtyHost({ sockPath: process.env.CCSERVER_PTY_HOST_SOCK });
@@ -55,6 +60,8 @@ before(async () => {
   ptyHostClientMod = await import('./ptyHostClient.js');
   sessionManager = await import('./sessionManager.js');
   sessionManager.initPtyHostDestroyedHandler();
+  sessionManager.initPtyHostDisconnectedHandler();
+  sessionManager.initPtyHostReconnectedHandler();
 });
 
 after(async () => {
@@ -64,9 +71,30 @@ after(async () => {
   delete process.env.CCSERVER_PTY_HOST;
   delete process.env.CCSERVER_PTY_HOST_SOCK;
   delete process.env.CCSERVER_PTY_HOST_SESSION_META_PATH;
+  delete process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS;
   try { rmSync(sockDir, { recursive: true, force: true }); } catch { /* best effort */ }
   try { rmSync(runtimeDir, { recursive: true, force: true }); } catch { /* best effort */ }
 });
+
+// Issue #119 Step6-0 test helper: a fake claude CLI printing one or more
+// `claude --resume <id>` hints (extractResumeSessionId's exact pattern, see
+// appLaunch.js), each separated by a short gap, before idling so the session
+// stays alive long enough to inspect. Mirrors the fake-claude-binary +
+// sandbox.config.json rig sessionManager.pty-host-shards.test.js's own Issue
+// #143 self-review test already uses (docker:false/gitBroker:false so the
+// launch never tries to build a real sandboxed environment).
+function writeFakeClaudeResumeBin(dir, resumeIds) {
+  const fakeBin = join(dir, 'fake-claude');
+  const lines = resumeIds.map((id) => `printf "claude --resume ${id}\\n"\nsleep 0.05\n`).join('');
+  writeFileSync(fakeBin, `#!/bin/bash\n${lines}sleep 100\n`, { mode: 0o755 });
+  return fakeBin;
+}
+
+function writeNoSandboxConfig(dir) {
+  const cfgPath = join(dir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false }));
+  return cfgPath;
+}
 
 // destroySession()'s pty-host teardown is fire-and-forget: waiting for it to
 // actually land on pty-host's side (not just returning from the call) before
@@ -393,4 +421,271 @@ test('gracefulShutdown under CCSERVER_PTY_HOST=1 does not kill pty-host sessions
   assert.ok(restored.outputBuffer.join('').includes(marker), 'pre-shutdown output survived and was replayed');
 
   await destroySessionAndWait(sessionId);
+});
+
+// Issue #119 Step6-0: the whole point of continuously tracking claude's
+// --resume hint (rather than only extracting it once at onExit, the
+// pre-existing behavior) is that pty-host's own crash-recovery auto-resume
+// needs an ACCURATE id while the session is still very much alive. Two
+// different hints (a compaction-like re-print) prove both that the FIRST one
+// reaches disk promptly and that a CHANGED value overwrites it rather than
+// sticking to whatever was first seen.
+test('a live claude session\'s claude --resume hint is tracked and written back to ptyHostSessionMeta.json, latest value wins', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-sm-ptyhost-resume-track-'));
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sm-ptyhost-resume-track-cfg-'));
+  const fakeBin = writeFakeClaudeResumeBin(cwd, ['resume-hint-first', 'resume-hint-second']);
+  const cfgPath = writeNoSandboxConfig(cfgDir);
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  let res;
+  try {
+    res = await sessionManager.createSession({ cwd, cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
+    const { sessionId, session } = res;
+    assert.ok(res.session, `claude session should spawn, got error: ${res.error}`);
+
+    await waitFor(() => session.outputBuffer.join('').includes('resume-hint-first'));
+    assert.equal(session.lastKnownResumeId, 'resume-hint-first', 'tracked in memory as soon as the first hint is seen');
+    await waitFor(
+      () => ptyHostSessionMeta.loadPtyHostSessionMeta()[sessionId]?.latestClaudeSessionId === 'resume-hint-first',
+      { timeoutMs: 2000 },
+    );
+
+    await waitFor(() => session.outputBuffer.join('').includes('resume-hint-second'));
+    assert.equal(session.lastKnownResumeId, 'resume-hint-second', 'in-memory value follows the latest hint, not the first');
+    await waitFor(
+      () => ptyHostSessionMeta.loadPtyHostSessionMeta()[sessionId]?.latestClaudeSessionId === 'resume-hint-second',
+      { timeoutMs: 2000 },
+    );
+  } finally {
+    if (res?.session) await destroySessionAndWait(res.sessionId);
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN; else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG; else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+// Issue #119 Step6-0: proves the debounce actually delays a rapid second
+// write rather than firing on every detected change -- a longer, dedicated
+// window (this file's `before()` default of 300ms is tuned for other tests'
+// patience, not for observing an in-flight delay) with generous margins on
+// both sides of it.
+test('ptyHostSessionMeta.json write-back is debounced: a rapid second hint does not land immediately', async () => {
+  const prevDebounce = process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS;
+  process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS = '600';
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-sm-ptyhost-resume-debounce-'));
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sm-ptyhost-resume-debounce-cfg-'));
+  const fakeBin = writeFakeClaudeResumeBin(cwd, ['debounce-hint-first', 'debounce-hint-second']);
+  const cfgPath = writeNoSandboxConfig(cfgDir);
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  let res;
+  try {
+    res = await sessionManager.createSession({ cwd, cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
+    const { sessionId, session } = res;
+    assert.ok(res.session, `claude session should spawn, got error: ${res.error}`);
+
+    // First hint: resumeIdLastWriteAt starts at 0, so this always writes
+    // immediately regardless of the debounce window (see
+    // scheduleResumeIdWriteback's own comment).
+    await waitFor(() => ptyHostSessionMeta.loadPtyHostSessionMeta()[sessionId]?.latestClaudeSessionId === 'debounce-hint-first', { timeoutMs: 2000 });
+
+    // The second hint prints ~50ms later (writeFakeClaudeResumeBin's gap),
+    // well inside the 600ms window that just started -- shortly after it is
+    // detected, the file must still show the FIRST value.
+    await waitFor(() => session.lastKnownResumeId === 'debounce-hint-second', { timeoutMs: 2000 });
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(
+      ptyHostSessionMeta.loadPtyHostSessionMeta()[sessionId]?.latestClaudeSessionId,
+      'debounce-hint-first',
+      'the second hint is being held back by the debounce, not written immediately',
+    );
+
+    // Once the window elapses, the held-back (latest) value reaches disk.
+    await waitFor(
+      () => ptyHostSessionMeta.loadPtyHostSessionMeta()[sessionId]?.latestClaudeSessionId === 'debounce-hint-second',
+      { timeoutMs: 2000 },
+    );
+  } finally {
+    if (res?.session) await destroySessionAndWait(res.sessionId);
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN; else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG; else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    if (prevDebounce === undefined) delete process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS; else process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS = prevDebounce;
+    try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+// Issue #119 Step6-0: a pending debounced write must not be lost just
+// because the pty exits before the debounce window elapses on its own -- see
+// buildSessionRecord's onExit flush. A long debounce (much longer than this
+// test is willing to wait) makes sure it's genuinely the exit-triggered
+// flush landing this, not the timer coincidentally firing first.
+test('a pending resume-id write-back is flushed immediately when the pty exits, not lost to the debounce window', async () => {
+  const prevDebounce = process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS;
+  process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS = '60000';
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-sm-ptyhost-resume-exitflush-'));
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sm-ptyhost-resume-exitflush-cfg-'));
+  const cfgPath = writeNoSandboxConfig(cfgDir);
+  // Unlike writeFakeClaudeResumeBin (which idles after printing so a test can
+  // keep inspecting a still-live session), this one exits right after its
+  // second hint -- the exact scenario under test.
+  const fakeBin = join(cwd, 'fake-claude');
+  writeFileSync(
+    fakeBin,
+    '#!/bin/bash\nprintf "claude --resume exitflush-hint-first\\n"\nsleep 0.05\nprintf "claude --resume exitflush-hint-second\\n"\n',
+    { mode: 0o755 },
+  );
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  let res;
+  try {
+    res = await sessionManager.createSession({ cwd, cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
+    const { sessionId, session } = res;
+    assert.ok(res.session, `claude session should spawn, got error: ${res.error}`);
+
+    await waitFor(() => session.exited === true, { timeoutMs: 5000 });
+    assert.equal(session.lastKnownResumeId, 'exitflush-hint-second', 'the second (pending, debounced) hint was still captured before exit');
+    assert.equal(
+      ptyHostSessionMeta.loadPtyHostSessionMeta()[sessionId]?.latestClaudeSessionId,
+      'exitflush-hint-second',
+      'onExit flushed the pending value instead of leaving it stuck behind the (60s) debounce window',
+    );
+  } finally {
+    if (res?.session) await destroySessionAndWait(res.sessionId);
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN; else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    delete process.env.CCSERVER_SANDBOX_CONFIG;
+    if (prevDebounce === undefined) delete process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS; else process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS = prevDebounce;
+    try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+// Issue #119 Step6 end-to-end: pty-host itself crashing and restarting (here,
+// closing the RPC listener then starting a brand new startPtyHost() at the
+// SAME sockPath -- a real crash would also SIGHUP every pty it owned, but
+// that part is unreachable from a controlled test the same way it always is
+// in this file, see e.g. the shutdown test above) must relaunch this
+// session's SAME id via auto-resume (Step6-3), and server本体's own client
+// reconnecting to the new instance must reattach it (Step6's
+// initPtyHostReconnectedHandler) -- without a human touching anything.
+test('a claude session survives a pty-host crash+restart with the same id, and server本体 reattaches it once its shard reconnects', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-sm-ptyhost-autoresume-'));
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sm-ptyhost-autoresume-cfg-'));
+  const fakeBin = writeFakeClaudeResumeBin(cwd, ['auto-resume-hint']);
+  const cfgPath = writeNoSandboxConfig(cfgDir);
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  // Captured before any reassignment below, so cleanup can always reach the
+  // pre-crash instance directly -- host.stop() only closes its RPC listener
+  // (see this file's earlier "stop() must not destroy live sessions" test),
+  // so the ORIGINAL process this test's session started as keeps running,
+  // unreachable via RPC but still a live child of this test process, until
+  // something calls ptyStore.destroy() on it directly.
+  const crashedHost = host;
+  // A fresh client with every handler re-armed against it -- an earlier
+  // test's own resetPtyHostClientForTests() (e.g. "restorePtyHostSessions
+  // reattaches...") drops the client object initPtyHostDisconnectedHandler/
+  // initPtyHostReconnectedHandler were armed against in this file's
+  // before(), only re-arming initPtyHostDestroyedHandler for its own needs.
+  // Without this, this test's crashedHost.stop() below would go unnoticed by
+  // a disconnected handler still listening on a client nothing uses anymore.
+  ptyHostClientMod.resetPtyHostClientForTests();
+  sessionManager.resetPtyHostDestroyedHandlerForTests();
+  sessionManager.resetPtyHostDisconnectedHandlerForTests();
+  sessionManager.resetPtyHostReconnectedHandlerForTests();
+  sessionManager.initPtyHostDestroyedHandler();
+  sessionManager.initPtyHostDisconnectedHandler();
+  sessionManager.initPtyHostReconnectedHandler();
+  let res;
+  let freshHost;
+  try {
+    res = await sessionManager.createSession({ cwd, cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
+    const { sessionId, session } = res;
+    assert.ok(res.session, `claude session should spawn, got error: ${res.error}`);
+
+    await waitFor(() => session.outputBuffer.join('').includes('auto-resume-hint'));
+    await waitFor(
+      () => ptyHostSessionMeta.loadPtyHostSessionMeta()[sessionId]?.latestClaudeSessionId === 'auto-resume-hint',
+      { timeoutMs: 2000 },
+    );
+
+    // Simulate pty-host crashing: close the RPC listener (this file's shared
+    // `host`) -- server本体's client sees a real 'close', firing
+    // onDisconnected (session ghosted from `sessions`, see Issue #143).
+    await crashedHost.stop();
+    await waitFor(() => sessionManager.getSession(sessionId) === undefined, { timeoutMs: 2000 });
+
+    // Simulate systemd's Restart=on-failure bringing a fresh instance back up
+    // at the SAME socket path -- its own startup runs auto-resume (Step6-3)
+    // before opening the RPC listener, so by the time this resolves, the
+    // relaunched session already exists under the SAME id.
+    const { startPtyHost } = await import('../pty-host/index.js');
+    freshHost = await startPtyHost({ sockPath: process.env.CCSERVER_PTY_HOST_SOCK });
+    assert.ok(freshHost.ptyStore.list().some((s) => s.id === sessionId), 'auto-resume relaunched the same session id');
+
+    // server本体's client reconnects on its own backoff schedule; once it
+    // does, initPtyHostReconnectedHandler's reconcile must notice the
+    // relaunched session and bring it back into `sessions`.
+    await waitFor(() => sessionManager.getSession(sessionId) !== undefined, { timeoutMs: 5000 });
+    const reattached = sessionManager.getSession(sessionId);
+    assert.equal(reattached.cwd, cwd);
+    assert.equal(reattached.app, 'claude');
+
+    // Prove it's a genuinely live, usable pty, not just a Map entry.
+    const newMarker = `AFTER_AUTORESUME_MARKER_${Date.now()}`;
+    sessionManager.writeToSession(sessionId, `echo ${newMarker}`, { submit: true });
+    await waitFor(() => reattached.outputBuffer.join('').includes(newMarker), { timeoutMs: 5000 });
+
+    // From here on this file's shared `host` IS freshHost -- every later
+    // test (and this file's own after()) must operate on the instance the
+    // client is actually connected to now.
+    host = freshHost;
+  } finally {
+    // Reap both generations' processes directly (bypassing the client/RPC
+    // entirely, same reasoning as ptyHostClient.test.js's own teardown
+    // pattern): the pre-crash one crashedHost's now-unreachable-via-RPC
+    // ptyStore still holds, and (if auto-resume/reconnect got far enough to
+    // create it) the post-crash one on freshHost. Both are no-ops if the
+    // id was never actually running there.
+    if (res?.sessionId) {
+      try { crashedHost.ptyStore.destroy(res.sessionId); } catch { /* already gone */ }
+      if (freshHost) { try { freshHost.ptyStore.destroy(res.sessionId); } catch { /* already gone */ } }
+    }
+    // Drop whatever server本体-side bookkeeping survived (harmless no-op if
+    // the session was already ghosted/never reattached).
+    if (res?.sessionId) sessionManager.destroySession(res.sessionId, { reason: 'test' });
+    // Whatever went wrong or how far this got, every later test in this file
+    // (and this file's own after()) needs `host` to end up as a genuinely
+    // live instance at the shared socket path -- restore that unconditionally
+    // rather than only on the success path. freshHost is already exactly
+    // that if it was created; crashedHost is only still usable if it was
+    // NEVER stopped (an assertion failed before that line).
+    if (freshHost) {
+      host = freshHost;
+    } else if (host === crashedHost) {
+      try {
+        // Already-listening probe: crashedHost.stop() may or may not have
+        // run before this depending on where the test failed. connectionCount
+        // isn't exposed here, so just attempt a fresh listen and treat
+        // EADDRINUSE (still listening -- stop() never ran) as "already fine".
+        const { startPtyHost } = await import('../pty-host/index.js');
+        host = await startPtyHost({ sockPath: process.env.CCSERVER_PTY_HOST_SOCK });
+      } catch {
+        // crashedHost was never actually stopped (failed before that line) --
+        // it's still the live, listening instance; leave `host` as is.
+      }
+    }
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN; else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG; else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
 });

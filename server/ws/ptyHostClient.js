@@ -120,6 +120,14 @@ export class PtyHostClient {
     this._reconnectTimer = null;
     this._destroyedListeners = new Set();
     this._disconnectedListeners = new Set();
+    this._reconnectedListeners = new Set();
+    // Issue #119 Step6: whether _connect() has EVER succeeded before, so its
+    // 'connect' handler below can tell "the first connection, at boot" (no
+    // onDisconnected can have fired yet -- nothing to reconcile) from "a
+    // RECONNECT after pty-host's process actually died" (onDisconnected,
+    // just above, necessarily fired first -- see onReconnected's own
+    // comment).
+    this._everConnected = false;
     this._closed = false;
   }
 
@@ -148,6 +156,18 @@ export class PtyHostClient {
     return () => this._disconnectedListeners.delete(cb);
   }
 
+  // Issue #119 Step6: fired when this client successfully reconnects after
+  // an onDisconnected (i.e. pty-host's process actually died and came back,
+  // NOT the first connection at boot -- see _everConnected above). By the
+  // time this fires, pty-host may already be running some of the same
+  // session ids it held before it died again (see server/pty-host/index.js's
+  // own auto-resume) -- see sessionManager.js's initPtyHostReconnectedHandler
+  // for the reconciliation this exists to trigger.
+  onReconnected(cb) {
+    this._reconnectedListeners.add(cb);
+    return () => this._reconnectedListeners.delete(cb);
+  }
+
   _forgetSession(sessionId) {
     this._remotePtys.delete(sessionId);
   }
@@ -167,7 +187,21 @@ export class PtyHostClient {
         this._reconnectDelay = RECONNECT_BASE_MS;
         this._flushQueue();
         this._resubscribeAll();
+        const isReconnect = this._everConnected;
+        this._everConnected = true;
         resolve();
+        // Fired after resolve(): a listener that itself calls back into this
+        // client (e.g. list()) needs _connectPromise already settled, not a
+        // reentrant _connect() racing this same promise.
+        if (isReconnect) {
+          for (const cb of this._reconnectedListeners) {
+            try {
+              cb();
+            } catch {
+              // a listener must never break dispatch to the others
+            }
+          }
+        }
       });
       socket.once('error', (err) => {
         if (!settled) {
