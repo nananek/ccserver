@@ -260,6 +260,13 @@ function startIpmiPolling() {
   if (ipmiTimer) return;
   refreshIpmiCache();
   ipmiTimer = setInterval(refreshIpmiCache, IPMI_POLL_INTERVAL);
+  // Background polling must never keep the process alive on its own (same
+  // pattern as ptyHostClient.js's reconnect timers / sessionManager.js's
+  // resumeIdWriteTimer) -- without this, ENABLE_IPMI=1 leaves a live
+  // 60s-interval timer that only self-clears after IPMI_IDLE_TIMEOUT (120s)
+  // of no requests, which is what made routes/system.test.js hang until the
+  // test runner's own timeout (Issue #156).
+  ipmiTimer.unref?.();
 }
 
 function requestIpmi() {
