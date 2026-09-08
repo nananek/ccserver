@@ -253,3 +253,10 @@ the task with it; the rest close their situation with it:
 
 Use `level` to match the outcome (success / warning / error). Delivery is
 non-blocking and never throws, so there is no reason to skip it.
+
+The four situations above stay full-channel calls (do not narrow them) --
+they are exactly the events a human must see everywhere. For anything else,
+`notify` also takes an optional `channels: ['discord' | 'vikunja']` array: if
+you want to send a lightweight, in-between-the-four-situations Discord ping
+without disturbing the group's Vikunja tracking card, pass `channels:
+['discord']`.

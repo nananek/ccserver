@@ -474,3 +474,94 @@ test('sendNotification stays ok:true even when the Vikunja call fails (non-block
     },
   );
 });
+
+// channels param (Issue #152): lets a caller pick a subset of the configured
+// channels per-call instead of always getting every configured channel.
+// Omitting it (every test above) must keep delivering to everything -- these
+// only cover the new, narrower channels:[...] behavior.
+test("sendNotification with channels:['discord'] skips Vikunja even when configured and a tracking key is present", async () => {
+  await withNotifyConfig(
+    {
+      notify: {
+        discordWebhook: 'https://discord.example/hook',
+        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
+      },
+    },
+    async () => {
+      restoreNotify();
+      await withVikunjaTasksPath(async () => {
+        const realFetch = global.fetch;
+        let vikunjaCalled = false;
+        global.fetch = async (url) => {
+          const u = String(url);
+          if (u.includes('discord.example')) return { ok: true };
+          vikunjaCalled = true;
+          return { ok: true, status: 200, text: async () => '{}' };
+        };
+        try {
+          const res = await sendNotification(
+            {
+              title: 'x', body: 'y', level: 'info', channels: ['discord'],
+            },
+            { sessionId: 'sess-discord-only' },
+          );
+          assert.equal(res.ok, true);
+          assert.equal(res.delivered.discord, true);
+          assert.equal(res.delivered.vikunja, undefined, "channels:['discord'] must skip Vikunja entirely");
+          assert.equal(vikunjaCalled, false);
+        } finally {
+          global.fetch = realFetch;
+        }
+      });
+    },
+  );
+});
+
+test("sendNotification with channels:['vikunja'] skips Discord and every subscribed webhook", async () => {
+  await withNotifyConfig(
+    {
+      notify: {
+        discordWebhook: 'https://discord.example/hook',
+        subscriptions: [{ url: 'https://hooks.example.com/slack', name: 'slack' }],
+        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
+      },
+    },
+    async () => {
+      restoreNotify();
+      await withVikunjaTasksPath(async () => {
+        const realFetch = global.fetch;
+        let webhookCalled = false;
+        global.fetch = async (url, opts) => {
+          const u = String(url);
+          if (u.includes('discord.example') || u.includes('hooks.example.com')) {
+            webhookCalled = true;
+            return { ok: true };
+          }
+          const path = new URL(u).pathname;
+          const method = opts.method;
+          if (method === 'GET' && path === '/api/v1/labels') return { ok: true, status: 200, text: async () => '[]' };
+          if (method === 'PUT' && path === '/api/v1/labels') return { ok: true, status: 201, text: async () => JSON.stringify({ id: 1 }) };
+          if (method === 'PUT' && /^\/api\/v1\/projects\/\d+\/tasks$/.test(path)) return { ok: true, status: 201, text: async () => JSON.stringify({ id: 7 }) };
+          if (method === 'PUT' && /^\/api\/v1\/tasks\/\d+\/labels$/.test(path)) return { ok: true, status: 201, text: async () => '{}' };
+          throw new Error(`unexpected fetch: ${method} ${path}`);
+        };
+        try {
+          const res = await sendNotification(
+            {
+              title: 'x', body: 'y', level: 'info', channels: ['vikunja'],
+            },
+            { sessionId: 'sess-vikunja-only' },
+          );
+          assert.equal(res.ok, true);
+          assert.equal(res.delivered.discord, false, "channels:['vikunja'] must skip Discord");
+          assert.equal(res.delivered.webhooks, 0, "channels:['vikunja'] must skip subscribed webhooks too");
+          assert.equal(res.delivered.failed, 0);
+          assert.deepEqual(res.delivered.vikunja, { ok: true, action: 'created', taskId: 7 });
+          assert.equal(webhookCalled, false);
+        } finally {
+          global.fetch = realFetch;
+        }
+      });
+    },
+  );
+});

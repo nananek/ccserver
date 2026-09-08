@@ -599,6 +599,69 @@ test('notify broker: frameless clients are replayed and carry no identity', asyn
   }
 });
 
+// channels (Issue #152): an optional array on the notify tool's own schema
+// (title/body/level/channels?), separate from the connection identity frame
+// above -- it rides the wire as a normal tool argument and is forwarded to
+// sendNotification verbatim, letting sendNotification's own channel-gating
+// logic (see notify.js/notify.test.js) do the actual filtering.
+test('notify broker: channels is forwarded to sendNotification verbatim', async () => {
+  const seenArgs = [];
+  const notifyApi = {
+    sendNotification: async (args) => {
+      seenArgs.push(args);
+      return { ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } };
+    },
+    subscribe: () => ({ ok: true, subscription: { id: 'sub-1' } }),
+    unsubscribe: () => ({ ok: true }),
+    listSubscriptions: () => [],
+  };
+  const notify = await broker.startNotifyBroker({
+    notifyApi,
+    sockPath: join(runtimeDir, 'ccserver-notify-channels.sock'),
+  });
+  try {
+    const c = mcpClient(notify.sockPath);
+    await c.connected;
+    await c.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'wire-test', version: '1' },
+    });
+    await callTool(c, 'notify', { title: 'x', body: 'y', channels: ['discord'] });
+    assert.deepEqual(seenArgs[0].channels, ['discord']);
+    c.close();
+  } finally {
+    broker.stopBroker(notify);
+  }
+});
+
+test('notify broker: a channels value outside discord/vikunja is rejected on the wire', async () => {
+  const notifyApi = {
+    sendNotification: async () => ({ ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } }),
+    subscribe: () => ({ ok: true, subscription: { id: 'sub-1' } }),
+    unsubscribe: () => ({ ok: true }),
+    listSubscriptions: () => [],
+  };
+  const notify = await broker.startNotifyBroker({
+    notifyApi,
+    sockPath: join(runtimeDir, 'ccserver-notify-channels-invalid.sock'),
+  });
+  try {
+    const c = mcpClient(notify.sockPath);
+    await c.connected;
+    await c.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'wire-test', version: '1' },
+    });
+    const result = await callToolRaw(c, 'notify', { title: 'x', body: 'y', channels: ['bogus'] });
+    assert.equal(result.isError, true, 'an enum value outside discord/vikunja must be rejected by the schema');
+    c.close();
+  } finally {
+    broker.stopBroker(notify);
+  }
+});
+
 // A hostile identity frame must never crash the broker or leak into another
 // connection: a frame that is not the {"ccserver": ...} shape is replayed as
 // ordinary MCP bytes (dropped by the transport as malformed), and the

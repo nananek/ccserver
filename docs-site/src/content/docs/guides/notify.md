@@ -56,7 +56,7 @@ _from: myhost · myproject · group abc12345 · session 01234567
 
 | ツール | 引数 | 説明 |
 |--------|------|------|
-| `notify` | `title`, `body`, `level?` (`info`/`success`/`warning`/`error`) | 全チャネルへ配送。`{ ok, delivered: { discord, webhooks, failed, vikunja? } }` (`vikunja` は Vikunja 未設定時は省略) |
+| `notify` | `title`, `body`, `level?` (`info`/`success`/`warning`/`error`), `channels?` (`['discord' \| 'vikunja']`) | 設定済み全チャネルへ配送。`channels` を指定するとその一部だけに絞れる (省略時は現行動作を維持)。`{ ok, delivered: { discord, webhooks, failed, vikunja? } }` (`vikunja` は Vikunja 未設定または `channels` で除外時は省略) |
 | `subscribe` | `url` (https のみ), `name?` | webhook 購読を追加・永続化。`{ ok, subscription }` |
 | `unsubscribe` | `subscriptionId` | 購読を削除・永続化。`{ ok }` / `{ error: 'not-found' }` |
 | `list_subscriptions` | – | `{ subscriptions: [...] }` |
@@ -70,6 +70,7 @@ _from: myhost · myproject · group abc12345 · session 01234567
 `notify.vikunja` (`baseUrl` https のみ + `apiToken`、両方必須) を設定すると、`notify` 呼び出し1回ごとに Vikunja タスクを作成/更新します (`server/ws/vikunjaClient.js`)。
 
 - **追跡単位**: `groupId` (無ければ `sessionId`) をキーに、進行中のタスク ID を `.saved-vikunja-tasks.json` (`.gitignore` 済み) に永続化します。identity が無い呼び出し (`groupId`/`sessionId` どちらも無し) は Vikunja 連携をスキップし、Discord/webhook のみ配送します。
+- **配送先の絞り込み (`channels`)**: `notify` 呼び出しごとに `channels: ['discord']` を指定すると Discord/webhook のみ配送し Vikunja タスクへの反映をスキップできます。逆に `channels: ['vikunja']` なら Discord/webhook への配送を止めて Vikunja タスクだけを静かに更新できます。省略時は (このセクションの説明通り) 設定済みの両方に配送する現行動作のままです。
 - **オーケストレーターの運用フロー (開始報告)**: コンボ起動のオーケストレーターは、人間から新しいタスクを引き受けたら作業投入の前に `notify({ title: '開始: <概要>', body: '<スコープ/分担>', level: 'info' })` を**タスクあたり1回だけ**呼びます (オーケストレーター注入テンプレート `server/ws/orchestrator-template.md` の Notification discipline に明記)。この初回 `info` がグループの追跡タスクを自動作成 (`status-running` ラベル、Doing バケット) し、以後の通知は同一タスクへのコメントになります。開始報告を省くとそのタスクは Vikunja 上で追跡されません。Vikunja 未設定環境では Discord/webhook 配送のみ行われます。
 - **初回**: 新規タスクを作成 (`title` = notify の `title`、`description` = `body` + 送信元フッター)。**2回目以降 (同じキー)**: タスクへコメントを1件追記 (`title` を先頭行、`body` を本文)。タスクの説明欄そのものは書き換えません。**1つのキー(グループ/セッション)につきカードは1枚を使い回します** — `success` になっても追跡は終わらず、次の `notify` は新規タスクではなく同じカードへのコメント追記になります。
 - **理由はラベルで、「今どちらの番か」は Kanban バケットで表現**します。`done: true` にする操作は一切行いません -- 完了報告 (`success`) はあくまで「人間の番になった」ことを意味するのであって、人間による確認が済んだ「done」ではないためです。実際に done にするかどうかは人間が Vikunja 上で判断します:

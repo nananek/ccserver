@@ -239,8 +239,20 @@ async function deliver(url, content) {
 // projectName, app }, see mcpBroker.js): when present -- and notify.attribution
 // is not disabled -- the payload's content gets an "_from: host · project ·
 // group · session" footer appended. Without identity the payload is delivered
-// as before (host-only footer). The notify tool's own args are unchanged.
-export async function sendNotification({ title, body, level } = {}, identity) {
+// as before (host-only footer).
+//
+// `channels` (Issue #152) lets a caller restrict delivery to a subset of the
+// configured channels; omitting it (null/undefined) keeps the original
+// behavior of delivering to everything that is configured. 'discord' covers
+// the Discord webhook AND every subscribed webhook together -- they are not
+// split further, since nothing has ever needed to control them independently
+// (see the vikunja-discord-design doc for Issue #152); 'vikunja' covers the
+// createOrUpdateTask() call. `delivered`'s shape is unchanged either way --
+// an excluded channel looks exactly like that channel being unconfigured
+// (discord:false/webhooks:0, or the `vikunja` key omitted).
+export async function sendNotification({
+  title, body, level, channels,
+} = {}, identity) {
   const cfg = loadNotifyConfig();
   let content = buildContent({ title, body, level });
   if (content && cfg.attribution) {
@@ -249,20 +261,23 @@ export async function sendNotification({ title, body, level } = {}, identity) {
   if (!content) {
     return { ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } };
   }
+  const wantDiscordChannel = channels == null || channels.includes('discord');
   const targets = [];
-  if (cfg.discordWebhook) targets.push(cfg.discordWebhook);
-  for (const s of subscriptions) targets.push(s.url);
+  if (wantDiscordChannel) {
+    if (cfg.discordWebhook) targets.push(cfg.discordWebhook);
+    for (const s of subscriptions) targets.push(s.url);
+  }
   // Vikunja tracks one task per notification key (groupId, falling back to
   // sessionId) rather than per-URL like the webhook targets above, so it is
   // dispatched alongside the Promise.all instead of folded into `targets`.
   const vikunjaKey = identity?.groupId ?? identity?.sessionId ?? null;
-  const wantVikunja = vikunjaEnabled() && vikunjaKey != null;
+  const wantVikunja = vikunjaEnabled() && vikunjaKey != null && (channels == null || channels.includes('vikunja'));
   const [results, vikunjaResult] = await Promise.all([
     Promise.all(targets.map((url) => deliver(url, content))),
     wantVikunja ? createOrUpdateTask({ key: vikunjaKey, title, body, level, identity }) : Promise.resolve(null),
   ]);
-  const discord = cfg.discordWebhook ? results[0] : false;
-  const webhookResults = cfg.discordWebhook ? results.slice(1) : results;
+  const discord = wantDiscordChannel && cfg.discordWebhook ? results[0] : false;
+  const webhookResults = wantDiscordChannel && cfg.discordWebhook ? results.slice(1) : results;
   const delivered = {
     discord,
     webhooks: webhookResults.filter(Boolean).length,
