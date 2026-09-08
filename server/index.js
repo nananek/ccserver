@@ -91,16 +91,19 @@ const AUTH_TOKEN = process.env.CCSERVER_TOKEN;
 const AUTH_MODE = resolveAuthMode();
 
 // Endpoints under /api/auth that must work with NO session yet -- the ones
-// that exist to *create* one (login-token now; Step3's WebAuthn
-// authentication options/verify later). This is an explicit allowlist, not a
-// blanket '/api/auth' prefix exemption: Step3 also adds WebAuthn
-// *registration* (adding a passkey while already logged in) under the same
-// /api/auth/webauthn/* path, and that one must require an existing session
-// like any other route -- a prefix exemption would silently bypass auth for
-// it too. Step3 should add its unauthenticated routes here and leave
-// registration off this list so it falls through to the normal session
-// check below.
-const UNAUTHENTICATED_AUTH_ROUTES = new Set(['/api/auth/login-token']);
+// that exist to *create* one (login-token; WebAuthn authentication
+// options/verify). This is an explicit allowlist, not a blanket '/api/auth'
+// prefix exemption: Step3 also adds WebAuthn *registration*
+// (register-options/register-verify, for adding a passkey while already
+// logged in) under the same /api/auth/webauthn/* path, and that one must
+// require an existing session like any other route -- a prefix exemption
+// would silently bypass auth for it too. It's deliberately absent here so it
+// falls through to the normal session check below.
+const UNAUTHENTICATED_AUTH_ROUTES = new Set([
+  '/api/auth/login-token',
+  '/api/auth/webauthn/authenticate-options',
+  '/api/auth/webauthn/authenticate-verify',
+]);
 const isAuthRoute = (url) => UNAUTHENTICATED_AUTH_ROUTES.has(url.split('?')[0]);
 
 if (AUTH_MODE === 'token') {

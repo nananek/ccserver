@@ -20,7 +20,9 @@ export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // of use rather than on every single authenticated request.
 export const SESSION_TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 
-function parseCookieHeader(header) {
+// Exported for webauthnChallenges.js's flow cookie (Issue #141 Step3), which
+// needs the exact same manual parse for a different cookie name.
+export function parseCookieHeader(header) {
   const cookies = {};
   if (!header) return cookies;
   for (const part of header.split(';')) {
