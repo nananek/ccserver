@@ -410,6 +410,10 @@ const EXCLUDE_MOUNTS = new Set(['/System']);
 
 export function parseDfOutput(stdout) {
   const entries = [];
+  // On macOS the `/` row is the sealed read-only system snapshot while the
+  // writable, user-visible capacity lives on /System/Volumes/Data (same pool,
+  // firmlinked view). Keep the Data row aside so `/` can report its numbers.
+  let dataRow = null;
   for (const line of String(stdout).trim().split('\n').slice(1)) {
     const parts = line.split(/\s+/);
     if (parts.length < 6) continue;
@@ -417,7 +421,10 @@ export function parseDfOutput(stdout) {
     // df -P prints the mount point last, so rejoin to keep spaces in it
     // (e.g. /Volumes/External SSD).
     const mount = parts.slice(5).join(' ');
-    if (EXCLUDE_MOUNTS.has(mount) || EXCLUDE_MOUNT_PREFIXES.some((p) => mount.startsWith(p))) continue;
+    if (EXCLUDE_MOUNTS.has(mount) || EXCLUDE_MOUNT_PREFIXES.some((p) => mount.startsWith(p))) {
+      if (mount === '/System/Volumes/Data') dataRow = { device, total, used, available };
+      continue;
+    }
     const fsType = device.startsWith('/dev/') ? null : device;
     if (fsType && EXCLUDE_FS.has(fsType)) continue;
     if (!device.startsWith('/dev/')) continue;
@@ -433,6 +440,21 @@ export function parseDfOutput(stdout) {
       available: toMb(available),
       usedPct: Math.round((usedMb / totalMb) * 1000) / 10,
     });
+  }
+  if (dataRow) {
+    const root = entries.find((e) => e.mount === '/');
+    if (root) {
+      const toMb = (k) => Math.round((parseInt(k, 10) * 1024) / 1024 / 1024);
+      const totalMb = toMb(dataRow.total);
+      if (totalMb > 0) {
+        const usedMb = toMb(dataRow.used);
+        root.device = dataRow.device.replace('/dev/', '');
+        root.total = totalMb;
+        root.used = usedMb;
+        root.available = toMb(dataRow.available);
+        root.usedPct = Math.round((usedMb / totalMb) * 1000) / 10;
+      }
+    }
   }
   return entries;
 }

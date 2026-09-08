@@ -125,3 +125,23 @@ test('parseDfOutput drops /System mounts but keeps / and spaced mounts', () => {
     assert.ok(r.total > 0 && r.used >= 0 && typeof r.usedPct === 'number');
   }
 });
+
+test('parseDfOutput reports Data volume numbers on / (macOS firmlink view)', () => {
+  const rows = parseDfOutput(DF_MACOS);
+  const root = rows.find((r) => r.mount === '/');
+  // /System/Volumes/Data row (used 309672600K) wins over the sealed
+  // system snapshot row (used 22190104K); device follows the numbers.
+  const toMb = (k) => Math.round((k * 1024) / 1024 / 1024);
+  assert.equal(root.device, 'disk3s1');
+  assert.equal(root.used, toMb(309672600));
+  assert.equal(root.available, toMb(117794720));
+});
+
+test('parseDfOutput keeps / as-is without a Data row (Linux)', () => {
+  const rows = parseDfOutput(`Filesystem     1024-blocks      Used Available Capacity  Mounted on
+/dev/sda1         10000000   2000000   8000000    20%    /
+`);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].mount, '/');
+  assert.equal(rows[0].device, 'sda1');
+});
