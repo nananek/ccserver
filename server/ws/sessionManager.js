@@ -27,24 +27,17 @@ import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { recordSessionLimitReset } from '../sessionLimitState.js';
 import { getPtyHostClient, getAllPtyHostClients, shardIndexForKey, shardKeyForSession, isPtyHostEnabled } from './ptyHostClient.js';
 import { setPtyHostSessionMeta, patchPtyHostSessionMeta, deletePtyHostSessionMeta, loadPtyHostSessionMeta } from './ptyHostSessionMeta.js';
+import {
+  parseTimeoutEnv,
+  DEFAULT_SESSION_TIMEOUT_MS,
+  DEFAULT_SESSION_EXITED_TIMEOUT_MS,
+  MIN_SESSION_EXITED_TIMEOUT_MS,
+} from '../timeoutEnv.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
 const SCHEDULES_PATH = join(__dirname, '..', '..', '.scheduled-prompts.json');
 
-const DEFAULT_SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours for active sessions
-// Raised from 30s: a pty that dies while nobody is attached used to take the
-// whole session with it half a minute later, so reopening the tab found
-// SESSION_NOT_FOUND and had to relaunch+resume with no way to see why the
-// process had gone. Five minutes is long enough to come back and read the
-// exit code.
-const DEFAULT_SESSION_EXITED_TIMEOUT_MS = 5 * 60 * 1000;
-const MIN_SESSION_EXITED_TIMEOUT_MS = 1000;
-// setTimeout's 32-bit ceiling (~24.8 days). Node does not reject a longer
-// delay -- it warns (TimeoutOverflowWarning) and silently uses 1ms instead,
-// so an operator setting a huge value to keep sessions around for a long
-// time would get the exact opposite: immediate teardown.
-const MAX_TIMEOUT_MS = 2147483647;
 const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 const IDLE_TIMEOUT_MS = 3000;
 // PTY size negotiation floor. The pty is sized to the SMALLEST viewport among
@@ -56,23 +49,6 @@ const MIN_PTY_ROWS = 1;
 // Both timeouts are operator-tunable. Parsed once at module load (env changes
 // mid-process are not a supported scenario) but exported as functions so the
 // parsing rules themselves stay directly testable.
-function parseTimeoutEnv(raw, { name, fallback, min }) {
-  if (raw == null || String(raw).trim() === '') return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) {
-    console.warn(`[session] ignoring invalid ${name}=${raw} (not a number); using ${fallback}ms`);
-    return fallback;
-  }
-  const ms = Math.trunc(n);
-  if (ms > MAX_TIMEOUT_MS) {
-    console.warn(
-      `[session] ${name}=${raw} exceeds setTimeout's ${MAX_TIMEOUT_MS}ms ceiling; `
-      + 'clamping to it (set 0 to disable the timeout instead of using a huge value)'
-    );
-    return MAX_TIMEOUT_MS;
-  }
-  return Math.max(min, ms);
-}
 
 // Idle (no viewer attached) destroy timeout. 0 or negative disables it
 // entirely -- the session then lives until the pty exits or someone tears it
@@ -82,6 +58,7 @@ export function resolveSessionTimeoutMs(env = process.env) {
     name: 'CCSERVER_SESSION_TIMEOUT_MS',
     fallback: DEFAULT_SESSION_TIMEOUT_MS,
     min: 0,
+    logPrefix: '[session]',
   });
 }
 
@@ -93,6 +70,7 @@ export function resolveExitedTimeoutMs(env = process.env) {
     name: 'CCSERVER_SESSION_EXITED_TIMEOUT_MS',
     fallback: DEFAULT_SESSION_EXITED_TIMEOUT_MS,
     min: MIN_SESSION_EXITED_TIMEOUT_MS,
+    logPrefix: '[session]',
   });
 }
 
@@ -2692,8 +2670,8 @@ export function savedSessionPublic(session, claudeId) {
 }
 
 export function gracefulShutdown() {
-  // Step4 (plan5): under CCSERVER_PTY_HOST=1, pty-host owns these ptys as a
-  // separate, independently-restarted systemd unit (see
+  // Step4 (plan5): when pty-host is enabled (isPtyHostEnabled()), pty-host
+  // owns these ptys as a separate, independently-restarted systemd unit (see
   // server/pty-host/index.js's header comment + Step0's PoC finding that a
   // killed parent takes its ptys down with it) -- killing them here would
   // defeat Step3's restore-on-restart (restorePtyHostSessions()) before it
@@ -2702,11 +2680,13 @@ export function gracefulShutdown() {
   // disconnect THIS process's UDS link, leaving the actual ptys running on
   // pty-host for the next boot's restorePtyHostSessions() to find via
   // list(). No .saved-sessions.json write either: that file only feeds the
-  // legacy direct-spawn restore path below -- pty-host sessions instead
-  // restore from ptyHostSessionMeta.json, which createSession() already
-  // keeps continuously up to date (see setPtyHostSessionMeta), so there is
-  // nothing new to persist here. destroyAllSessions()/destroySession() are
-  // deliberately not reused for this cleanup: both call
+  // direct-spawn restore path below -- direct-spawn is Step7's permanent
+  // fallback mode, not code on its way out, but it still has nothing to do
+  // with THIS branch: pty-host sessions restore from ptyHostSessionMeta.json
+  // instead, which createSession() already keeps continuously up to date
+  // (see setPtyHostSessionMeta), so there is nothing new to persist here.
+  // destroyAllSessions()/destroySession() are deliberately not reused for
+  // this cleanup: both call
   // session.ptyProcess.kill()/.destroy(), which for a RemotePty is an actual
   // fire-and-forget kill/destroy RPC to pty-host (see ptyHostClient.js) --
   // exactly the "pty dies with the server本体 restart" bug this step fixes.
