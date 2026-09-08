@@ -18,6 +18,8 @@ import {
   getPtyHostClient,
   getAllPtyHostClients,
   resetPtyHostClientForTests,
+  isPtyHostEnabled,
+  checkPtyHostReachable,
 } from './ptyHostClient.js';
 
 function sleep(ms) {
@@ -362,4 +364,77 @@ test('getAllPtyHostClients returns exactly shardCount() clients, indexed 0..N-1'
     if (prev === undefined) delete process.env.CCSERVER_PTY_HOST_SHARDS;
     else process.env.CCSERVER_PTY_HOST_SHARDS = prev;
   }
+});
+
+// Issue #119 Step7-2: isPtyHostEnabled() now defaults to ON (unset/empty),
+// flipped from the historical default-OFF -- only an explicit '0' opts out.
+// Exercised via the injected `env` param (a plain object, not process.env)
+// so this stays a pure-function test with no global mutation/restore.
+test('isPtyHostEnabled defaults to true when unset or empty, false only for an explicit "0"', () => {
+  assert.equal(isPtyHostEnabled({}), true, 'unset means enabled by default');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '' }), true, 'empty string means enabled by default');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '0' }), false, 'explicit "0" is the only way to opt out');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '1' }), true, 'the historical explicit "1" still means enabled');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: 'yes' }), true, 'any other non-"0" value stays enabled, not just "1"');
+});
+
+test('isPtyHostEnabled reads process.env by default when no env argument is given', () => {
+  const prev = process.env.CCSERVER_PTY_HOST;
+  try {
+    process.env.CCSERVER_PTY_HOST = '0';
+    assert.equal(isPtyHostEnabled(), false);
+    delete process.env.CCSERVER_PTY_HOST;
+    assert.equal(isPtyHostEnabled(), true);
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_PTY_HOST;
+    else process.env.CCSERVER_PTY_HOST = prev;
+  }
+});
+
+// Issue #119 Step7-3: checkPtyHostReachable() backs server/index.js's
+// boot-time auto-fallback -- an existing deployment that never started
+// ccserver-pty-host.service must not have isPtyHostEnabled()'s new
+// default-ON break every session creation outright.
+test('checkPtyHostReachable resolves true against a real, running pty-host', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-ptyhostclient-reachable-'));
+  const sockPath = join(dir, 'pty-host.sock');
+  const host = await startPtyHost({ sockPath });
+  const client = new PtyHostClient(sockPath);
+  try {
+    assert.equal(await checkPtyHostReachable(client), true);
+  } finally {
+    client.close();
+    await host.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkPtyHostReachable resolves false quickly (well under its timeout) when nothing is listening', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-ptyhostclient-unreachable-'));
+  // A path in a real, existing directory that nothing ever listens on --
+  // the connection is refused/ENOENT almost immediately, not via the
+  // timeout, which is exactly the common "pty-host was never set up" case
+  // this function exists to detect cheaply.
+  const sockPath = join(dir, 'nothing-here.sock');
+  const client = new PtyHostClient(sockPath);
+  const startedAt = Date.now();
+  try {
+    const reachable = await checkPtyHostReachable(client, 3000);
+    assert.equal(reachable, false);
+    assert.ok(Date.now() - startedAt < 1000, 'an absent socket must fail fast, not wait out the 3000ms timeout');
+  } finally {
+    client.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkPtyHostReachable resolves false once its own timeout elapses, for a client that never settles', async () => {
+  // A stub, not a real PtyHostClient: only list() matters to
+  // checkPtyHostReachable, and a promise that never settles is the cleanest
+  // way to exercise the timeout race deterministically -- a real "pty-host
+  // accepts the connection but never answers" repro would need an actual
+  // wedged process.
+  const neverSettles = { list: () => new Promise(() => {}) };
+  const reachable = await checkPtyHostReachable(neverSettles, 200);
+  assert.equal(reachable, false);
 });

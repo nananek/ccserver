@@ -31,6 +31,19 @@ const RPC_TIMEOUT_MS = 5000;
 const CONNECT_TIMEOUT_MS = 5000;
 const RECONNECT_BASE_MS = 100;
 const RECONNECT_MAX_MS = 5000;
+// Issue #119 Step7-3: how long checkPtyHostReachable() below waits before
+// giving up. Deliberately shorter than RPC_TIMEOUT_MS/CONNECT_TIMEOUT_MS
+// above -- those exist for steady-state reconnects, where waiting longer
+// costs nothing (an unref'd background timer). This one instead runs once,
+// synchronously, in server本体's own boot sequence: a pty-host that is
+// actually up accepts the connection and answers `list` near-instantly
+// (Step6's own auto-resume already finished before pty-host ever opens its
+// RPC listener, see server/pty-host/index.js), and one that was simply never
+// started refuses the connection (or fails on a missing socket path)
+// essentially immediately too -- this timeout is only ever actually spent
+// waiting on the rare case of a process that's up but wedged, so it stays
+// short enough not to meaningfully delay boot in either common case.
+const STARTUP_PROBE_TIMEOUT_MS = 3000;
 // Cap on buffered fire-and-forget frames (write/resize/kill/destroy) while
 // disconnected -- a human types slowly, so a multi-second reconnect gap never
 // comes close to this; it only guards against an unbounded leak if pty-host
@@ -530,8 +543,45 @@ export function getAllPtyHostClients() {
   return result;
 }
 
-export function isPtyHostEnabled() {
-  return process.env.CCSERVER_PTY_HOST === '1';
+// Issue #119 Step7-2: defaults to ON now that pty-host (Step1-6) is
+// considered feature-complete -- unset/empty means "enabled", matching a
+// fresh install that never touched this var. Only an explicit '0' opts out;
+// any other value (including the historical '1') stays ON, so a deployment
+// that already set CCSERVER_PTY_HOST=1 sees no behavior change. `env`
+// defaults to `process.env` but is overridable so callers (this file's own
+// unit tests) can check the logic without mutating the real process env.
+// See server/index.js's boot-time reachability probe for the other half of
+// the rollout story: this function alone doesn't know whether pty-host is
+// actually reachable, only whether the deployment wants it.
+export function isPtyHostEnabled(env = process.env) {
+  const raw = env.CCSERVER_PTY_HOST;
+  if (raw == null || raw === '') return true;
+  return raw !== '0';
+}
+
+// Issue #119 Step7-3: probes whether `client`'s pty-host is actually up,
+// without joining its normal reconnect-forever lifecycle (_scheduleReconnect()
+// above keeps trying in the background on any ordinary failure) -- this is a
+// one-shot check, used at boot (server/index.js) to decide whether
+// isPtyHostEnabled()'s new default-ON needs to fall back to direct spawn for
+// this run. A deployment that has never started ccserver-pty-host.service
+// must still be able to create sessions after upgrading to this default.
+// Never throws: true means a `list` RPC actually round-tripped, false means
+// anything else (unreachable, timed out, RPC error) -- the caller only cares
+// about the boolean, not why.
+export async function checkPtyHostReachable(client, timeoutMs = STARTUP_PROBE_TIMEOUT_MS) {
+  try {
+    await Promise.race([
+      client.list(),
+      new Promise((_, reject) => {
+        const timer = setTimeout(() => reject(new Error(`no response within ${timeoutMs}ms`)), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Test seam: drop every shard's client so the next getPtyHostClient() call

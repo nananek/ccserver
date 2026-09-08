@@ -23,6 +23,7 @@ import { authRoute } from './routes/auth.js';
 import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
 import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler, initPtyHostDisconnectedHandler, initPtyHostReconnectedHandler, restorePtyHostSessions } from './ws/sessionManager.js';
+import { getPtyHostClient, isPtyHostEnabled, checkPtyHostReachable } from './ws/ptyHostClient.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
@@ -222,16 +223,59 @@ try {
 
 const PORT = process.env.PORT || 3001;
 
+// Issue #119 Step7-3: isPtyHostEnabled() now defaults to ON when
+// CCSERVER_PTY_HOST is unset (ptyHostClient.js), so an existing deployment
+// that has never started ccserver-pty-host.service would otherwise have
+// every createSession() call below fail outright the moment it upgrades.
+// Probe reachability once, up front, and fall back to direct spawn for this
+// run if pty-host isn't actually there. Overriding process.env.CCSERVER_PTY_HOST
+// (rather than some separate in-memory flag) is deliberate: isPtyHostEnabled()
+// re-reads it fresh on every call, so this one write is automatically
+// honored by every pty-host call site below -- this file's own
+// initPtyHost*Handler calls just after, and every usePtyHost check inside
+// sessionManager.js -- with no extra plumbing. A deployment that already has
+// pty-host running is unaffected, and one that explicitly opted out via
+// CCSERVER_PTY_HOST=0 never reaches this block at all (isPtyHostEnabled()
+// is already false).
+//
+// Only probes shard 0 (getPtyHostClient()'s default): the scenario this
+// guards against is "pty-host was never set up on this host at all", which
+// is necessarily a shard-0-only deployment (CCSERVER_PTY_HOST_SHARDS is
+// itself opt-in, see ptyHostClient.js's shardCount()) -- a partitioned
+// deployment missing just one of several shards is already handled per-shard
+// by restorePtyHostSessions()/createSession()'s own unreachable-shard
+// handling further down, not by this all-or-nothing boot-time fallback.
+if (isPtyHostEnabled()) {
+  const ptyHostClient = getPtyHostClient();
+  if (await checkPtyHostReachable(ptyHostClient)) {
+    fastify.log.info('pty-host reachable at boot -- sessions will be created via pty-host');
+  } else {
+    fastify.log.warn(
+      'pty-host unreachable at boot -- falling back to direct pty spawn for this run. Start '
+      + 'ccserver-pty-host.service (see docs-site deployment/systemd.md) for terminal sessions '
+      + 'to survive a ccserver restart, or set CCSERVER_PTY_HOST=0 to silence this check.'
+    );
+    process.env.CCSERVER_PTY_HOST = '0';
+    // No other call site will ever touch this client again this run (every
+    // pty-host-related check below now reads isPtyHostEnabled() as false) --
+    // close it so it stops retrying in the background for no one, rather
+    // than reconnecting forever via its own internal backoff.
+    ptyHostClient.close();
+  }
+}
+
 // pty-host adapter (plan5 Step2): registers the `destroyed` push-event
 // handler that cleans up server本体's local sessions Map when pty-host tears
 // a session down on its own. A no-op (never opens the UDS socket) unless
-// CCSERVER_PTY_HOST=1.
+// pty-host is enabled AND reachable (isPtyHostEnabled() -- see the probe
+// just above, which can itself force this to false for the rest of this
+// run).
 initPtyHostDestroyedHandler();
 
 // Issue #143 problem 2: registers the disconnect handler that treats a
 // shard's pty-host process dying as every session it held being lost (see
 // sessionManager.js's initPtyHostDisconnectedHandler). Also a no-op unless
-// CCSERVER_PTY_HOST=1.
+// isPtyHostEnabled().
 initPtyHostDisconnectedHandler();
 
 // Issue #119 Step6: registers the reconnect handler that, once a shard comes
@@ -239,7 +283,7 @@ initPtyHostDisconnectedHandler();
 // already auto-resumed on that shard (see sessionManager.js's
 // initPtyHostReconnectedHandler) -- without this, Step6's auto-resume would
 // keep those sessions alive on pty-host's side invisibly, with server本体
-// never noticing. Also a no-op unless CCSERVER_PTY_HOST=1.
+// never noticing. Also a no-op unless isPtyHostEnabled().
 initPtyHostReconnectedHandler();
 
 // ccserver-notify: restore the subscription registry, then host the
