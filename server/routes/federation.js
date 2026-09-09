@@ -116,6 +116,25 @@ export async function federationRoute(fastify, opts) {
     return { instance };
   });
 
+  // Issue #161: a separate, explicit follow-up to DELETE (revoke) above --
+  // hard-deletes a revoked row so the same fingerprint can be re-paired from
+  // scratch. Only ever operates on rows already in 'revoked' status; DELETE's
+  // soft-delete/audit-trail behavior is unchanged.
+  fastify.post('/federation/instances/:id/forget', async (request, reply) => {
+    const forgotten = pairing.forgetInstance(request.params.id);
+    if (!forgotten) {
+      return reply.code(404).send({
+        error: 'instance not found, or not in revoked status (forget only works on a revoked pairing)',
+      });
+    }
+    // Same reasoning as the DELETE handler above: a lingering FederationLink
+    // keyed by this fingerprint must not survive the row it belonged to, or a
+    // fresh re-pairing attempt would reuse a dead/closed link instead of
+    // dialing fresh.
+    removeLink(forgotten.fingerprint);
+    return { success: true, id: request.params.id, fingerprint: forgotten.fingerprint };
+  });
+
   fastify.get('/federation/pending', async () => {
     await reconcileBestEffort();
     return { pending: pairing.listPending() };

@@ -65,6 +65,25 @@ test('RPC_METHODS / authorizeRequest are exported here for link dispatch to shar
   assert.equal(authorizeRequest({ kind: 'rpc', method: 'sessions.list' }, { status: 'active' }, false).ok, true);
 });
 
+// Issue #161 regression: a forgotten (hard-deleted) peer must be treated
+// exactly like a never-before-seen one, not like a revoked one -- the whole
+// point of forgetting is to unblock a fresh pairing.propose from that
+// fingerprint. federationPairing.forgetInstance() achieves this purely by
+// deleting the row (see that module), so what matters here is confirming
+// authorizeRequest's existing "no row at all" branch already does the right
+// thing for pairing.propose specifically, since that is the one RPC a
+// pre-active peer is allowed to call.
+test('authorizeRequest: pairing.propose from an unknown (or forgotten) fingerprint is allowed', () => {
+  assert.equal(authorizeRequest({ kind: 'rpc', method: 'pairing.propose' }, undefined, false).ok, true);
+  assert.equal(authorizeRequest({ kind: 'rpc', method: 'pairing.propose' }, null, false).ok, true);
+});
+
+test('authorizeRequest: pairing.propose from a still-revoked fingerprint is refused', () => {
+  const result = authorizeRequest({ kind: 'rpc', method: 'pairing.propose' }, { status: 'revoked' }, false);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /revoked/);
+});
+
 // ---------------------------------------------------------------------
 // Live mTLS integration suite
 

@@ -180,6 +180,62 @@ test('full pairing + proxy lifecycle over the REST surface', { skip }, async () 
 
   const afterRevoke = await app.inject({ method: 'GET', url: `/api/federation/instances/${aRow.id}/sessions` });
   assert.equal(afterRevoke.statusCode, 404);
+
+  // 7. Issue #161: forget the revoked row entirely, then re-pair with the
+  // same peer from scratch to prove the fingerprint is no longer stuck.
+  const forget = await app.inject({ method: 'POST', url: `/api/federation/instances/${aRow.id}/forget` });
+  assert.equal(forget.statusCode, 200);
+  assert.deepEqual(forget.json(), { success: true, id: aRow.id, fingerprint: aRow.fingerprint });
+
+  const listedAfterForget = (await app.inject({ method: 'GET', url: '/api/federation/instances' })).json().instances;
+  assert.equal(listedAfterForget.find((r) => r.id === aRow.id), undefined, 'the forgotten row is gone from the listing');
+
+  // Revoking is local-only (see the DELETE handler's comment above and the
+  // guide's non-reversibility note), so the peer's own row for A is still
+  // sitting at 'active' -- it never heard about A's revoke. Re-proposing
+  // from A would otherwise hit federationServer.js's connection gate on B's
+  // side, which treats a "known, not-revoked" peer's fresh dial as a link
+  // reconnect rather than a new pairing.propose bootstrap, and time out.
+  // Simulate the peer's own human revoking-then-forgetting on their end too
+  // (same pattern step 2 above uses to simulate the peer's decisions) so the
+  // re-propose below exercises the realistic both-sides-forgot scenario the
+  // plan describes, not an artificially one-sided one.
+  pairing.revoke(peerRow.id);
+  assert.equal(pairing.forgetInstance(peerRow.id)?.status, 'revoked');
+
+  const reProposed = await app.inject({
+    method: 'POST', url: '/api/federation/instances',
+    payload: { remoteAddr: `127.0.0.1:${peerPort}`, label: 'my-peer-again' },
+  });
+  assert.equal(reProposed.statusCode, 200);
+  const newRow = reProposed.json().instance;
+  assert.notEqual(newRow.id, aRow.id, 'a brand-new row, not the deleted one resurrected');
+  assert.equal(newRow.status, 'pending_local_approval', 'forgetting unblocked a fresh pending pairing with the same fingerprint');
+});
+
+test('POST /federation/instances/:id/forget rejects a non-revoked instance', { skip }, async () => {
+  // Fabricated row via the pairing module directly (a fake fingerprint, no
+  // real TLS dial) rather than a real POST /instances propose against the
+  // shared live peer: the point here is only to exercise the route's status
+  // check, and reusing the real peer risks colliding with whatever
+  // pairing/link state the other tests in this suite already left it in.
+  const row = pairing.recordOutboundRequest({
+    fingerprint: 'FP:route-test-not-revoked', certPem: 'PEM', hostnameClaimed: null, addr: '127.0.0.1:1',
+  });
+  assert.equal(row.status, 'pending_local_approval');
+
+  const forget = await app.inject({ method: 'POST', url: `/api/federation/instances/${row.id}/forget` });
+  assert.equal(forget.statusCode, 404);
+  assert.equal(pairing.getInstance(row.id)?.status, 'pending_local_approval', 'refused forget must not touch the row');
+
+  // Clean up so this fabricated row doesn't linger for later tests.
+  pairing.revoke(row.id);
+  assert.equal(pairing.forgetInstance(row.id)?.status, 'revoked');
+});
+
+test('POST /federation/instances/:id/forget 404s for an unknown id', { skip }, async () => {
+  const res = await app.inject({ method: 'POST', url: '/api/federation/instances/does-not-exist/forget' });
+  assert.equal(res.statusCode, 404);
 });
 
 test('POST /pending/:id/decide validates the decision and unknown ids', { skip }, async () => {

@@ -264,4 +264,19 @@ export function revoke(id) {
   return rowToPublic(getRowById(id));
 }
 
+// Hard-deletes a row, permanently removing the audit trail (Issue #161).
+// Restricted to 'revoked' rows -- that is the one status upsertPeerRow()
+// never lets leave on its own (see that function's header comment). This
+// is what unblocks re-pairing with the same fingerprint: with the row
+// gone, the next pairing.propose (either direction) is treated as a
+// brand-new peer and goes through the normal pending_local_approval flow.
+// revoke() itself is unchanged -- it stays a sticky, audit-preserving
+// soft delete; forgetting is a separate, explicit follow-up action.
+export function forgetInstance(id) {
+  const row = getRowById(id);
+  if (!row || row.status !== 'revoked') return null;
+  getDb().prepare('DELETE FROM paired_instances WHERE id = ?').run(id);
+  return rowToPublic(row);
+}
+
 export const _internal = { rowToPublic, isPendingStatus };

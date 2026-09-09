@@ -45,6 +45,7 @@ export default function PairedInstancesSection() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [revokingId, setRevokingId] = useState(null);
+  const [forgettingId, setForgettingId] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [remoteAddr, setRemoteAddr] = useState('');
   const [remoteToken, setRemoteToken] = useState('');
@@ -132,7 +133,7 @@ export default function PairedInstancesSection() {
 
   const handleRevoke = useCallback(async (instance) => {
     const name = instance.label || shortFingerprint(instance.fingerprint);
-    if (!window.confirm(`インスタンス "${name}" のペアリングを取り消しますか?\n以後このインスタンスからの接続は全て拒否されます(相手側には通知されません)。`)) return;
+    if (!window.confirm(`インスタンス "${name}" のペアリングを取り消しますか?\n以後このインスタンスからの接続は全て拒否されます(相手側には通知されません)。\nこの操作は取り消せません。再ペアリングするには、双方のインスタンスで取り消し後に「完全に削除」する必要があります。`)) return;
     setRevokingId(instance.id);
     try {
       const res = await authFetch(`/api/federation/instances/${encodeURIComponent(instance.id)}`, { method: 'DELETE' });
@@ -146,6 +147,29 @@ export default function PairedInstancesSection() {
       window.alert(`取り消しに失敗しました: ${err.message}`);
     } finally {
       setRevokingId(null);
+    }
+  }, [refresh]);
+
+  // Issue #161: a revoked row is otherwise stuck forever (upsertPeerRow
+  // refuses to reuse a 'revoked' row on its own) -- this is the explicit,
+  // separate follow-up action that hard-deletes it so the same fingerprint
+  // can be re-paired from scratch.
+  const handleForget = useCallback(async (instance) => {
+    const name = instance.label || shortFingerprint(instance.fingerprint);
+    if (!window.confirm(`インスタンス "${name}" を完全に削除しますか?\nこの操作は元に戻せません。このインスタンス上の記録が消え、次に接続してきた際は新規ペアリングとして扱われます。\n再ペアリングするには、相手側でも同様に「完全に削除」する必要があります(片方だけ削除すると、もう片方は相手を拒否したままになります)。`)) return;
+    setForgettingId(instance.id);
+    try {
+      const res = await authFetch(`/api/federation/instances/${encodeURIComponent(instance.id)}/forget`, { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        window.alert(body.error || `削除に失敗しました (HTTP ${res.status})`);
+        return;
+      }
+      await refresh();
+    } catch (err) {
+      window.alert(`削除に失敗しました: ${err.message}`);
+    } finally {
+      setForgettingId(null);
     }
   }, [refresh]);
 
@@ -220,15 +244,27 @@ export default function PairedInstancesSection() {
                   <span className="pairing-addr">{inst.addr}</span>
                 </div>
               </div>
-              <button
-                className="sandbox-delete-btn"
-                onClick={() => handleRevoke(inst)}
-                disabled={inst.status === 'revoked' || revokingId === inst.id}
-                title={inst.status === 'revoked' ? '既に取り消し済みです' : 'ペアリングを取り消す'}
-                aria-label={`${inst.label || inst.fingerprint} のペアリングを取り消す`}
-              >
-                &#10005;
-              </button>
+              {inst.status === 'revoked' ? (
+                <button
+                  className="sandbox-delete-btn"
+                  onClick={() => handleForget(inst)}
+                  disabled={forgettingId === inst.id}
+                  title="このピアを完全に削除(元に戻せません)"
+                  aria-label={`${inst.label || inst.fingerprint} を完全に削除`}
+                >
+                  &#128465;
+                </button>
+              ) : (
+                <button
+                  className="sandbox-delete-btn"
+                  onClick={() => handleRevoke(inst)}
+                  disabled={revokingId === inst.id}
+                  title="ペアリングを取り消す"
+                  aria-label={`${inst.label || inst.fingerprint} のペアリングを取り消す`}
+                >
+                  &#10005;
+                </button>
+              )}
             </li>
           ))}
         </ul>

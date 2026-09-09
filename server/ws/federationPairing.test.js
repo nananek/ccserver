@@ -97,6 +97,46 @@ test('revoke is sticky: a revoked row cannot be re-activated by decisions or re-
   assert.equal(pairing.getActiveInstance(row.id), null, 'getActiveInstance must never return a revoked row');
 });
 
+test('forgetInstance refuses non-revoked rows and leaves them untouched', () => {
+  const active = pairing.recordInboundRequest({ fingerprint: 'FP:N1', certPem: 'PEM', hostnameClaimed: null, addr: 'h:1' });
+  pairing.recordLocalDecision(active.id, 'approved');
+  pairing.recordRemoteDecision(active.id, 'approved');
+  assert.equal(pairing.getInstance(active.id).status, 'active');
+  assert.equal(pairing.forgetInstance(active.id), null);
+  assert.equal(pairing.getInstance(active.id).status, 'active', 'row must survive a refused forget');
+
+  const rejected = pairing.recordInboundRequest({ fingerprint: 'FP:N2', certPem: 'PEM', hostnameClaimed: null, addr: 'h:1' });
+  pairing.recordLocalDecision(rejected.id, 'rejected');
+  assert.equal(pairing.forgetInstance(rejected.id), null);
+  assert.equal(pairing.getInstance(rejected.id).status, 'rejected');
+});
+
+test('forgetInstance returns null for an unknown id', () => {
+  assert.equal(pairing.forgetInstance('does-not-exist'), null);
+});
+
+test('forgetInstance hard-deletes a revoked row, unblocking re-pairing with the same fingerprint', () => {
+  const row = pairing.recordInboundRequest({ fingerprint: 'FP:N3', certPem: 'PEM', hostnameClaimed: null, addr: 'h:1' });
+  pairing.recordLocalDecision(row.id, 'approved');
+  pairing.recordRemoteDecision(row.id, 'approved');
+  pairing.revoke(row.id);
+  assert.equal(pairing.getInstance(row.id).status, 'revoked');
+
+  const forgotten = pairing.forgetInstance(row.id);
+  assert.equal(forgotten.id, row.id);
+  assert.equal(forgotten.status, 'revoked', 'returns the row as it was just before deletion');
+
+  assert.equal(pairing.getInstance(row.id), null, 'row is gone entirely, not just re-statused');
+  assert.equal(pairing.getInstanceByFingerprint('FP:N3'), null);
+
+  // The core issue #161 scenario: with the row gone, the same fingerprint
+  // proposing again is treated as a brand-new peer, not refused as revoked.
+  const reProposed = pairing.recordInboundRequest({ fingerprint: 'FP:N3', certPem: 'PEM2', hostnameClaimed: null, addr: 'h:2' });
+  assert.notEqual(reProposed, null);
+  assert.notEqual(reProposed.id, row.id, 'a brand-new row, not the deleted one resurrected');
+  assert.equal(reProposed.status, 'pending_local_approval');
+});
+
 test('a rejected pairing can be retried from scratch by a fresh propose', () => {
   const row = pairing.recordInboundRequest({ fingerprint: 'FP:G', certPem: 'PEM', hostnameClaimed: null, addr: 'h:1' });
   pairing.recordLocalDecision(row.id, 'rejected');
