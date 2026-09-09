@@ -117,15 +117,15 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
     //   隠す/移動/追加の操作対象が消えるため。
     if (!data) {
       if (stats?.error && (MONITOR_WIDGET_IDS.includes(id) || id === 'memory-storage')) {
-        if (id === 'ipmi' && !showIpmi) return null;
         return <div className="error">Failed to load system stats: {stats.error}</div>;
       }
       return null;
     }
-    // 各カードはデータ欠落時に内部で null を描画するが、ここで返す React 要素
-    // 自体は null にならないため、下流の `.filter(body !== null)` では除外
-    // できない。空の WidgetShell を作らないよう、ここで描画可否を判定する。
-    // ただしバックエンドが部分200 + errors を返した項目は、欠測として隠すのではなく
+    // data 取得済みなら可視ウィジェットは必ず枠 (WidgetShell) を出す。
+    // データ欠落時は中身を空 (<></>) にして枠だけ残す。null を返すと
+    // 下流の `.filter(body !== null)` で枠ごと消え、＋メニューにも戻らず
+    // 隠す/移動の操作対象が消えるため (IPMI非対応時の不具合)。
+    // バックエンドが部分200 + errors を返した項目は、欠測として隠すのではなく
     // 枠内に項目別エラーを出す (HTTP 500時の !data 分岐と対になる処理)。
     const sectionError = (section) => data?.errors?.[section] ?? null;
     const sectionErrorBody = (section) => {
@@ -135,35 +135,35 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
     };
     switch (id) {
       case 'system': {
-        if (!hasSystemMetrics(data)) return sectionErrorBody('system');
+        if (!hasSystemMetrics(data)) return sectionErrorBody('system') ?? <></>;
         return <SystemCard data={data} hideTitle bare />;
       }
       case 'cpu':
-        if (!hasCpuUsage(data)) return sectionErrorBody('cpu');
+        if (!hasCpuUsage(data)) return sectionErrorBody('cpu') ?? <></>;
         return <CpuCard data={data} hideTitle bare />;
       case 'memory':
-        if (!hasMemory(data)) return sectionErrorBody('memory');
+        if (!hasMemory(data)) return sectionErrorBody('memory') ?? <></>;
         return <MemoryCard data={data} hideTitle bare />;
       case 'storage': {
-        if (!hasStorage(data)) return null;
+        if (!hasStorage(data)) return <></>;
         return <StorageCard data={data} hideTitle bare />;
       }
       case 'temps': {
-        if (!hasTemperatures(data)) return null;
+        if (!hasTemperatures(data)) return <></>;
         return <TempCard data={data} hideTitle bare />;
       }
       case 'gpu':
-        if (!hasGpuMetrics(data)) return null;
+        if (!hasGpuMetrics(data)) return <></>;
         return <GpuCard data={data} hideTitle bare />;
       case 'ipmi': {
-        if (!showIpmi || !hasIpmiData(data)) return null;
+        if (!showIpmi || !hasIpmiData(data)) return <></>;
         return <IpmiCards data={data} showIpmi={showIpmi} hideTitle />;
       }
       // 旧 'memory-storage' (分離前) を保存済み prefs で持ち続けている場合の
       // フォールバック。useWidgetPrefs 側で order/visibility を移行するため、
       // 通常は到達しない。
       case 'memory-storage': {
-        if (!hasMemory(data) && !hasStorage(data)) return sectionErrorBody('memory');
+        if (!hasMemory(data) && !hasStorage(data)) return sectionErrorBody('memory') ?? <></>;
         return (
           <>
             <MemoryCard data={data} hideTitle bare />
@@ -178,8 +178,9 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
 
   const showMonitorStatus = shownWidgets.some((w) => MONITOR_WIDGET_IDS.includes(w.id));
 
-  // 描画可能な本体を持つウィジェットのみ枠を作る。取得済みで0件の場合は
-  // 下の空メッセージで空白回避する。
+  // 可視ウィジェットはデータ欠落時も空枠として残す (renderWidgetBody は
+  // data取得済みなら null を返さない)。null になるのはローディング中・
+  // 未知IDのみ。取得済みで0件の場合は下の空メッセージで空白回避する。
   const renderedWidgets = shownWidgets
     .map((w) => ({ w, body: renderWidgetBody(w.id) }))
     .filter(({ body }) => body !== null);
