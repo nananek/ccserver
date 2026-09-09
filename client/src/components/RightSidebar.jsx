@@ -1,14 +1,15 @@
 import { useState, useRef, useEffect } from 'react';
 import { useWidgetPrefs } from '../hooks/useWidgetPrefs.js';
 import { useSystemStatsContext } from './widgets/SystemStatsProvider.jsx';
-import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards, SystemCard, hasCpuUsage, hasGpuMetrics, hasSystemMetrics, hasMemoryOrStorage, hasTemperatures, hasIpmiData } from './widgets/MonitorCards.jsx';
+import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards, SystemCard, hasCpuUsage, hasGpuMetrics, hasSystemMetrics, hasMemory, hasStorage, hasTemperatures, hasIpmiData } from './widgets/MonitorCards.jsx';
 import UsageWidget from './widgets/UsageWidget.jsx';
 
 const WIDGET_DEFS = [
   { id: 'usage', title: 'Usage', defaultVisible: true },
   { id: 'system', title: 'System', defaultVisible: true },
   { id: 'cpu', title: 'CPU', defaultVisible: true },
-  { id: 'memory-storage', title: 'Memory / Storage', defaultVisible: true },
+  { id: 'memory', title: 'Memory', defaultVisible: true },
+  { id: 'storage', title: 'Storage', defaultVisible: true },
   { id: 'temps', title: 'Temperatures', defaultVisible: false },
   { id: 'gpu', title: 'GPU', defaultVisible: true },
   { id: 'ipmi', title: 'IPMI', defaultVisible: false },
@@ -100,7 +101,7 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
     //   枠内にエラーを出す。単一バナーに集約すると枠が0件になり
     //   隠す/移動/追加の操作対象が消えるため。
     if (!data) {
-      if (stats?.error && MONITOR_WIDGET_IDS.includes(id)) {
+      if (stats?.error && (MONITOR_WIDGET_IDS.includes(id) || id === 'memory-storage')) {
         if (id === 'ipmi' && !showIpmi) return null;
         return <div className="error">Failed to load system stats: {stats.error}</div>;
       }
@@ -125,14 +126,13 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
       case 'cpu':
         if (!hasCpuUsage(data)) return sectionErrorBody('cpu');
         return <CpuCard data={data} hideTitle />;
-      case 'memory-storage':
-        if (!hasMemoryOrStorage(data)) return sectionErrorBody('memory');
-        return (
-          <>
-            <MemoryCard data={data} hideTitle />
-            <StorageCard data={data} hideTitle />
-          </>
-        );
+      case 'memory':
+        if (!hasMemory(data)) return sectionErrorBody('memory');
+        return <MemoryCard data={data} hideTitle />;
+      case 'storage': {
+        if (!hasStorage(data)) return null;
+        return <StorageCard data={data} hideTitle />;
+      }
       case 'temps': {
         if (!hasTemperatures(data)) return null;
         return <TempCard data={data} hideTitle />;
@@ -143,6 +143,18 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
       case 'ipmi': {
         if (!showIpmi || !hasIpmiData(data)) return null;
         return <IpmiCards data={data} showIpmi={showIpmi} hideTitle />;
+      }
+      // 旧 'memory-storage' (分離前) を保存済み prefs で持ち続けている場合の
+      // フォールバック。useWidgetPrefs 側で order/visibility を移行するため、
+      // 通常は到達しない。
+      case 'memory-storage': {
+        if (!hasMemory(data) && !hasStorage(data)) return sectionErrorBody('memory');
+        return (
+          <>
+            <MemoryCard data={data} hideTitle />
+            <StorageCard data={data} hideTitle />
+          </>
+        );
       }
       default:
         return null;
@@ -281,7 +293,7 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
 
 export { WIDGET_DEFS };
 
-export const MONITOR_WIDGET_IDS = ['system', 'cpu', 'memory-storage', 'temps', 'gpu', 'ipmi'];
+export const MONITOR_WIDGET_IDS = ['system', 'cpu', 'memory', 'storage', 'temps', 'gpu', 'ipmi'];
 
 function RightSidebarWithInternalPrefs({ usageProps }) {
   const prefs = useWidgetPrefs(WIDGET_DEFS);

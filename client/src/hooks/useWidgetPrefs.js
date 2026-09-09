@@ -23,6 +23,55 @@ function loadOpen() {
   }
 }
 
+function migrateLegacyMemoryStorage(defaultIds) {
+  // 'memory-storage' -> 'memory' + 'storage' 分離の移行。
+  // 旧 order 上の位置を維持したまま置換し、旧 visibility を両方へ継承する。
+  try {
+    if (!defaultIds.includes('memory') || !defaultIds.includes('storage')) return;
+    const legacyKey = `${VIS_KEY_PREFIX}memory-storage${VIS_SUFFIX}`;
+    const raw = localStorage.getItem(ORDER_KEY);
+    if (raw && raw.includes('memory-storage')) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.includes('memory-storage')) {
+          const next = [];
+          for (const id of parsed) {
+            if (id === 'memory-storage') {
+              if (!next.includes('memory')) next.push('memory');
+              if (!next.includes('storage')) next.push('storage');
+            } else if (!next.includes(id)) {
+              next.push(id);
+            }
+          }
+          localStorage.setItem(ORDER_KEY, JSON.stringify(next));
+        }
+      } catch {
+        // ignore (loadOrder がデフォルトにフォールバックする)
+      }
+    }
+    const legacyVis = localStorage.getItem(legacyKey);
+    if (legacyVis !== null) {
+      for (const id of ['memory', 'storage']) {
+        const cur = localStorage.getItem(`${VIS_KEY_PREFIX}${id}${VIS_SUFFIX}`);
+        if (cur === null) {
+          try {
+            localStorage.setItem(`${VIS_KEY_PREFIX}${id}${VIS_SUFFIX}`, legacyVis);
+          } catch {
+            // ignore
+          }
+        }
+      }
+      try {
+        localStorage.removeItem(legacyKey);
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // ignore (private mode etc.)
+  }
+}
+
 function loadOrder(defaultIds) {
   try {
     const raw = localStorage.getItem(ORDER_KEY);
@@ -66,7 +115,10 @@ export function useWidgetPrefs(widgetDefs) {
       return false;
     }
   });
-  const [order, setOrderState] = useState(() => loadOrder(defaultIds));
+  const [order, setOrderState] = useState(() => {
+    migrateLegacyMemoryStorage(defaultIds);
+    return loadOrder(defaultIds);
+  });
   const [hiddenIds, setHiddenIds] = useState(() => {
     const hidden = new Set();
     for (const w of widgetDefs) {

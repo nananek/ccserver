@@ -342,7 +342,7 @@ test('moving across usage hidden by env skips it', async ({ page }) => {
   });
   // usageが途中に残る保存順序 (環境でusageが除外される場合)
   await page.addInitScript(
-    () => localStorage.setItem('ccserver-widget-order', JSON.stringify(['system', 'usage', 'cpu', 'memory-storage', 'gpu'])),
+    () => localStorage.setItem('ccserver-widget-order', JSON.stringify(['system', 'usage', 'cpu', 'memory', 'storage', 'gpu'])),
   );
   await page.goto('/');
 
@@ -629,7 +629,7 @@ test('non-finite cpu values are hidden, not rendered as NaN', async ({ page }) =
   await expect(cpuWidget).not.toContainText('NaN');
 });
 
-test('memory without usable numbers makes no memory-storage widget', async ({ page }) => {
+test('memory without usable numbers makes no memory/storage widget', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
       uptime: 3600,
@@ -645,7 +645,10 @@ test('memory without usable numbers makes no memory-storage widget', async ({ pa
   await page.goto('/');
 
   await expect(page.locator('.widget-card', {
-    has: page.locator('.widget-card-title', { hasText: 'Memory / Storage' }),
+    has: page.locator('.widget-card-title', { hasText: 'Memory' }),
+  })).toHaveCount(0);
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'Storage' }),
   })).toHaveCount(0);
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'CPU' }),
@@ -668,12 +671,16 @@ test('partial memory renders placeholders instead of undefined', async ({ page }
   await page.goto('/');
 
   const memWidget = page.locator('.widget-card', {
-    has: page.locator('.widget-card-title', { hasText: 'Memory / Storage' }),
+    has: page.locator('.widget-card-title', { hasText: 'Memory' }),
   });
   await expect(memWidget).toBeVisible();
   // 旧コードは"undefined MB"表示
   await expect(memWidget).not.toContainText('undefined');
   await expect(memWidget).toContainText('Available: —');
+  // storage が空のため Storage 枠は作られない（分離の確認）
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'Storage' }),
+  })).toHaveCount(0);
 });
 
 test('storage rows with missing numbers are hidden', async ({ page }) => {
@@ -694,13 +701,17 @@ test('storage rows with missing numbers are hidden', async ({ page }) => {
   });
   await page.goto('/');
 
-  const memWidget = page.locator('.widget-card', {
-    has: page.locator('.widget-card-title', { hasText: 'Memory / Storage' }),
+  const storageWidget = page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'Storage' }),
   });
-  await expect(memWidget).toBeVisible();
+  await expect(storageWidget).toBeVisible();
   // 欠測行は出さない (旧コードは'/bad'行を描画していた)
-  await expect(memWidget).toContainText('/data');
-  await expect(memWidget.getByText('/bad', { exact: true })).toHaveCount(0);
+  await expect(storageWidget).toContainText('/data');
+  await expect(storageWidget.getByText('/bad', { exact: true })).toHaveCount(0);
+  // memory が null のため Memory 枠は作られない（分離の確認）
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'Memory' }),
+  })).toHaveCount(0);
 });
 
 test('system filters unusable load values instead of showing 0.00/NaN', async ({ page }) => {
@@ -857,7 +868,7 @@ test('system-stats 500 shows per-widget errors and keeps widgets editable', asyn
 
   // 可視モニターウィジェットごとに枠が作られ、枠内にエラーが出る。
   // 旧コードはリスト上部の単一バナーのみで枠が0件だった。
-  for (const title of ['System', 'CPU', 'Memory / Storage', 'GPU']) {
+  for (const title of ['System', 'CPU', 'Memory', 'Storage', 'GPU']) {
     const card = page.locator('.widget-card', {
       has: page.locator('.widget-card-title', { hasText: title }),
     });
@@ -907,8 +918,12 @@ test('partial 200 with errors shows only the failed widget as an error', async (
     has: page.locator('.widget-card-title', { hasText: 'System' }),
   })).toBeVisible();
   await expect(page.locator('.widget-card', {
-    has: page.locator('.widget-card-title', { hasText: 'Memory / Storage' }),
+    has: page.locator('.widget-card-title', { hasText: 'Memory' }),
   })).toBeVisible();
+  // storage が空のため Storage 枠は作られない（分離の確認）
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'Storage' }),
+  })).toHaveCount(0);
 });
 
 test('slow responses do not pile up overlapping system-stats polls', async ({ page }) => {

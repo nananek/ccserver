@@ -162,8 +162,16 @@ function usableMemory(memory) {
   };
 }
 
+export function hasMemory(data) {
+  return usableMemory(data?.memory) != null;
+}
+
+export function hasStorage(data) {
+  return visibleStorageRows(data).length > 0;
+}
+
 export function hasMemoryOrStorage(data) {
-  return usableMemory(data?.memory) != null || visibleStorageRows(data).length > 0;
+  return hasMemory(data) || hasStorage(data);
 }
 
 export function MemoryCard({ data, hideTitle = false }) {
