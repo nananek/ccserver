@@ -831,9 +831,10 @@ export default function App() {
   // sidebar) itself has tabs to switch between them, so it is no longer tied
   // to whichever app the active terminal tab happens to be running -- it
   // stays visible on opencode/copilot terminals too, as long as at least one
-  // source is usable. It's hidden only via sandbox.config.json's
-  // "showUsage": false, or when the server reports nothing usable at all
-  // (no CLI installed AND no Go key, accounting for hiddenApps).
+  // source is usable. It's fully hidden via sandbox.config.json's
+  // "showUsage": false, or when hiddenApps hides every usable source.
+  // When no CLI is installed AND no Go key exists, the frame stays with a
+  // friendly empty message instead (emptyReason 'no-cli', see below).
   // `availableApps` null/absent (fetch pending or failed, older server)
   // means "unknown" -- every tab is assumed available in that case (unless
   // hidden via hiddenApps). Note `opencodeGo` is not the opencode CLI
@@ -845,7 +846,20 @@ export default function App() {
   const claudeAvailable = isAppSelectable('claude', usagePrefs.availableApps, usagePrefs.hiddenApps);
   const codexAvailable = isAppSelectable('codex', usagePrefs.availableApps, usagePrefs.hiddenApps);
   const opencodeGoAvailable = isAppVisible('opencode', usagePrefs.availableApps, usagePrefs.hiddenApps);
-  const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable && !opencodeGoAvailable);
+  // `hidden`: 設定で無効化された場合は従来通りウィジェットごと除外する。
+  // `emptyReason: 'no-cli'`: CLI未インストール (+Goキーなし) で表示ソースが
+  // 無い場合は枠を残して親切メッセージを出す。hiddenAppsで「あるのに隠した」
+  // 場合は設定尊重で除外側に倒す (誤った「未インストール」表示を避ける)。
+  // availableApps==null (取得前/失敗/旧サーバ) は不明扱いで従来通り可視。
+  const availableApps = usagePrefs.availableApps;
+  const hiddenApps = usagePrefs.hiddenApps ?? [];
+  const claudeInstalled = !availableApps || availableApps.claude !== false;
+  const codexInstalled = !availableApps || availableApps.codex !== false;
+  const goReady = !availableApps ? true : availableApps.opencodeGo === true;
+  const nothingUsable = !claudeAvailable && !codexAvailable && !opencodeGoAvailable;
+  const noCliInstalled = !!availableApps && !claudeInstalled && !codexInstalled && !goReady;
+  const usageEmptyNoCli = usagePrefs.showUsage && !!availableApps && nothingUsable && noCliInstalled;
+  const usageHidden = !usagePrefs.showUsage || (!!availableApps && nothingUsable && !usageEmptyNoCli);
   // First-run seed only: UsageWidget remembers the app the user last picked
   // (localStorage), so this active-tab-derived default is used just when
   // nothing has been saved yet. The active tab's app wins when that source
@@ -858,7 +872,7 @@ export default function App() {
   const monitorWidgetsVisible = sidebarPrefs.open
     && sidebarPrefs.visibleWidgets.some((w) => MONITOR_WIDGET_IDS.includes(w.id));
   const statsActive = monitorWidgetsVisible;
-  const usageWidgetProps = { hidden: usageHidden, defaultApp: usageDefaultApp, availableApps: usagePrefs.availableApps, hiddenApps: usagePrefs.hiddenApps };
+  const usageWidgetProps = { hidden: usageHidden, emptyReason: usageEmptyNoCli ? 'no-cli' : null, defaultApp: usageDefaultApp, availableApps: usagePrefs.availableApps, hiddenApps: usagePrefs.hiddenApps };
 
   return (
     <div className="app">

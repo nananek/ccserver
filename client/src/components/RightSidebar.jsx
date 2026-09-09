@@ -82,15 +82,30 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
 
   // Usage機能が無効な環境では Usage を表示対象から除外する
   // (枠だけの「データがありません」を出さない。＋メニューにも出ない)。
-  const shownWidgets = usageProps?.hidden
+  // ただし CLI未インストール (emptyReason 'no-cli') は枠を残して親切
+  // メッセージを出すため除外しない。通常ウィジェット同様に隠す/移動/
+  // 追加の対象になる。showUsage:false や hiddenApps起因の不可視は
+  // hidden=true のまま完全除外される (App.jsx)。
+  const usageFullyHidden = !!usageProps?.hidden;
+  const shownWidgets = usageFullyHidden
     ? visibleWidgets.filter((w) => w.id !== 'usage')
     : visibleWidgets;
-  const addableWidgets = usageProps?.hidden
+  const addableWidgets = usageFullyHidden
     ? hiddenWidgets.filter((w) => w.id !== 'usage')
     : hiddenWidgets;
 
   const renderWidgetBody = (id) => {
     if (id === 'usage') {
+      if (usageProps?.emptyReason === 'no-cli') {
+        return (
+          <div className="usage-empty">
+            <div>CLIがインストールされていません</div>
+            <div className="usage-error-hint">
+              Claude / Codex CLIをインストールするか、OpenCode Goキーを設定すると使用量を表示できます
+            </div>
+          </div>
+        );
+      }
       return <UsageWidget {...usageProps} />;
     }
     const data = stats?.data;
@@ -172,11 +187,10 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
   // 描画されなかった可視ウィジェットを挟んだ移動も無反応に見えるため、
   // moveWidget には「非表示 or 今回非描画」を飛ばす述語を渡す。
   const renderedIds = new Set(renderedWidgets.map(({ w }) => w.id));
-  const usageHidden = !!usageProps?.hidden;
   const skipMoveIds = new Set([
     ...hiddenWidgets.map((w) => w.id),
     ...shownWidgets.filter((w) => !renderedIds.has(w.id)).map((w) => w.id),
-    ...(usageHidden ? ['usage'] : []),
+    ...(usageFullyHidden ? ['usage'] : []),
   ]);
 
   return (
