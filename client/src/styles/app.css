@@ -1026,12 +1026,19 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 5px 12px;
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   background: var(--bg-secondary);
   z-index: 1;
+}
+
+/* Sessions左ヘッダーは中身が20pxボタンのみで、Widgets右(28pxボタン)・
+   Terminal(32pxボタン)より約8px低くなるため、min-heightで39pxに揃える。
+   中身はalign-items:centerで中央寄せされる。 */
+.left-sidebar .sidebar-header {
+  min-height: 39px;
 }
 
 .sidebar-title {
@@ -1103,7 +1110,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 5px 8px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -2467,7 +2474,7 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 12px;
+  padding: 3px 12px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -3500,7 +3507,7 @@ body {
 
   .terminal-header {
     gap: 8px;
-    padding: 6px 8px;
+    padding: 3px 8px;
   }
 
   .terminal-title {
