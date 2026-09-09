@@ -121,25 +121,25 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
     switch (id) {
       case 'system': {
         if (!hasSystemMetrics(data)) return sectionErrorBody('system');
-        return <SystemCard data={data} hideTitle />;
+        return <SystemCard data={data} hideTitle bare />;
       }
       case 'cpu':
         if (!hasCpuUsage(data)) return sectionErrorBody('cpu');
-        return <CpuCard data={data} hideTitle />;
+        return <CpuCard data={data} hideTitle bare />;
       case 'memory':
         if (!hasMemory(data)) return sectionErrorBody('memory');
-        return <MemoryCard data={data} hideTitle />;
+        return <MemoryCard data={data} hideTitle bare />;
       case 'storage': {
         if (!hasStorage(data)) return null;
-        return <StorageCard data={data} hideTitle />;
+        return <StorageCard data={data} hideTitle bare />;
       }
       case 'temps': {
         if (!hasTemperatures(data)) return null;
-        return <TempCard data={data} hideTitle />;
+        return <TempCard data={data} hideTitle bare />;
       }
       case 'gpu':
         if (!hasGpuMetrics(data)) return null;
-        return <GpuCard data={data} hideTitle />;
+        return <GpuCard data={data} hideTitle bare />;
       case 'ipmi': {
         if (!showIpmi || !hasIpmiData(data)) return null;
         return <IpmiCards data={data} showIpmi={showIpmi} hideTitle />;
@@ -151,8 +151,8 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
         if (!hasMemory(data) && !hasStorage(data)) return sectionErrorBody('memory');
         return (
           <>
-            <MemoryCard data={data} hideTitle />
-            <StorageCard data={data} hideTitle />
+            <MemoryCard data={data} hideTitle bare />
+            <StorageCard data={data} hideTitle bare />
           </>
         );
       }

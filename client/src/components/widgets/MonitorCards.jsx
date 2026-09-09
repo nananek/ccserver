@@ -81,13 +81,13 @@ export function hasSystemMetrics(data) {
   return true;
 }
 
-export function SystemCard({ data, hideTitle = false }) {
+export function SystemCard({ data, hideTitle = false, bare = false }) {
   if (!hasSystemMetrics(data)) return null;
   const uptime = numOrNull(data.uptime);
   const load = formatLoadAvg(data.loadAvg);
-  return (
-    <div className="monitor-card">
-      {!hideTitle && <div className="monitor-card-title">System</div>}
+  const body = (
+    <>
+      {!hideTitle && !bare && <div className="monitor-card-title">System</div>}
       {uptime != null && (
         <div className="monitor-ipmi-row">
           <span className="monitor-ipmi-label">Uptime</span>
@@ -100,6 +100,12 @@ export function SystemCard({ data, hideTitle = false }) {
           <span className="monitor-ipmi-value">{load}</span>
         </div>
       )}
+    </>
+  );
+  if (bare) return body;
+  return (
+    <div className="monitor-card">
+      {body}
     </div>
   );
 }
@@ -111,13 +117,13 @@ export function hasCpuUsage(data) {
   return !!data?.cpu && numOrNull(usage?.total) != null && Array.isArray(usage?.cores);
 }
 
-export function CpuCard({ data, hideTitle = false }) {
+export function CpuCard({ data, hideTitle = false, bare = false }) {
   if (!hasCpuUsage(data)) return null;
   const usage = data.cpu.usage;
   const total = numOrNull(usage.total);
-  return (
-    <div className="monitor-card">
-      {!hideTitle && <div className="monitor-card-title">CPU</div>}
+  const body = (
+    <>
+      {!hideTitle && !bare && <div className="monitor-card-title">CPU</div>}
       <div className="monitor-card-subtitle">{data.cpu.model}</div>
       <Bar
         value={total}
@@ -142,6 +148,12 @@ export function CpuCard({ data, hideTitle = false }) {
           );
         })}
       </div>
+    </>
+  );
+  if (bare) return body;
+  return (
+    <div className="monitor-card">
+      {body}
     </div>
   );
 }
@@ -174,12 +186,12 @@ export function hasMemoryOrStorage(data) {
   return hasMemory(data) || hasStorage(data);
 }
 
-export function MemoryCard({ data, hideTitle = false }) {
+export function MemoryCard({ data, hideTitle = false, bare = false }) {
   const mem = usableMemory(data?.memory);
   if (!mem) return null;
-  return (
-    <div className="monitor-card">
-      {!hideTitle && <div className="monitor-card-title">Memory</div>}
+  const body = (
+    <>
+      {!hideTitle && !bare && <div className="monitor-card-title">Memory</div>}
       <Bar
         value={mem.used}
         max={mem.total}
@@ -198,6 +210,12 @@ export function MemoryCard({ data, hideTitle = false }) {
           format={`${formatMb(mem.swapUsed)} / ${formatMb(mem.swapTotal)}`}
         />
       )}
+    </>
+  );
+  if (bare) return body;
+  return (
+    <div className="monitor-card">
+      {body}
     </div>
   );
 }
@@ -211,12 +229,12 @@ export function visibleStorageRows(data) {
   );
 }
 
-export function StorageCard({ data, hideTitle = false }) {
+export function StorageCard({ data, hideTitle = false, bare = false }) {
   const rows = visibleStorageRows(data);
   if (rows.length === 0) return null;
-  return (
-    <div className="monitor-card">
-      {!hideTitle && <div className="monitor-card-title">Storage</div>}
+  const body = (
+    <>
+      {!hideTitle && !bare && <div className="monitor-card-title">Storage</div>}
       {rows.map((s, i) => (
         <Bar
           key={`${s.mount}#${i}`}
@@ -227,6 +245,12 @@ export function StorageCard({ data, hideTitle = false }) {
           format={`${formatMb(s.used)} / ${formatMb(s.total)}`}
         />
       ))}
+    </>
+  );
+  if (bare) return body;
+  return (
+    <div className="monitor-card">
+      {body}
     </div>
   );
 }
@@ -242,7 +266,7 @@ export function hasTemperatures(data) {
   return visibleTempItems(t.cpu).length > 0 || visibleTempItems(t.pch).length > 0 || visibleTempItems(t.other).length > 0;
 }
 
-export function TempCard({ data, hideTitle = false }) {
+export function TempCard({ data, hideTitle = false, bare = false }) {
   if (!hasTemperatures(data)) return null;
   const t = data.temperatures;
   // 欠測値 (null) の行は描画せず、全件欠測のグループは見出しごと出さない。
@@ -250,9 +274,9 @@ export function TempCard({ data, hideTitle = false }) {
   const cpu = visibleTempItems(t.cpu);
   const pch = visibleTempItems(t.pch);
   const other = visibleTempItems(t.other);
-  return (
-    <div className="monitor-card">
-      {!hideTitle && <div className="monitor-card-title">Temperatures</div>}
+  const body = (
+    <>
+      {!hideTitle && !bare && <div className="monitor-card-title">Temperatures</div>}
       {cpu.length > 0 && (
         <div className="monitor-temp-group">
           <div className="monitor-temp-group-label">CPU</div>
@@ -277,6 +301,12 @@ export function TempCard({ data, hideTitle = false }) {
           ))}
         </div>
       )}
+    </>
+  );
+  if (bare) return body;
+  return (
+    <div className="monitor-card">
+      {body}
     </div>
   );
 }
@@ -299,7 +329,7 @@ export function hasGpuMetrics(data) {
   return numOrNull(g.temp) != null || numOrNull(g.utilization) != null || numOrNull(g.memoryUsed) != null;
 }
 
-export function GpuCard({ data, hideTitle = false }) {
+export function GpuCard({ data, hideTitle = false, bare = false }) {
   if (!hasGpuMetrics(data)) return null;
   const g = data.gpu;
   const temp = numOrNull(g.temp);
@@ -309,9 +339,9 @@ export function GpuCard({ data, hideTitle = false }) {
   const fanSpeed = numOrNull(g.fanSpeed);
   const powerUsage = numOrNull(g.powerUsage);
   const powerCap = numOrNull(g.powerCap);
-  return (
-    <div className="monitor-card">
-      {!hideTitle && <div className="monitor-card-title">GPU</div>}
+  const body = (
+    <>
+      {!hideTitle && !bare && <div className="monitor-card-title">GPU</div>}
       <div className="monitor-card-subtitle">{g.name}</div>
       {temp != null && <TempItem label="Temperature" value={temp} />}
       {utilization != null && (
@@ -334,6 +364,12 @@ export function GpuCard({ data, hideTitle = false }) {
         <span>Fan: {fanSpeed != null ? `${fanSpeed}%` : '—'}</span>
         <span>Power: {powerUsage != null ? `${powerUsage}W` : '—'} / {powerCap != null ? `${powerCap}W` : '—'}</span>
       </div>
+    </>
+  );
+  if (bare) return body;
+  return (
+    <div className="monitor-card">
+      {body}
     </div>
   );
 }

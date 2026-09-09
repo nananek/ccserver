@@ -926,6 +926,42 @@ test('partial 200 with errors shows only the failed widget as an error', async (
   })).toHaveCount(0);
 });
 
+test('monitor widgets render single frame without nested monitor-card', async ({ page }) => {
+  mockRoutes(page, {
+    systemStats: {
+      uptime: 3600,
+      loadAvg: [0.5, 0.4, 0.3],
+      cpu: { model: 'Test CPU', usage: { total: 25, cores: [20, 30] } },
+      memory: { total: 16000, used: 8000, available: 8000, bufferCache: 1000, swapTotal: 0, swapUsed: 0 },
+      storage: [
+        { mount: '/data', device: 'sdb1', total: 2000, used: 500, available: 1500, usedPct: 25 },
+      ],
+      temperatures: {},
+      gpu: { name: 'Test GPU', temp: 50, utilization: 55, memoryUsed: 1000, memoryTotal: 2000, fanSpeed: 30, powerUsage: 70, powerCap: 100 },
+      ipmi: null,
+    },
+  });
+  await page.goto('/');
+
+  // System/CPU/Memory/Storage/GPU は外側 WidgetShell のみで内側 .monitor-card を持たない。
+  // IPMI は複数セクションのため内側カードを残す対象外。
+  const cases = [
+    { title: 'System', text: 'Uptime' },
+    { title: 'CPU', text: 'Test CPU' },
+    { title: 'Memory', text: 'RAM' },
+    { title: 'Storage', text: '/data' },
+    { title: 'GPU', text: 'Test GPU' },
+  ];
+  for (const { title, text } of cases) {
+    const widget = page.locator('.widget-card', {
+      has: page.locator('.widget-card-title', { hasText: title }),
+    });
+    await expect(widget).toBeVisible();
+    await expect(widget.locator('.widget-card-body > .monitor-card')).toHaveCount(0);
+    await expect(widget).toContainText(text);
+  }
+});
+
 test('slow responses do not pile up overlapping system-stats polls', async ({ page }) => {
   let systemStatsHits = 0;
   // 応答2.5sに対し周期1s。旧コードは毎tick発行して並走する。

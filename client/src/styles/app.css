@@ -1184,6 +1184,14 @@ body {
   padding: 10px 12px;
 }
 
+/* bare表示 (System/CPU/Memory/Storage/Temps/GPU) は外側 WidgetShell が唯一の枠。
+   内側 .monitor-card を出さないため、subtitle の詰め (-4px) だけ打ち消す。
+   body 自体の gap:8px がカード内 gap と同値のため、その他の間隔はそのまま。
+   IPMI は内側カードを残すため対象外。 */
+.widget-card-body .monitor-card-subtitle {
+  margin-top: 0;
+}
+
 .sidebar-empty {
   padding: 16px;
   text-align: center;
