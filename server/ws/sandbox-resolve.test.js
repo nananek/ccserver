@@ -103,6 +103,40 @@ test('resolveApp reports found: false for a configured claudeBin that does not e
   }
 });
 
+// hostCommand: the absolute host path for NON-sandboxed spawns. resolveApp's
+// `command` is resolved against SANDBOX_PATH, which can see installs the
+// server process's own PATH cannot (e.g. ~/.local/bin missing from a
+// GUI/systemd-launched server's PATH) -- spawning that bare name on the host
+// then dies immediately with exit 1 and no output (shells use absolute
+// /bin/bash, so only agent CLIs break). hostCommand must therefore always be
+// an existing absolute path when found, independent of process.env.PATH
+// (resolveApp never reads it -- see the header comment above).
+test('resolveApp reports an absolute, existing hostCommand for every installed app', () => {
+  let checked = 0;
+  for (const app of ['claude', 'opencode', 'copilot', 'codex', 'commandcode']) {
+    const r = resolveApp(app);
+    if (!r.found) continue;
+    checked++;
+    assert.ok(r.hostCommand, `${app}: hostCommand must be set when found`);
+    assert.ok(
+      r.hostCommand.startsWith('/'),
+      `${app}: hostCommand must be absolute, got: ${r.hostCommand}`
+    );
+    assert.ok(
+      existsSync(r.hostCommand),
+      `${app}: hostCommand must exist on the host: ${r.hostCommand}`
+    );
+  }
+  // Vacuous pass on hosts with no agent CLI (same skip philosophy as above:
+  // plain CI runners have neither binary); the per-app tests above cover
+  // hosts that do.
+  assert.ok(checked >= 0);
+});
+
+test('resolveApp hostCommand is null when the app is genuinely missing', { skip: isInstalled('claude') }, () => {
+  assert.equal(resolveApp('claude').hostCommand, null);
+});
+
 // installedApps() must agree with resolveApp on every app id -- host- and
 // install-state-independent (it is a pure mirror of the per-app resolution).
 test('installedApps mirrors resolveApp found flags for all supported apps', () => {

@@ -1,7 +1,7 @@
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
+import { writeFileSync, readFileSync, unlinkSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
@@ -828,6 +828,38 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // only ever reached when the session genuinely runs unsandboxed.
   const forceSandbox = cfg.forceSandbox;
   const sandboxRequested = (forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable();
+
+  // Non-sandboxed host spawns exec on the host, not in the sandbox: a bare
+  // `command` resolved against SANDBOX_PATH may not resolve on the server
+  // process's own PATH (e.g. a ~/.local/bin install with a GUI/systemd PATH
+  // that lacks it), and the child then dies immediately with exit 1 and no
+  // output. Prefer the resolved absolute host path there (see resolveApp's
+  // hostCommand); sandboxed launches keep the bare name their own PATH
+  // resolves, so this never touches the sandbox branches below.
+  if (!shell && !sandboxRequested && resolved.hostCommand) {
+    command = resolved.hostCommand;
+  }
+
+  // Defensive backstop for the above: resolveApp always supplies hostCommand
+  // when found, so a bare host-spawn name here means something regressed --
+  // refuse with a clear message instead of an opaque immediate exit 1.
+  if (!shell && !sandboxRequested && !command.includes('/') && process.platform !== 'win32') {
+    const onHostPath = (process.env.PATH || '').split(':').some((dir) => {
+      if (!dir) return false;
+      try {
+        const st = statSync(join(dir, command));
+        return st.isFile() && (st.mode & 0o111);
+      } catch { return false; }
+    });
+    if (!onHostPath) {
+      return {
+        sessionId: id,
+        session: null,
+        error: `Cannot launch: ${sessionApp} resolved to bare "${command}" which is not on the server's host PATH `
+          + `(resolved via the sandbox PATH instead). Add its install dir to PATH before starting the server.`,
+      };
+    }
+  }
 
   // An explicitly requested sandbox that cannot be built is refused instead
   // of silently falling back to a direct (unsandboxed) spawn: running on the

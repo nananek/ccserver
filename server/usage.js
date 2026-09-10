@@ -245,7 +245,12 @@ function capture() {
       resolve({ error: 'claude is not installed on this server' });
       return;
     }
-    let command = resolvedClaude.command;
+    // Direct (non-sandboxed) fallback below execs on the host: use the
+    // absolute host path, not the bare name (which is resolved against the
+    // sandbox PATH and may not resolve on the server's own PATH -- see
+    // resolveApp's hostCommand). The sandboxed branch below re-resolves
+    // internally, so this only affects the direct fallback.
+    let command = resolvedClaude.hostCommand || resolvedClaude.command;
     let args = ['--ax-screen-reader'];
     let spawnCwd = homedir();
     let sandboxed = false;

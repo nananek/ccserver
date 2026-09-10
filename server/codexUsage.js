@@ -102,7 +102,10 @@ function capture() {
       resolve({ error: 'codex is not installed on this server' });
       return;
     }
-    let command = resolvedCodex.command;
+    // Direct (non-sandboxed) fallback below execs on the host: use the
+    // absolute host path, not the bare name (see resolveApp's hostCommand and
+    // server/usage.js's twin fallback).
+    let command = resolvedCodex.hostCommand || resolvedCodex.command;
     let args = ['app-server'];
     let spawnCwd = homedir();
     let sandboxed = false;

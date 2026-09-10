@@ -916,13 +916,15 @@ function resolveAgentCommand(cmd, extraDirs = []) {
 
 // Resolve how launches should invoke an agent CLI, plus the host path (if any)
 // that must be exposed read-only in the sandbox for that invocation to work.
-//   command    - argv[0] to run
-//   installDir - extra ro-bind so the resolved binary is present, or null
-//   found      - whether the CLI actually resolved somewhere searchable. When
-//                false, `command` is only a fallback bare name that will fail
-//                at spawn time (execvp ENOENT) -- callers should refuse the
-//                launch up front instead (see sessionManager's not-installed
-//                error and installedApps()).
+//   command     - argv[0] to run inside the sandbox
+//   hostCommand - absolute host path of the same binary (when found), for
+//                 NON-sandboxed host spawns. Never null when found is true.
+//   installDir  - extra ro-bind so the resolved binary is present, or null
+//   found       - whether the CLI actually resolved somewhere searchable. When
+//                 false, `command` is only a fallback bare name that will fail
+//                 at spawn time (execvp ENOENT) -- callers should refuse the
+//                 launch up front instead (see sessionManager's not-installed
+//                 error and installedApps()).
 //
 // claude: "claude" (so the sandbox's PATH resolves it) unless overridden via
 //   CCSERVER_CLAUDE_BIN / "claudeBin" in the sandbox config.
@@ -933,25 +935,33 @@ function resolveAgentCommand(cmd, extraDirs = []) {
 //   SANDBOX_PATH); falls back to an absolute path for installs PATH can't see.
 // codex: like copilot, a bare name first (~/.local/bin is searched as a
 //   fallback); falls back to an absolute path for installs PATH can't see.
+//
+// Why two spellings: `command` is resolved against SANDBOX_PATH, which can
+// see installs the server process's own PATH cannot (e.g. ~/.local/bin
+// missing from a GUI/systemd-launched server's PATH). Spawning that bare
+// name on the HOST then dies immediately with exit 1 and no output, while
+// shells (absolute /bin/bash) survive -- so host spawns must use
+// `hostCommand` instead (see sessionManager's non-sandbox branch). Sandbox
+// launches keep `command`: their own PATH resolves it identically.
 export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
   if (app === 'opencode') {
     const r = resolveAgentCommand('opencode', [join(HOME, '.opencode', 'bin')]);
     if (r) {
       let real = r.path;
       try { real = realpathSync(r.path); } catch { /* keep as given */ }
-      return { command: real, installDir: appInstallDir(real), found: true };
+      return { command: real, hostCommand: real, installDir: appInstallDir(real), found: true };
     }
-    return { command: process.platform === 'win32' ? 'opencode.exe' : 'opencode', installDir: null, found: false };
+    return { command: process.platform === 'win32' ? 'opencode.exe' : 'opencode', hostCommand: null, installDir: null, found: false };
   }
   if (app === 'copilot') {
     const r = resolveAgentCommand('copilot', [join(HOME, '.local', 'bin')]);
-    if (r) return { command: r.command, installDir: appInstallDir(r.path), found: true };
-    return { command: process.platform === 'win32' ? 'copilot.exe' : 'copilot', installDir: null, found: false };
+    if (r) return { command: r.command, hostCommand: r.path, installDir: appInstallDir(r.path), found: true };
+    return { command: process.platform === 'win32' ? 'copilot.exe' : 'copilot', hostCommand: null, installDir: null, found: false };
   }
   if (app === 'codex') {
     const r = resolveAgentCommand('codex', [join(HOME, '.local', 'bin')]);
-    if (r) return { command: r.command, installDir: appInstallDir(r.path), found: true };
-    return { command: process.platform === 'win32' ? 'codex.exe' : 'codex', installDir: null, found: false };
+    if (r) return { command: r.command, hostCommand: r.path, installDir: appInstallDir(r.path), found: true };
+    return { command: process.platform === 'win32' ? 'codex.exe' : 'codex', hostCommand: null, installDir: null, found: false };
   }
   if (app === 'commandcode') {
     const names = ['command-code', 'commandcode', 'cmdc', 'cmd'];
@@ -963,17 +973,17 @@ export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
         // command-code is a Node package; expose its package root so its
         // bundled node_modules remain available inside the sandbox.
         const packageRoot = dirname(dirname(real));
-        return { command: real, installDir: packageRoot, found: true };
+        return { command: real, hostCommand: real, installDir: packageRoot, found: true };
       }
     }
-    return { command: 'command-code', installDir: null, found: false };
+    return { command: 'command-code', hostCommand: null, installDir: null, found: false };
   }
   const command = configuredBin || (process.platform === 'win32' ? 'claude.exe' : 'claude');
   const r = resolveAgentCommand(command);
   // Keep the bare name when PATH resolves it (the sandbox PATH can too); use
   // an absolute path for installs PATH can't see (e.g. systemd).
-  if (r) return { command: r.command, installDir: appInstallDir(r.path), found: true };
-  return { command, installDir: null, found: false };
+  if (r) return { command: r.command, hostCommand: r.path, installDir: appInstallDir(r.path), found: true };
+  return { command, hostCommand: null, installDir: null, found: false };
 }
 
 // Which agent CLIs are actually launchable on this host, keyed by app id.
