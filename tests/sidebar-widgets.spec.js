@@ -249,7 +249,7 @@ test('hiding the system widget persists across a reload', async ({ page }) => {
   })).toBeVisible();
 });
 
-test('missing uptime/loadAvg makes no empty system widget', async ({ page }) => {
+test('missing uptime/loadAvg keeps an empty system frame', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
       cpu: { model: 'Test CPU', usage: { total: 25, cores: [20, 30] } },
@@ -262,16 +262,18 @@ test('missing uptime/loadAvg makes no empty system widget', async ({ page }) => 
   });
   await page.goto('/');
 
-  // サイドバー: Systemウィジェットの枠は作られないが、CPUは表示される
-  await expect(page.locator('.widget-card', {
+  // サイドバー: データ欠測時もSystemの枠は残し、中身は空にする。CPUは表示される
+  const systemWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'System' }),
-  })).toHaveCount(0);
+  });
+  await expect(systemWidget).toBeVisible();
+  await expect(systemWidget.locator('.widget-card-body')).toBeEmpty();
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'CPU' }),
   })).toBeVisible();
 });
 
-test('partial cpu payload neither crashes nor makes an empty cpu widget', async ({ page }) => {
+test('partial cpu payload neither crashes nor hides the cpu frame', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
       uptime: 3600,
@@ -286,11 +288,13 @@ test('partial cpu payload neither crashes nor makes an empty cpu widget', async 
   });
   await page.goto('/');
 
-  // usage.total/cores 欠落時: CPUウィジェットの枠は作られない。
+  // usage.total/cores 欠落時: CPUの枠は残し、中身は空にする。
   // ガード前のコード (total.toFixed/cores.map) ならrender時に例外になる。
-  await expect(page.locator('.widget-card', {
+  const cpuWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'CPU' }),
-  })).toHaveCount(0);
+  });
+  await expect(cpuWidget).toBeVisible();
+  await expect(cpuWidget.locator('.widget-card-body')).toBeEmpty();
   // ページ全体は生きており、Systemウィジェットは表示される
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'System' }),
@@ -365,10 +369,10 @@ test('move buttons at the rendered boundaries are disabled', async ({ page }) =>
   await expect(cards.last().locator('.widget-icon-btn[title="上へ"]')).toBeEnabled();
 });
 
-test('moving across an unrendered visible widget changes the visible order', async ({ page }) => {
+test('moving across an empty visible widget swaps with it', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
-      // Systemは可視設定のままデータ欠落で未描画になる形状
+      // Systemは可視設定のままデータ欠落で空枠になる形状
       uptime: null,
       cpu: { model: 'Test CPU', usage: { total: 25, cores: [20, 30] } },
       memory: { total: 16000, used: 8000, available: 8000, bufferCache: 1000, swapTotal: 0, swapUsed: 0 },
@@ -380,12 +384,17 @@ test('moving across an unrendered visible widget changes the visible order', asy
   });
   await page.goto('/');
 
-  // 描画順は [Usage, CPU, ...] (Systemは枠なし)。先頭Usageを下へ押すと
-  // 未描画のSystemを飛ばしてCPUと入れ替わる。旧コードではorder上の隣
-  // (System) と交換するだけで可視順序が変わらなかった。
+  // 描画順は [Usage, System(空枠), CPU, ...]。先頭Usageを下へ押すと
+  // 空枠のSystemと入れ替わる (空枠も隠す/移動の操作対象として残す仕様)。
+  // 未描画 (ローディング中・未知ID) のみが移動時に飛ばされる対象。
   await expect(page.locator('.widget-card .widget-card-title').first()).toContainText('Usage');
+  const systemWidget = page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'System' }),
+  });
+  await expect(systemWidget).toBeVisible();
+  await expect(systemWidget.locator('.widget-card-body')).toBeEmpty();
   await page.locator('.widget-card').first().locator('.widget-icon-btn[title="下へ"]').click();
-  await expect(page.locator('.widget-card .widget-card-title').first()).toContainText('CPU');
+  await expect(page.locator('.widget-card .widget-card-title').first()).toContainText('System');
 });
 
 test('partial ipmi payload neither crashes nor makes empty ipmi cards', async ({ page }) => {
@@ -450,7 +459,7 @@ test('non-numeric gpu fields never render as NaN', async ({ page }) => {
   await expect(gpuWidget).toContainText('Fan: —');
 });
 
-test('gpu payload without usable metrics makes no gpu widget', async ({ page }) => {
+test('gpu payload without usable metrics keeps an empty gpu frame', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
       uptime: 3600,
@@ -465,16 +474,19 @@ test('gpu payload without usable metrics makes no gpu widget', async ({ page }) 
   });
   await page.goto('/');
 
-  await expect(page.locator('.widget-card', {
+  // 有効メトリクスがなくても枠は残し、中身は空にする
+  const gpuWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'GPU' }),
-  })).toHaveCount(0);
+  });
+  await expect(gpuWidget).toBeVisible();
+  await expect(gpuWidget.locator('.widget-card-body')).toBeEmpty();
   // ページ全体は生きている
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'CPU' }),
   })).toBeVisible();
 });
 
-test('empty temperature arrays make no temperatures widget', async ({ page }) => {
+test('empty temperature arrays keep an empty temperatures frame', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
       uptime: 3600,
@@ -490,12 +502,14 @@ test('empty temperature arrays make no temperatures widget', async ({ page }) =>
   });
   await page.goto('/');
 
-  // ＋メニューからTemperaturesを追加しても枠は作られない
+  // ＋メニューからTemperaturesを追加すると、有効行がなくても空枠が作られる
   await page.locator('.sidebar-header .btn', { hasText: '＋' }).click();
   await page.locator('.sidebar-add-item', { hasText: 'Temperatures' }).click();
-  await expect(page.locator('.widget-card', {
+  const tempsWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'Temperatures' }),
-  })).toHaveCount(0);
+  });
+  await expect(tempsWidget).toBeVisible();
+  await expect(tempsWidget.locator('.widget-card-body')).toBeEmpty();
   // ページ全体は生きている
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'CPU' }),
@@ -555,7 +569,7 @@ test('temperature rows with missing values are hidden', async ({ page }) => {
   await expect(tempsWidget.getByText('Broken', { exact: true })).toHaveCount(0);
 });
 
-test('temperatures with only missing values make no widget', async ({ page }) => {
+test('temperatures with only missing values keep an empty frame', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
       uptime: 3600,
@@ -572,10 +586,12 @@ test('temperatures with only missing values make no widget', async ({ page }) =>
 
   await page.locator('.sidebar-header .btn', { hasText: '＋' }).click();
   await page.locator('.sidebar-add-item', { hasText: 'Temperatures' }).click();
-  // 有効行がないため枠自体が作られない (空の見出しだけのカードを出さない)
-  await expect(page.locator('.widget-card', {
+  // 有効行がなくても枠は残し、隠す/移動/追加の操作対象を維持する
+  const tempsWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'Temperatures' }),
-  })).toHaveCount(0);
+  });
+  await expect(tempsWidget).toBeVisible();
+  await expect(tempsWidget.locator('.widget-card-body')).toBeEmpty();
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'CPU' }),
   })).toBeVisible();
@@ -629,7 +645,7 @@ test('non-finite cpu values are hidden, not rendered as NaN', async ({ page }) =
   await expect(cpuWidget).not.toContainText('NaN');
 });
 
-test('memory without usable numbers makes no memory/storage widget', async ({ page }) => {
+test('memory without usable numbers keeps empty memory/storage frames', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
       uptime: 3600,
@@ -644,12 +660,17 @@ test('memory without usable numbers makes no memory/storage widget', async ({ pa
   });
   await page.goto('/');
 
-  await expect(page.locator('.widget-card', {
+  // 欠測時も枠は残る（中身は空）。分離後は Memory と Storage が独立した枠になる
+  const memWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'Memory' }),
-  })).toHaveCount(0);
-  await expect(page.locator('.widget-card', {
+  });
+  await expect(memWidget).toBeVisible();
+  await expect(memWidget.locator('.widget-card-body')).toBeEmpty();
+  const storageWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'Storage' }),
-  })).toHaveCount(0);
+  });
+  await expect(storageWidget).toBeVisible();
+  await expect(storageWidget.locator('.widget-card-body')).toBeEmpty();
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'CPU' }),
   })).toBeVisible();
@@ -677,10 +698,12 @@ test('partial memory renders placeholders instead of undefined', async ({ page }
   // 旧コードは"undefined MB"表示
   await expect(memWidget).not.toContainText('undefined');
   await expect(memWidget).toContainText('Available: —');
-  // storage が空のため Storage 枠は作られない（分離の確認）
-  await expect(page.locator('.widget-card', {
+  // storage が空でも Storage の空枠は残る（分離の確認）
+  const emptyStorageWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'Storage' }),
-  })).toHaveCount(0);
+  });
+  await expect(emptyStorageWidget).toBeVisible();
+  await expect(emptyStorageWidget.locator('.widget-card-body')).toBeEmpty();
 });
 
 test('storage rows with missing numbers are hidden', async ({ page }) => {
@@ -708,10 +731,12 @@ test('storage rows with missing numbers are hidden', async ({ page }) => {
   // 欠測行は出さない (旧コードは'/bad'行を描画していた)
   await expect(storageWidget).toContainText('/data');
   await expect(storageWidget.getByText('/bad', { exact: true })).toHaveCount(0);
-  // memory が null のため Memory 枠は作られない（分離の確認）
-  await expect(page.locator('.widget-card', {
+  // memory が null でも Memory の空枠は残る（分離の確認）
+  const emptyMemWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'Memory' }),
-  })).toHaveCount(0);
+  });
+  await expect(emptyMemWidget).toBeVisible();
+  await expect(emptyMemWidget.locator('.widget-card-body')).toBeEmpty();
 });
 
 test('system filters unusable load values instead of showing 0.00/NaN', async ({ page }) => {
@@ -740,7 +765,7 @@ test('system filters unusable load values instead of showing 0.00/NaN', async ({
   await expect(systemWidget.getByText('Uptime', { exact: true })).toHaveCount(0);
 });
 
-test('system with only unusable values makes no widget', async ({ page }) => {
+test('system with only unusable values keeps an empty frame', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
       uptime: null,
@@ -755,9 +780,12 @@ test('system with only unusable values makes no widget', async ({ page }) => {
   });
   await page.goto('/');
 
-  await expect(page.locator('.widget-card', {
+  // 有効値がなくても枠は残し、中身は空にする
+  const systemWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'System' }),
-  })).toHaveCount(0);
+  });
+  await expect(systemWidget).toBeVisible();
+  await expect(systemWidget.locator('.widget-card-body')).toBeEmpty();
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'CPU' }),
   })).toBeVisible();
@@ -801,7 +829,7 @@ test('ipmi rows with missing values are hidden without crashing', async ({ page 
   }
 });
 
-test('ipmi with only missing values makes no widget', async ({ page }) => {
+test('ipmi with only missing values keeps an empty frame', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
       uptime: 3600,
@@ -818,10 +846,12 @@ test('ipmi with only missing values makes no widget', async ({ page }) => {
 
   await page.locator('.sidebar-header .btn', { hasText: '＋' }).click();
   await page.locator('.sidebar-add-item', { hasText: 'IPMI' }).click();
-  // 有効行がないため枠自体が作られない (旧コードは"null W"の空枠を表示)
-  await expect(page.locator('.widget-card', {
+  // 有効行がなくても枠は残し、隠す/移動/追加の操作対象を維持する
+  const ipmiWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'IPMI' }),
-  })).toHaveCount(0);
+  });
+  await expect(ipmiWidget).toBeVisible();
+  await expect(ipmiWidget.locator('.widget-card-body')).toBeEmpty();
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'CPU' }),
   })).toBeVisible();
@@ -920,10 +950,12 @@ test('partial 200 with errors shows only the failed widget as an error', async (
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'Memory' }),
   })).toBeVisible();
-  // storage が空のため Storage 枠は作られない（分離の確認）
-  await expect(page.locator('.widget-card', {
+  // storage が空でも Storage の空枠は残る（分離の確認）
+  const partialStorageWidget = page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'Storage' }),
-  })).toHaveCount(0);
+  });
+  await expect(partialStorageWidget).toBeVisible();
+  await expect(partialStorageWidget.locator('.widget-card-body')).toBeEmpty();
 });
 
 test('monitor widgets render single frame without nested monitor-card', async ({ page }) => {

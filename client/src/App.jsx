@@ -843,16 +843,15 @@ export default function App() {
   // without the opencodeGo key is an older server, so Go stays hidden
   // there (see appAvailability.js's isAppVisible, shared with UsageWidget).
   // hiddenApps 'opencode' hides the Go tab as well (issue #105).
-  const claudeAvailable = isAppSelectable('claude', usagePrefs.availableApps, usagePrefs.hiddenApps);
-  const codexAvailable = isAppSelectable('codex', usagePrefs.availableApps, usagePrefs.hiddenApps);
-  const opencodeGoAvailable = isAppVisible('opencode', usagePrefs.availableApps, usagePrefs.hiddenApps);
+  const availableApps = usagePrefs.availableApps;
+  const claudeAvailable = isAppSelectable('claude', availableApps, usagePrefs.hiddenApps);
+  const codexAvailable = isAppSelectable('codex', availableApps, usagePrefs.hiddenApps);
+  const opencodeGoAvailable = isAppVisible('opencode', availableApps, usagePrefs.hiddenApps);
   // `hidden`: 設定で無効化された場合は従来通りウィジェットごと除外する。
   // `emptyReason: 'no-cli'`: CLI未インストール (+Goキーなし) で表示ソースが
   // 無い場合は枠を残して親切メッセージを出す。hiddenAppsで「あるのに隠した」
   // 場合は設定尊重で除外側に倒す (誤った「未インストール」表示を避ける)。
   // availableApps==null (取得前/失敗/旧サーバ) は不明扱いで従来通り可視。
-  const availableApps = usagePrefs.availableApps;
-  const hiddenApps = usagePrefs.hiddenApps ?? [];
   const claudeInstalled = !availableApps || availableApps.claude !== false;
   const codexInstalled = !availableApps || availableApps.codex !== false;
   const goReady = !availableApps ? true : availableApps.opencodeGo === true;
@@ -872,7 +871,7 @@ export default function App() {
   const monitorWidgetsVisible = sidebarPrefs.open
     && sidebarPrefs.visibleWidgets.some((w) => MONITOR_WIDGET_IDS.includes(w.id));
   const statsActive = monitorWidgetsVisible;
-  const usageWidgetProps = { hidden: usageHidden, emptyReason: usageEmptyNoCli ? 'no-cli' : null, defaultApp: usageDefaultApp, availableApps: usagePrefs.availableApps, hiddenApps: usagePrefs.hiddenApps };
+  const usageWidgetProps = { hidden: usageHidden, emptyReason: usageEmptyNoCli ? 'no-cli' : null, defaultApp: usageDefaultApp, availableApps, hiddenApps: usagePrefs.hiddenApps };
 
   return (
     <div className="app">
