@@ -378,8 +378,10 @@ body {
 }
 
 /* Session right-click menu: fixed-position small menu shared by the popup
-   and sidebar lists. Same look as .sidebar-add-menu. */
-.session-context-menu {
+   and sidebar lists. Same look as .sidebar-add-menu.
+   Widget right-click menu (.widget-context-menu) shares frame and item rules. */
+.session-context-menu,
+.widget-context-menu {
   position: fixed;
   z-index: 100;
   background: var(--bg-secondary);
@@ -392,7 +394,8 @@ body {
   flex-direction: column;
 }
 
-.session-context-item {
+.session-context-item,
+.widget-context-item {
   background: none;
   border: none;
   text-align: left;
@@ -403,9 +406,30 @@ body {
 }
 
 .session-context-item:hover,
-.session-context-item:focus-visible {
+.session-context-item:focus-visible,
+.widget-context-item:hover,
+.widget-context-item:focus-visible {
   background: var(--bg-surface);
   color: var(--text-primary);
+}
+
+/* Widget context menu: small muted group heading. 2nd and later groups get a divider. */
+.widget-context-group-label {
+  padding: 6px 12px 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.widget-context-group + .widget-context-group {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 2px;
+}
+
+/* Fixed-width check slot so labels align whether or not ✓ is shown. */
+.widget-context-item .ctx-check {
+  display: inline-block;
+  width: 1.1em;
 }
 
 /* Rename dialog input: full-width text field in the resume-dialog frame. */
@@ -3398,6 +3422,85 @@ body {
   margin-top: 4px;
 }
 
+/* Core heatmap: 1 core = 1 cell. auto-fill wraps so height barely grows
+   with core count (anti-vertical-stretch for many-core machines). */
+.monitor-core-heatmap {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14px, 1fr));
+  gap: 2px;
+  margin-top: 6px;
+}
+
+.monitor-core-cell {
+  position: relative;
+  aspect-ratio: 1/1;
+  min-width: 0;
+  border-radius: 2px;
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.monitor-core-cell-fill {
+  position: absolute;
+  inset: 0;
+  transition: opacity .4s ease, background .4s ease;
+}
+
+.monitor-core-cell.is-missing {
+  background: transparent;
+  border: 1px dashed var(--border);
+}
+
+.monitor-core-cell:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Readout under the heatmap. min-height avoids jitter on hover in/out. */
+.monitor-core-readout {
+  margin-top: 6px;
+  min-height: 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* Core compact grid: numbered rows with a thin bar + integer value.
+   Reuses .monitor-bar-track/.monitor-bar-fill with height overridden. */
+.monitor-core-compact {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 3px 8px;
+  margin-top: 4px;
+}
+
+.monitor-core-compact-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.monitor-core-compact-label {
+  min-width: 2ch;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.monitor-core-compact .monitor-bar-track {
+  height: 8px;
+}
+
+.monitor-core-compact-value {
+  min-width: 3ch;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
 /* Memory detail */
 .monitor-mem-detail,
 .monitor-gpu-detail {
@@ -3564,6 +3667,14 @@ body {
   .monitor-bar-value {
     min-width: 50px;
     font-size: 11px;
+  }
+
+  .monitor-core-heatmap {
+    grid-template-columns: repeat(auto-fill, minmax(16px, 1fr));
+  }
+
+  .monitor-core-compact {
+    grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
   }
 }
 

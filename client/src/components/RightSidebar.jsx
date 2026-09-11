@@ -1,13 +1,23 @@
 import { useState, useRef, useEffect } from 'react';
 import { useWidgetPrefs } from '../hooks/useWidgetPrefs.js';
 import { useSystemStatsContext } from './widgets/SystemStatsProvider.jsx';
-import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards, SystemCard, hasCpuUsage, hasGpuMetrics, hasSystemMetrics, hasMemory, hasStorage, hasTemperatures, hasIpmiData } from './widgets/MonitorCards.jsx';
+import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards, SystemCard, hasCpuUsage, hasGpuMetrics, hasSystemMetrics, hasMemory, hasStorage, hasTemperatures, hasIpmiData, CPU_CORE_VIEWS, DEFAULT_CPU_CORE_VIEW } from './widgets/MonitorCards.jsx';
+import WidgetContextMenu from './WidgetContextMenu.jsx';
 import UsageWidget from './widgets/UsageWidget.jsx';
 
 const WIDGET_DEFS = [
   { id: 'usage', title: 'Usage', defaultVisible: true },
   { id: 'system', title: 'System', defaultVisible: true },
-  { id: 'cpu', title: 'CPU', defaultVisible: true },
+  {
+    id: 'cpu', title: 'CPU', defaultVisible: true,
+    options: {
+      coreView: {
+        label: '表示モード',
+        default: DEFAULT_CPU_CORE_VIEW, // 'auto'
+        choices: CPU_CORE_VIEWS, // MonitorCards.jsx から import
+      },
+    },
+  },
   { id: 'memory', title: 'Memory', defaultVisible: true },
   { id: 'storage', title: 'Storage', defaultVisible: true },
   { id: 'temps', title: 'Temperatures', defaultVisible: false },
@@ -22,10 +32,10 @@ const INTERVAL_OPTIONS = [
   { value: 10000, label: '10秒' },
 ];
 
-function WidgetShell({ title, onHide, onMoveUp, onMoveDown, canMoveUp = true, canMoveDown = true, children }) {
+function WidgetShell({ title, onHide, onMoveUp, onMoveDown, canMoveUp = true, canMoveDown = true, onContextMenu, children }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
-    <section className="widget-card">
+    <section className="widget-card" onContextMenu={onContextMenu}>
       <header className="widget-card-header">
         <button
           type="button"
@@ -49,12 +59,23 @@ function WidgetShell({ title, onHide, onMoveUp, onMoveDown, canMoveUp = true, ca
 }
 
 function RightSidebarInner({ usageProps = {}, prefs }) {
-  const { open, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget, overlay, setOverlay } = prefs;
+  const { open, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget, overlay, setOverlay, getWidgetOption, setWidgetOption } = prefs;
   const [addOpen, setAddOpen] = useState(false);
   const [intervalOpen, setIntervalOpen] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState(null); // { id, x, y }
   const addWrapRef = useRef(null);
   const intervalWrapRef = useRef(null);
   const stats = useSystemStatsContext();
+
+  // ウィジェットの右クリックメニューを開く。固有項目を持たないウィジェットには
+  // onContextMenu を渡さないため、ここに来るのは options 付きのみ。
+  // SessionList.jsx:36-40 と同じく preventDefault してから座標を保存する。
+  const handleWidgetContextMenu = (e, id) => {
+    e.preventDefault();
+    setAddOpen(false);
+    setIntervalOpen(false);
+    setCtxMenu({ id, x: e.clientX, y: e.clientY });
+  };
 
   useEffect(() => {
     if (!addOpen && !intervalOpen) return;
@@ -143,7 +164,7 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
       }
       case 'cpu':
         if (!hasCpuUsage(data)) return sectionErrorBody('cpu') ?? <></>;
-        return <CpuCard data={data} hideTitle bare />;
+        return <CpuCard data={data} hideTitle bare coreView={getWidgetOption('cpu', 'coreView')} />;
       case 'memory':
         if (!hasMemory(data)) return sectionErrorBody('memory') ?? <></>;
         return <MemoryCard data={data} hideTitle bare />;
@@ -208,7 +229,7 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                onClick={() => { setIntervalOpen((v) => !v); setAddOpen(false); }}
+                onClick={() => { setIntervalOpen((v) => !v); setAddOpen(false); setCtxMenu(null); }}
                 title="更新頻度"
                 aria-label="更新頻度"
                 aria-haspopup="menu"
@@ -238,7 +259,7 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                onClick={() => { setAddOpen((v) => !v); setIntervalOpen(false); }}
+                onClick={() => { setAddOpen((v) => !v); setIntervalOpen(false); setCtxMenu(null); }}
                 title="非表示のウィジェットを追加"
                 aria-label="非表示のウィジェットを追加"
                 aria-haspopup="menu"
@@ -278,6 +299,7 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
             onMoveDown={() => moveWidget(w.id, 'down', (x) => skipMoveIds.has(x))}
             canMoveUp={i > 0}
             canMoveDown={i < renderedWidgets.length - 1}
+            onContextMenu={w.options ? (e) => handleWidgetContextMenu(e, w.id) : undefined}
           >
             {body}
           </WidgetShell>
@@ -293,6 +315,25 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
           <div className="sidebar-empty">表示中のウィジェットがありません。＋から追加してください。</div>
         )}
       </div>
+      {ctxMenu && (() => {
+        const def = WIDGET_DEFS.find((d) => d.id === ctxMenu.id);
+        if (!def?.options) return null;
+        const groups = Object.entries(def.options).map(([key, opt]) => ({
+          key,
+          label: opt.label,
+          current: getWidgetOption(ctxMenu.id, key) ?? opt.default,
+          choices: opt.choices,
+          onSelect: (value) => setWidgetOption(ctxMenu.id, key, value),
+        }));
+        return (
+          <WidgetContextMenu
+            x={ctxMenu.x}
+            y={ctxMenu.y}
+            groups={groups}
+            onClose={() => setCtxMenu(null)}
+          />
+        );
+      })()}
     </aside>
   );
 }

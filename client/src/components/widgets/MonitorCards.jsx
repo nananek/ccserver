@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 export function formatUptime(seconds) {
   // 非有限値・負数は欠測として '—' 表示 (GpuCard の numOrNull 方針と一致)。
   // 右サイドバー側の呼び出しもこのガードで安全になる。
@@ -117,10 +119,127 @@ export function hasCpuUsage(data) {
   return !!data?.cpu && numOrNull(usage?.total) != null && Array.isArray(usage?.cores);
 }
 
-export function CpuCard({ data, hideTitle = false, bare = false }) {
+// コア表示の選択肢。localStorage の検証にも使うため単一の定義を共有する。
+// 'auto' はコア数に応じて bars/heatmap に倒す (resolveCoreView)。
+export const AUTO_HEATMAP_CORE_THRESHOLD = 8; // これを超えたらヒートマップ
+export const CPU_CORE_VIEWS = [
+  { value: 'auto', label: '自動 (8コア超でヒートマップ)' },
+  { value: 'bars', label: '通常モード' },
+  { value: 'compact', label: 'コンパクトモード' },
+  { value: 'heatmap', label: 'ヒートマップモード' },
+  { value: 'total', label: 'Total のみ' },
+];
+
+export const DEFAULT_CPU_CORE_VIEW = 'auto';
+
+// 'auto' (および未知値・undefined) をコア数に応じて解決する。
+// 明示モードはそのまま返す。欠測込みの配列長で判定する。
+export function resolveCoreView(coreView, coreCount) {
+  if (coreView !== 'bars' && coreView !== 'compact' && coreView !== 'heatmap' && coreView !== 'total') {
+    return coreCount > AUTO_HEATMAP_CORE_THRESHOLD ? 'heatmap' : 'bars';
+  }
+  return coreView;
+}
+
+// 欠測コア (null/非数値) は値を null にしたまま配列に残す。詰めてしまうと
+// 以降の Core 番号が物理コアとずれるため、描画側で位置を保ったまま除外する。
+function coreEntries(cores) {
+  return cores.map((core, i) => ({ i, v: numOrNull(core) }));
+}
+
+// 1コア=1マスの格子。コア数が増えても折り返しで横に伸びるため、
+// カードの高さはコア数にほぼ依存しない (多コア機での縦伸び対策)。
+function CoreHeatmap({ cores }) {
+  // 値ではなくインデックスだけを持つ。data は数秒ごとに更新されるため、
+  // 値を state に入れると読み出し欄に古い数値が残る。
+  const [activeIdx, setActiveIdx] = useState(null);
+  const entries = coreEntries(cores);
+  const valid = entries.filter((e) => e.v != null);
+  const active = activeIdx == null ? null : entries.find((e) => e.i === activeIdx && e.v != null);
+  const peak = valid.reduce((a, b) => (a == null || b.v > a.v ? b : a), null);
+  let readout;
+  if (active) readout = `Core ${active.i}  ${active.v.toFixed(1)}%`;
+  else if (peak) readout = `${valid.length} cores · max Core ${peak.i} ${peak.v.toFixed(1)}%`;
+  else readout = `${entries.length} cores`;
+  return (
+    <div className="monitor-core-heatmap-wrap">
+      <div className="monitor-core-heatmap">
+        {entries.map(({ i, v }) =>
+          v == null ? (
+            <span key={i} className="monitor-core-cell is-missing" title={`Core ${i}: —`} />
+          ) : (
+            <span
+              key={i}
+              className="monitor-core-cell"
+              role="img"
+              tabIndex={0}
+              title={`Core ${i}: ${v.toFixed(1)}%`}
+              aria-label={`Core ${i}: ${v.toFixed(1)}%`}
+              onPointerEnter={() => setActiveIdx(i)}
+              onPointerLeave={() => setActiveIdx((cur) => (cur === i ? null : cur))}
+              onFocus={() => setActiveIdx(i)}
+              onBlur={() => setActiveIdx((cur) => (cur === i ? null : cur))}
+            >
+              {/* 閾値色 (usageColor) と濃淡の二重符号化。4色だけより差が読める */}
+              <span
+                className="monitor-core-cell-fill"
+                style={{ background: usageColor(v), opacity: 0.18 + (v / 100) * 0.82 }}
+              />
+            </span>
+          )
+        )}
+      </div>
+      {/* ホバーできないタッチ環境でも、フォーカスで同じ値を読めるようにする */}
+      <div className="monitor-core-readout">{readout}</div>
+    </div>
+  );
+}
+
+// バー表現を保ったまま多段化する中間モード。番号と整数値のみに切り詰める。
+function CoreCompactGrid({ cores }) {
+  return (
+    <div className="monitor-core-compact">
+      {coreEntries(cores).map(({ i, v }) => {
+        if (v == null) return null;
+        return (
+          <div key={i} className="monitor-core-compact-item" title={`Core ${i}: ${v.toFixed(1)}%`}>
+            <span className="monitor-core-compact-label">{i}</span>
+            <span className="monitor-bar-track">
+              <span className="monitor-bar-fill" style={{ width: `${v}%`, background: usageColor(v) }} />
+            </span>
+            <span className="monitor-core-compact-value">{Math.round(v)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CoreBars({ cores }) {
+  return (
+    <div className="monitor-core-grid">
+      {coreEntries(cores).map(({ i, v }) => {
+        // 欠測コア (null/非数値) は行ごと描画しない ("NaN%"/0%誤表示の防止)。
+        if (v == null) return null;
+        return (
+          <Bar
+            key={i}
+            value={v}
+            max={100}
+            label={`Core ${i}`}
+            format={`${v.toFixed(1)}%`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+export function CpuCard({ data, hideTitle = false, bare = false, coreView = DEFAULT_CPU_CORE_VIEW }) {
   if (!hasCpuUsage(data)) return null;
   const usage = data.cpu.usage;
   const total = numOrNull(usage.total);
+  const resolvedView = resolveCoreView(coreView, usage.cores.length);
   const body = (
     <>
       {!hideTitle && !bare && <div className="monitor-card-title">CPU</div>}
@@ -132,22 +251,9 @@ export function CpuCard({ data, hideTitle = false, bare = false }) {
         color={usageColor(total)}
         format={`${total.toFixed(1)}%`}
       />
-      <div className="monitor-core-grid">
-        {usage.cores.map((core, i) => {
-          // 欠測コア (null/非数値) は行ごと描画しない ("NaN%"/0%誤表示の防止)。
-          const v = numOrNull(core);
-          if (v == null) return null;
-          return (
-            <Bar
-              key={i}
-              value={v}
-              max={100}
-              label={`Core ${i}`}
-              format={`${v.toFixed(1)}%`}
-            />
-          );
-        })}
-      </div>
+      {resolvedView === 'bars' && <CoreBars cores={usage.cores} />}
+      {resolvedView === 'compact' && <CoreCompactGrid cores={usage.cores} />}
+      {resolvedView === 'heatmap' && <CoreHeatmap cores={usage.cores} />}
     </>
   );
   if (bare) return body;
