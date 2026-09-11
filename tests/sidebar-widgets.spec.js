@@ -1133,3 +1133,83 @@ test('the context menu stays on screen when opened at the viewport edge', async 
   expect(mb.x + mb.width).toBeLessThanOrEqual(vp.width);
   expect(mb.y + mb.height).toBeLessThanOrEqual(vp.height);
 });
+
+test('the context menu lists auto plus four modes with the current one checked', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  await cpuWidgetOf(page).click({ button: 'right' });
+
+  const menu = page.locator('.widget-context-menu');
+  await expect(menu).toBeVisible();
+  await expect(menu).toContainText('表示モード');
+  const items = menu.getByRole('menuitemradio');
+  await expect(items).toHaveCount(5);
+  for (const label of ['自動 (8コア超でヒートマップ)', '通常モード', 'コンパクトモード', 'ヒートマップモード', 'Total のみ']) {
+    await expect(menu.getByRole('menuitemradio', { name: label })).toHaveCount(1);
+  }
+  // 2コア・未設定なので auto が現在値。
+  await expect(
+    menu.getByRole('menuitemradio', { name: '自動 (8コア超でヒートマップ)' })
+  ).toHaveAttribute('aria-checked', 'true');
+});
+
+test('right-clicking a widget without options opens no menu', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  const mem = page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'Memory' }),
+  });
+  await expect(mem).toBeVisible();
+
+  // 固有項目を持たないため onContextMenu を渡さず、ブラウザ標準メニューを通す。
+  await mem.click({ button: 'right' });
+  await expect(page.locator('.widget-context-menu')).toHaveCount(0);
+});
+
+test('a manually picked heatmap wins over auto and marks missing cores', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, null, 30]) });
+  await page.goto('/');
+  const cpu = cpuWidgetOf(page);
+  await expect(cpu).toBeVisible();
+  // 3コアなので auto は通常モード。
+  await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
+
+  await pickCoreView(page, 'ヒートマップモード');
+  // 欠測コアも位置を保ったまま .is-missing のマスで描画される。
+  await expect(cpu.locator('.monitor-core-cell')).toHaveCount(3);
+  await expect(cpu.locator('.monitor-core-cell.is-missing')).toHaveCount(1);
+  await expect(cpu).not.toContainText('NaN');
+});
+
+test('the heatmap keeps the cpu widget short on a 64-core machine', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats(Array.from({ length: 64 }, (_, i) => (i * 7) % 100)) });
+  await page.goto('/');
+  const cpu = cpuWidgetOf(page);
+  await expect(cpu.locator('.monitor-core-cell')).toHaveCount(64);
+
+  // 設定なし (自動) のままヒートマップになり、高さは 300px 未満に収まる。
+  const heatBox = await cpu.boundingBox();
+  expect(heatBox.height).toBeLessThan(300);
+
+  // 「通常モード」明示選択時より大幅に小さいこと (縦伸び解消の回帰防止)。
+  await pickCoreView(page, '通常モード');
+  await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
+  const barsBox = await cpu.boundingBox();
+  expect(heatBox.height).toBeLessThan(barsBox.height * 0.5);
+});
+
+test('the widget context menu closes on Escape and outside click', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  const menu = page.locator('.widget-context-menu');
+
+  await cpuWidgetOf(page).click({ button: 'right' });
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+
+  await cpuWidgetOf(page).click({ button: 'right' });
+  await expect(menu).toBeVisible();
+  await page.locator('.right-sidebar .sidebar-title').click();
+  await expect(menu).toHaveCount(0);
+});
