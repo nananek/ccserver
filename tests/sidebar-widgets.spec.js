@@ -1162,8 +1162,18 @@ test('right-clicking a widget without options opens no menu', async ({ page }) =
   await expect(mem).toBeVisible();
 
   // 固有項目を持たないため onContextMenu を渡さず、ブラウザ標準メニューを通す。
+  // defaultPrevented も見る: カスタムメニューが出ないことだけだと、全ウィジェットへ
+  // onContextMenu を配線してしまっても (描画側の 2 枚目のガードに守られて)
+  // 緑のまま通る。そのとき preventDefault だけが効いて右クリックが
+  // 完全に無反応になるので、標準メニューが残ることを明示的に押さえる。
+  // React はルートコンテナにハンドラを張るので document のバブル段で読める。
+  await page.evaluate(() => {
+    window.__ctxPrevented = null;
+    document.addEventListener('contextmenu', (e) => { window.__ctxPrevented = e.defaultPrevented; });
+  });
   await mem.click({ button: 'right' });
   await expect(page.locator('.widget-context-menu')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__ctxPrevented)).toBe(false);
 });
 
 test('a manually picked heatmap wins over auto and marks missing cores', async ({ page }) => {
@@ -1187,7 +1197,10 @@ test('the heatmap keeps the cpu widget short on a 64-core machine', async ({ pag
   const cpu = cpuWidgetOf(page);
   await expect(cpu.locator('.monitor-core-cell')).toHaveCount(64);
 
-  // 設定なし (自動) のままヒートマップになり、高さは 300px 未満に収まる。
+  // 設定なし (自動) のままヒートマップになり、高さが肥大化しないこと。
+  // 実測値 (1280x720 / サイドバー幅既定): ヒートマップ ~224px / 通常モード ~1204px。
+  // 300 はサイドバー幅経由でビューポートに間接依存するので、本命の
+  // 回帰ガードは下の対バー比 (実測 0.19) の方。
   const heatBox = await cpu.boundingBox();
   expect(heatBox.height).toBeLessThan(300);
 
@@ -1198,7 +1211,7 @@ test('the heatmap keeps the cpu widget short on a 64-core machine', async ({ pag
   expect(heatBox.height).toBeLessThan(barsBox.height * 0.5);
 });
 
-test('the widget context menu closes on Escape and outside click', async ({ page }) => {
+test('the widget context menu closes on Escape and outside click, but not inside', async ({ page }) => {
   mockRoutes(page, { systemStats: cpuStats([20, 30]) });
   await page.goto('/');
   const menu = page.locator('.widget-context-menu');
@@ -1208,8 +1221,13 @@ test('the widget context menu closes on Escape and outside click', async ({ page
   await page.keyboard.press('Escape');
   await expect(menu).toHaveCount(0);
 
+  // メニュー内の mousedown では閉じない (contains 判定)。項目は onClose で
+  // どうせ閉じるため、項目以外 (グループ見出し) を叩かないとこの分岐を押さえられない。
   await cpuWidgetOf(page).click({ button: 'right' });
   await expect(menu).toBeVisible();
+  await menu.locator('.widget-context-group-label').click();
+  await expect(menu).toBeVisible();
+
   await page.locator('.right-sidebar .sidebar-title').click();
   await expect(menu).toHaveCount(0);
 });
