@@ -922,6 +922,24 @@ test('system-stats 500 shows per-widget errors and keeps widgets editable', asyn
   })).toBeHidden();
 });
 
+test('system-stats error keeps IPMI frame hidden when showIpmi is off', async ({ page }) => {
+  // showIpmi=false (IPMI無効/未対応) の状態で /system-stats 自体が失敗しても、
+  // データ取得成功パス (case 'ipmi') と同じく IPMI 枠は出ないこと。
+  await page.addInitScript(() => {
+    localStorage.setItem('monitor-show-ipmi', 'false');
+    localStorage.setItem('ccserver-widget:ipmi:visible', '1');
+  });
+  mockRoutes(page, { systemStatsStatus: 500, systemStats: { error: 'internal' } });
+  await page.goto('/');
+
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'System' }),
+  })).toBeVisible();
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'IPMI' }),
+  })).toHaveCount(0);
+});
+
 test('partial 200 with errors shows only the failed widget as an error', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {

@@ -858,7 +858,14 @@ export default function App() {
   const nothingUsable = !claudeAvailable && !codexAvailable && !opencodeGoAvailable;
   const noCliInstalled = !!availableApps && !claudeInstalled && !codexInstalled && !goReady;
   const usageEmptyNoCli = usagePrefs.showUsage && !!availableApps && nothingUsable && noCliInstalled;
-  const usageHidden = !usagePrefs.showUsage || (!!availableApps && nothingUsable && !usageEmptyNoCli);
+  // `!!availableApps` はここでは付けない: availableApps===null (不明) の場合、
+  // nothingUsable が true になるのは hiddenApps で全滅させた場合のみ
+  // (isAppSelectable/isAppVisible は availableApps が無ければ常にavailable側に
+  // 倒すため)。つまり null でも nothingUsable なら「設定で意図的に隠した」
+  // ケースであり、旧計算式(`!showUsage || nothingUsable`)通りウィジェットごと
+  // 隠すのが正しい。ここに `!!availableApps` を付けると、その場合だけ
+  // Usageウィジェットが表示されたままになってしまう。
+  const usageHidden = !usagePrefs.showUsage || (nothingUsable && !usageEmptyNoCli);
   // First-run seed only: UsageWidget remembers the app the user last picked
   // (localStorage), so this active-tab-derived default is used just when
   // nothing has been saved yet. The active tab's app wins when that source

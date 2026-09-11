@@ -116,7 +116,10 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
     //   枠内にエラーを出す。単一バナーに集約すると枠が0件になり
     //   隠す/移動/追加の操作対象が消えるため。
     if (!data) {
-      if (stats?.error && (MONITOR_WIDGET_IDS.includes(id) || id === 'memory-storage')) {
+      // ipmi は showIpmi=false (無効/未対応) なら成功パス(下の switch)と同じく
+      // 常に非表示。ここで漏らすと、取得成功時とエラー時で挙動が非対称になる。
+      if (stats?.error && id === 'ipmi' && !showIpmi) return null;
+      if (stats?.error && MONITOR_WIDGET_IDS.includes(id)) {
         return <div className="error">Failed to load system stats: {stats.error}</div>;
       }
       return null;
@@ -158,18 +161,6 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
       case 'ipmi': {
         if (!showIpmi || !hasIpmiData(data)) return <></>;
         return <IpmiCards data={data} showIpmi={showIpmi} hideTitle />;
-      }
-      // 旧 'memory-storage' (分離前) を保存済み prefs で持ち続けている場合の
-      // フォールバック。useWidgetPrefs 側で order/visibility を移行するため、
-      // 通常は到達しない。
-      case 'memory-storage': {
-        if (!hasMemory(data) && !hasStorage(data)) return sectionErrorBody('memory') ?? <></>;
-        return (
-          <>
-            <MemoryCard data={data} hideTitle bare />
-            <StorageCard data={data} hideTitle bare />
-          </>
-        );
       }
       default:
         return null;

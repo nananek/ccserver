@@ -176,3 +176,22 @@ test('Usage widget drops the codex tab entirely when codex is hidden', async ({ 
   await expect(widget.locator('.usage-tabs')).toHaveCount(0);
   await expect(widget.locator('.usage-tab', { hasText: 'Codex' })).toHaveCount(0);
 });
+
+test('Usage widget is fully hidden, not just tab-restricted, when hiddenApps hides every usable source and availableApps is unknown', async ({ page }) => {
+  // availableApps 不明 (未フェッチ/旧サーバ相当) の状態で hiddenApps が
+  // claude/codex/opencode 全部を隠した場合の回帰チェック。usageHidden の
+  // 計算に `!!availableApps` ゲートが入っていると、availableApps===null の
+  // ときだけ nothingUsable=true が usageHidden に反映されず、設定で隠した
+  // はずの Usage ウィジェットが表示されたまま残ってしまっていた。
+  await stubDirsHome(page, {
+    ...HOME_RESPONSE,
+    availableApps: undefined,
+    hiddenApps: ['claude', 'codex', 'opencode'],
+  });
+  await page.goto('/');
+  await expect(page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'Usage' }),
+  })).toHaveCount(0);
+  await expect(page.locator('.usage-widget')).toHaveCount(0);
+  await expect(page.locator('.usage-empty')).toHaveCount(0);
+});

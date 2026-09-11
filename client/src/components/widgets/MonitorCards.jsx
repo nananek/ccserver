@@ -182,10 +182,6 @@ export function hasStorage(data) {
   return visibleStorageRows(data).length > 0;
 }
 
-export function hasMemoryOrStorage(data) {
-  return hasMemory(data) || hasStorage(data);
-}
-
 export function MemoryCard({ data, hideTitle = false, bare = false }) {
   const mem = usableMemory(data?.memory);
   if (!mem) return null;
