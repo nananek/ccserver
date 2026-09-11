@@ -115,6 +115,19 @@ test('bwrap-unavailable sandbox refusal keeps its hint and stays infra-classifie
   assert.equal(launchFailureCode(msg), 'internal');
 });
 
+test('non-sandboxed host-spawn PATH backstop stays infra-classified', () => {
+  // The exact message sessionManager.js's createSession() builds when a bare
+  // command resolveApp resolved via SANDBOX_PATH isn't on the server's own
+  // host PATH (`Failed to spawn "${command}": ...` -- the "Failed to spawn"
+  // prefix, not a "Cannot launch: <app> ..." one, since this is a server-side
+  // misconfiguration, not a rejection of the request as given).
+  const msg = 'Failed to spawn "claude": not on the server\'s host PATH (resolved via the sandbox PATH '
+    + 'instead). Add claude\'s install dir to the server\'s PATH before starting the server.';
+  assert.equal(isInfrastructureError(msg), true);
+  assert.equal(orchestratorRestartFailureStatus(msg), 500);
+  assert.equal(launchFailureCode(msg), 'internal');
+});
+
 test('workerLaunchFailureCode: channel-failed is internal, the rest follows the message', () => {
   // addMember's stable error code for handoff broker (unix socket) creation
   // failure -- server-side fault regardless of the message text.

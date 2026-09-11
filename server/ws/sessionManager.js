@@ -842,7 +842,11 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
 
   // Defensive backstop for the above: resolveApp always supplies hostCommand
   // when found, so a bare host-spawn name here means something regressed --
-  // refuse with a clear message instead of an opaque immediate exit 1.
+  // refuse with a clear message instead of an opaque immediate exit 1. Kept
+  // under the "Failed to spawn" prefix (not "Cannot launch: <app> ...", which
+  // INFRA_ERROR_PREFIXES reserves for request-as-given rejections) so this
+  // server-side PATH misconfiguration classifies as an infra fault (500),
+  // not a 400 -- see isInfrastructureError / groups.test.js.
   if (!shell && !sandboxRequested && !command.includes('/') && process.platform !== 'win32') {
     const onHostPath = (process.env.PATH || '').split(':').some((dir) => {
       if (!dir) return false;
@@ -855,8 +859,8 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       return {
         sessionId: id,
         session: null,
-        error: `Cannot launch: ${sessionApp} resolved to bare "${command}" which is not on the server's host PATH `
-          + `(resolved via the sandbox PATH instead). Add its install dir to PATH before starting the server.`,
+        error: `Failed to spawn "${command}": not on the server's host PATH (resolved via the sandbox PATH `
+          + `instead). Add ${sessionApp}'s install dir to the server's PATH before starting the server.`,
       };
     }
   }
