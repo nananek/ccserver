@@ -426,6 +426,13 @@ body {
   padding-top: 2px;
 }
 
+/* 折り返さない: 長いラベルでも高さが変わらず読みやすいし、
+   画面端で測っても rect が本来の幅を返す (WidgetContextMenu の位置計算)。 */
+.widget-context-group-label,
+.widget-context-item {
+  white-space: nowrap;
+}
+
 /* Fixed-width check slot so labels align whether or not ✓ is shown. */
 .widget-context-item .ctx-check {
   display: inline-block;
@@ -3402,6 +3409,10 @@ body {
 }
 
 .monitor-bar-fill {
+  /* display 必須: コンパクトモードでは track/fill が <span> なので、
+     指定がないと fill が inline のままになり width/height が効かない
+     (非置換インライン要素には適用されない) = バーが一切描画されない。 */
+  display: block;
   height: 100%;
   border-radius: 3px;
   transition: width 0.5s ease;

@@ -102,10 +102,14 @@ function loadVisibility(id, defaultVisible) {
   }
 }
 
-// ウィジェット別オプションは可視状態と同じ名前空間 (ccserver-widget:<id>:<key>)。
+// ウィジェット別オプションは可視状態と同じ名前空間だが、`:opt:` を挿んで分ける
+// (ccserver-widget:<id>:opt:<key>)。挿まないと key が 'visible' のとき
+// 可視状態のキー (ccserver-widget:<id>:visible) と衝突して壊す。
 // 値は列挙型のみを想定し、未知の値 (古いビルドの保存値・手書き) は既定へ倒す。
+const OPT_INFIX = ':opt:';
+
 function optionKey(id, key) {
-  return `${VIS_KEY_PREFIX}${id}:${key}`;
+  return `${VIS_KEY_PREFIX}${id}${OPT_INFIX}${key}`;
 }
 
 function loadWidgetOption(id, key, choices, fallback) {

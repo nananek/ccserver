@@ -1026,3 +1026,110 @@ test('slow responses do not pile up overlapping system-stats polls', async ({ pa
   await page.waitForTimeout(5500);
   expect(systemStatsHits).toBeLessThanOrEqual(4);
 });
+
+// --- ウィジェット右クリックメニュー / CPU表示モード -------------------------
+
+function cpuStats(cores) {
+  return {
+    uptime: 3600,
+    loadAvg: [0.5, 0.4, 0.3],
+    cpu: { model: 'Test CPU', usage: { total: 25, cores } },
+    memory: { total: 16000, used: 8000, available: 8000, bufferCache: 1000, swapTotal: 0, swapUsed: 0 },
+    storage: [],
+    temperatures: {},
+    gpu: null,
+    ipmi: null,
+  };
+}
+
+function cpuWidgetOf(page) {
+  return page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'CPU' }),
+  });
+}
+
+async function pickCoreView(page, label) {
+  await cpuWidgetOf(page).click({ button: 'right' });
+  const menu = page.locator('.widget-context-menu');
+  await expect(menu).toBeVisible();
+  await menu.getByRole('menuitemradio', { name: label }).click();
+  await expect(menu).toHaveCount(0);
+}
+
+test('cpu core view mode is switchable from the context menu and persists', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  const cpu = cpuWidgetOf(page);
+  await expect(cpu).toBeVisible();
+  // 2コアなので auto は bars。
+  await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
+
+  await pickCoreView(page, 'ヒートマップモード');
+  await expect(cpu.locator('.monitor-core-heatmap .monitor-core-cell')).toHaveCount(2);
+
+  await page.reload();
+  await expect(cpuWidgetOf(page).locator('.monitor-core-heatmap')).toHaveCount(1);
+
+  // 選択中の項目にチェックが付く。
+  await cpuWidgetOf(page).click({ button: 'right' });
+  await expect(
+    page.locator('.widget-context-menu').getByRole('menuitemradio', { name: 'ヒートマップモード' })
+  ).toHaveAttribute('aria-checked', 'true');
+});
+
+test('auto core view flips to the heatmap past the 8-core threshold', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats(Array.from({ length: 8 }, (_, i) => i * 5)) });
+  await page.goto('/');
+  await expect(cpuWidgetOf(page).locator('.monitor-core-grid')).toHaveCount(1);
+  await expect(cpuWidgetOf(page).locator('.monitor-core-heatmap')).toHaveCount(0);
+
+  await page.context().clearCookies();
+  await page.route('**/api/system-stats*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(cpuStats(Array.from({ length: 9 }, (_, i) => i * 5))),
+    });
+  });
+  await page.reload();
+  await expect(cpuWidgetOf(page).locator('.monitor-core-heatmap .monitor-core-cell')).toHaveCount(9);
+});
+
+test('compact core view actually draws a bar for every core', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 70]) });
+  await page.goto('/');
+  await pickCoreView(page, 'コンパクトモード');
+
+  const items = cpuWidgetOf(page).locator('.monitor-core-compact-item');
+  await expect(items).toHaveCount(2);
+  // 回帰: fill が inline <span> のままだと width/height が効かず幅0になる
+  // (バーが全く描画されない)。実寸で見る。
+  const widths = await items.locator('.monitor-bar-fill').evaluateAll(
+    (els) => els.map((el) => el.getBoundingClientRect().width)
+  );
+  expect(widths).toHaveLength(2);
+  for (const w of widths) expect(w).toBeGreaterThan(0);
+  expect(widths[1]).toBeGreaterThan(widths[0]);
+});
+
+test('the context menu stays on screen when opened at the viewport edge', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  const cpu = cpuWidgetOf(page);
+  await expect(cpu).toBeVisible();
+
+  const box = await cpu.boundingBox();
+  const vp = page.viewportSize();
+  // ウィジェットの右下隅 = 画面右端すれすれで開く。
+  await page.mouse.move(box.x + box.width - 2, box.y + box.height - 2);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.up({ button: 'right' });
+
+  const menu = page.locator('.widget-context-menu');
+  await expect(menu).toBeVisible();
+  const mb = await menu.boundingBox();
+  expect(mb.x).toBeGreaterThanOrEqual(0);
+  expect(mb.y).toBeGreaterThanOrEqual(0);
+  expect(mb.x + mb.width).toBeLessThanOrEqual(vp.width);
+  expect(mb.y + mb.height).toBeLessThanOrEqual(vp.height);
+});
