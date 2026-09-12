@@ -1145,6 +1145,17 @@ body {
   min-width: 0;
 }
 
+/* 長押しでウィジェットメニューを開くので、OS の callout / 文字選択に
+   横取りさせない (iOS は長押しで contextmenu を出さない代わりにこれが出る)。
+   デスクトップでは数値をコピーできる方が便利なのでタッチ端末だけに効かせる。 */
+@media (pointer: coarse) {
+  .widget-card {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
 .widget-card-header {
   display: flex;
   align-items: center;

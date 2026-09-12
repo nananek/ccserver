@@ -20,9 +20,14 @@ export default function WidgetContextMenu({ x, y, groups = [], onClose }) {
       if (e.key === 'Escape') onClose?.();
     };
     document.addEventListener('mousedown', onDown);
+    // iOS は非インタラクティブ要素のタップで mouse 系を出さないことがあるので、
+    // タッチでも確実に閉じられるよう touchstart も見る。メニューを開いた
+    // 長押しの touchstart はこの mount より前に済んでいるので自分では閉じない。
+    document.addEventListener('touchstart', onDown, { passive: true });
     document.addEventListener('keydown', onKey);
     return () => {
       document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('touchstart', onDown);
       document.removeEventListener('keydown', onKey);
     };
   }, [onClose]);

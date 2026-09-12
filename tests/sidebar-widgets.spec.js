@@ -1261,3 +1261,100 @@ test('the context menu stacks its items one per row', async ({ page }) => {
     }
   }
 });
+
+// --- タッチ端末: 長押しでウィジェットメニュー -------------------------------
+// iOS は長押しで contextmenu を発火しないので、右クリック経路とは別に自前の
+// 長押し検出が要る。viewport は既定 (デスクトップ幅) のままにして、≤900px の
+// ドロワー化とは切り離してジェスチャだけを見る。
+test.describe('touch', () => {
+  test.use({ hasTouch: true });
+
+  // 既存のタッチ系 spec (text-selection / mobile-scroll) と同じく CDP で送る。
+  async function touchGestures(page) {
+    const client = await page.context().newCDPSession(page);
+    return {
+      start: (x, y) => client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] }),
+      move: (x, y) => client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y }] }),
+      end: () => client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }),
+    };
+  }
+
+  async function cpuCenter(page) {
+    const box = await cpuWidgetOf(page).boundingBox();
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  }
+
+  test('a long-press opens the widget menu on touch', async ({ page }) => {
+    mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+    await page.goto('/');
+    const cpu = cpuWidgetOf(page);
+    await expect(cpu).toBeVisible();
+    await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
+
+    const touch = await touchGestures(page);
+    const { x, y } = await cpuCenter(page);
+    await touch.start(x, y);
+    await page.waitForTimeout(600);
+
+    const menu = page.locator('.widget-context-menu');
+    await expect(menu).toBeVisible();
+    // 指の位置に出る (右クリックと同じ座標基準)。
+    const mb = await menu.boundingBox();
+    expect(Math.abs(mb.x - x)).toBeLessThan(60);
+    expect(Math.abs(mb.y - y)).toBeLessThan(60);
+
+    // 回帰: touchend で preventDefault しないと、指を離した瞬間に合成される
+    // mousedown/click がメニューの真下に落ちて項目を誤タップする (または閉じる)。
+    // Chromium の touch emulation は CDP 経由だと合成 mouse を出さないので、
+    // 「メニューが残っている」だけでは配線を戻しても緑のまま通ってしまう。
+    // defaultPrevented を直接見て押さえる (spec:1170 の contextmenu と同じ手)。
+    await page.evaluate(() => {
+      window.__touchEndPrevented = null;
+      document.addEventListener('touchend', (e) => { window.__touchEndPrevented = e.defaultPrevented; });
+    });
+    await touch.end();
+    expect(await page.evaluate(() => window.__touchEndPrevented)).toBe(true);
+    await page.waitForTimeout(200);
+    await expect(menu).toBeVisible();
+    await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
+  });
+
+  test('a short tap does not open the widget menu', async ({ page }) => {
+    mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+    await page.goto('/');
+    await expect(cpuWidgetOf(page)).toBeVisible();
+
+    // 長押しが不成立なら既定動作を殺してはいけない: 殺すとヘッダの折りたたみ
+    // ボタン等が tap で反応しなくなる。
+    await page.evaluate(() => {
+      window.__touchEndPrevented = null;
+      document.addEventListener('touchend', (e) => { window.__touchEndPrevented = e.defaultPrevented; });
+    });
+
+    const touch = await touchGestures(page);
+    const { x, y } = await cpuCenter(page);
+    await touch.start(x, y);
+    await page.waitForTimeout(150);
+    await touch.end();
+    expect(await page.evaluate(() => window.__touchEndPrevented)).toBe(false);
+
+    await page.waitForTimeout(600);
+    await expect(page.locator('.widget-context-menu')).toHaveCount(0);
+  });
+
+  test('moving the finger cancels the long-press', async ({ page }) => {
+    mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+    await page.goto('/');
+    await expect(cpuWidgetOf(page)).toBeVisible();
+
+    const touch = await touchGestures(page);
+    const { x, y } = await cpuCenter(page);
+    await touch.start(x, y);
+    // サイドバーをスクロールしようとしただけ = メニューは出ない。
+    await touch.move(x, y - 20);
+    await page.waitForTimeout(600);
+
+    await expect(page.locator('.widget-context-menu')).toHaveCount(0);
+    await touch.end();
+  });
+});

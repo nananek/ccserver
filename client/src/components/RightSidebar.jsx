@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useWidgetPrefs } from '../hooks/useWidgetPrefs.js';
+import { useLongPress } from '../hooks/useLongPress.js';
 import { useSystemStatsContext } from './widgets/SystemStatsProvider.jsx';
 import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards, SystemCard, hasCpuUsage, hasGpuMetrics, hasSystemMetrics, hasMemory, hasStorage, hasTemperatures, hasIpmiData, CPU_CORE_VIEWS, DEFAULT_CPU_CORE_VIEW } from './widgets/MonitorCards.jsx';
 import WidgetContextMenu from './WidgetContextMenu.jsx';
@@ -32,10 +33,13 @@ const INTERVAL_OPTIONS = [
   { value: 10000, label: '10秒' },
 ];
 
-function WidgetShell({ title, onHide, onMoveUp, onMoveDown, canMoveUp = true, canMoveDown = true, onContextMenu, children }) {
+function WidgetShell({ title, onHide, onMoveUp, onMoveDown, canMoveUp = true, canMoveDown = true, onContextMenu, onLongPress, children }) {
   const [collapsed, setCollapsed] = useState(false);
+  // タッチ端末では contextmenu が来ない (iOS) / 来ても機種依存なので、
+  // 長押しも同じメニューの入口にする。onContextMenu と同じ要素に張る。
+  const longPress = useLongPress(onLongPress);
   return (
-    <section className="widget-card" onContextMenu={onContextMenu}>
+    <section className="widget-card" onContextMenu={onContextMenu} {...longPress}>
       <header className="widget-card-header">
         <button
           type="button"
@@ -67,14 +71,19 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
   const intervalWrapRef = useRef(null);
   const stats = useSystemStatsContext();
 
-  // ウィジェットの右クリックメニューを開く。固有項目を持たないウィジェットには
-  // onContextMenu を渡さないため、ここに来るのは options 付きのみ。
+  // ウィジェットのメニューを開く。固有項目を持たないウィジェットには入口を
+  // 渡さないため、ここに来るのは options 付きのみ。右クリックと長押しで座標の
+  // 出どころが違うだけなので、開く処理はここに寄せる。
+  const openWidgetMenu = (id, x, y) => {
+    setAddOpen(false);
+    setIntervalOpen(false);
+    setCtxMenu({ id, x, y });
+  };
+
   // SessionList.jsx:36-40 と同じく preventDefault してから座標を保存する。
   const handleWidgetContextMenu = (e, id) => {
     e.preventDefault();
-    setAddOpen(false);
-    setIntervalOpen(false);
-    setCtxMenu({ id, x: e.clientX, y: e.clientY });
+    openWidgetMenu(id, e.clientX, e.clientY);
   };
 
   useEffect(() => {
@@ -300,6 +309,7 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
             canMoveUp={i > 0}
             canMoveDown={i < renderedWidgets.length - 1}
             onContextMenu={w.options ? (e) => handleWidgetContextMenu(e, w.id) : undefined}
+            onLongPress={w.options ? (p) => openWidgetMenu(w.id, p.x, p.y) : undefined}
           >
             {body}
           </WidgetShell>
