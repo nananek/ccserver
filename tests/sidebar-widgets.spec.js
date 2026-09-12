@@ -1231,3 +1231,33 @@ test('the widget context menu closes on Escape and outside click, but not inside
   await page.locator('.right-sidebar .sidebar-title').click();
   await expect(menu).toHaveCount(0);
 });
+
+test('the context menu stacks its items one per row', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  await cpuWidgetOf(page).click({ button: 'right' });
+
+  const menu = page.locator('.widget-context-menu');
+  await expect(menu).toBeVisible();
+
+  // 回帰: グループが素の block だとボタンが inline-block のまま横一列に並ぶ。
+  // クラス名ではなく実寸で「1項目1行」を押さえる。
+  const boxes = await menu.getByRole('menuitemradio').evaluateAll(
+    (els) => els.map((el) => {
+      const { x, y, width, height } = el.getBoundingClientRect();
+      return { x, y, width, height };
+    })
+  );
+  expect(boxes).toHaveLength(5);
+
+  const menuBox = await menu.boundingBox();
+  for (let i = 0; i < boxes.length; i++) {
+    // 左端が揃い、メニュー幅いっぱい (= 横並びでない)。
+    expect(Math.abs(boxes[i].x - boxes[0].x)).toBeLessThan(1);
+    expect(boxes[i].width).toBeGreaterThan(menuBox.width * 0.9);
+    // 前の項目の下端以降に置かれる (行が重ならない)。
+    if (i > 0) {
+      expect(boxes[i].y).toBeGreaterThanOrEqual(boxes[i - 1].y + boxes[i - 1].height - 0.5);
+    }
+  }
+});

@@ -420,6 +420,15 @@ body {
   color: var(--text-muted);
 }
 
+/* 選択肢は1項目1行。button の既定は inline-block なので、ここで縦積みに
+   しないと (nowrap と相まって) 横一列に並んでしまう。stretch でメニュー幅
+   いっぱいになり、ホバー範囲も行全体になる。 */
+.widget-context-group {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
 .widget-context-group + .widget-context-group {
   border-top: 1px solid var(--border);
   margin-top: 4px;
