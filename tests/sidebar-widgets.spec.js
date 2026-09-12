@@ -1026,3 +1026,347 @@ test('slow responses do not pile up overlapping system-stats polls', async ({ pa
   await page.waitForTimeout(5500);
   expect(systemStatsHits).toBeLessThanOrEqual(4);
 });
+
+// --- ウィジェット右クリックメニュー / CPU表示モード -------------------------
+
+function cpuStats(cores) {
+  return {
+    uptime: 3600,
+    loadAvg: [0.5, 0.4, 0.3],
+    cpu: { model: 'Test CPU', usage: { total: 25, cores } },
+    memory: { total: 16000, used: 8000, available: 8000, bufferCache: 1000, swapTotal: 0, swapUsed: 0 },
+    storage: [],
+    temperatures: {},
+    gpu: null,
+    ipmi: null,
+  };
+}
+
+function cpuWidgetOf(page) {
+  return page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'CPU' }),
+  });
+}
+
+async function pickCoreView(page, label) {
+  await cpuWidgetOf(page).click({ button: 'right' });
+  const menu = page.locator('.widget-context-menu');
+  await expect(menu).toBeVisible();
+  await menu.getByRole('menuitemradio', { name: label }).click();
+  await expect(menu).toHaveCount(0);
+}
+
+test('cpu core view mode is switchable from the context menu and persists', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  const cpu = cpuWidgetOf(page);
+  await expect(cpu).toBeVisible();
+  // 2コアなので auto は bars。
+  await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
+
+  await pickCoreView(page, 'ヒートマップモード');
+  await expect(cpu.locator('.monitor-core-heatmap .monitor-core-cell')).toHaveCount(2);
+
+  await page.reload();
+  await expect(cpuWidgetOf(page).locator('.monitor-core-heatmap')).toHaveCount(1);
+
+  // 選択中の項目にチェックが付く。
+  await cpuWidgetOf(page).click({ button: 'right' });
+  await expect(
+    page.locator('.widget-context-menu').getByRole('menuitemradio', { name: 'ヒートマップモード' })
+  ).toHaveAttribute('aria-checked', 'true');
+});
+
+test('auto core view flips to the heatmap past the 8-core threshold', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats(Array.from({ length: 8 }, (_, i) => i * 5)) });
+  await page.goto('/');
+  await expect(cpuWidgetOf(page).locator('.monitor-core-grid')).toHaveCount(1);
+  await expect(cpuWidgetOf(page).locator('.monitor-core-heatmap')).toHaveCount(0);
+
+  await page.context().clearCookies();
+  await page.route('**/api/system-stats*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(cpuStats(Array.from({ length: 9 }, (_, i) => i * 5))),
+    });
+  });
+  await page.reload();
+  await expect(cpuWidgetOf(page).locator('.monitor-core-heatmap .monitor-core-cell')).toHaveCount(9);
+});
+
+test('compact core view actually draws a bar for every core', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 70]) });
+  await page.goto('/');
+  await pickCoreView(page, 'コンパクトモード');
+
+  const items = cpuWidgetOf(page).locator('.monitor-core-compact-item');
+  await expect(items).toHaveCount(2);
+  // 回帰: fill が inline <span> のままだと width/height が効かず幅0になる
+  // (バーが全く描画されない)。実寸で見る。
+  const widths = await items.locator('.monitor-bar-fill').evaluateAll(
+    (els) => els.map((el) => el.getBoundingClientRect().width)
+  );
+  expect(widths).toHaveLength(2);
+  for (const w of widths) expect(w).toBeGreaterThan(0);
+  expect(widths[1]).toBeGreaterThan(widths[0]);
+});
+
+test('the context menu stays on screen when opened at the viewport edge', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  const cpu = cpuWidgetOf(page);
+  await expect(cpu).toBeVisible();
+
+  const box = await cpu.boundingBox();
+  const vp = page.viewportSize();
+  // ウィジェットの右下隅 = 画面右端すれすれで開く。
+  await page.mouse.move(box.x + box.width - 2, box.y + box.height - 2);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.up({ button: 'right' });
+
+  const menu = page.locator('.widget-context-menu');
+  await expect(menu).toBeVisible();
+  const mb = await menu.boundingBox();
+  expect(mb.x).toBeGreaterThanOrEqual(0);
+  expect(mb.y).toBeGreaterThanOrEqual(0);
+  expect(mb.x + mb.width).toBeLessThanOrEqual(vp.width);
+  expect(mb.y + mb.height).toBeLessThanOrEqual(vp.height);
+});
+
+test('the context menu lists auto plus four modes with the current one checked', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  await cpuWidgetOf(page).click({ button: 'right' });
+
+  const menu = page.locator('.widget-context-menu');
+  await expect(menu).toBeVisible();
+  await expect(menu).toContainText('表示モード');
+  const items = menu.getByRole('menuitemradio');
+  await expect(items).toHaveCount(5);
+  for (const label of ['自動 (8コア超でヒートマップ)', '通常モード', 'コンパクトモード', 'ヒートマップモード', 'Total のみ']) {
+    await expect(menu.getByRole('menuitemradio', { name: label })).toHaveCount(1);
+  }
+  // 2コア・未設定なので auto が現在値。
+  await expect(
+    menu.getByRole('menuitemradio', { name: '自動 (8コア超でヒートマップ)' })
+  ).toHaveAttribute('aria-checked', 'true');
+});
+
+test('right-clicking a widget without options opens no menu', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  const mem = page.locator('.widget-card', {
+    has: page.locator('.widget-card-title', { hasText: 'Memory' }),
+  });
+  await expect(mem).toBeVisible();
+
+  // 固有項目を持たないため onContextMenu を渡さず、ブラウザ標準メニューを通す。
+  // defaultPrevented も見る: カスタムメニューが出ないことだけだと、全ウィジェットへ
+  // onContextMenu を配線してしまっても (描画側の 2 枚目のガードに守られて)
+  // 緑のまま通る。そのとき preventDefault だけが効いて右クリックが
+  // 完全に無反応になるので、標準メニューが残ることを明示的に押さえる。
+  // React はルートコンテナにハンドラを張るので document のバブル段で読める。
+  await page.evaluate(() => {
+    window.__ctxPrevented = null;
+    document.addEventListener('contextmenu', (e) => { window.__ctxPrevented = e.defaultPrevented; });
+  });
+  await mem.click({ button: 'right' });
+  await expect(page.locator('.widget-context-menu')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__ctxPrevented)).toBe(false);
+});
+
+test('a manually picked heatmap wins over auto and marks missing cores', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, null, 30]) });
+  await page.goto('/');
+  const cpu = cpuWidgetOf(page);
+  await expect(cpu).toBeVisible();
+  // 3コアなので auto は通常モード。
+  await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
+
+  await pickCoreView(page, 'ヒートマップモード');
+  // 欠測コアも位置を保ったまま .is-missing のマスで描画される。
+  await expect(cpu.locator('.monitor-core-cell')).toHaveCount(3);
+  await expect(cpu.locator('.monitor-core-cell.is-missing')).toHaveCount(1);
+  await expect(cpu).not.toContainText('NaN');
+});
+
+test('the heatmap keeps the cpu widget short on a 64-core machine', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats(Array.from({ length: 64 }, (_, i) => (i * 7) % 100)) });
+  await page.goto('/');
+  const cpu = cpuWidgetOf(page);
+  await expect(cpu.locator('.monitor-core-cell')).toHaveCount(64);
+
+  // 設定なし (自動) のままヒートマップになり、高さが肥大化しないこと。
+  // 実測値 (1280x720 / サイドバー幅既定): ヒートマップ ~224px / 通常モード ~1204px。
+  // 300 はサイドバー幅経由でビューポートに間接依存するので、本命の
+  // 回帰ガードは下の対バー比 (実測 0.19) の方。
+  const heatBox = await cpu.boundingBox();
+  expect(heatBox.height).toBeLessThan(300);
+
+  // 「通常モード」明示選択時より大幅に小さいこと (縦伸び解消の回帰防止)。
+  await pickCoreView(page, '通常モード');
+  await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
+  const barsBox = await cpu.boundingBox();
+  expect(heatBox.height).toBeLessThan(barsBox.height * 0.5);
+});
+
+test('the widget context menu closes on Escape and outside click, but not inside', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  const menu = page.locator('.widget-context-menu');
+
+  await cpuWidgetOf(page).click({ button: 'right' });
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+
+  // メニュー内の mousedown では閉じない (contains 判定)。項目は onClose で
+  // どうせ閉じるため、項目以外 (グループ見出し) を叩かないとこの分岐を押さえられない。
+  await cpuWidgetOf(page).click({ button: 'right' });
+  await expect(menu).toBeVisible();
+  await menu.locator('.widget-context-group-label').click();
+  await expect(menu).toBeVisible();
+
+  await page.locator('.right-sidebar .sidebar-title').click();
+  await expect(menu).toHaveCount(0);
+});
+
+test('the context menu stacks its items one per row', async ({ page }) => {
+  mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+  await page.goto('/');
+  await cpuWidgetOf(page).click({ button: 'right' });
+
+  const menu = page.locator('.widget-context-menu');
+  await expect(menu).toBeVisible();
+
+  // 回帰: グループが素の block だとボタンが inline-block のまま横一列に並ぶ。
+  // クラス名ではなく実寸で「1項目1行」を押さえる。
+  const boxes = await menu.getByRole('menuitemradio').evaluateAll(
+    (els) => els.map((el) => {
+      const { x, y, width, height } = el.getBoundingClientRect();
+      return { x, y, width, height };
+    })
+  );
+  expect(boxes).toHaveLength(5);
+
+  const menuBox = await menu.boundingBox();
+  for (let i = 0; i < boxes.length; i++) {
+    // 左端が揃い、メニュー幅いっぱい (= 横並びでない)。
+    expect(Math.abs(boxes[i].x - boxes[0].x)).toBeLessThan(1);
+    expect(boxes[i].width).toBeGreaterThan(menuBox.width * 0.9);
+    // 前の項目の下端以降に置かれる (行が重ならない)。
+    if (i > 0) {
+      expect(boxes[i].y).toBeGreaterThanOrEqual(boxes[i - 1].y + boxes[i - 1].height - 0.5);
+    }
+  }
+});
+
+// --- タッチ端末: 長押しでウィジェットメニュー -------------------------------
+// iOS は長押しで contextmenu を発火しないので、右クリック経路とは別に自前の
+// 長押し検出が要る。viewport は既定 (デスクトップ幅) のままにして、≤900px の
+// ドロワー化とは切り離してジェスチャだけを見る。
+test.describe('touch', () => {
+  test.use({ hasTouch: true });
+
+  // 既存のタッチ系 spec (text-selection / mobile-scroll) と同じく CDP で送る。
+  async function touchGestures(page) {
+    const client = await page.context().newCDPSession(page);
+    return {
+      start: (x, y) => client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] }),
+      move: (x, y) => client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y }] }),
+      end: () => client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }),
+    };
+  }
+
+  // 整数に丸める: page.mouse は整数座標を送るが CDP touch は渡した浮動小数を
+  // そのまま使うので、丸めないと右クリックとの比較が sub-pixel でズレる。
+  async function cpuCenter(page) {
+    const box = await cpuWidgetOf(page).boundingBox();
+    return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+  }
+
+  test('a long-press opens the widget menu on touch', async ({ page }) => {
+    mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+    await page.goto('/');
+    const cpu = cpuWidgetOf(page);
+    await expect(cpu).toBeVisible();
+    await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
+
+    const menu = page.locator('.widget-context-menu');
+    const { x, y } = await cpuCenter(page);
+
+    // 同じ座標の右クリックと同じ位置に出ること (= 長押しが右クリック相当)。
+    // メニューは画面端で実寸クランプされるため (WidgetContextMenu.jsx:33-42)、
+    // タッチ座標との差を直接見るとメニュー幅 = フォント幅に依存してブレる。
+    // 右クリック経路の結果と突き合わせれば環境差なく効く。
+    await page.mouse.move(x, y);
+    await page.mouse.down({ button: 'right' });
+    await page.mouse.up({ button: 'right' });
+    await expect(menu).toBeVisible();
+    const byRightClick = await menu.boundingBox();
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+
+    const touch = await touchGestures(page);
+    await touch.start(x, y);
+    await page.waitForTimeout(600);
+
+    await expect(menu).toBeVisible();
+    expect(await menu.boundingBox()).toEqual(byRightClick);
+
+    // 回帰: touchend で preventDefault しないと、指を離した瞬間に合成される
+    // mousedown/click がメニューの真下に落ちて項目を誤タップする (または閉じる)。
+    // Chromium の touch emulation は CDP 経由だと合成 mouse を出さないので、
+    // 「メニューが残っている」だけでは配線を戻しても緑のまま通ってしまう。
+    // defaultPrevented を直接見て押さえる (spec:1170 の contextmenu と同じ手)。
+    await page.evaluate(() => {
+      window.__touchEndPrevented = null;
+      document.addEventListener('touchend', (e) => { window.__touchEndPrevented = e.defaultPrevented; });
+    });
+    await touch.end();
+    expect(await page.evaluate(() => window.__touchEndPrevented)).toBe(true);
+    await page.waitForTimeout(200);
+    await expect(menu).toBeVisible();
+    await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
+  });
+
+  test('a short tap does not open the widget menu', async ({ page }) => {
+    mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+    await page.goto('/');
+    await expect(cpuWidgetOf(page)).toBeVisible();
+
+    // 長押しが不成立なら既定動作を殺してはいけない: 殺すとヘッダの折りたたみ
+    // ボタン等が tap で反応しなくなる。
+    await page.evaluate(() => {
+      window.__touchEndPrevented = null;
+      document.addEventListener('touchend', (e) => { window.__touchEndPrevented = e.defaultPrevented; });
+    });
+
+    const touch = await touchGestures(page);
+    const { x, y } = await cpuCenter(page);
+    await touch.start(x, y);
+    await page.waitForTimeout(150);
+    await touch.end();
+    expect(await page.evaluate(() => window.__touchEndPrevented)).toBe(false);
+
+    await page.waitForTimeout(600);
+    await expect(page.locator('.widget-context-menu')).toHaveCount(0);
+  });
+
+  test('moving the finger cancels the long-press', async ({ page }) => {
+    mockRoutes(page, { systemStats: cpuStats([20, 30]) });
+    await page.goto('/');
+    await expect(cpuWidgetOf(page)).toBeVisible();
+
+    const touch = await touchGestures(page);
+    const { x, y } = await cpuCenter(page);
+    await touch.start(x, y);
+    // サイドバーをスクロールしようとしただけ = メニューは出ない。
+    await touch.move(x, y - 20);
+    await page.waitForTimeout(600);
+
+    await expect(page.locator('.widget-context-menu')).toHaveCount(0);
+    await touch.end();
+  });
+});
