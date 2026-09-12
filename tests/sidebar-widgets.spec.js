@@ -1279,9 +1279,11 @@ test.describe('touch', () => {
     };
   }
 
+  // 整数に丸める: page.mouse は整数座標を送るが CDP touch は渡した浮動小数を
+  // そのまま使うので、丸めないと右クリックとの比較が sub-pixel でズレる。
   async function cpuCenter(page) {
     const box = await cpuWidgetOf(page).boundingBox();
-    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
   }
 
   test('a long-press opens the widget menu on touch', async ({ page }) => {
@@ -1291,17 +1293,27 @@ test.describe('touch', () => {
     await expect(cpu).toBeVisible();
     await expect(cpu.locator('.monitor-core-grid')).toHaveCount(1);
 
-    const touch = await touchGestures(page);
+    const menu = page.locator('.widget-context-menu');
     const { x, y } = await cpuCenter(page);
+
+    // 同じ座標の右クリックと同じ位置に出ること (= 長押しが右クリック相当)。
+    // メニューは画面端で実寸クランプされるため (WidgetContextMenu.jsx:33-42)、
+    // タッチ座標との差を直接見るとメニュー幅 = フォント幅に依存してブレる。
+    // 右クリック経路の結果と突き合わせれば環境差なく効く。
+    await page.mouse.move(x, y);
+    await page.mouse.down({ button: 'right' });
+    await page.mouse.up({ button: 'right' });
+    await expect(menu).toBeVisible();
+    const byRightClick = await menu.boundingBox();
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+
+    const touch = await touchGestures(page);
     await touch.start(x, y);
     await page.waitForTimeout(600);
 
-    const menu = page.locator('.widget-context-menu');
     await expect(menu).toBeVisible();
-    // 指の位置に出る (右クリックと同じ座標基準)。
-    const mb = await menu.boundingBox();
-    expect(Math.abs(mb.x - x)).toBeLessThan(60);
-    expect(Math.abs(mb.y - y)).toBeLessThan(60);
+    expect(await menu.boundingBox()).toEqual(byRightClick);
 
     // 回帰: touchend で preventDefault しないと、指を離した瞬間に合成される
     // mousedown/click がメニューの真下に落ちて項目を誤タップする (または閉じる)。
