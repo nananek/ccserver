@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useWidgetPrefs } from '../hooks/useWidgetPrefs.js';
 import { useLongPress } from '../hooks/useLongPress.js';
+import { openMenuAtEvent } from '../hooks/useDismissableMenu.js';
 import { useSystemStatsContext } from './widgets/SystemStatsProvider.jsx';
 import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards, SystemCard, hasCpuUsage, hasGpuMetrics, hasSystemMetrics, hasMemory, hasStorage, hasTemperatures, hasIpmiData, CPU_CORE_VIEWS, DEFAULT_CPU_CORE_VIEW } from './widgets/MonitorCards.jsx';
 import WidgetContextMenu from './WidgetContextMenu.jsx';
@@ -37,9 +38,18 @@ function WidgetShell({ title, onHide, onMoveUp, onMoveDown, canMoveUp = true, ca
   const [collapsed, setCollapsed] = useState(false);
   // タッチ端末では contextmenu が来ない (iOS) / 来ても機種依存なので、
   // 長押しも同じメニューの入口にする。onContextMenu と同じ要素に張る。
+  // フック自体は無条件に呼ぶ (hooks 順序) が、 spread は onLongPress がある
+  // ときだけにする (項目を持たないウィジェットで無駄なタッチ処理をしない)。
   const longPress = useLongPress(onLongPress);
+  // 長押し対応ウィジェットにだけ付く目印。タッチ端末の user-select 抑止は
+  // このクラスに絞る (メニューの出ないウィジェットのコピーを殺さない)。
+  const hasMenu = !!(onContextMenu || onLongPress);
   return (
-    <section className="widget-card" onContextMenu={onContextMenu} {...longPress}>
+    <section
+      className={hasMenu ? 'widget-card widget-card--has-menu' : 'widget-card'}
+      onContextMenu={onContextMenu}
+      {...(onLongPress ? longPress : {})}
+    >
       <header className="widget-card-header">
         <button
           type="button"
@@ -80,11 +90,18 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
     setCtxMenu({ id, x, y });
   };
 
-  // SessionList.jsx:36-40 と同じく preventDefault してから座標を保存する。
+  // SessionList.jsx:36-40 と同じく preventDefault してから座標を保存する
+  // (共通オープナー openMenuAtEvent に一本化)。
   const handleWidgetContextMenu = (e, id) => {
-    e.preventDefault();
-    openWidgetMenu(id, e.clientX, e.clientY);
+    openMenuAtEvent(e, (x, y) => openWidgetMenu(id, x, y));
   };
+
+  // パネルを閉じたらメニューの state も捨てる。キーボード Enter/Space での
+  // click は mousedown/touchstart を伴わないため WidgetContextMenu の外側判定が
+  // 発火せず、捨てないと次に開いたとき古い座標のメニューが一瞬再表示される。
+  useEffect(() => {
+    if (!open) setCtxMenu(null);
+  }, [open]);
 
   useEffect(() => {
     if (!addOpen && !intervalOpen) return;
@@ -331,7 +348,10 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
         const groups = Object.entries(def.options).map(([key, opt]) => ({
           key,
           label: opt.label,
-          current: getWidgetOption(ctxMenu.id, key) ?? opt.default,
+          // 既定値への解決は読み取り時 (loadWidgetOptions) に済んでいる。
+          // CpuCard 側も coreView = DEFAULT_CPU_CORE_VIEW の既定引数を持つ。
+          // ここでは解決済みの値をそのまま読む (二重フォールバックにしない)。
+          current: getWidgetOption(ctxMenu.id, key),
           choices: opt.choices,
           onSelect: (value) => setWidgetOption(ctxMenu.id, key, value),
         }));

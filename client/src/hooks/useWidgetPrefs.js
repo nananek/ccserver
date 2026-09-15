@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { NARROW_DRAWER_QUERY } from './viewportQuery.js';
+import { loadEnumPref } from './enumPref.js';
 
 const SIDEBAR_OPEN_KEY = 'ccserver-sidebar-open';
 const SIDEBAR_OVERLAY_KEY = 'ccserver-sidebar-overlay';
@@ -113,12 +114,8 @@ function optionKey(id, key) {
 }
 
 function loadWidgetOption(id, key, choices, fallback) {
-  try {
-    const v = localStorage.getItem(optionKey(id, key));
-    return choices.some((c) => c.value === v) ? v : fallback;
-  } catch {
-    return fallback;
-  }
+  // 許可値検証つき読み取りは enumPref に一本化 (useSessionSidebarPrefs と共有)。
+  return loadEnumPref(optionKey(id, key), choices, fallback);
 }
 
 // widgetDefs の options 定義から `<id>:<key>` をキーにした一枚のマップを作る。

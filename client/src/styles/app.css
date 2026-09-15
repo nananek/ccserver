@@ -1147,9 +1147,11 @@ body {
 
 /* 長押しでウィジェットメニューを開くので、OS の callout / 文字選択に
    横取りさせない (iOS は長押しで contextmenu を出さない代わりにこれが出る)。
+   メニューを持たないウィジェットのコピー利便性を殺さないよう、
+   長押し対応 (.widget-card--has-menu) にだけ効かせる。
    デスクトップでは数値をコピーできる方が便利なのでタッチ端末だけに効かせる。 */
 @media (pointer: coarse) {
-  .widget-card {
+  .widget-card--has-menu {
     -webkit-touch-callout: none;
     -webkit-user-select: none;
     user-select: none;

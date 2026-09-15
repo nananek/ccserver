@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { NARROW_DRAWER_QUERY } from './viewportQuery.js';
+import { loadEnumPref } from './enumPref.js';
 
 // 左セッション表示の設定 (右ウィジェットとは独立したフラグ群)。
 // - mode: 'sidebar' (既定・常時表示の左サイドバー) | 'popup' (従来のポップアップ)
@@ -10,13 +11,8 @@ const OPEN_KEY = 'ccserver-session-sidebar-open';
 const OVERLAY_KEY = 'ccserver-session-sidebar-overlay';
 
 function loadMode() {
-  try {
-    const v = localStorage.getItem(MODE_KEY);
-    if (v === 'popup' || v === 'sidebar') return v;
-  } catch {
-    // ignore (private mode etc.)
-  }
-  return 'sidebar';
+  // 許可値検証つき読み取りは enumPref に一本化 (useWidgetPrefs と共有)。
+  return loadEnumPref(MODE_KEY, ['popup', 'sidebar'], 'sidebar');
 }
 
 function loadOpen() {

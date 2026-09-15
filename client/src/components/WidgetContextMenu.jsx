@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState, useCallback, useEffect } from 'react';
+import { useDismissableMenu } from '../hooks/useDismissableMenu.js';
 
 // ウィジェットの右クリックメニュー (汎用)。開閉は SessionContextMenu と同じ方式:
 // 外側 mousedown で閉じる + Escape で閉じる。位置はクリック座標 (position: fixed)。
@@ -12,30 +13,17 @@ export default function WidgetContextMenu({ x, y, groups = [], onClose }) {
   // paint 前に走るのでちらつかない。項目数や文言が増えても勝手に追従する。
   const [pos, setPos] = useState({ left: x, top: y });
 
-  useEffect(() => {
-    const onDown = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) onClose?.();
-    };
-    const onKey = (e) => {
-      if (e.key === 'Escape') onClose?.();
-    };
-    document.addEventListener('mousedown', onDown);
-    // iOS は非インタラクティブ要素のタップで mouse 系を出さないことがあるので、
-    // タッチでも確実に閉じられるよう touchstart も見る。メニューを開いた
-    // 長押しの touchstart はこの mount より前に済んでいるので自分では閉じない。
-    document.addEventListener('touchstart', onDown, { passive: true });
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('touchstart', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [onClose]);
+  // 開閉は SessionContextMenu と共通 (useDismissableMenu):
+  // 外側 mousedown/touchstart で閉じる + Escape で閉じる。
+  // メニューを開いた長押しの touchstart はこの mount より前に済んでいるので自分では閉じない。
+  useDismissableMenu(menuRef, onClose);
 
   // 項目数も文言もウィジェット次第なので、幅・高さは決め打ちにせず測る。
   // .widget-context-item は white-space: nowrap なので、右端近くに出しても
   // 折り返しで縮まず rect は本来の幅を返す。
-  useLayoutEffect(() => {
+  // メニューを開いたままリサイズ (devtools開閉・タブレット回転) しても
+  // はみ出さないよう、resize でも同じクランプを再実行する。
+  const clampPos = useCallback(() => {
     const el = menuRef.current;
     if (!el) return;
     const { width, height } = el.getBoundingClientRect();
@@ -45,6 +33,17 @@ export default function WidgetContextMenu({ x, y, groups = [], onClose }) {
     // groups は毎レンダー新しい配列なので deps に入れない (無限ループになる)。
     // 内容が変わるのは開き直したときだけで、そのときは x/y も変わる。
   }, [x, y]);
+
+  useLayoutEffect(() => {
+    clampPos();
+  }, [clampPos]);
+
+  useEffect(() => {
+    window.addEventListener('resize', clampPos);
+    return () => {
+      window.removeEventListener('resize', clampPos);
+    };
+  }, [clampPos]);
 
   return (
     <div

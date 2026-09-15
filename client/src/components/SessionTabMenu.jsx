@@ -1,7 +1,8 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useRef, useCallback } from 'react';
 import SessionList from './SessionList.jsx';
 import { moveMenuFocus } from './sessionMenuNav.js';
 import { sessionMenuIcon } from './TabIcon.jsx';
+import { useDismissableMenu } from '../hooks/useDismissableMenu.js';
 
 // セッションタブ用ハンバーガーメニュー: 開いている terminal タブと group
 // (コンボ) タブを上段、サーバー上で稼働中だが未オープンのセッションを下段に
@@ -35,21 +36,9 @@ export default function SessionTabMenu({
   const wrapRef = useRef(null);
   const menuRef = useRef(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) onClose?.();
-    };
-    const onKey = (e) => {
-      if (e.key === 'Escape') onClose?.();
-    };
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open, onClose]);
+  // 開閉は WidgetContextMenu / SessionContextMenu と共通 (useDismissableMenu)。
+  // ラッパー ref による外側判定 + Escape。常時マウントなので open の間だけ有効化する。
+  useDismissableMenu(wrapRef, onClose, { enabled: open });
 
   // メニュー内のボタン間を矢印キーで移動する (menu パターンのキーボード操作)。
   // 実体は SessionSidebar と共用の moveMenuFocus。

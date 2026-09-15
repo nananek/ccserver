@@ -31,7 +31,11 @@ export function useLongPress(onLongPress, { ms = LONG_PRESS_MS, movePx = LONG_PR
     cancel();
     if (!onLongPress) return;
     // 2本指以降はピンチ/スクロールなので長押しとして扱わない。
-    if (e.touches.length !== 1) return;
+    // 開始したタイマーは畳む (下の onTouchEnd で1本指に戻ったら再開する)。
+    if (e.touches.length !== 1) {
+      startRef.current = null;
+      return;
+    }
     const t = e.touches[0];
     startRef.current = { x: t.clientX, y: t.clientY };
     firedRef.current = false;
@@ -53,14 +57,32 @@ export function useLongPress(onLongPress, { ms = LONG_PRESS_MS, movePx = LONG_PR
 
   const onTouchEnd = useCallback((e) => {
     cancel();
-    if (!firedRef.current) return;
-    firedRef.current = false;
-    // 長押しが成立したときだけ既定動作を止める。これがないと指を離した瞬間に
-    // ブラウザが同じ座標へ mousedown/click を合成し、そこにはもうメニューが
-    // 出ているので即座に項目をタップしたことになる (または外側判定で閉じる)。
-    // React は touchend を非 passive で張るので preventDefault が効く。
-    e.preventDefault();
-  }, [cancel]);
+    if (firedRef.current) {
+      firedRef.current = false;
+      // 長押しが成立したときだけ既定動作を止める。これがないと指を離した瞬間に
+      // ブラウザが同じ座標へ mousedown/click を合成し、そこにはもうメニューが
+      // 出ているので即座に項目をタップしたことになる (または外側判定で閉じる)。
+      // React は touchend を非 passive で張るので preventDefault が効く。
+      e.preventDefault();
+      startRef.current = null;
+      return;
+    }
+    // 2本指が絡んで中断した後、1本指が残っていればそこから検出を再開する。
+    // (2本目に軽く触れただけでタイマーが永久に止まるのを防ぐ。
+    // 残った指の現在位置を起点にするので、ピンチ終了直後のずれも拾わない。)
+    if (onLongPress && e.touches.length === 1) {
+      const t = e.touches[0];
+      startRef.current = { x: t.clientX, y: t.clientY };
+      firedRef.current = false;
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null;
+        firedRef.current = true;
+        onLongPress({ x: startRef.current.x, y: startRef.current.y });
+      }, ms);
+    } else {
+      startRef.current = null;
+    }
+  }, [cancel, onLongPress, ms]);
 
   return { onTouchStart, onTouchMove, onTouchEnd, onTouchCancel: onTouchEnd };
 }

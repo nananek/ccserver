@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
+import { useDismissableMenu } from '../hooks/useDismissableMenu.js';
 
 // セッション行の右クリックメニュー (ポップアップ / 左サイドバー共用)。
 // 開閉は SessionTabMenu と同じ方式: 外側 mousedown で閉じる + Escape で閉じる。
@@ -14,20 +15,9 @@ export default function SessionContextMenu({
 }) {
   const menuRef = useRef(null);
 
-  useEffect(() => {
-    const onDown = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) onClose?.();
-    };
-    const onKey = (e) => {
-      if (e.key === 'Escape') onClose?.();
-    };
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [onClose]);
+  // 開閉は WidgetContextMenu と共通 (useDismissableMenu):
+  // 外側 mousedown/touchstart で閉じる + Escape で閉じる。
+  useDismissableMenu(menuRef, onClose);
 
   const left = Math.max(4, Math.min(x, window.innerWidth - 204));
   const top = Math.max(4, Math.min(y, window.innerHeight - 84));
