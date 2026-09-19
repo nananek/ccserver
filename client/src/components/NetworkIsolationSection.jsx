@@ -128,10 +128,10 @@ export default function NetworkIsolationSection() {
           checked={isolate}
           onChange={(e) => setIsolate(e.target.checked)}
         />
-        起動時に隔離を有効にする (isolate)
+        起動時のネットワークを制限する
       </label>
       <p className="settings-hint">
-        オンで起動したセッションは enforce、外したセッションは open で始まります。実行中の切替は各セッションの 🌐 トグルで行います。
+        オンで起動したセッションは enforce、外したセッションは open で始まります。実際の遮断は mode が enforce のときのみ行われます (audit では判定を記録するだけで通します)。macOSでは境界自体は常時有効のため、この設定は開始直後のstateのみを決めます (Linuxではオフ=境界なし・トグルなし)。実行中の切替は各セッションの 🌐 トグルで行います。
       </p>
       <div className="general-setting-row">
         <label htmlFor="network-mode-select">動作モード (mode)</label>
