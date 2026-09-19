@@ -56,6 +56,15 @@ const BASH = '/usr/bin/bash';
 // isolation and no nested dockerd. The bash lived at /bin/bash on macOS
 // (there is no /usr/bin/bash).
 export const IS_MACOS = process.platform === 'darwin';
+
+// macOS Seatbelt is always armed (see buildSandboxSpawn): the profile is
+// fixed at sandbox-exec spawn and cannot be tightened later, so every macOS
+// launch starts a broker with the isolated profile. network.isolate only
+// selects the initial live state -- enforce when on, open when off -- and
+// the running-session toggle flips it afterward without a restart.
+export function macOSNetworkBrokerInitialState(netIsolate) {
+  return netIsolate ? 'enforce' : 'open';
+}
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 const MACOS_BASH = '/bin/bash';
 
@@ -2121,9 +2130,10 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   const rootlesskitToolingAvailable = !IS_MACOS && dockerSandboxAvailableFn();
   // Structural isolation for bwrap: wrapped in rootlesskit for a private
   // netns + in-netns firewall only when this launch actually asked for it
-  // (network.isolate) AND the tooling exists -- on-demand, exactly like the
-  // seatbelt branch below, not tied to the unrelated `docker` (nested
-  // dockerd) flag. A `docker:true` launch keeps its existing unrestricted
+  // (network.isolate) AND the tooling exists -- on-demand, not tied to the
+  // unrelated `docker` (nested dockerd) flag. (Unlike the macOS seatbelt
+  // branch, which is always armed so isolation can be applied on demand
+  // without a restart.) A `docker:true` launch keeps its existing unrestricted
   // slirp4netns NAT networking unless network.isolate is ALSO on; nested
   // dockerd's own rootlesskit wrapping predates this feature and has nothing
   // to do with it. Never true on macOS (seatbelt instead).
@@ -2196,31 +2206,39 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   // wired into buildBwrapArgs separately below.
   const commitGuard = commitMessageGuard.enabled ? startCommitGuard(commitMessageGuard.blockedPatterns) : null;
 
-  // Network-isolation broker (see network-broker.js): started on-demand,
-  // only when this launch actually asked for it (network.isolate) -- bwrap
-  // needs the rootlesskit tooling too (needBwrapIsolation already folds that
-  // check in; on a host missing it, no broker starts and a plain unisolated
-  // bwrap launch runs instead, see the warning above). Seatbelt has no such
-  // tooling dependency, so IS_MACOS alone gates it there. Once armed, the
+  // Network-isolation broker (see network-broker.js): on Linux started
+  // on-demand, only when this launch actually asked for it
+  // (network.isolate) -- bwrap needs the rootlesskit tooling too
+  // (needBwrapIsolation already folds that check in; on a host missing it,
+  // no broker starts and a plain unisolated bwrap launch runs instead, see
+  // the warning above). On macOS Seatbelt is ALWAYS armed: the Seatbelt
+  // profile is fixed at sandbox-exec spawn time and cannot be tightened
+  // later, so an isolate:false launch with no boundary could never be
+  // isolated on demand. Every macOS launch therefore starts a broker and
+  // uses the isolated profile; `network.isolate` only selects this launch's
+  // STARTING state (enforce when on, open when off). Once armed, the
   // running-session toggle can flip enforce/open freely without a restart --
-  // `state` here is only this launch's STARTING policy (enforce when
-  // network.isolate is on; open is unreachable in practice since a false
-  // network.isolate never reaches this branch at all); `mode` is the
-  // operator-only enforce/audit from sandbox.config.json. A start failure is
-  // a real launch failure (fail-closed at the infra level, same posture as
-  // startGitBroker for an actual git repo) -- clean up gitBroker/commitGuard
-  // first since they were already started and would otherwise leak.
+  // `mode` is the operator-only enforce/audit from sandbox.config.json. A
+  // start failure is a real launch failure (fail-closed at the infra level,
+  // same posture as startGitBroker for an actual git repo) -- clean up
+  // gitBroker/commitGuard first since they were already started and would
+  // otherwise leak.
+  // NOTE (open-state proxy compliance): even in `open` the Seatbelt profile
+  // denies direct TCP/UDP except the broker port, so traffic must flow via
+  // the injected HTTP(S)_PROXY. A proxy-ignoring tool stays blocked even
+  // while "open" -- this is the cost of restart-free on-demand isolation.
   let networkBroker = null;
-  if (needBwrapIsolation || (IS_MACOS && netIsolate)) {
+  if (needBwrapIsolation || IS_MACOS) {
     try {
       networkBroker = startNetworkBrokerFn({
         allowedHosts: netCfg.allowedHosts,
         deniedHosts: netCfg.deniedHosts,
         mode: netCfg.mode, // operator-only enforce/audit (sandbox.config.json)
-        // Only reachable with netIsolate true (see the condition above), so
-        // this always starts enforcing; the running-session toggle can flip
-        // it open afterward.
-        state: 'enforce',
+        // macOS: enforce iff network.isolate, else open (see
+        // macOSNetworkBrokerInitialState -- the on-demand toggle flips it
+        // later). Linux only reaches here with netIsolate true, so this is
+        // always enforce there.
+        state: IS_MACOS ? macOSNetworkBrokerInitialState(netIsolate) : 'enforce',
       });
     } catch (err) {
       if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
@@ -2310,9 +2328,12 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         mcpToken,
         extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, claudeDir: installDir,
         orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
-        // Network isolation (see seatbeltIsolatedNetworkRules): null keeps
-        // historical open egress; set only when this launch requested it.
-        networkBroker: netIsolate ? networkBroker : null,
+        // Network isolation (see seatbeltIsolatedNetworkRules): always
+        // armed on macOS -- the broker started above is always passed so the
+        // profile pins broker-only egress from the start. network.isolate
+        // only selected its initial enforce/open state; the live toggle
+        // (terminal.js) flips it afterward without a restart.
+        networkBroker,
       });
     } catch (err) {
       // buildSeatbeltLaunch threw AFTER startGitBroker/startCommitGuard (and
@@ -2337,11 +2358,11 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env), ...seatbeltCmd],
       docker: false,
       stateDir: null,
-      // Network-isolation broker: armed only when this launch requested
-      // isolation (the broker was started above iff netIsolate). The live
-      // toggle (terminal.js) flips this broker's enforce/open policy.
+      // Network-isolation broker: always armed on macOS (the broker was
+      // started above unconditionally). The live toggle (terminal.js) flips
+      // this broker's enforce/open policy without a restart.
       ...NO_NETWORK_BROKER_HANDLE,
-      ...(netIsolate && networkBroker ? {
+      ...(networkBroker ? {
         sandboxNetworkBrokerProc: networkBroker.proc,
         sandboxNetworkBrokerDir: networkBroker.dir,
         networkBrokerPort: networkBroker.port,

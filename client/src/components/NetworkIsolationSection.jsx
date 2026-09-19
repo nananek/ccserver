@@ -43,6 +43,8 @@ function parseHostLines(text) {
 // 件数を報告する。deniedHosts は許可・open・audit に優先して常に拒否。
 // isolate/mode の実行中変更は対象外 (enforce/open 切替は各セッションの
 // トグル、起動時 audit/enforce は起動時ポリシーのため)。
+// macOS(seatbelt)は常時armedのため isolate は初期stateの意味になり、
+// isolate:false 起動でもトグルで後から enforce できる。
 export default function NetworkIsolationSection() {
   const [isolate, setIsolate] = useState(false);
   const [mode, setMode] = useState('enforce');
