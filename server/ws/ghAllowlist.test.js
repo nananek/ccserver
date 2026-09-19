@@ -394,6 +394,78 @@ describe('classifyGhInvocation: gh api (Actions read-only)', () => {
   });
 });
 
+describe('classifyGhInvocation: gh api (Security-tab alerts, read-only)', () => {
+  for (const prefix of ['code-scanning/alerts', 'dependabot/alerts', 'secret-scanning/alerts']) {
+    test(`${prefix}: bare listing endpoint resolves repo from cwd origin`, () => {
+      const r = classifyGhInvocation(['api', `repos/testowner/testrepo/${prefix}`], cwdOrigin);
+      assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+    });
+
+    test(`${prefix}: single-alert endpoint (trailing /<number>) is allowed`, () => {
+      const r = classifyGhInvocation(['api', `repos/testowner/testrepo/${prefix}/1`], cwdOrigin);
+      assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+    });
+
+    test(`${prefix}: nested sub-resource (e.g. /locations) is allowed`, () => {
+      const r = classifyGhInvocation(['api', `repos/testowner/testrepo/${prefix}/1/locations`], cwdOrigin);
+      assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+    });
+
+    test(`${prefix}: leading slash is accepted`, () => {
+      const r = classifyGhInvocation(['api', `/repos/testowner/testrepo/${prefix}`], cwdOrigin);
+      assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+    });
+
+    test(`SECURITY: ${prefix} with {owner}/{repo} placeholders is refused`, () => {
+      const r = classifyGhInvocation(['api', `repos/{owner}/{repo}/${prefix}`, '--repo', 'testowner/testrepo'], cwdOrigin);
+      assert.equal(r.allowed, false);
+      assert.equal(r.reason, 'repo-unresolved');
+    });
+
+    test(`${prefix}: --method POST is refused (read-only only)`, () => {
+      const r = classifyGhInvocation(['api', `repos/testowner/testrepo/${prefix}`, '--method', 'POST'], cwdOrigin);
+      assert.equal(r.allowed, false);
+      assert.equal(r.reason, 'ambiguous-flags');
+    });
+
+    test(`${prefix}: short-flag data flag -f is refused`, () => {
+      const r = classifyGhInvocation(['api', `repos/testowner/testrepo/${prefix}`, '-f', 'state=open'], cwdOrigin);
+      assert.equal(r.allowed, false);
+      assert.equal(r.reason, 'ambiguous-flags');
+    });
+
+    test(`SECURITY: dot-segment traversal in ${prefix} is refused`, () => {
+      const r = classifyGhInvocation(['api', `repos/testowner/testrepo/${prefix}/../../someoneelse/issues`], cwdOrigin);
+      assert.equal(r.allowed, false);
+      assert.equal(r.reason, 'subcommand-not-allowed');
+    });
+  }
+
+  test('SECURITY: dependabot/secrets (credential store, not alerts) is refused', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/dependabot/secrets'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'subcommand-not-allowed');
+  });
+
+  test('SECURITY: security-advisories (can carry embargoed text) is refused', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/security-advisories'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'subcommand-not-allowed');
+  });
+
+  test('SECURITY: --hostname is refused on a security-alerts endpoint too', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/secret-scanning/alerts', '--hostname', 'ghe.example.com'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'ambiguous-flags');
+  });
+
+  test('SECURITY: literal endpoint plus a conflicting --repo surfaces both repos', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/code-scanning/alerts', '--repo', 'someoneelse/unrelated'], cwdOrigin);
+    assert.equal(r.allowed, true);
+    assert.deepEqual([...r.repos].sort(), ['github.com/someoneelse/unrelated', REPO].sort());
+  });
+});
+
 describe('classifyGhInvocation: workflow run/enable/disable require explicit repo', () => {
   test('workflow run without --repo/-R is refused (cwd fallback disabled)', () => {
     const r = classifyGhInvocation(['workflow', 'run', 'deploy.yml'], cwdOrigin);

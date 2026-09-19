@@ -10,11 +10,18 @@
 // against the same allow-list already computed for git (gitAllowlist.js).
 // Anything not explicitly named in ALLOWED is refused -- most importantly:
 //   - `gh api` (any GitHub API endpoint, not repo-scoped at all -- could
-//     read/write far beyond any single repo). The one exception: a GET
-//     against a LITERAL repos/{owner}/{repo}/actions/... endpoint is
-//     repo-scoped and read-only, so it's allowed (see classifyGhApi below);
-//     every other `gh api` call -- including the {owner}/{repo} placeholder
-//     form -- is still refused.
+//     read/write far beyond any single repo). Two narrow exceptions: a GET
+//     against a LITERAL repos/{owner}/{repo}/actions/... endpoint, and a GET
+//     against that repo's Security-tab alert endpoints -- code-scanning,
+//     Dependabot, and secret-scanning alerts. Both are repo-scoped and
+//     read-only, so they're allowed (see classifyGhApi below); every other
+//     `gh api` call -- including the {owner}/{repo} placeholder form -- is
+//     still refused. (Note: secret-scanning alert objects carry the leaked
+//     secret's type/location/state, never the secret value itself -- gh
+//     never returns that over this API -- so this is not a credential leak
+//     the way `gh secret`/`gh auth` below would be. `dependabot/secrets`,
+//     Dependabot's own repo-secret store, is deliberately NOT included here
+//     for exactly that reason.)
 //   - `gh auth` / `gh secret` / `gh variable` / `gh ssh-key` / `gh gpg-key`
 //     (credential/secret management, not a repo operation)
 //   - `gh repo clone` / `fork` / `create` / `delete` / `rename` (the target
@@ -69,7 +76,7 @@ const ALLOWED = {
 
 const URL_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
 
-// The only `gh api` endpoint shape allowed: a GET on repos/OWNER/REPO/
+// The only `gh api` endpoint shapes allowed: a GET on repos/OWNER/REPO/
 // actions/... with LITERAL owner/repo strings (see classifyGhApi for why the
 // "{owner}"/"{repo}" placeholder form is refused). The leading "/" is
 // optional. Anything under actions/ is required (a bare "repos/o/r/actions"
@@ -77,6 +84,18 @@ const URL_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
 // /orgs/..., non-actions repos/... endpoints, and absolute URLs
 // (https://api.github.com/...) all fail this regex and stay refused.
 const API_ACTIONS_PATH_RE = /^\/?repos\/([^/]+)\/([^/]+)\/actions\/.+$/;
+
+// The Security-tab counterpart of the above: a GET on repos/OWNER/REPO/ +
+// one of the three alert-listing prefixes, again with LITERAL owner/repo.
+// Unlike actions/, the bare prefix itself (no trailing path) is a real,
+// commonly-used call -- "list alerts" -- so it's accepted with or without a
+// trailing /<alert-number>[/...] segment (e.g. .../locations,
+// .../dismissed-comment). Only these three prefixes: not
+// "dependabot/secrets" (Dependabot's own repo secrets -- credential
+// management, refused just like `gh secret`) and not
+// "security-advisories" (can carry embargoed/private advisory text, a
+// different risk than alert metadata).
+const API_SECURITY_ALERTS_PATH_RE = /^\/?repos\/([^/]+)\/([^/]+)\/(?:code-scanning\/alerts|dependabot\/alerts|secret-scanning\/alerts)(?:\/.+)?$/;
 
 // workflow run/enable/disable trigger/write operations (kick off CI, toggle
 // a workflow's on/off state), so unlike every other subcommand they must NOT
@@ -183,11 +202,13 @@ function apiRejectsFlags(argv) {
   });
 }
 
-// The dedicated `gh api` path: only GETs on repos/OWNER/REPO/actions/...
-// (see API_ACTIONS_PATH_RE) are allowed, with the owner/repo written out
-// LITERALLY. The endpoint's own owner/repo is collected as the required repo
-// reference (pitfall 2: an endpoint naming one repo plus a --repo flag naming
-// another must have both checked by the caller).
+// The dedicated `gh api` path: only GETs on repos/OWNER/REPO/actions/... or
+// repos/OWNER/REPO/{code-scanning,dependabot,secret-scanning}/alerts...
+// (see API_ACTIONS_PATH_RE / API_SECURITY_ALERTS_PATH_RE) are allowed, with
+// the owner/repo written out LITERALLY. The endpoint's own owner/repo is
+// collected as the required repo reference (pitfall 2: an endpoint naming
+// one repo plus a --repo flag naming another must have both checked by the
+// caller).
 //
 // The "{owner}"/"{repo}" placeholder form is deliberately NOT supported. gh
 // fills placeholders from its own base-repo resolution (the root --repo flag,
@@ -201,17 +222,18 @@ function apiRejectsFlags(argv) {
 // literally means the checked repo is exactly the repo gh will call.
 function classifyGhApi(argv) {
   const endpoint = argv[1];
-  if (!endpoint || !API_ACTIONS_PATH_RE.test(endpoint)) {
+  const match = endpoint && (API_ACTIONS_PATH_RE.exec(endpoint) || API_SECURITY_ALERTS_PATH_RE.exec(endpoint));
+  if (!match) {
     return { allowed: false, repos: [], reason: 'subcommand-not-allowed' };
   }
   if (apiRejectsFlags(argv)) {
     return { allowed: false, repos: [], reason: 'ambiguous-flags' };
   }
 
-  const [, owner, repo] = API_ACTIONS_PATH_RE.exec(endpoint);
+  const [, owner, repo] = match;
 
   // A dot segment can change the effective URL path before the request is
-  // handled, escaping the checked repo or the actions-only scope. gh sends
+  // handled, escaping the checked repo or the allowed scope. gh sends
   // the endpoint verbatim, and the API server percent-decodes the path once
   // (net/http then cleans ".." segments via redirect, which gh follows), so
   // the whole path is decoded once here -- exactly the server's view -- and
