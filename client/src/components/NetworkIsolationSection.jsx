@@ -56,6 +56,8 @@ export default function NetworkIsolationSection() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [liveApplied, setLiveApplied] = useState(null);
+  const [isolateSaving, setIsolateSaving] = useState(false);
+  const [isolateSaveError, setIsolateSaveError] = useState(null);
 
   const overlaps = useMemo(
     () => findAllowDenyOverlaps(parseHostLines(hostsText), parseHostLines(deniedHostsText)),
@@ -86,6 +88,37 @@ export default function NetworkIsolationSection() {
     refresh();
   }, [refresh]);
 
+  // isolate (起動時のネットワークを制限する) saves immediately on toggle,
+  // independent of the explicit 保存 button below -- it is the master
+  // on/off switch and a user flipping it expects it to take effect (for the
+  // NEXT launch; running sessions are unaffected either way) without also
+  // having to review/confirm the rest of the form. initialState/mode/
+  // allow-deny-lists stay batched behind the explicit save + confirm, since
+  // those can immediately affect running sessions (lists) or are easy to
+  // fat-finger (initialState/mode).
+  const handleIsolateToggle = async (checked) => {
+    const prev = isolate;
+    setIsolate(checked);
+    setIsolateSaving(true);
+    setIsolateSaveError(null);
+    try {
+      const res = await authFetch('/api/network-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isolate: checked }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      const s = body.settings || {};
+      setIsolate(s.isolate === true);
+    } catch (err) {
+      setIsolate(prev);
+      setIsolateSaveError(err.message || '保存に失敗しました');
+    } finally {
+      setIsolateSaving(false);
+    }
+  };
+
   const handleSave = async () => {
     const hosts = parseHostLines(hostsText);
     const denied = parseHostLines(deniedHostsText);
@@ -95,7 +128,7 @@ export default function NetworkIsolationSection() {
     const overlapNote = overlaps.length > 0
       ? `\n⚠️ 許可と拒否の重複 ${overlaps.length} 件あり (拒否が優先されます):\n${overlaps.slice(0, 5).map((o) => `- 許可「${o.allow}」× 拒否「${o.deny}」`).join('\n')}${overlaps.length > 5 ? `\n他 ${overlaps.length - 5} 件` : ''}`
       : '';
-    if (!window.confirm(`ネットワーク隔離設定を保存しますか？\n- isolate: ${isolate ? 'ON' : 'OFF'}\n- initialState: ${initialState}\n- mode: ${mode}\n- allowedHosts: ${hosts.length} 件\n- deniedHosts: ${denied.length} 件${overlapNote}\n実行中の隔離セッションへも自動反映されます。`)) return;
+    if (!window.confirm(`ネットワーク隔離設定を保存しますか？\n- initialState: ${initialState}\n- mode: ${mode}\n- allowedHosts: ${hosts.length} 件\n- deniedHosts: ${denied.length} 件${overlapNote}\n実行中の隔離セッションへも自動反映されます。`)) return;
     setSaving(true);
     setSaveError(null);
     setLiveApplied(null);
@@ -131,12 +164,15 @@ export default function NetworkIsolationSection() {
         <input
           type="checkbox"
           checked={isolate}
-          onChange={(e) => setIsolate(e.target.checked)}
+          disabled={isolateSaving}
+          onChange={(e) => handleIsolateToggle(e.target.checked)}
         />
         起動時のネットワークを制限する
+        {isolateSaving ? ' (保存中...)' : ''}
       </label>
+      {isolateSaveError && <div className="error">Error: {isolateSaveError}</div>}
       <p className="settings-hint">
-        オフでは隔離機能自体が無効になります (ブローカーなし・open egress・🌐トグルなし)。オンで起動したセッションは下の開始状態で始まります。
+        オフでは隔離機能自体が無効になります (ブローカーなし・open egress・🌐トグルなし)。オンで起動したセッションは下の開始状態で始まります。変更は即座に保存されます (新規起動から適用、実行中のセッションには影響しません)。
       </p>
       <div className="general-setting-row">
         <label htmlFor="network-initial-state-select">開始状態 (initialState)</label>
