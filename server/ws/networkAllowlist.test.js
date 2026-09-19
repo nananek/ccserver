@@ -42,17 +42,17 @@ test('getNetworkSettings defaults on a missing file', () => {
 });
 
 test('getNetworkSettings mirrors loadSandboxConfig parsing', () => {
-  writeRaw({ network: { isolate: true, mode: 'audit', allowedHosts: ['api.anthropic.com', 42, null, ''], deniedHosts: ['evil.example', 42, null, ''] } });
-  assert.deepEqual(getNetworkSettings(), { isolate: true, mode: 'audit', allowedHosts: ['api.anthropic.com'], deniedHosts: ['evil.example'] });
+  writeRaw({ network: { isolate: true, mode: 'audit', allowedHosts: ['api.example.com', 42, null, ''], deniedHosts: ['evil.example', 42, null, ''] } });
+  assert.deepEqual(getNetworkSettings(), { isolate: true, mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] });
 });
 
 test('updateNetworkSettings creates the file and normalizes entries', () => {
   try { rmSync(cfgPath, { force: true }); } catch { /* ignore */ }
-  const res = updateNetworkSettings({ isolate: true, mode: 'audit', allowedHosts: ['  API.Anthropic.COM ', '.opencode.ai', 'api.anthropic.com'], deniedHosts: ['  Evil.Example ', '.tracker.example'] });
+  const res = updateNetworkSettings({ isolate: true, mode: 'audit', allowedHosts: ['  API.Example.COM ', '.example.net', 'api.example.com'], deniedHosts: ['  Evil.Example ', '.tracker.example'] });
   assert.equal(res.ok, true);
-  assert.deepEqual(res.settings, { isolate: true, mode: 'audit', allowedHosts: ['api.anthropic.com', '.opencode.ai'], deniedHosts: ['evil.example', '.tracker.example'] });
+  assert.deepEqual(res.settings, { isolate: true, mode: 'audit', allowedHosts: ['api.example.com', '.example.net'], deniedHosts: ['evil.example', '.tracker.example'] });
   const onDisk = JSON.parse(readFileSync(cfgPath, 'utf-8'));
-  assert.deepEqual(onDisk.network.allowedHosts, ['api.anthropic.com', '.opencode.ai']);
+  assert.deepEqual(onDisk.network.allowedHosts, ['api.example.com', '.example.net']);
   assert.deepEqual(onDisk.network.deniedHosts, ['evil.example', '.tracker.example']);
 });
 
@@ -71,10 +71,10 @@ test('updateNetworkSettings rejects bad isolate/mode/list', () => {
   for (const patch of [
     { isolate: 'yes' },
     { mode: 'sometimes' },
-    { allowedHosts: 'api.anthropic.com' },
-    { allowedHosts: ['https://api.anthropic.com'] },
-    { allowedHosts: ['api.anthropic.com:443'] },
-    { allowedHosts: ['*.anthropic.com'] },
+    { allowedHosts: 'api.example.com' },
+    { allowedHosts: ['https://api.example.com'] },
+    { allowedHosts: ['api.example.com:443'] },
+    { allowedHosts: ['*.example.com'] },
     { allowedHosts: ['not a host'] },
     { allowedHosts: [''] },
     { deniedHosts: 'evil.example' },

@@ -368,8 +368,8 @@ test('network defaults: isolate=false, mode=enforce, empty lists', () => {
 });
 
 test('network: isolate/mode/allowedHosts/deniedHosts are read from the config file', () => {
-  withConfig({ network: { isolate: true, mode: 'audit', allowedHosts: ['api.anthropic.com'], deniedHosts: ['evil.example'] } }, () => {
-    assert.deepEqual(loadSandboxConfig().network, { isolate: true, mode: 'audit', allowedHosts: ['api.anthropic.com'], deniedHosts: ['evil.example'] });
+  withConfig({ network: { isolate: true, mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] } }, () => {
+    assert.deepEqual(loadSandboxConfig().network, { isolate: true, mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] });
   });
 });
 

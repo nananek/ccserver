@@ -13,25 +13,25 @@ import { isHostAllowed, isHostDenied, isHostMatched, startNetworkBroker, setNetw
 // --- isHostAllowed (pure) ----------------------------------------------------
 
 test('isHostAllowed: exact match', () => {
-  assert.equal(isHostAllowed('api.anthropic.com', ['api.anthropic.com']), true);
-  assert.equal(isHostAllowed('api.anthropic.com', ['API.ANTHROPIC.COM']), true, 'case-insensitive');
-  assert.equal(isHostAllowed('evil.com', ['api.anthropic.com']), false);
+  assert.equal(isHostAllowed('api.example.com', ['api.example.com']), true);
+  assert.equal(isHostAllowed('api.example.com', ['API.EXAMPLE.COM']), true, 'case-insensitive');
+  assert.equal(isHostAllowed('other.example.com', ['api.example.com']), false);
 });
 
 test('isHostAllowed: leading-dot suffix matches the domain and its subdomains', () => {
-  assert.equal(isHostAllowed('anthropic.com', ['.anthropic.com']), true);
-  assert.equal(isHostAllowed('api.anthropic.com', ['.anthropic.com']), true);
-  assert.equal(isHostAllowed('deep.api.anthropic.com', ['.anthropic.com']), true);
-  assert.equal(isHostAllowed('notanthropic.com', ['.anthropic.com']), false, 'must not match a bare suffix without the dot boundary');
-  assert.equal(isHostAllowed('anthropic.com.evil.com', ['.anthropic.com']), false);
+  assert.equal(isHostAllowed('example.com', ['.example.com']), true);
+  assert.equal(isHostAllowed('api.example.com', ['.example.com']), true);
+  assert.equal(isHostAllowed('deep.api.example.com', ['.example.com']), true);
+  assert.equal(isHostAllowed('notexample.com', ['.example.com']), false, 'must not match a bare suffix without the dot boundary');
+  assert.equal(isHostAllowed('example.com.attacker.example', ['.example.com']), false);
 });
 
 test('isHostAllowed: fails closed on empty/malformed input', () => {
-  assert.equal(isHostAllowed('api.anthropic.com', []), false);
-  assert.equal(isHostAllowed('api.anthropic.com', undefined), false);
-  assert.equal(isHostAllowed('api.anthropic.com', [null, 42, '']), false);
-  assert.equal(isHostAllowed('', ['api.anthropic.com']), false);
-  assert.equal(isHostAllowed(null, ['api.anthropic.com']), false);
+  assert.equal(isHostAllowed('api.example.com', []), false);
+  assert.equal(isHostAllowed('api.example.com', undefined), false);
+  assert.equal(isHostAllowed('api.example.com', [null, 42, '']), false);
+  assert.equal(isHostAllowed('', ['api.example.com']), false);
+  assert.equal(isHostAllowed(null, ['api.example.com']), false);
 });
 
 // --- real broker process: CONNECT relay, auth, live toggle, audit mode -----

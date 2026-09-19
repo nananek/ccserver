@@ -44,14 +44,14 @@ test('PUT writes the file, normalizes, and reports live counts', async () => {
   const res = await app.inject({
     method: 'PUT',
     url: '/api/network-settings',
-    payload: { isolate: true, mode: 'audit', allowedHosts: [' API.Anthropic.COM ', '.opencode.ai'], deniedHosts: [' Evil.Example ', '.tracker.example'] },
+    payload: { isolate: true, mode: 'audit', allowedHosts: [' API.Example.COM ', '.example.net'], deniedHosts: [' Evil.Example ', '.tracker.example'] },
   });
   assert.equal(res.statusCode, 200);
   const body = res.json();
-  assert.deepEqual(body.settings, { isolate: true, mode: 'audit', allowedHosts: ['api.anthropic.com', '.opencode.ai'], deniedHosts: ['evil.example', '.tracker.example'] });
+  assert.deepEqual(body.settings, { isolate: true, mode: 'audit', allowedHosts: ['api.example.com', '.example.net'], deniedHosts: ['evil.example', '.tracker.example'] });
   assert.deepEqual(body.liveApplied, { ok: 0, failed: 0 }, 'no live sessions in this suite');
   const onDisk = JSON.parse(readFileSync(cfgPath, 'utf-8'));
-  assert.deepEqual(onDisk.network.allowedHosts, ['api.anthropic.com', '.opencode.ai']);
+  assert.deepEqual(onDisk.network.allowedHosts, ['api.example.com', '.example.net']);
   assert.deepEqual(onDisk.network.deniedHosts, ['evil.example', '.tracker.example']);
 
   const reread = await app.inject({ method: 'GET', url: '/api/network-settings' });
@@ -63,7 +63,7 @@ test('PUT validation errors map to 400 and change nothing', async () => {
     { mode: 'sometimes' },
     { isolate: 'yes' },
     { allowedHosts: ['https://evil.example'] },
-    { allowedHosts: 'api.anthropic.com' },
+    { allowedHosts: 'api.example.com' },
     { deniedHosts: ['https://evil.example'] },
     { deniedHosts: 'evil.example' },
   ]) {
