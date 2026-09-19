@@ -48,7 +48,7 @@
 //   - live `state` ('enforce' | 'open'), mutated at runtime via the
 //     `/__admin/mode` control endpoint (see setNetworkBrokerMode below):
 //     this is what the running-session UI toggle flips. It starts at
-//     whichever state the launcher armed this session with (see
+//     whichever state the launcher enabled isolation for this session with (see
 //     startNetworkBroker's `state` param) -- 'audit' mode overrides the live
 //     state entirely (audit always behaves as if 'open' while still logging
 //     verdicts, except for denied hosts which stay blocked). The network
@@ -234,11 +234,10 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
   // Live policy state, mutated only by the /__admin/mode endpoint. 'audit'
   // is not a valid live state (it's the operator-only startup mode above);
   // when initialMode is 'audit' every CONNECT is logged but always allowed,
-  // regardless of `state`. Starts at whatever the launcher armed this
-  // session with (see startNetworkBroker's `initialState`) -- every Linux
-  // bwrap launch always starts a broker now (see buildSandboxSpawn), so this
-  // is 'open' (unrestricted, same as no isolation) unless network.isolate
-  // (or a live toggle) asked to start 'enforce'.
+  // regardless of `state`. Starts at whatever the launcher enabled isolation
+  // for this session with (see startNetworkBroker's `state`, fed from
+  // sandbox.config.json's network.initialState) -- 'enforce' unless the
+  // operator set initialState to 'open'.
   let state = initialState === 'open' ? 'open' : 'enforce';
   const token = process.env.CCSANDBOX_NETWORK_BROKER_TOKEN || '';
 
@@ -419,11 +418,11 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
 //
 //   mode  - operator-only (sandbox.config.json's network.mode): 'enforce'
 //           (default) or 'audit' (never blocks, only logs verdicts).
-//   state - the LIVE toggle's starting value: 'enforce' or 'open' (default).
-//           Every Linux bwrap launch calls this (see buildSandboxSpawn)
-//           regardless of whether network.isolate is on -- `state` is what
-//           encodes that setting, not whether a broker exists at all. The
-//           running-session toggle (terminal.js's set_network_isolation ->
+//   state - the LIVE toggle's starting value: 'enforce' (default) or 'open'.
+//           Only isolation-enabled launches call this (see buildSandboxSpawn -- a broker
+//           exists only when network.isolate is on); `state` carries
+//           sandbox.config.json's network.initialState. The running-session
+//           toggle (terminal.js's set_network_isolation ->
 //           setNetworkBrokerMode) flips this same value later; it works
 //           identically regardless of the state this call started with.
 //   deniedHosts - absolute deny-list (sandbox.config.json's

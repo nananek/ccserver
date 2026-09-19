@@ -57,13 +57,15 @@ const BASH = '/usr/bin/bash';
 // (there is no /usr/bin/bash).
 export const IS_MACOS = process.platform === 'darwin';
 
-// macOS Seatbelt is always armed (see buildSandboxSpawn): the profile is
-// fixed at sandbox-exec spawn and cannot be tightened later, so every macOS
-// launch starts a broker with the isolated profile. network.isolate only
-// selects the initial live state -- enforce when on, open when off -- and
-// the running-session toggle flips it afterward without a restart.
-export function macOSNetworkBrokerInitialState(netIsolate) {
-  return netIsolate ? 'enforce' : 'open';
+// network.isolate is the master switch for the network-isolation feature
+// (see buildSandboxSpawn): when off, neither backend starts a broker and the
+// sandbox launches with open egress. When on, isolation is enabled for the
+// launch and
+// network.initialState selects the broker's starting live state -- 'enforce'
+// or 'open' -- which the running-session toggle can flip afterward without
+// a restart.
+export function macOSNetworkBrokerInitialState(initialState) {
+  return initialState === 'open' ? 'open' : 'enforce';
 }
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 const MACOS_BASH = '/bin/bash';
@@ -761,10 +763,14 @@ export function loadSandboxConfig() {
   const hiddenApps = Array.isArray(raw.hiddenApps)
     ? [...new Set(raw.hiddenApps.filter((a) => APP_IDS.includes(a)))]
     : [];
-  // Network isolation (see network-broker.js): isolate is the launch-time
-  // starting policy only (true=enforce, false=open) -- it never decides
-  // whether the structural boundary (bwrap firewall / seatbelt profile)
-  // exists at all, only the broker's starting state (see buildSandboxSpawn).
+  // Network isolation (see network-broker.js): isolate is the master
+  // switch for the whole feature (false by default: no broker, open egress,
+  // no live toggle on either backend). When on, isolation is enabled for the
+  // launch and
+  // initialState selects the broker's starting live state ('enforce' by
+  // default, 'open' when explicitly set) -- it never decides whether the
+  // structural boundary (bwrap firewall / seatbelt profile) exists at all,
+  // only the broker's starting state (see buildSandboxSpawn).
   // mode is operator-only ('audit' never blocks a non-denied host, but
   // deniedHosts still blocks even in audit). allowedHosts/deniedHosts use the
   // same exact-or-leading-dot syntax; validation/normalization on write lives
@@ -773,6 +779,7 @@ export function loadSandboxConfig() {
   const rawNetwork = (raw.network && typeof raw.network === 'object' && !Array.isArray(raw.network)) ? raw.network : {};
   const network = {
     isolate: rawNetwork.isolate === true,
+    initialState: rawNetwork.initialState === 'open' ? 'open' : 'enforce',
     mode: rawNetwork.mode === 'audit' ? 'audit' : 'enforce',
     allowedHosts: Array.isArray(rawNetwork.allowedHosts)
       ? rawNetwork.allowedHosts.filter((h) => typeof h === 'string' && h)
@@ -1353,8 +1360,8 @@ export function wrapBwrapInnerWithNetworkFilter(innerCmd, filterScript) {
 }
 
 // Handle fields for the network-isolation broker (see network-broker.js),
-// null on every branch that doesn't arm a broker for this launch. Both the
-// bwrap and seatbelt branches arm on-demand only, when this launch actually
+// null on every branch that doesn't start a broker for this launch. Both the
+// bwrap and seatbelt branches enable isolation on-demand only, when this launch actually
 // requested isolation (network.isolate) -- bwrap additionally needs
 // rootlesskit/slirp4netns/newuidmap present (see needBwrapIsolation in
 // buildSandboxSpawn); a host missing that tooling falls back to a plain,
@@ -2100,7 +2107,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 // `deps.startNetworkBroker` lets tests inject a fake broker starter (no real
 // child process/rootlesskit needed), and `deps.dockerSandboxAvailable` lets
 // tests simulate a host with/without the rootlesskit/slirp4netns/newuidmap
-// tooling, to exercise the arming logic below hermetically -- see
+// tooling, to exercise the enablement logic below hermetically -- see
 // sandbox-network-isolation.test.js.
 export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }, deps = {}) {
   const { startNetworkBroker: startNetworkBrokerFn = startNetworkBroker, dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable } = deps || {};
@@ -2131,9 +2138,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   // Structural isolation for bwrap: wrapped in rootlesskit for a private
   // netns + in-netns firewall only when this launch actually asked for it
   // (network.isolate) AND the tooling exists -- on-demand, not tied to the
-  // unrelated `docker` (nested dockerd) flag. (Unlike the macOS seatbelt
-  // branch, which is always armed so isolation can be applied on demand
-  // without a restart.) A `docker:true` launch keeps its existing unrestricted
+  // unrelated `docker` (nested dockerd) flag. A `docker:true` launch keeps its existing unrestricted
   // slirp4netns NAT networking unless network.isolate is ALSO on; nested
   // dockerd's own rootlesskit wrapping predates this feature and has nothing
   // to do with it. Never true on macOS (seatbelt instead).
@@ -2206,39 +2211,36 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   // wired into buildBwrapArgs separately below.
   const commitGuard = commitMessageGuard.enabled ? startCommitGuard(commitMessageGuard.blockedPatterns) : null;
 
-  // Network-isolation broker (see network-broker.js): on Linux started
-  // on-demand, only when this launch actually asked for it
-  // (network.isolate) -- bwrap needs the rootlesskit tooling too
-  // (needBwrapIsolation already folds that check in; on a host missing it,
-  // no broker starts and a plain unisolated bwrap launch runs instead, see
-  // the warning above). On macOS Seatbelt is ALWAYS armed: the Seatbelt
-  // profile is fixed at sandbox-exec spawn time and cannot be tightened
-  // later, so an isolate:false launch with no boundary could never be
-  // isolated on demand. Every macOS launch therefore starts a broker and
-  // uses the isolated profile; `network.isolate` only selects this launch's
-  // STARTING state (enforce when on, open when off). Once armed, the
+  // Network-isolation broker (see network-broker.js): started on-demand,
+  // only when this launch actually asked for it (network.isolate) -- bwrap
+  // needs the rootlesskit tooling too (needBwrapIsolation already folds that
+  // check in; on a host missing it, no broker starts and a plain unisolated
+  // bwrap launch runs instead, see the warning above). Seatbelt has no such
+  // tooling dependency, so IS_MACOS alone gates it there -- but only when
+  // network.isolate is on: an isolate:false launch keeps the historical open
+  // egress profile and starts no broker at all. When isolation is enabled, the
   // running-session toggle can flip enforce/open freely without a restart --
-  // `mode` is the operator-only enforce/audit from sandbox.config.json. A
-  // start failure is a real launch failure (fail-closed at the infra level,
-  // same posture as startGitBroker for an actual git repo) -- clean up
-  // gitBroker/commitGuard first since they were already started and would
-  // otherwise leak.
-  // NOTE (open-state proxy compliance): even in `open` the Seatbelt profile
-  // denies direct TCP/UDP except the broker port, so traffic must flow via
-  // the injected HTTP(S)_PROXY. A proxy-ignoring tool stays blocked even
-  // while "open" -- this is the cost of restart-free on-demand isolation.
+  // `state` here is this launch's STARTING policy from network.initialState
+  // (see macOSNetworkBrokerInitialState); `mode` is the operator-only
+  // enforce/audit from sandbox.config.json. A start failure is a real launch
+  // failure (fail-closed at the infra level, same posture as startGitBroker
+  // for an actual git repo) -- clean up gitBroker/commitGuard first since
+  // they were already started and would otherwise leak.
+  // NOTE (open-state proxy compliance): even in `open` the isolated Seatbelt
+  // profile denies direct TCP/UDP except the broker port, so traffic must
+  // flow via the injected HTTP(S)_PROXY. A proxy-ignoring tool stays blocked
+  // even while "open".
   let networkBroker = null;
-  if (needBwrapIsolation || IS_MACOS) {
+  if (needBwrapIsolation || (IS_MACOS && netIsolate)) {
     try {
       networkBroker = startNetworkBrokerFn({
         allowedHosts: netCfg.allowedHosts,
         deniedHosts: netCfg.deniedHosts,
         mode: netCfg.mode, // operator-only enforce/audit (sandbox.config.json)
-        // macOS: enforce iff network.isolate, else open (see
+        // Starting live state from network.initialState (see
         // macOSNetworkBrokerInitialState -- the on-demand toggle flips it
-        // later). Linux only reaches here with netIsolate true, so this is
-        // always enforce there.
-        state: IS_MACOS ? macOSNetworkBrokerInitialState(netIsolate) : 'enforce',
+        // later).
+        state: macOSNetworkBrokerInitialState(netCfg.initialState),
       });
     } catch (err) {
       if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
@@ -2328,11 +2330,14 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         mcpToken,
         extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, claudeDir: installDir,
         orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
-        // Network isolation (see seatbeltIsolatedNetworkRules): always
-        // armed on macOS -- the broker started above is always passed so the
-        // profile pins broker-only egress from the start. network.isolate
-        // only selected its initial enforce/open state; the live toggle
-        // (terminal.js) flips it afterward without a restart.
+        // Network isolation (see seatbeltIsolatedNetworkRules): isolation-enabled
+        // only
+        // when this launch requested it (network.isolate) -- the broker
+        // started above is passed so the profile pins broker-only egress
+        // from the start, with network.initialState as its starting state.
+        // An isolate:false launch passes null and keeps the historical open
+        // egress. The live toggle (terminal.js) flips an isolation-enabled broker
+        // afterward without a restart.
         networkBroker,
       });
     } catch (err) {
@@ -2358,9 +2363,10 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env), ...seatbeltCmd],
       docker: false,
       stateDir: null,
-      // Network-isolation broker: always armed on macOS (the broker was
-      // started above unconditionally). The live toggle (terminal.js) flips
-      // this broker's enforce/open policy without a restart.
+      // Network-isolation broker: isolation-enabled only when this launch requested
+      // isolation (the broker was started above iff network.isolate). The
+      // live toggle (terminal.js) flips this broker's enforce/open policy
+      // without a restart.
       ...NO_NETWORK_BROKER_HANDLE,
       ...(networkBroker ? {
         sandboxNetworkBrokerProc: networkBroker.proc,
@@ -2413,7 +2419,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
     // macOS-only teardown handles (always null on the bwrap path).
     seatbeltDir: null,
     seatbeltFiles: null,
-    // Network-isolation broker: armed only when this launch requested
+    // Network-isolation broker: isolation-enabled only when this launch requested
     // isolation (needBwrapIsolation, see above -- also null on a host
     // missing the rootlesskit tooling, same as a plain unisolated launch).
     ...NO_NETWORK_BROKER_HANDLE,

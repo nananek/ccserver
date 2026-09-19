@@ -1,6 +1,6 @@
 // REST boundary for the network-isolation settings GUI: GET exposes the
 // effective settings, PUT validates + writes the file and auto-applies the
-// lists to live armed sessions (none exist in this suite, so liveApplied is
+// lists to live isolation-enabled sessions (none exist in this suite, so liveApplied is
 // 0/0 -- the live push path itself is covered by
 // sessionManager.pushAllowlistToArmedSessions.test.js).
 // Runs against a throwaway CCSERVER_SANDBOX_CONFIG so the host's real config
@@ -37,18 +37,18 @@ after(async () => {
 test('GET returns defaults on a missing file', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/network-settings' });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json().settings, { isolate: false, mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+  assert.deepEqual(res.json().settings, { isolate: false, initialState: 'enforce', mode: 'enforce', allowedHosts: [], deniedHosts: [] });
 });
 
 test('PUT writes the file, normalizes, and reports live counts', async () => {
   const res = await app.inject({
     method: 'PUT',
     url: '/api/network-settings',
-    payload: { isolate: true, mode: 'audit', allowedHosts: [' API.Example.COM ', '.example.net'], deniedHosts: [' Evil.Example ', '.tracker.example'] },
+    payload: { isolate: true, initialState: 'open', mode: 'audit', allowedHosts: [' API.Example.COM ', '.example.net'], deniedHosts: [' Evil.Example ', '.tracker.example'] },
   });
   assert.equal(res.statusCode, 200);
   const body = res.json();
-  assert.deepEqual(body.settings, { isolate: true, mode: 'audit', allowedHosts: ['api.example.com', '.example.net'], deniedHosts: ['evil.example', '.tracker.example'] });
+  assert.deepEqual(body.settings, { isolate: true, initialState: 'open', mode: 'audit', allowedHosts: ['api.example.com', '.example.net'], deniedHosts: ['evil.example', '.tracker.example'] });
   assert.deepEqual(body.liveApplied, { ok: 0, failed: 0 }, 'no live sessions in this suite');
   const onDisk = JSON.parse(readFileSync(cfgPath, 'utf-8'));
   assert.deepEqual(onDisk.network.allowedHosts, ['api.example.com', '.example.net']);
@@ -62,6 +62,7 @@ test('PUT validation errors map to 400 and change nothing', async () => {
   for (const payload of [
     { mode: 'sometimes' },
     { isolate: 'yes' },
+    { initialState: 'sometimes' },
     { allowedHosts: ['https://evil.example'] },
     { allowedHosts: 'api.example.com' },
     { deniedHosts: ['https://evil.example'] },

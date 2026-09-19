@@ -8,7 +8,7 @@
 // required to spawn it (same precedent as sessionManager.test.js's header
 // comment) -- with a real broker's port/token attached onto the live session
 // record afterward, exactly the shape buildSandboxSpawn would have set had
-// this been a real bwrap, isolation-armed launch.
+// this been a real bwrap launch with isolation enabled.
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -40,7 +40,7 @@ function fakeChan() {
   };
 }
 
-async function armedSession() {
+async function isolationEnabledSession() {
   const res = await createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
   assert.equal(res.error, undefined, res.error);
   cleanupSessionIds.push(res.sessionId);
@@ -70,8 +70,8 @@ test('init sends network_isolation_state (armed:false) for a non-isolated sessio
   assert.equal(msg.enabled, false);
 });
 
-test('attach sends network_isolation_state (armed:true, enabled reflects live mode) for an armed session', async () => {
-  const { sessionId } = await armedSession();
+test('attach sends network_isolation_state (armed:true, enabled reflects live mode) for an isolation-enabled session', async () => {
+  const { sessionId } = await isolationEnabledSession();
   const chan = fakeChan();
   const handler = attachTerminalHandler(chan);
   await handler.handleMessage({ type: 'attach', sessionId });
@@ -82,7 +82,7 @@ test('attach sends network_isolation_state (armed:true, enabled reflects live mo
 });
 
 test('set_network_isolation flips the real broker and echoes the new state', async () => {
-  const { sessionId, session, broker } = await armedSession();
+  const { sessionId, session, broker } = await isolationEnabledSession();
   const chan = fakeChan();
   const handler = attachTerminalHandler(chan);
   await handler.handleMessage({ type: 'attach', sessionId });
@@ -117,7 +117,7 @@ test('set_network_isolation flips the real broker and echoes the new state', asy
   assert.equal(session.networkIsolateMode, 'enforce', 'flips back');
 });
 
-test('set_network_isolation on a non-armed session echoes armed:false, ok:false (nothing to flip)', async () => {
+test('set_network_isolation on a session without isolation echoes armed:false, ok:false (nothing to flip)', async () => {
   const res = await createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
   cleanupSessionIds.push(res.sessionId);
   const chan = fakeChan();
@@ -130,7 +130,7 @@ test('set_network_isolation on a non-armed session echoes armed:false, ok:false 
 });
 
 test('get_network_isolation reports the current live state without mutating it', async () => {
-  const { sessionId, session } = await armedSession();
+  const { sessionId, session } = await isolationEnabledSession();
   const chan = fakeChan();
   const handler = attachTerminalHandler(chan);
   await handler.handleMessage({ type: 'attach', sessionId });

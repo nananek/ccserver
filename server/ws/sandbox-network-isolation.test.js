@@ -1,7 +1,7 @@
 // Network isolation for the bwrap (Linux) backend (see network-broker.js).
 //
 // buildBwrapNetworkFilterScript/wrapBwrapInnerWithNetworkFilter are pure, and
-// buildSandboxSpawn's arming logic is exercised via the injectable
+// buildSandboxSpawn's isolation-enablement logic is exercised via the injectable
 // deps.startNetworkBroker/deps.dockerSandboxAvailable seams -- nothing here
 // spawns a real broker child process or real rootlesskit/bwrap.
 
@@ -113,7 +113,7 @@ test('buildBwrapNetworkFilterScript: fail-closed when neither iptables nor nft e
   assert.throws(() => runFilterScriptWithStubs([]), 'refuses to run open without firewall tooling');
 });
 
-// --- buildSandboxSpawn arming (hermetic: fake broker, forced tooling state) -
+// --- buildSandboxSpawn isolation enablement (hermetic: fake broker, forced tooling state) -
 
 function fakeBrokerStarter(calls) {
   return (opts) => {
@@ -145,17 +145,17 @@ function bwrapSpawnArgs(spawn) {
   return i >= 0 ? spawn.args.slice(i + 1) : spawn.args;
 }
 
-test('macOSNetworkBrokerInitialState: isolate selects the starting state (always armed)', () => {
-  // macOS Seatbelt launches are always armed so isolation can be applied on
-  // demand via the live toggle: isolate:false starts open, isolate:true
-  // starts enforce.
-  assert.equal(macOSNetworkBrokerInitialState(true), 'enforce');
-  assert.equal(macOSNetworkBrokerInitialState(false), 'open');
-  assert.equal(macOSNetworkBrokerInitialState(undefined), 'open');
-  assert.equal(macOSNetworkBrokerInitialState(null), 'open');
+test('macOSNetworkBrokerInitialState: initialState selects the starting state', () => {
+  // network.initialState is the starting live state of an isolation-enabled launch:
+  // 'open' starts open, anything else starts enforce.
+  assert.equal(macOSNetworkBrokerInitialState('enforce'), 'enforce');
+  assert.equal(macOSNetworkBrokerInitialState('open'), 'open');
+  assert.equal(macOSNetworkBrokerInitialState(undefined), 'enforce');
+  assert.equal(macOSNetworkBrokerInitialState(null), 'enforce');
+  assert.equal(macOSNetworkBrokerInitialState('sometimes'), 'enforce');
 });
 
-test('buildSandboxSpawn: network.isolate:true arms structural isolation (Linux)', { skip: process.platform === 'darwin' }, () => {
+test('buildSandboxSpawn: network.isolate:true enables structural isolation (Linux)', { skip: process.platform === 'darwin' }, () => {
   writeConfig({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false }, network: { isolate: true } });
   const calls = [];
   const spawn = buildSandboxSpawn(
@@ -182,7 +182,7 @@ test('buildSandboxSpawn: network.isolate:true arms structural isolation (Linux)'
   assert.ok(dashC >= 0, 'inner command wrapped as bash -c with the filter prelude');
   assert.ok(spawn.args[dashC + 1].includes('iptables -P OUTPUT DROP'), 'DROP policy in the prelude');
   assert.ok(spawn.args[dashC + 1].includes('CCSBROKER_PORT=54321'), 'broker port in the prelude');
-  // ...and the session is reported armed for the live toggle.
+  // ...and the session is reported isolation-enabled for the live toggle.
   assert.equal(spawn.networkIsolateArmed, true);
   assert.equal(spawn.networkIsolateMode, 'enforce');
   assert.equal(spawn.networkBrokerPort, 54321);
@@ -196,14 +196,27 @@ test('buildSandboxSpawn: a plain bwrap launch (network.isolate off) never starts
     { cwd: tmpRoot, targetCommand: ['claude'], app: 'claude' },
     { startNetworkBroker: fakeBrokerStarter(calls), dockerSandboxAvailable: () => true },
   );
-  assert.equal(calls.length, 0, 'on-demand only on Linux: no broker when network.isolate is off (macOS seatbelt is always armed instead)');
+  assert.equal(calls.length, 0, 'on-demand: no broker when network.isolate is off, on either backend');
   assert.equal(spawn.command, '/usr/bin/bwrap', 'plain bwrap, no rootlesskit wrapping needed for isolation');
   assert.ok(!spawn.args.includes('-c'), 'no firewall prelude wrapping');
   assert.equal(spawn.networkIsolateArmed, false);
   assert.equal(spawn.networkBrokerPort, null);
 });
 
-test('buildSandboxSpawn: docker:true (nested dockerd) alone does not arm network isolation', { skip: process.platform === 'darwin' }, () => {
+test('buildSandboxSpawn: network.initialState:open starts the broker open (Linux)', { skip: process.platform === 'darwin' }, () => {
+  writeConfig({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false }, network: { isolate: true, initialState: 'open' } });
+  const calls = [];
+  const spawn = buildSandboxSpawn(
+    { cwd: tmpRoot, targetCommand: ['claude'], app: 'claude' },
+    { startNetworkBroker: fakeBrokerStarter(calls), dockerSandboxAvailable: () => true },
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].state, 'open', 'starting live state comes from network.initialState');
+  assert.equal(spawn.networkIsolateArmed, true);
+  assert.equal(spawn.networkIsolateMode, 'open');
+});
+
+test('buildSandboxSpawn: docker:true (nested dockerd) alone does not enable network isolation', { skip: process.platform === 'darwin' }, () => {
   // needBwrapIsolation is gated on network.isolate, not on the unrelated
   // `docker` (nested dockerd) flag -- a docker:true launch keeps its
   // existing unrestricted slirp4netns NAT networking unless network.isolate

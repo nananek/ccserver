@@ -361,15 +361,24 @@ test('notify.vikunja defaults: timeoutSeconds=15, verifyTls=true, statusLabelPre
   });
 });
 
-test('network defaults: isolate=false, mode=enforce, empty lists', () => {
+test('network defaults: isolate=false, initialState=enforce, mode=enforce, empty lists', () => {
   withConfig({}, () => {
-    assert.deepEqual(loadSandboxConfig().network, { isolate: false, mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+    assert.deepEqual(loadSandboxConfig().network, { isolate: false, initialState: 'enforce', mode: 'enforce', allowedHosts: [], deniedHosts: [] });
   });
 });
 
-test('network: isolate/mode/allowedHosts/deniedHosts are read from the config file', () => {
-  withConfig({ network: { isolate: true, mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] } }, () => {
-    assert.deepEqual(loadSandboxConfig().network, { isolate: true, mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] });
+test('network: isolate/initialState/mode/allowedHosts/deniedHosts are read from the config file', () => {
+  withConfig({ network: { isolate: true, initialState: 'open', mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] } }, () => {
+    assert.deepEqual(loadSandboxConfig().network, { isolate: true, initialState: 'open', mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] });
+  });
+});
+
+test('network: initialState collapses anything but "open" to "enforce"', () => {
+  withConfig({ network: { initialState: 'sometimes' } }, () => {
+    assert.equal(loadSandboxConfig().network.initialState, 'enforce');
+  });
+  withConfig({ network: { initialState: 'open' } }, () => {
+    assert.equal(loadSandboxConfig().network.initialState, 'open');
   });
 });
 
@@ -392,9 +401,9 @@ test('network: allowedHosts/deniedHosts filter out non-string entries', () => {
 
 test('network: a non-object "network" key collapses to defaults', () => {
   withConfig({ network: 'nope' }, () => {
-    assert.deepEqual(loadSandboxConfig().network, { isolate: false, mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+    assert.deepEqual(loadSandboxConfig().network, { isolate: false, initialState: 'enforce', mode: 'enforce', allowedHosts: [], deniedHosts: [] });
   });
   withConfig({ network: ['nope'] }, () => {
-    assert.deepEqual(loadSandboxConfig().network, { isolate: false, mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+    assert.deepEqual(loadSandboxConfig().network, { isolate: false, initialState: 'enforce', mode: 'enforce', allowedHosts: [], deniedHosts: [] });
   });
 });

@@ -136,8 +136,7 @@ test('audit mode: always allows (and would-deny is only logged)', async () => {
 });
 
 test('state: "open" starts the broker unrestricted, no toggle needed', async () => {
-  // Every Linux bwrap launch now always arms a broker (see
-  // buildSandboxSpawn), starting 'open' when network.isolate was off -- this
+  // An isolation-enabled launch with network.initialState 'open' (see buildSandboxSpawn)
   // must behave exactly like no isolation at all until the running-session
   // toggle flips it, not like the (default) 'enforce' start.
   const targetPort = await startEchoServer();
@@ -146,7 +145,7 @@ test('state: "open" starts the broker unrestricted, no toggle needed', async () 
   assert.equal(broker.state, 'open');
 
   const { statusLine } = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
-  assert.match(statusLine, /^HTTP\/1\.1 200/, 'unarmed-by-config session starts fully open, not enforced');
+  assert.match(statusLine, /^HTTP\/1\.1 200/, 'open-start session begins fully open, not enforced');
 });
 
 test('live toggle: setNetworkBrokerMode flips enforce <-> open without restarting', async () => {

@@ -38,19 +38,24 @@ test('resolveSandboxConfigPath honors CCSERVER_SANDBOX_CONFIG', () => {
 
 test('getNetworkSettings defaults on a missing file', () => {
   try { rmSync(cfgPath, { force: true }); } catch { /* ignore */ }
-  assert.deepEqual(getNetworkSettings(), { isolate: false, mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+  assert.deepEqual(getNetworkSettings(), { isolate: false, initialState: 'enforce', mode: 'enforce', allowedHosts: [], deniedHosts: [] });
 });
 
 test('getNetworkSettings mirrors loadSandboxConfig parsing', () => {
-  writeRaw({ network: { isolate: true, mode: 'audit', allowedHosts: ['api.example.com', 42, null, ''], deniedHosts: ['evil.example', 42, null, ''] } });
-  assert.deepEqual(getNetworkSettings(), { isolate: true, mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] });
+  writeRaw({ network: { isolate: true, initialState: 'open', mode: 'audit', allowedHosts: ['api.example.com', 42, null, ''], deniedHosts: ['evil.example', 42, null, ''] } });
+  assert.deepEqual(getNetworkSettings(), { isolate: true, initialState: 'open', mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] });
+});
+
+test('getNetworkSettings collapses a missing initialState to enforce', () => {
+  writeRaw({ network: { isolate: true } });
+  assert.deepEqual(getNetworkSettings(), { isolate: true, initialState: 'enforce', mode: 'enforce', allowedHosts: [], deniedHosts: [] });
 });
 
 test('updateNetworkSettings creates the file and normalizes entries', () => {
   try { rmSync(cfgPath, { force: true }); } catch { /* ignore */ }
-  const res = updateNetworkSettings({ isolate: true, mode: 'audit', allowedHosts: ['  API.Example.COM ', '.example.net', 'api.example.com'], deniedHosts: ['  Evil.Example ', '.tracker.example'] });
+  const res = updateNetworkSettings({ isolate: true, initialState: 'open', mode: 'audit', allowedHosts: ['  API.Example.COM ', '.example.net', 'api.example.com'], deniedHosts: ['  Evil.Example ', '.tracker.example'] });
   assert.equal(res.ok, true);
-  assert.deepEqual(res.settings, { isolate: true, mode: 'audit', allowedHosts: ['api.example.com', '.example.net'], deniedHosts: ['evil.example', '.tracker.example'] });
+  assert.deepEqual(res.settings, { isolate: true, initialState: 'open', mode: 'audit', allowedHosts: ['api.example.com', '.example.net'], deniedHosts: ['evil.example', '.tracker.example'] });
   const onDisk = JSON.parse(readFileSync(cfgPath, 'utf-8'));
   assert.deepEqual(onDisk.network.allowedHosts, ['api.example.com', '.example.net']);
   assert.deepEqual(onDisk.network.deniedHosts, ['evil.example', '.tracker.example']);
@@ -63,13 +68,15 @@ test('updateNetworkSettings is partial and preserves other keys', () => {
   const onDisk = JSON.parse(readFileSync(cfgPath, 'utf-8'));
   assert.equal(onDisk['//note'], 'keep me', 'comment keys survive');
   assert.equal(onDisk.docker, false, 'unrelated keys survive');
-  assert.deepEqual(onDisk.network, { isolate: false, mode: 'enforce', allowedHosts: ['b.example'] });
+  assert.deepEqual(onDisk.network, { isolate: false, mode: 'enforce', allowedHosts: ['b.example'] }, 'unpatched keys stay untouched on disk');
 });
 
-test('updateNetworkSettings rejects bad isolate/mode/list', () => {
+test('updateNetworkSettings rejects bad isolate/initialState/mode/list', () => {
   writeRaw({});
   for (const patch of [
     { isolate: 'yes' },
+    { initialState: 'sometimes' },
+    { initialState: true },
     { mode: 'sometimes' },
     { allowedHosts: 'api.example.com' },
     { allowedHosts: ['https://api.example.com'] },

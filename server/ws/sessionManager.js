@@ -1712,8 +1712,8 @@ export function sandboxHomeInUsePath(homePath) {
   return n;
 }
 
-// Pushes a replacement allow/deny-list to every live session whose sandbox
-// is armed for network isolation (see network-broker.js): the Settings GUI's
+// Pushes a replacement allow/deny-list to every live session that has network
+// isolation enabled (see network-broker.js): the Settings GUI's
 // save path (server/routes/networkAllowlist.js) calls this so a running
 // session's egress policy updates without a restart. Fails soft per session
 // -- one dead/unreachable broker (session exiting mid-push, race with

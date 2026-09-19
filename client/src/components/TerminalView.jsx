@@ -290,7 +290,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // enforce/open policy, which the button below flips without any sandbox
   // restart. Both arrive from the server (server/ws/terminal.js's
   // network_isolation_state) -- this session record has no local say in
-  // whether it's armed, only in toggling `enabled` once it is.
+  // whether isolation is enabled for it, only in toggling `enabled` once it is.
   const [networkIsolateArmed, setNetworkIsolateArmed] = useState(false);
   const [networkIsolateEnabled, setNetworkIsolateEnabled] = useState(false);
   // Non-sandbox Auto-Y confirmation: enabling Auto-Y outside a sandbox means

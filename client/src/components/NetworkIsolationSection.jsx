@@ -37,16 +37,17 @@ function parseHostLines(text) {
   return (typeof text === 'string' ? text : '').split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
 }
 
-// ネットワーク隔離設定 (sandbox.config.json の network.isolate / mode /
-// allowedHosts / deniedHosts) の GUI 編集。保存はファイルへ書き込み
-// (次回起動から適用) ＋実行中の隔離 armed セッション全件へ自動反映し、
-// 件数を報告する。deniedHosts は許可・open・audit に優先して常に拒否。
-// isolate/mode の実行中変更は対象外 (enforce/open 切替は各セッションの
-// トグル、起動時 audit/enforce は起動時ポリシーのため)。
-// macOS(seatbelt)は常時armedのため isolate は初期stateの意味になり、
-// isolate:false 起動でもトグルで後から enforce できる。
+// ネットワーク隔離設定 (sandbox.config.json の network.isolate /
+// network.initialState / network.mode / allowedHosts / deniedHosts) の GUI
+// 編集。保存はファイルへ書き込み (次回起動から適用) ＋実行中の隔離有効
+// セッション全件へ自動反映し、件数を報告する。deniedHosts は許可・open・
+// audit に優先して常に拒否。isolate/initialState/mode の実行中変更は対象外
+// (enforce/open 切替は各セッションのトグル、起動時 initialState/mode は
+// 起動時ポリシーのため)。isolate:false では隔離機能自体が無効 (ブローカー
+// なし・open egress・トグルなし) になる。
 export default function NetworkIsolationSection() {
   const [isolate, setIsolate] = useState(false);
+  const [initialState, setInitialState] = useState('enforce');
   const [mode, setMode] = useState('enforce');
   const [hostsText, setHostsText] = useState('');
   const [deniedHostsText, setDeniedHostsText] = useState('');
@@ -70,6 +71,7 @@ export default function NetworkIsolationSection() {
       const data = await res.json();
       const s = data.settings || {};
       setIsolate(s.isolate === true);
+      setInitialState(s.initialState === 'open' ? 'open' : 'enforce');
       setMode(s.mode === 'audit' ? 'audit' : 'enforce');
       setHostsText(Array.isArray(s.allowedHosts) ? s.allowedHosts.join('\n') : '');
       setDeniedHostsText(Array.isArray(s.deniedHosts) ? s.deniedHosts.join('\n') : '');
@@ -91,7 +93,7 @@ export default function NetworkIsolationSection() {
     const overlapNote = saveOverlaps.length > 0
       ? `\n⚠️ 許可と拒否の重複 ${saveOverlaps.length} 件あり (拒否が優先されます):\n${saveOverlaps.slice(0, 5).map((o) => `- 許可「${o.allow}」× 拒否「${o.deny}」`).join('\n')}${saveOverlaps.length > 5 ? `\n他 ${saveOverlaps.length - 5} 件` : ''}`
       : '';
-    if (!window.confirm(`ネットワーク隔離設定を保存しますか？\n- isolate: ${isolate ? 'ON' : 'OFF'}\n- mode: ${mode}\n- allowedHosts: ${hosts.length} 件\n- deniedHosts: ${denied.length} 件${overlapNote}\n実行中の隔離セッションへも自動反映されます。`)) return;
+    if (!window.confirm(`ネットワーク隔離設定を保存しますか？\n- isolate: ${isolate ? 'ON' : 'OFF'}\n- initialState: ${initialState}\n- mode: ${mode}\n- allowedHosts: ${hosts.length} 件\n- deniedHosts: ${denied.length} 件${overlapNote}\n実行中の隔離セッションへも自動反映されます。`)) return;
     setSaving(true);
     setSaveError(null);
     setLiveApplied(null);
@@ -99,12 +101,13 @@ export default function NetworkIsolationSection() {
       const res = await authFetch('/api/network-settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isolate, mode, allowedHosts: hosts, deniedHosts: denied }),
+        body: JSON.stringify({ isolate, initialState, mode, allowedHosts: hosts, deniedHosts: denied }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
       const s = body.settings || {};
       setIsolate(s.isolate === true);
+      setInitialState(s.initialState === 'open' ? 'open' : 'enforce');
       setMode(s.mode === 'audit' ? 'audit' : 'enforce');
       setHostsText(Array.isArray(s.allowedHosts) ? s.allowedHosts.join('\n') : '');
       setDeniedHostsText(Array.isArray(s.deniedHosts) ? s.deniedHosts.join('\n') : '');
@@ -131,7 +134,22 @@ export default function NetworkIsolationSection() {
         起動時のネットワークを制限する
       </label>
       <p className="settings-hint">
-        オンで起動したセッションは enforce、外したセッションは open で始まります。実際の遮断は mode が enforce のときのみ行われます (audit では判定を記録するだけで通します)。macOSでは境界自体は常時有効のため、この設定は開始直後のstateのみを決めます (Linuxではオフ=境界なし・トグルなし)。実行中の切替は各セッションの 🌐 トグルで行います。
+        オフでは隔離機能自体が無効になります (ブローカーなし・open egress・🌐トグルなし)。オンで起動したセッションは下の開始状態で始まります。
+      </p>
+      <div className="general-setting-row">
+        <label htmlFor="network-initial-state-select">開始状態 (initialState)</label>
+        <select
+          id="network-initial-state-select"
+          value={initialState}
+          onChange={(e) => setInitialState(e.target.value === 'open' ? 'open' : 'enforce')}
+          disabled={!isolate}
+        >
+          <option value="enforce">enforce (許可リストのみで開始)</option>
+          <option value="open">open (一時解除状態で開始)</option>
+        </select>
+      </div>
+      <p className="settings-hint">
+        隔離を有効にして起動したセッションの開始直後のstateです。実際の遮断は mode が enforce のときのみ行われます (audit では判定を記録するだけで通します)。実行中の切替は各セッションの 🌐 トグルで行います。
       </p>
       <div className="general-setting-row">
         <label htmlFor="network-mode-select">動作モード (mode)</label>
@@ -195,7 +213,7 @@ export default function NetworkIsolationSection() {
       {liveApplied && (
         <p className="settings-hint">
           保存しました。実行中 {liveApplied.ok} セッションへ即時反映
-          {liveApplied.failed > 0 ? ` (${liveApplied.failed} 件失敗)` : ''} ／ isolate・mode の変更は新規起動から適用されます。
+          {liveApplied.failed > 0 ? ` (${liveApplied.failed} 件失敗)` : ''} ／ isolate・initialState・mode の変更は新規起動から適用されます。
         </p>
       )}
       {!liveApplied && (

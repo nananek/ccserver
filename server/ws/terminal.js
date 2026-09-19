@@ -326,9 +326,9 @@ export function attachTerminalHandler(chan) {
             if (ok) session.networkIsolateMode = mode;
             chan.send(JSON.stringify({ ...networkIsolationStateMsg(session), ok }));
           } else if (session) {
-            // Not armed (or the broker handle is somehow incomplete) --
-            // nothing to flip, but the client still gets a definitive
-            // answer instead of silence.
+            // No isolation for this session (or the broker handle is somehow
+            // incomplete) -- nothing to flip, but the client still gets a
+            // definitive answer instead of silence.
             chan.send(JSON.stringify({ ...networkIsolationStateMsg(session), ok: false }));
           }
         }

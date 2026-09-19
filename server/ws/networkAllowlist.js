@@ -1,10 +1,11 @@
 // Read/write boundary for the network-isolation settings in
-// sandbox.config.json (`network.isolate` / `network.mode` /
-// `network.allowedHosts` / `network.deniedHosts`), backing the Settings GUI
-// tab and its auto-apply to running sessions. Shape mirrors
-// loadSandboxConfig()'s network parsing in sandbox.js (isolate off /
-// enforce / string-only allow/deny-lists by default) so the GUI can never
-// show something the launcher resolves differently.
+// sandbox.config.json (`network.isolate` / `network.initialState` /
+// `network.mode` / `network.allowedHosts` / `network.deniedHosts`), backing
+// the Settings GUI tab and its auto-apply to running sessions. Shape mirrors
+// loadSandboxConfig()'s network parsing in sandbox.js (feature off /
+// starting state enforce / mode enforce / string-only allow/deny-lists by
+// default) so the GUI can never show something the launcher resolves
+// differently.
 //
 // The file is read fresh on every call (same as loadSandboxConfig -- no
 // cache), so a successful update governs the next launch with no reload.
@@ -33,9 +34,10 @@ function readRawConfig() {
 }
 
 // Effective network settings exactly as loadSandboxConfig() resolves them
-// (operator-only enforce/audit mode, opt-in isolate, string-only lists).
-// deniedHosts uses the same syntax as allowedHosts but always wins: a
-// denied host is blocked even in live open state and in audit mode.
+// (feature off unless isolate is on; starting live state enforce unless
+// initialState is 'open'; operator-only enforce/audit mode; string-only
+// lists). deniedHosts uses the same syntax as allowedHosts but always wins:
+// a denied host is blocked even in live open state and in audit mode.
 export function getNetworkSettings() {
   const { raw } = readRawConfig();
   const net = (raw && typeof raw === 'object' && raw.network && typeof raw.network === 'object' && !Array.isArray(raw.network))
@@ -43,6 +45,7 @@ export function getNetworkSettings() {
     : {};
   return {
     isolate: net.isolate === true,
+    initialState: net.initialState === 'open' ? 'open' : 'enforce',
     mode: net.mode === 'audit' ? 'audit' : 'enforce',
     allowedHosts: Array.isArray(net.allowedHosts)
       ? net.allowedHosts.filter((h) => typeof h === 'string' && h)
@@ -78,6 +81,12 @@ export function updateNetworkSettings(patch = {}) {
       return { ok: false, code: 'validation', message: 'isolate must be a boolean' };
     }
     net.isolate = patch.isolate;
+  }
+  if (patch.initialState !== undefined) {
+    if (patch.initialState !== 'enforce' && patch.initialState !== 'open') {
+      return { ok: false, code: 'validation', message: 'initialState must be "enforce" or "open"' };
+    }
+    net.initialState = patch.initialState;
   }
   if (patch.mode !== undefined) {
     if (patch.mode !== 'enforce' && patch.mode !== 'audit') {

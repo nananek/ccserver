@@ -1,14 +1,16 @@
 // REST boundary for the network-isolation settings in sandbox.config.json
-// (network.isolate / network.mode / network.allowedHosts /
-// network.deniedHosts), backing the Settings GUI tab. Registered under /api
-// (server/index.js), so the optional token auth hook applies automatically.
+// (network.isolate / network.initialState / network.mode /
+// network.allowedHosts / network.deniedHosts), backing the Settings GUI tab.
+// Registered under /api (server/index.js), so the optional token auth hook
+// applies automatically.
 //
 // GET returns the effective settings. PUT takes a partial patch, writes it to
 // the file (governing the next launch), then auto-applies the allow/deny
-// lists to every live armed session's broker and reports the live counts --
-// running sessions need no restart for the lists themselves. isolate/mode
-// changes are launch-time policy and intentionally never pushed live (the
-// live enforce/open state belongs to each session's own toggle).
+// lists to every live isolation-enabled session's broker and reports the live counts --
+// running sessions need no restart for the lists themselves.
+// isolate/initialState/mode changes are launch-time policy and intentionally
+// never pushed live (the live enforce/open state belongs to each session's
+// own toggle).
 //
 // Status mapping: validation -> 400, internal -> 500.
 
