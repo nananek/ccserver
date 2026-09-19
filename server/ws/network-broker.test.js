@@ -345,3 +345,53 @@ test('denylist endpoint: live replacement via setNetworkBrokerLists', async () =
   assert.match(reopened.statusLine, /^HTTP\/1\.1 200/, 'clearing the deny-list restores the allow verdict');
   reopened.sock.destroy();
 });
+
+// --- RST resilience: client abort after deny must not kill the broker ------
+// Regression for `CONNECT tomadoi.com:443 -> deny (denylist)` followed by
+// `Error: read ECONNRESET / Unhandled 'error' event / exited code=1`.
+// 407/400/403 paths used to end() without any socket 'error' listener, so a
+// client RST after the verdict killed the whole broker process.
+test('client RST after 403/407/400 does not kill the broker', async () => {
+  const targetPort = await startEchoServer();
+  const broker = startNetworkBroker({ allowedHosts: [], deniedHosts: ['127.0.0.1'] });
+  brokers.push(broker);
+  const target = `127.0.0.1:${targetPort}`;
+
+  // 403 deny + abrupt RST (no graceful close, mirrors undici/curl on 403).
+  const denied = await rawConnect(broker.port, target, basicAuth(broker.token));
+  assert.match(denied.statusLine, /^HTTP\/1\.1 403/);
+  denied.sock.destroy(); // RST instead of FIN
+
+  // 407 (no/wrong token) + abrupt RST.
+  const noAuth = await rawConnect(broker.port, target, null);
+  assert.match(noAuth.statusLine, /^HTTP\/1\.1 407/);
+  noAuth.sock.destroy();
+
+  // Fire-and-forget CONNECT that never waits for the verdict, then RST.
+  await new Promise((resolve) => {
+    const sock = netConnect(broker.port, '127.0.0.1', () => {
+      sock.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\nProxy-Authorization: ${basicAuth(broker.token)}\r\n\r\n`);
+      sock.destroy();
+      // Give the broker a tick to hit the ECONNRESET path if unhandled.
+      setTimeout(resolve, 100);
+    });
+    sock.on('error', () => {});
+  });
+
+  // Malformed HTTP + abrupt close (clientError path).
+  await new Promise((resolve) => {
+    const sock = netConnect(broker.port, '127.0.0.1', () => {
+      sock.write('NOT-A-REAL-REQUEST\r\n\r\n');
+      sock.destroy();
+      setTimeout(resolve, 100);
+    });
+    sock.on('error', () => {});
+  });
+
+  // Broker must still be alive and still enforce the denylist.
+  assert.equal(broker.proc.exitCode, null, 'broker survived client RSTs');
+  assert.equal(broker.proc.signalCode, null, 'broker survived client RSTs');
+  const stillDenied = await rawConnect(broker.port, target, basicAuth(broker.token));
+  assert.match(stillDenied.statusLine, /^HTTP\/1\.1 403/, 'same broker still answers after RSTs');
+  stillDenied.sock.destroy();
+});

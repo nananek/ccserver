@@ -243,6 +243,11 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
   const token = process.env.CCSANDBOX_NETWORK_BROKER_TOKEN || '';
 
   const server = createServer((req, res) => {
+    // Socket aborts (RST after 403/407/404 etc.) surface as 'error' on
+    // req/res -- without these the broker dies with Unhandled 'error'
+    // (ECONNRESET). Intentionally silent: only CONNECT verdicts are logged.
+    req.on('error', () => {});
+    res.on('error', () => {});
     // Only the admin control endpoints are served as plain HTTP; everything
     // else on this port is proxy traffic (CONNECT, handled below) or noise.
     if (req.method === 'POST' && (req.url === '/__admin/mode' || req.url === '/__admin/allowlist')) {
@@ -332,6 +337,13 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
   });
 
   server.on('connect', (req, clientSocket, head) => {
+    // Must be first: 407/400/403 paths end() the socket and return early,
+    // but a client RST after that (normal for 403-deny) emits ECONNRESET.
+    // Without this the process dies with Unhandled 'error' event. Silent by
+    // design -- only the CONNECT allow/deny line above is logged.
+    let upstream = null;
+    clientSocket.on('error', () => { try { upstream?.destroy(); } catch { /* ignore */ } });
+    req.on('error', () => {});
     const suppliedToken = tokenFromProxyAuth(req.headers['proxy-authorization']);
     if (!tokenEq(suppliedToken, token)) {
       clientSocket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="network-broker"\r\n\r\n');
@@ -356,15 +368,19 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
       clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
-    const upstream = netConnect(target.port, target.host, () => {
+    const upstreamConn = netConnect(target.port, target.host, () => {
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      if (head && head.length) upstream.write(head);
-      upstream.pipe(clientSocket);
-      clientSocket.pipe(upstream);
+      if (head && head.length) upstreamConn.write(head);
+      upstreamConn.pipe(clientSocket);
+      clientSocket.pipe(upstreamConn);
     });
-    upstream.on('error', () => { try { clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch { /* ignore */ } });
-    clientSocket.on('error', () => { try { upstream.destroy(); } catch { /* ignore */ } });
+    upstream = upstreamConn;
+    upstreamConn.on('error', () => { try { clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch { /* ignore */ } });
   });
+
+  // Malformed HTTP on the port (not a valid CONNECT/admin request) -- destroy
+  // silently so one bad client can't kill the broker. No log: deny log only.
+  server.on('clientError', (err, sock) => { try { sock.destroy(); } catch { /* ignore */ } });
 
   server.on('error', (err) => {
     process.stderr.write(`[network-broker] listen failed: ${err.message}\n`);
