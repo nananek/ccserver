@@ -134,14 +134,47 @@ export function normalizeAllowedHosts(entries) {
 
 export const MAX_ALLOWED_HOSTS = 200;
 
+// Canonical parse of the `network` key of sandbox.config.json into the
+// shape both loadSandboxConfig() (sandbox.js, what a launch actually
+// applies) and getNetworkSettings() (networkAllowlist.js, what the Settings
+// GUI shows/saves) need: isolate is the master switch (false by default: no
+// broker, open egress, no live toggle on either backend); initialState
+// selects the broker's starting live state ('enforce' by default, 'open'
+// when explicitly set); mode is operator-only ('audit' never blocks a
+// non-denied host, but deniedHosts still blocks even in audit);
+// allowedHosts/deniedHosts use the same exact-or-leading-dot syntax and are
+// only filtered to strings here (full validation/normalization on write is
+// normalizeAllowedHosts above -- this parse just mirrors what's already on
+// disk). Both call sites used to hand-duplicate this parse, kept in sync
+// only by a comment claiming they mirrored each other; extracted here so
+// they structurally cannot drift again.
+export function normalizeNetworkSettings(rawNetwork) {
+  const net = (rawNetwork && typeof rawNetwork === 'object' && !Array.isArray(rawNetwork)) ? rawNetwork : {};
+  return {
+    isolate: net.isolate === true,
+    initialState: net.initialState === 'open' ? 'open' : 'enforce',
+    mode: net.mode === 'audit' ? 'audit' : 'enforce',
+    allowedHosts: Array.isArray(net.allowedHosts)
+      ? net.allowedHosts.filter((h) => typeof h === 'string' && h)
+      : [],
+    deniedHosts: Array.isArray(net.deniedHosts)
+      ? net.deniedHosts.filter((h) => typeof h === 'string' && h)
+      : [],
+  };
+}
+
 // Splits a CONNECT target ("host:port") into its parts. IPv6 literals
 // ("[::1]:443") are deliberately unsupported (returns null) -- allow-listing
 // is hostname-based, and no supported agent CLI's model API is IPv6-literal.
+// The host is stripped of a trailing root-label dot ("evil.example." ==
+// "evil.example" in DNS) before matching, so a trailing-dot FQDN can't be
+// used to slip past isHostAllowed/isHostDenied.
 function parseConnectTarget(target) {
   if (typeof target !== 'string' || target.startsWith('[')) return null;
   const idx = target.lastIndexOf(':');
   if (idx <= 0) return null;
-  const host = target.slice(0, idx);
+  let host = target.slice(0, idx);
+  if (host.endsWith('.')) host = host.slice(0, -1);
   const port = Number(target.slice(idx + 1));
   if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
   return { host, port };
@@ -342,6 +375,12 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
     // design -- only the CONNECT allow/deny line above is logged.
     let upstream = null;
     clientSocket.on('error', () => { try { upstream?.destroy(); } catch { /* ignore */ } });
+    // 'close' without a prior 'error' is the common case for a peer that
+    // vanishes silently (flaky network, black hole, half-open) rather than
+    // RST'ing -- without also cleaning up here, the other side's socket
+    // (and its fd) leaks for the rest of this long-lived, per-session
+    // broker process's life.
+    clientSocket.on('close', () => { try { upstream?.destroy(); } catch { /* ignore */ } });
     req.on('error', () => {});
     const suppliedToken = tokenFromProxyAuth(req.headers['proxy-authorization']);
     if (!tokenEq(suppliedToken, token)) {
@@ -367,14 +406,24 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
       clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
+    // Pre-200 only: once the 200 is sent and piping starts (below), an
+    // upstream error must just tear the tunnel down -- writing more HTTP
+    // bytes over an error at that point would corrupt whatever TLS/
+    // application data is already flowing through the pipe.
+    const respond502 = () => { try { clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch { /* ignore */ } };
     const upstreamConn = netConnect(target.port, target.host, () => {
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      upstreamConn.off('error', respond502);
+      upstreamConn.on('error', () => { try { clientSocket.destroy(); } catch { /* ignore */ } });
       if (head && head.length) upstreamConn.write(head);
       upstreamConn.pipe(clientSocket);
       clientSocket.pipe(upstreamConn);
     });
     upstream = upstreamConn;
-    upstreamConn.on('error', () => { try { clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch { /* ignore */ } });
+    upstreamConn.on('error', respond502);
+    // See clientSocket's matching 'close' handler above for why this is
+    // needed alongside 'error'.
+    upstreamConn.on('close', () => { try { clientSocket.destroy(); } catch { /* ignore */ } });
   });
 
   // Malformed HTTP on the port (not a valid CONNECT/admin request) -- destroy

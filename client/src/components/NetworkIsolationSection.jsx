@@ -89,9 +89,11 @@ export default function NetworkIsolationSection() {
   const handleSave = async () => {
     const hosts = parseHostLines(hostsText);
     const denied = parseHostLines(deniedHostsText);
-    const saveOverlaps = findAllowDenyOverlaps(hosts, denied);
-    const overlapNote = saveOverlaps.length > 0
-      ? `\n⚠️ 許可と拒否の重複 ${saveOverlaps.length} 件あり (拒否が優先されます):\n${saveOverlaps.slice(0, 5).map((o) => `- 許可「${o.allow}」× 拒否「${o.deny}」`).join('\n')}${saveOverlaps.length > 5 ? `\n他 ${saveOverlaps.length - 5} 件` : ''}`
+    // Reuse the already-memoized value (derived from the same hostsText/
+    // deniedHostsText state above) instead of recomputing the O(allow×deny)
+    // overlap scan from scratch.
+    const overlapNote = overlaps.length > 0
+      ? `\n⚠️ 許可と拒否の重複 ${overlaps.length} 件あり (拒否が優先されます):\n${overlaps.slice(0, 5).map((o) => `- 許可「${o.allow}」× 拒否「${o.deny}」`).join('\n')}${overlaps.length > 5 ? `\n他 ${overlaps.length - 5} 件` : ''}`
       : '';
     if (!window.confirm(`ネットワーク隔離設定を保存しますか？\n- isolate: ${isolate ? 'ON' : 'OFF'}\n- initialState: ${initialState}\n- mode: ${mode}\n- allowedHosts: ${hosts.length} 件\n- deniedHosts: ${denied.length} 件${overlapNote}\n実行中の隔離セッションへも自動反映されます。`)) return;
     setSaving(true);

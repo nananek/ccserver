@@ -314,8 +314,9 @@ export function releaseSeatbeltOverlay(ownedFiles, peerFileLists) {
 export const SEATBELT_ISOLATED_BROKER_HOST = '127.0.0.1';
 
 export function seatbeltIsolatedNetworkRules(brokerPort) {
-  if (!Number.isInteger(Number(brokerPort))) {
-    throw new Error('seatbeltIsolatedNetworkRules: brokerPort must be an integer TCP port');
+  const port = Number(brokerPort);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error('seatbeltIsolatedNetworkRules: brokerPort must be a valid TCP port');
   }
   return [
     ';; network isolation: IP egress only toward the per-session broker.',
@@ -483,8 +484,11 @@ export function buildSeatbeltProfileText({
     // addition (an extra `(allow network*)` anywhere would silently win back
     // open egress for the overlapping operation). denyNetOutboundLiterals
     // stays last in both modes so the control-plane unix pins keep beating
-    // the unix-socket allow.
-    ...(networkIsolate && Number.isInteger(networkIsolate.brokerPort)
+    // the unix-socket allow. An invalid brokerPort with networkIsolate set
+    // must fail closed (seatbeltIsolatedNetworkRules throws), not silently
+    // fall back to the broad allow below -- that fallback is for
+    // networkIsolate genuinely being unset (isolation off).
+    ...(networkIsolate
       ? seatbeltIsolatedNetworkRules(networkIsolate.brokerPort)
       : ['(allow network*)']),
     // Host control-plane unix sockets (pty-host RPC, meta broker) live under

@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test';
 
-// Settings 左メニュー: 4項目の表示と切り替えを検証する。
-// サンドボックス/ペアリング/パスキーの実データには依存しない (見出しと
-// 空表示のいずれかが現れればよい) ため、bwrap 等の環境条件は不要。
+// Settings 左メニュー: 5項目の表示と切り替えを検証する。
+// サンドボックス/ネットワーク隔離/ペアリング/パスキーの実データには依存しない
+// (見出しと空表示のいずれかが現れればよい) ため、bwrap 等の環境条件は不要。
 test.describe('Settings left menu', () => {
   test('menus switch sections', async ({ page }) => {
     await page.goto('/');
@@ -13,10 +13,10 @@ test.describe('Settings left menu', () => {
     const settings = page.locator('.settings-view');
     await expect(settings).toBeVisible();
 
-    // 左メニューの4項目がタブとして表示される (一般が先頭)。
+    // 左メニューの5項目がタブとして表示される (一般が先頭)。
     const sidebar = settings.locator('.settings-sidebar');
     const tabs = sidebar.getByRole('tab');
-    await expect(tabs).toHaveText(['一般', '作成済みサンドボックス', 'ペアリング済みインスタンス', 'パスキー']);
+    await expect(tabs).toHaveText(['一般', '作成済みサンドボックス', 'ネットワーク隔離', 'ペアリング済みインスタンス', 'パスキー']);
     const panel = settings.locator('[role="tabpanel"]');
     await expect(panel).toBeVisible();
 
@@ -28,6 +28,11 @@ test.describe('Settings left menu', () => {
     await sidebar.getByRole('tab', { name: '作成済みサンドボックス' }).click();
     await expect(sidebar.getByRole('tab', { name: '作成済みサンドボックス' })).toHaveAttribute('aria-selected', 'true');
     await expect(panel).toContainText('作成済みサンドボックス');
+
+    // ネットワーク隔離に切り替え。
+    await sidebar.getByRole('tab', { name: 'ネットワーク隔離' }).click();
+    await expect(sidebar.getByRole('tab', { name: 'ネットワーク隔離' })).toHaveAttribute('aria-selected', 'true');
+    await expect(panel).toContainText('ネットワーク隔離');
 
     // ペアリングに切り替え。
     await sidebar.getByRole('tab', { name: 'ペアリング済みインスタンス' }).click();

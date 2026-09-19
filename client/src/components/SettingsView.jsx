@@ -11,7 +11,7 @@ import NetworkIsolationSection from './NetworkIsolationSection.jsx';
 const SETTINGS_MENUS = [
   { key: 'general', label: '一般' },
   { key: 'sandboxes', label: '作成済みサンドボックス' },
-  { key: 'network', label: 'ネットワーク分離' },
+  { key: 'network', label: 'ネットワーク隔離' },
   { key: 'pairing', label: 'ペアリング済みインスタンス' },
   { key: 'passkeys', label: 'パスキー' },
 ];

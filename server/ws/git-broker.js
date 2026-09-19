@@ -566,6 +566,10 @@ function parseServeArgs(argv) {
   return out;
 }
 
-if (process.argv[2] === '--serve') {
+// process.argv[1] === __filename matters because network-broker.js imports
+// helpers from this module and also uses '--serve' as its own argv[2]: without
+// this check, every network-broker child process would inadvertently run this
+// module's runServer() too (see network-broker.js's matching guard).
+if (process.argv[2] === '--serve' && process.argv[1] === __filename) {
   runServer(parseServeArgs(process.argv.slice(3)));
 }

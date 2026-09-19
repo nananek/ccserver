@@ -407,7 +407,17 @@ export class PtyStore {
       exitSignal: e.exitSignal,
       createdAt: e.createdAt,
       viewers: e.subscribers.size,
-      sandbox: { active: e.sandbox.active, docker: e.sandbox.docker },
+      // networkBrokerPort/Token/IsolateArmed/IsolateMode included so
+      // server本体's reattachLiveSession (a pty-host-side crash respawns each
+      // session with a brand-new broker, fresh port+token) can pick up the
+      // CURRENT broker instead of trusting its own pre-crash restore
+      // metadata, which would otherwise point at a broker
+      // NetworkBrokerRegistry.reapOrphans() has already SIGTERM'd.
+      sandbox: {
+        active: e.sandbox.active, docker: e.sandbox.docker,
+        networkBrokerPort: e.sandbox.networkBrokerPort, networkBrokerToken: e.sandbox.networkBrokerToken,
+        networkIsolateArmed: e.sandbox.networkIsolateArmed, networkIsolateMode: e.sandbox.networkIsolateMode,
+      },
     }));
   }
 

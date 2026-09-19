@@ -1723,21 +1723,40 @@ export function sandboxHomeInUsePath(homePath) {
 // call is made straight from this process even for a pty-host-hosted
 // session whose broker child lives in a different process.
 export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }) {
-  let ok = 0;
-  let failed = 0;
-  for (const s of sessions.values()) {
-    if (!s.networkIsolateArmed || !s.networkBrokerPort || !s.networkBrokerToken) continue;
+  const armed = [...sessions.values()].filter((s) => s.networkIsolateArmed && s.networkBrokerPort && s.networkBrokerToken);
+  // Parallel, not sequential: each session's push is an independent HTTP
+  // round-trip to a different broker process, so awaiting them one at a time
+  // in a for...of would block the Settings PUT handler (which awaits this)
+  // for up to N round-trips instead of max(). One dead/unreachable broker
+  // (session exiting mid-push, race with teardown) must not stop the rest --
+  // same fail-soft posture as before, just concurrent.
+  const results = await Promise.all(armed.map(async (s) => {
     try {
-      const applied = await setNetworkBrokerLists(
+      return await setNetworkBrokerLists(
         { port: s.networkBrokerPort, token: s.networkBrokerToken },
         { allowedHosts, deniedHosts },
       );
-      if (applied) ok++; else failed++;
     } catch {
-      failed++;
+      return false;
     }
+  }));
+  let ok = 0;
+  let failed = 0;
+  for (const applied of results) {
+    if (applied) ok++; else failed++;
   }
   return { ok, failed };
+}
+
+// Persists the 🌐 toggle's live enforce/open choice for a session (see
+// terminal.js's set_network_isolation) so a server本体 restart -- pty-host
+// and its broker child survive it -- rebuilds the session record with the
+// state the user last chose instead of falling back to the launch-time
+// networkIsolateMode still on disk (which would otherwise leave the UI's
+// security-boundary indicator showing a mode that doesn't match live
+// traffic until toggled again).
+export function persistSessionNetworkIsolateMode(id, mode) {
+  patchPtyHostSessionMeta(id, { networkIsolateMode: mode });
 }
 
 // Detach the schedule from a session that's going away, but keep it armed so it
@@ -2682,12 +2701,31 @@ async function reattachLiveSession(live, meta, client, shardIndex) {
       cols: live.cols,
       rows: live.rows,
       pid: live.pid,
-      sandbox: { active: live.sandbox?.active, docker: live.sandbox?.docker, stateDir: meta.sandboxStateDir },
+      sandbox: {
+        active: live.sandbox?.active, docker: live.sandbox?.docker, stateDir: meta.sandboxStateDir,
+        networkBrokerPort: live.sandbox?.networkBrokerPort ?? null,
+        networkBrokerToken: live.sandbox?.networkBrokerToken ?? null,
+        networkIsolateArmed: !!live.sandbox?.networkIsolateArmed,
+        networkIsolateMode: live.sandbox?.networkIsolateMode ?? null,
+      },
     });
   } catch (err) {
     console.warn(`[session] ${live.id}: restore attach failed, skipping (${err.message})`);
     return false;
   }
+
+  // A pty-host-side crash respawns each session with a brand-new broker
+  // (fresh port+token; the pre-crash one gets SIGTERM'd by
+  // NetworkBrokerRegistry.reapOrphans()) -- so the live values pty-host's
+  // list() just reported (above, threaded through as rpty.sandboxInfo) win
+  // over whatever this restore metadata still has on disk from before the
+  // crash. Without this, every 🌐 toggle and allow/deny-list save would
+  // silently fail against the dead old port for this session's whole
+  // remaining lifetime.
+  const liveNetworkBrokerPort = rpty.sandboxInfo?.networkBrokerPort ?? null;
+  const liveNetworkBrokerToken = rpty.sandboxInfo?.networkBrokerToken ?? null;
+  const liveNetworkIsolateArmed = !!rpty.sandboxInfo?.networkIsolateArmed;
+  const liveNetworkIsolateMode = rpty.sandboxInfo?.networkIsolateMode ?? null;
 
   buildSessionRecord(live.id, rpty, {
     ...meta,
@@ -2701,7 +2739,23 @@ async function reattachLiveSession(live, meta, client, shardIndex) {
     // shardIndex field at all): every such entry was necessarily created
     // by the sole pre-Step5 instance, i.e. shard 0.
     shardIndex: meta.shardIndex ?? shardIndex,
+    networkBrokerPort: liveNetworkBrokerPort,
+    networkBrokerToken: liveNetworkBrokerToken,
+    networkIsolateArmed: liveNetworkIsolateArmed,
+    networkIsolateMode: liveNetworkIsolateMode,
   });
+
+  // Persist the live values back so a subsequent server本体 restart (without
+  // another pty-host crash in between) restores from the current broker
+  // instead of the stale one again.
+  if (liveNetworkBrokerPort !== (meta.networkBrokerPort ?? null) || liveNetworkBrokerToken !== (meta.networkBrokerToken ?? null)) {
+    patchPtyHostSessionMeta(live.id, {
+      networkBrokerPort: liveNetworkBrokerPort,
+      networkBrokerToken: liveNetworkBrokerToken,
+      networkIsolateArmed: liveNetworkIsolateArmed,
+      networkIsolateMode: liveNetworkIsolateMode,
+    });
+  }
 
   // Replays the retained backlog through the exact same onData path a
   // live session uses (buildSessionRecord wired it above) -- a

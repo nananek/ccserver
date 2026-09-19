@@ -1,11 +1,10 @@
 // Read/write boundary for the network-isolation settings in
 // sandbox.config.json (`network.isolate` / `network.initialState` /
 // `network.mode` / `network.allowedHosts` / `network.deniedHosts`), backing
-// the Settings GUI tab and its auto-apply to running sessions. Shape mirrors
-// loadSandboxConfig()'s network parsing in sandbox.js (feature off /
-// starting state enforce / mode enforce / string-only allow/deny-lists by
-// default) so the GUI can never show something the launcher resolves
-// differently.
+// the Settings GUI tab and its auto-apply to running sessions. Parsing is
+// network-broker.js's normalizeNetworkSettings, shared with
+// loadSandboxConfig()'s network parsing in sandbox.js, so the GUI cannot show
+// something the launcher resolves differently.
 //
 // The file is read fresh on every call (same as loadSandboxConfig -- no
 // cache), so a successful update governs the next launch with no reload.
@@ -15,7 +14,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeAllowedHosts, MAX_ALLOWED_HOSTS } from './network-broker.js';
+import { normalizeAllowedHosts, MAX_ALLOWED_HOSTS, normalizeNetworkSettings } from './network-broker.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -37,23 +36,12 @@ function readRawConfig() {
 // (feature off unless isolate is on; starting live state enforce unless
 // initialState is 'open'; operator-only enforce/audit mode; string-only
 // lists). deniedHosts uses the same syntax as allowedHosts but always wins:
-// a denied host is blocked even in live open state and in audit mode.
+// a denied host is blocked even in live open state and in audit mode. Parse
+// is shared with loadSandboxConfig() (sandbox.js) via
+// normalizeNetworkSettings so the two structurally cannot drift apart.
 export function getNetworkSettings() {
   const { raw } = readRawConfig();
-  const net = (raw && typeof raw === 'object' && raw.network && typeof raw.network === 'object' && !Array.isArray(raw.network))
-    ? raw.network
-    : {};
-  return {
-    isolate: net.isolate === true,
-    initialState: net.initialState === 'open' ? 'open' : 'enforce',
-    mode: net.mode === 'audit' ? 'audit' : 'enforce',
-    allowedHosts: Array.isArray(net.allowedHosts)
-      ? net.allowedHosts.filter((h) => typeof h === 'string' && h)
-      : [],
-    deniedHosts: Array.isArray(net.deniedHosts)
-      ? net.deniedHosts.filter((h) => typeof h === 'string' && h)
-      : [],
-  };
+  return normalizeNetworkSettings(raw && typeof raw === 'object' ? raw.network : undefined);
 }
 
 // Partial update: only keys present in `patch` change; everything else in the

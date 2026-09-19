@@ -14,6 +14,7 @@ import {
   computeNextLocalTime,
   resolveMcpSocketForSession,
   buildScheduleStateMsg as scheduleStateMsg,
+  persistSessionNetworkIsolateMode,
 } from './sessionManager.js';
 import { setNetworkBrokerMode } from './network-broker.js';
 
@@ -323,7 +324,10 @@ export function attachTerminalHandler(chan) {
           if (session && session.networkIsolateArmed && session.networkBrokerPort && session.networkBrokerToken) {
             const mode = msg.enabled ? 'enforce' : 'open';
             const ok = await setNetworkBrokerMode({ port: session.networkBrokerPort, token: session.networkBrokerToken }, mode);
-            if (ok) session.networkIsolateMode = mode;
+            if (ok) {
+              session.networkIsolateMode = mode;
+              persistSessionNetworkIsolateMode(currentSessionId, mode);
+            }
             chan.send(JSON.stringify({ ...networkIsolationStateMsg(session), ok }));
           } else if (session) {
             // No isolation for this session (or the broker handle is somehow

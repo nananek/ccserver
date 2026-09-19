@@ -16,6 +16,12 @@
 #   CCSANDBOX_DOCKERD_TAG     this launch's tag, recorded in the status file
 #                             below iff it wins the flock (see sandbox.js's
 #                             dockerdStatus/dockerAvailability)
+#   CCSANDBOX_DOCKER_NO_IPTABLES "1" when network isolation is also active:
+#                             starts dockerd with --iptables=false so it never
+#                             inserts its own FORWARD/NAT rules on top of the
+#                             netns firewall (see buildBwrapNetworkFilterScript
+#                             in sandbox.js). Container port publishing
+#                             (`docker run -p`) does not work in this mode.
 #   CCSANDBOX_PROVISION_RTK / CCSANDBOX_PROVISION_CRG  "1" to provision
 #   CCSANDBOX_RTK_VERSION / CCSANDBOX_RTK_URL / CCSANDBOX_RTK_SHA256 / CCSANDBOX_CRG_VERSION
 #   HOME, XDG_RUNTIME_DIR, PATH, DOCKER_HOST
@@ -50,10 +56,15 @@ if [ "${CCSANDBOX_DOCKER:-0}" = "1" ]; then
       # startup order. Written just before exec (nothing after this
       # subshell's exec runs) and never blocks/affects the flock itself.
       echo "${CCSANDBOX_DOCKERD_TAG:-}" > "$STATUS" 2>/dev/null || true
+      DOCKERD_IPTABLES_ARGS=""
+      if [ "${CCSANDBOX_DOCKER_NO_IPTABLES:-0}" = "1" ]; then
+        DOCKERD_IPTABLES_ARGS="--iptables=false"
+      fi
       exec dockerd \
         --host="$DOCKER_HOST" \
         --data-root="$DATA_ROOT" \
         --exec-root="$XDG_RUNTIME_DIR/docker-exec" \
+        $DOCKERD_IPTABLES_ARGS \
         >"$LOG" 2>&1
     fi
   ) &
