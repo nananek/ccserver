@@ -42,6 +42,7 @@ export class PtyStore {
   constructor({
     onEvent = () => {},
     gitBrokerRegistry = null,
+    networkBrokerRegistry = null,
     sessionTimeoutMs = resolveSessionTimeoutMs(),
     exitedTimeoutMs = resolveExitedTimeoutMs(),
     outputBufferMaxBytes = OUTPUT_BUFFER_MAX_BYTES,
@@ -49,6 +50,7 @@ export class PtyStore {
     this._sessions = new Map();
     this._onEvent = onEvent;
     this._gitBrokerRegistry = gitBrokerRegistry;
+    this._networkBrokerRegistry = networkBrokerRegistry;
     this._sessionTimeoutMs = sessionTimeoutMs;
     this._exitedTimeoutMs = exitedTimeoutMs;
     this._outputBufferMaxBytes = outputBufferMaxBytes;
@@ -114,6 +116,12 @@ export class PtyStore {
     let commitGuardDir = null;
     let seatbeltDir = null;
     let seatbeltFiles = null;
+    let networkBrokerPort = null;
+    let networkBrokerToken = null;
+    let networkIsolateArmed = false;
+    let networkIsolateMode = null;
+    let sandboxNetworkBrokerProc = null;
+    let sandboxNetworkBrokerDir = null;
     if (sandbox) {
       let built;
       try {
@@ -140,6 +148,17 @@ export class PtyStore {
       seatbeltDir = built.seatbeltDir || null;
       // Orchestrator rule copies in the project dir (macOS only).
       seatbeltFiles = built.seatbeltFiles || null;
+      // Network-isolation broker (see network-broker.js): port/token/armed/
+      // mode are plain data relayed back to server本体 (see spawn()'s return
+      // value below) for its running-session toggle's live HTTP calls;
+      // sandboxNetworkBrokerProc/Dir are this process's own teardown handle,
+      // same treatment as gitBrokerProc/Dir.
+      networkBrokerPort = built.networkBrokerPort || null;
+      networkBrokerToken = built.networkBrokerToken || null;
+      networkIsolateArmed = !!built.networkIsolateArmed;
+      networkIsolateMode = built.networkIsolateMode || null;
+      sandboxNetworkBrokerProc = built.sandboxNetworkBrokerProc || null;
+      sandboxNetworkBrokerDir = built.sandboxNetworkBrokerDir || null;
     }
 
     let ptyProcess;
@@ -161,6 +180,8 @@ export class PtyStore {
       if (gitBrokerDir) { try { rmSync(gitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (commitGuardDir) { try { rmSync(commitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (seatbeltDir) { try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (sandboxNetworkBrokerProc) { try { sandboxNetworkBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
+      if (sandboxNetworkBrokerDir) { try { rmSync(sandboxNetworkBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (Array.isArray(seatbeltFiles)) {
         // Same guard as destroy(): a concurrent launch from the same
         // orchestratorDir may already own these paths.
@@ -188,7 +209,11 @@ export class PtyStore {
       subscribers: new Set(), // opaque connIds (see class doc above)
       timeoutTimer: null,
       createdAt: Date.now(),
-      sandbox: { active: sandbox, docker, stateDir, gitBrokerProc, gitBrokerDir, commitGuardDir, seatbeltDir, seatbeltFiles },
+      sandbox: {
+        active: sandbox, docker, stateDir, gitBrokerProc, gitBrokerDir, commitGuardDir, seatbeltDir, seatbeltFiles,
+        networkBrokerPort, networkBrokerToken, networkIsolateArmed, networkIsolateMode,
+        sandboxNetworkBrokerProc, sandboxNetworkBrokerDir,
+      },
     };
 
     ptyProcess.onData((data) => this._handleData(entry, data));
@@ -197,6 +222,9 @@ export class PtyStore {
     this._sessions.set(sessionId, entry);
     if (gitBrokerProc && this._gitBrokerRegistry) {
       this._gitBrokerRegistry.record(sessionId, { pid: gitBrokerProc.pid, dir: gitBrokerDir });
+    }
+    if (sandboxNetworkBrokerProc && this._networkBrokerRegistry) {
+      this._networkBrokerRegistry.record(sessionId, { pid: sandboxNetworkBrokerProc.pid, dir: sandboxNetworkBrokerDir });
     }
 
     return {
@@ -207,7 +235,15 @@ export class PtyStore {
       // seatbeltFiles: read-only reference so server本体's fireSchedule
       // retire-first guard can see an exited predecessor still owns the
       // orchestrator overlay. Teardown stays pty-host's (plan5 2.1).
-      sandbox: { active: sandbox, docker, stateDir, seatbeltFiles: seatbeltFiles || null },
+      // networkBrokerPort/Token/IsolateArmed/IsolateMode: plain data server本体
+      // needs for its running-session toggle's live HTTP calls to this
+      // broker -- unlike the broker's own process/dir (this process's
+      // teardown handle, never sent across the RPC boundary, see
+      // sandboxNetworkBrokerProc/Dir above).
+      sandbox: {
+        active: sandbox, docker, stateDir, seatbeltFiles: seatbeltFiles || null,
+        networkBrokerPort, networkBrokerToken, networkIsolateArmed, networkIsolateMode,
+      },
     };
   }
 
@@ -339,6 +375,12 @@ export class PtyStore {
     if (entry.sandbox.seatbeltDir) {
       try { rmSync(entry.sandbox.seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
     }
+    if (entry.sandbox.sandboxNetworkBrokerProc) {
+      try { entry.sandbox.sandboxNetworkBrokerProc.kill('SIGTERM'); } catch { /* already dead */ }
+    }
+    if (entry.sandbox.sandboxNetworkBrokerDir) {
+      try { rmSync(entry.sandbox.sandboxNetworkBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
     if (Array.isArray(entry.sandbox.seatbeltFiles)) {
       releaseSeatbeltOverlay(
         entry.sandbox.seatbeltFiles,
@@ -346,6 +388,7 @@ export class PtyStore {
       );
     }
     this._gitBrokerRegistry?.forget(id);
+    this._networkBrokerRegistry?.forget(id);
 
     this._emit(entry, { type: 'event', event: 'destroyed', id });
     this._sessions.delete(id);

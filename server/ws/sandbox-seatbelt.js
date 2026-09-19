@@ -27,6 +27,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { buildIsolatedProxyEnv } from './network-broker.js';
 
 // Base dir for per-launch seatbelt runtime dirs. os.tmpdir() honors $TMPDIR,
 // which on macOS is the per-user /var/folders/... path. Overridable via
@@ -283,6 +284,51 @@ export function releaseSeatbeltOverlay(ownedFiles, peerFileLists) {
   }
 }
 
+// Network isolation for the seatbelt backend (see network-broker.js). Unlike
+// bwrap (a real netns + kernel firewall), sandbox-exec has no network
+// namespace: this is a Seatbelt policy flip from broad `(allow network*)` to
+// deny-by-default-except-the-broker's-loopback-port. Defense in depth, not a
+// hard boundary -- a same-UID process can still recover the broker's token
+// via KERN_PROCARGS2 (see the sysctl-read comment block below), so this
+// keeps a well-behaved process off the network without stopping a
+// deliberately hostile one from finding the token and dialing the broker
+// itself (which is still allow-list-scoped, unlike a raw network escape).
+//
+// SBPL SYNTAX (verified live on macOS 14.8.5 arm64 -- these filters are
+// sparsely documented, do not "simplify" without re-verifying):
+//   - the tcp/udp remote filter takes a bare "host:port" STRING:
+//     `(remote tcp "localhost:54321")`. A nested `(remote ip ...)` /
+//     `(remote address ...)` form does NOT compile (`remote expects string
+//     argument` / `unbound variable: address`).
+//   - the host part must be `*` or the literal name `localhost` (a numeric
+//     `127.0.0.1` is rejected at compile time with `host must be * or
+//     localhost in network address`). Verified live that this `localhost`
+//     rule matches actual 127.0.0.1 connections (nc to 127.0.0.1:port
+//     succeeds) while any other port is refused.
+//   - the broker is always dialed at the numeric 127.0.0.1 (see
+//     SEATBELT_ISOLATED_BROKER_HOST), never via the `localhost` name, so no
+//     DNS resolution is needed inside the sandbox at all.
+// Emission ORDER is load-bearing (last-match-wins): broad denies first, the
+// broker re-allow after them, and the caller keeps denyNetOutboundLiterals
+// last so the control-plane unix pins still beat the unix-socket allow below.
+export const SEATBELT_ISOLATED_BROKER_HOST = '127.0.0.1';
+
+export function seatbeltIsolatedNetworkRules(brokerPort) {
+  if (!Number.isInteger(Number(brokerPort))) {
+    throw new Error('seatbeltIsolatedNetworkRules: brokerPort must be an integer TCP port');
+  }
+  return [
+    ';; network isolation: IP egress only toward the per-session broker.',
+    ';; Direct connections fail closed; the broker resolves+connects',
+    ';; host-side, and the proxy host is an IP literal so the sandbox',
+    ';; needs no DNS of its own.',
+    '(allow network-outbound (remote unix-socket))',
+    '(deny network-outbound (remote tcp))',
+    '(deny network-outbound (remote udp))',
+    `(allow network-outbound (remote tcp "localhost:${Number(brokerPort)}"))`,
+  ];
+}
+
 // Assemble the profile text. Each list holds ready-made `regex #"..."` bodies
 // (see subtreeRegex) or exact-path literals. Seatbelt is last-match-wins:
 // the deny lines beat the allow lines ONLY because they are emitted AFTER
@@ -302,6 +348,9 @@ export function releaseSeatbeltOverlay(ownedFiles, peerFileLists) {
 //                    (emitted after the broad network allow; connect() is
 //                    mediated as network-outbound, so file-write* pins
 //                    cannot stop it)
+//   networkIsolate              - null (default, historical open egress) or
+//                    { brokerPort } for a strict broker-only profile (see
+//                    seatbeltIsolatedNetworkRules above)
 export function buildSeatbeltProfileText({
   readRegexes = [],
   readMetadataRegexes = [],
@@ -317,6 +366,7 @@ export function buildSeatbeltProfileText({
   denyNetOutboundLiterals = [],
   runtimeDirDenyWriteRegexes = [],
   runtimeSocketAllowLiterals = [],
+  networkIsolate = null,
 } = {}) {
   const line = (op, sel) => `  (${op} ${sel})`;
   const regexes = (list) => list.map((r) => `(regex #"${r}")`).join(' ');
@@ -428,7 +478,15 @@ export function buildSeatbeltProfileText({
     //     the numeric-MIB path (see the KNOWN LIMITATION above) is unaffected.
     '(deny sysctl-read (sysctl-name "hw.ephemeral_storage") (sysctl-name "kern.osvariant_status") (sysctl-name "kern.procargs") (sysctl-name "kern.procargs2"))',
     '(allow mach-lookup)',
-    '(allow network*)',
+    // Open egress (default) or strict broker-only egress (isolated launches).
+    // The isolated rules are emitted INSTEAD of the broad allow -- never in
+    // addition (an extra `(allow network*)` anywhere would silently win back
+    // open egress for the overlapping operation). denyNetOutboundLiterals
+    // stays last in both modes so the control-plane unix pins keep beating
+    // the unix-socket allow.
+    ...(networkIsolate && Number.isInteger(networkIsolate.brokerPort)
+      ? seatbeltIsolatedNetworkRules(networkIsolate.brokerPort)
+      : ['(allow network*)']),
     // Host control-plane unix sockets (pty-host RPC, meta broker) live under
     // hostRuntimeDir() -- inside the broad tmp write rules on darwin.
     // connect() is mediated as network-outbound (a file-write* pin cannot
@@ -571,6 +629,12 @@ function expandAgainstHome(p, hostHome) {
 //                    the whole tree is deny-written so a sandboxed process
 //                    cannot rename/rmdir it and break other sessions' control
 //                    plane, with only this session's own sockets re-allowed
+//   networkBroker  - { port, token } | null (see network-broker.js): when set
+//                    the profile switches to broker-only IP egress (see
+//                    seatbeltIsolatedNetworkRules) and HTTP(S)_PROXY points at
+//                    the loopback broker. Null keeps historical open egress.
+//                    Raw non-proxy TCP (direct curl without the proxy env,
+//                    direct ssh) fails closed while set -- intended.
 //
 // Returns { dir, profilePath, binDir, hooksDir, homeDir, ruleCopies,
 // overlayFiles, nodeBin, env }. `dir` is the single teardown unit (also
@@ -604,6 +668,7 @@ export function buildSeatbeltLaunch({
   ghPaths = [],
   controlSockDenies = [],
   hostRuntimeDir = null,
+  networkBroker = null,
 }) {
   // Defense in depth behind buildSandboxSpawn / sessionManager's cwd='/'
   // refusal: a projectDir of "/" makes subtrees('/') compile to "^/(/.*)?$",
@@ -911,6 +976,19 @@ export function buildSeatbeltLaunch({
     // "no mounts -> no /ccserver-sandbox-provision.sh" warning, while
     // buildMinimalSandboxSpawn passes null. Nothing provision-related is
     // read or emitted here.
+
+    // Network isolation (see network-broker.js + seatbeltIsolatedNetworkRules
+    // above): the broker lives on host loopback, directly reachable since
+    // seatbelt is unsandboxed at the network layer. Same shared proxy-env
+    // builder as the bwrap backend; operator extraEnv below still wins on
+    // conflict (deliberate operator override, like bwrap).
+    if (networkBroker && Number.isInteger(networkBroker.port) && networkBroker.token) {
+      Object.assign(env, buildIsolatedProxyEnv({
+        host: SEATBELT_ISOLATED_BROKER_HOST,
+        port: networkBroker.port,
+        token: networkBroker.token,
+      }));
+    }
 
     // Operator env last, so it overrides the defaults above (like bwrap).
     for (const [k, v] of Object.entries(extraEnv || {})) {
@@ -1226,6 +1304,11 @@ export function buildSeatbeltLaunch({
         ? [...new Set(ghPaths)].filter((p) => p && p !== join(binDir, 'gh'))
         : [],
       denyNetOutboundLiterals: netDenyLiterals,
+      // Network isolation (see seatbeltIsolatedNetworkRules above): null
+      // keeps historical open egress; set only when this launch requested it.
+      networkIsolate: networkBroker && Number.isInteger(networkBroker.port)
+        ? { brokerPort: networkBroker.port }
+        : undefined,
     });
     writeFileSync(profilePath, profileText, { mode: 0o600 });
     return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, overlayFiles: overlayFiles.length > 0 ? [...overlayFiles] : null, nodeBin, env };

@@ -1,0 +1,609 @@
+// Host-side network-egress broker for sandboxed sessions.
+//
+// Runs OUTSIDE the sandbox (spawned by sandbox.js as a plain child process
+// of ccserver, exactly like git-broker.js), and is the ONLY path a
+// network-isolated session's traffic is allowed to leave through. Each
+// backend forces this by construction, not by convention:
+//   - bwrap:  the rootlesskit-created netns gets an in-netns firewall rule
+//     that drops everything except this broker's port.
+//   - seatbelt: the profile flips to deny-by-default network, with a single
+//     explicit allow for this broker's loopback port.
+// See sandbox.js's buildSandboxSpawn for how each backend wires this up.
+//
+// This file is dual-purpose like git-broker.js: `startNetworkBroker()` is
+// called from sandbox.js to launch a fresh instance per session, and when
+// executed directly with `--serve` it IS that instance.
+//
+// Protocol: a plain HTTP CONNECT proxy (Node's http server + 'connect'
+// event) -- NOT a full forward/MITM proxy. TLS goes through end-to-end
+// untouched, so the broker only ever sees `CONNECT host:port`, never
+// plaintext or the TLS session itself. This is what makes hostname-based
+// allow-listing work against CDN-fronted APIs with rotating IPs, which a
+// plain IP/port firewall rule cannot do reliably.
+//
+// Proxy auth: the broker binds every interface (0.0.0.0), not just loopback
+// -- bwrap sessions reach it through slirp4netns's host-loopback forwarding
+// (the sandbox's netns sees the broker at its slirp4netns gateway address,
+// not at its own loopback); seatbelt sessions are unsandboxed at the network
+// layer so it's directly reachable either way. Net effect: ANY local
+// process -- and, since this is 0.0.0.0, anything that can otherwise reach
+// this host's network interfaces at all -- can dial the port, not just this
+// session's sandbox. A per-session token is therefore required on every
+// CONNECT via standard
+// HTTP proxy credentials (`Proxy-Authorization: Basic base64(x:<token>)`,
+// which curl/undici/most HTTP clients send automatically when the proxy URL
+// itself carries a userinfo part -- see buildProxyUrl below) -- without it,
+// one session could relay traffic through another session's allow-list.
+// Same audit-layer caveat as git-broker's own token (see its handleRequest
+// comment): on macOS a same-UID peer can still recover env vars via
+// KERN_PROCARGS2, so this is defense in depth, not a hard boundary there.
+//
+// Two independent axes of "how permissive right now":
+//   - `mode` (operator-only, from sandbox.config.json's network.mode):
+//     'enforce' (default) actually blocks disallowed hosts; 'audit' logs
+//     every CONNECT's allow/deny verdict but never blocks non-denied hosts
+//     -- for an operator to empirically discover the real host set an agent
+//     CLI needs before flipping a project to 'enforce'. The deny-list
+//     (network.deniedHosts) always blocks, even in audit mode.
+//   - live `state` ('enforce' | 'open'), mutated at runtime via the
+//     `/__admin/mode` control endpoint (see setNetworkBrokerMode below):
+//     this is what the running-session UI toggle flips. It starts at
+//     whichever state the launcher armed this session with (see
+//     startNetworkBroker's `state` param) -- 'audit' mode overrides the live
+//     state entirely (audit always behaves as if 'open' while still logging
+//     verdicts, except for denied hosts which stay blocked). The network
+//     *boundary* itself (bwrap firewall / seatbelt profile) never changes
+//     after launch -- only this in-process policy flag does, which is why
+//     the toggle is instant and needs no sandbox restart.
+
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { connect as netConnect } from 'node:net';
+import { createServer, request as httpRequest } from 'node:http';
+import { execFileSync, spawn } from 'node:child_process';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
+
+const __filename = fileURLToPath(import.meta.url);
+
+// True when `host` matches an entry in `list`: either an exact
+// hostname, or (for an entry starting with '.') that suffix domain or any of
+// its subdomains. Pure, case-insensitive, no I/O -- the enforcement decision
+// itself, testable without spinning up the real proxy server. Port is
+// deliberately not part of matching: CONNECT for HTTPS is always :443 in
+// practice, and over-scoping to specific ports adds surface for no benefit.
+// Shared by the allow-list and the deny-list (deniedHosts): both use the
+// exact-or-leading-dot syntax.
+export function isHostMatched(host, list) {
+  if (typeof host !== 'string' || !host) return false;
+  const h = host.toLowerCase();
+  for (const entry of list || []) {
+    if (typeof entry !== 'string' || !entry) continue;
+    const e = entry.toLowerCase();
+    if (e.startsWith('.')) {
+      const suffix = e.slice(1);
+      if (h === suffix || h.endsWith(e)) return true;
+    } else if (h === e) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isHostAllowed(host, allowedHosts) {
+  return isHostMatched(host, allowedHosts);
+}
+
+// Deny-list match: same syntax as the allow-list. A match here always wins
+// over the allow-list, the live open state, and audit mode.
+export function isHostDenied(host, deniedHosts) {
+  return isHostMatched(host, deniedHosts);
+}
+
+// Canonical allow-list entry validation/normalization, shared by the config
+// store (server/ws/networkAllowlist.js) and the live child endpoint below so
+// the file and a running broker can never disagree on what an entry means.
+// Accepts what isHostAllowed can match: an exact hostname or a leading-dot
+// suffix (`.example.com` covers the domain and its subdomains). Anything
+// else (schemes, ports, wildcards, whitespace, IPv6 literals) is rejected:
+// the broker matches CONNECT hostnames only, so such entries could never
+// match and would be dead data. Returns { hosts, rejected }: `hosts` is
+// trimmed, lowercased and deduplicated; `rejected` holds the raw inputs that
+// failed, for 400 responses.
+export function normalizeAllowedHosts(entries) {
+  const hosts = [];
+  const rejected = [];
+  const seen = new Set();
+  // One DNS label: alphanumerics + interior hyphens. Dots separate labels;
+  // a single leading dot marks a suffix entry (its remainder must itself be
+  // a valid hostname).
+  const LABEL = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?';
+  const HOSTNAME_RE = new RegExp(`^${LABEL}(?:\\.${LABEL})*$`);
+  for (const raw of Array.isArray(entries) ? entries : []) {
+    if (typeof raw !== 'string') { rejected.push(raw); continue; }
+    const e = raw.trim().toLowerCase();
+    const body = e.startsWith('.') ? e.slice(1) : e;
+    if (!e || e.length > 253 || !HOSTNAME_RE.test(body)) { rejected.push(raw); continue; }
+    if (seen.has(e)) continue;
+    seen.add(e);
+    hosts.push(e);
+  }
+  return { hosts, rejected };
+}
+
+export const MAX_ALLOWED_HOSTS = 200;
+
+// Splits a CONNECT target ("host:port") into its parts. IPv6 literals
+// ("[::1]:443") are deliberately unsupported (returns null) -- allow-listing
+// is hostname-based, and no supported agent CLI's model API is IPv6-literal.
+function parseConnectTarget(target) {
+  if (typeof target !== 'string' || target.startsWith('[')) return null;
+  const idx = target.lastIndexOf(':');
+  if (idx <= 0) return null;
+  const host = target.slice(0, idx);
+  const port = Number(target.slice(idx + 1));
+  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
+  return { host, port };
+}
+
+// Constant-time compare that never throws and rejects length mismatches
+// (mirrors git-broker.js's tokenEq).
+function tokenEq(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0) return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  try { return timingSafeEqual(ab, bb); } catch { return false; }
+}
+
+// Extracts the token from a `Proxy-Authorization: Basic base64(x:<token>)`
+// header (the form curl/undici send when the proxy URL carries userinfo --
+// see buildProxyUrl). Any other scheme, or a malformed header, yields null.
+function tokenFromProxyAuth(header) {
+  if (typeof header !== 'string') return null;
+  const m = /^Basic\s+(\S+)$/i.exec(header.trim());
+  if (!m) return null;
+  let decoded;
+  try {
+    decoded = Buffer.from(m[1], 'base64').toString('utf-8');
+  } catch {
+    return null;
+  }
+  const sep = decoded.indexOf(':');
+  if (sep === -1) return null;
+  return decoded.slice(sep + 1);
+}
+
+// Same, for the admin endpoint's `Authorization: Bearer <token>`.
+function tokenFromBearerAuth(header) {
+  if (typeof header !== 'string') return null;
+  const m = /^Bearer\s+(\S+)$/i.exec(header.trim());
+  return m ? m[1] : null;
+}
+
+// The proxy URL a sandboxed session should set HTTP_PROXY/HTTPS_PROXY to:
+// embeds the per-session token as Basic-auth userinfo so well-behaved HTTP
+// clients (curl, undici, requests, ...) send it automatically on every
+// CONNECT without any extra configuration inside the sandbox.
+export function networkBrokerProxyUrl({ host = '127.0.0.1', port, token }) {
+  return `http://networkbroker:${encodeURIComponent(token)}@${host}:${port}`;
+}
+
+// The proxy env block every isolated backend injects (bwrap and seatbelt
+// share this so proxy-detection quirks can't drift between them: curl/Python
+// check lowercase, Node/Go commonly check uppercase, and agent CLIs bundle
+// whichever HTTP client their runtime ships -- setting only one casing risks
+// the env var being silently ignored, which looks identical to "no network
+// at all" behind a structural boundary). `noProxyExtra` covers same-network
+// peers that must never be routed through the proxy; loopback is always
+// exempt.
+export function buildIsolatedProxyEnv({ host = '127.0.0.1', port, token, noProxyExtra = [] }) {
+  const proxyUrl = networkBrokerProxyUrl({ host, port, token });
+  const noProxy = ['localhost', '127.0.0.1', ...noProxyExtra].join(',');
+  return {
+    HTTP_PROXY: proxyUrl,
+    HTTPS_PROXY: proxyUrl,
+    http_proxy: proxyUrl,
+    https_proxy: proxyUrl,
+    NO_PROXY: noProxy,
+    no_proxy: noProxy,
+  };
+}
+
+function runServer({ allowlist, denylist, mode, portFile, state: initialState }) {
+  let allowedHosts;
+  try {
+    allowedHosts = JSON.parse(readFileSync(allowlist, 'utf-8'));
+    if (!Array.isArray(allowedHosts)) allowedHosts = [];
+  } catch {
+    allowedHosts = []; // fail closed if the allow-list can't be read
+  }
+  // Deny-list: same syntax as the allow-list. Missing/unreadable means
+  // "nothing denied" (allow-side fail-closed is unchanged).
+  let deniedHosts = [];
+  if (denylist) {
+    try {
+      const parsed = JSON.parse(readFileSync(denylist, 'utf-8'));
+      if (Array.isArray(parsed)) deniedHosts = parsed;
+    } catch {
+      deniedHosts = [];
+    }
+  }
+  const initialMode = mode === 'audit' ? 'audit' : 'enforce';
+  // Live policy state, mutated only by the /__admin/mode endpoint. 'audit'
+  // is not a valid live state (it's the operator-only startup mode above);
+  // when initialMode is 'audit' every CONNECT is logged but always allowed,
+  // regardless of `state`. Starts at whatever the launcher armed this
+  // session with (see startNetworkBroker's `initialState`) -- every Linux
+  // bwrap launch always starts a broker now (see buildSandboxSpawn), so this
+  // is 'open' (unrestricted, same as no isolation) unless network.isolate
+  // (or a live toggle) asked to start 'enforce'.
+  let state = initialState === 'open' ? 'open' : 'enforce';
+  const token = process.env.CCSANDBOX_NETWORK_BROKER_TOKEN || '';
+
+  const server = createServer((req, res) => {
+    // Only the admin control endpoints are served as plain HTTP; everything
+    // else on this port is proxy traffic (CONNECT, handled below) or noise.
+    if (req.method === 'POST' && (req.url === '/__admin/mode' || req.url === '/__admin/allowlist')) {
+      const suppliedToken = tokenFromBearerAuth(req.headers.authorization);
+      if (!tokenEq(suppliedToken, token)) {
+        res.writeHead(401).end('unauthorized');
+        return;
+      }
+      let body = '';
+      req.on('data', (c) => { body += c; if (body.length > 65536) req.destroy(); });
+      req.on('end', () => {
+        if (req.url === '/__admin/mode') {
+          let parsed;
+          try { parsed = JSON.parse(body); } catch { parsed = null; }
+          if (!parsed || (parsed.mode !== 'enforce' && parsed.mode !== 'open')) {
+            res.writeHead(400).end('bad mode');
+            return;
+          }
+          state = parsed.mode;
+          process.stdout.write(`[network-broker] live state -> ${state}\n`);
+          res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, mode: state }));
+          return;
+        }
+        // Live allow/deny-list replacement (GUI save with auto-apply): the
+        // same validation as the config store, so a list the file accepts
+        // is always one a running broker accepts too. `hosts` and
+        // `deniedHosts` are each optional; only present keys are replaced
+        // (back-compat: old clients sending only `hosts` keep working).
+        let parsed;
+        try { parsed = JSON.parse(body); } catch { parsed = null; }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({
+            error: 'bad allowlist',
+            rejected: [],
+          }));
+          return;
+        }
+        const hasAllow = parsed.hosts !== undefined;
+        const hasDeny = parsed.deniedHosts !== undefined;
+        if (!hasAllow && !hasDeny) {
+          res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({
+            error: 'bad allowlist',
+            rejected: [],
+          }));
+          return;
+        }
+        let nextAllowed = allowedHosts;
+        let nextDenied = deniedHosts;
+        if (hasAllow) {
+          if (!Array.isArray(parsed.hosts)) {
+            res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'bad allowlist', rejected: [] }));
+            return;
+          }
+          const { hosts, rejected } = normalizeAllowedHosts(parsed.hosts);
+          if (rejected.length > 0 || hosts.length > MAX_ALLOWED_HOSTS) {
+            res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({
+              error: 'bad allowlist',
+              rejected,
+            }));
+            return;
+          }
+          nextAllowed = hosts;
+        }
+        if (hasDeny) {
+          if (!Array.isArray(parsed.deniedHosts)) {
+            res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'bad denylist', rejected: [] }));
+            return;
+          }
+          const { hosts, rejected } = normalizeAllowedHosts(parsed.deniedHosts);
+          if (rejected.length > 0 || hosts.length > MAX_ALLOWED_HOSTS) {
+            res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({
+              error: 'bad denylist',
+              rejected,
+            }));
+            return;
+          }
+          nextDenied = hosts;
+        }
+        allowedHosts = nextAllowed;
+        deniedHosts = nextDenied;
+        process.stdout.write(`[network-broker] live allowlist -> ${allowedHosts.length} host(s), denylist -> ${deniedHosts.length} host(s)\n`);
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, count: allowedHosts.length, deniedCount: deniedHosts.length }));
+      });
+      return;
+    }
+    res.writeHead(404).end();
+  });
+
+  server.on('connect', (req, clientSocket, head) => {
+    const suppliedToken = tokenFromProxyAuth(req.headers['proxy-authorization']);
+    if (!tokenEq(suppliedToken, token)) {
+      clientSocket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="network-broker"\r\n\r\n');
+      return;
+    }
+    const target = parseConnectTarget(req.url);
+    if (!target) {
+      clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+      return;
+    }
+    const denied = isHostDenied(target.host, deniedHosts);
+    const allowed = isHostMatched(target.host, allowedHosts);
+    // Deny-list wins over everything: allow-list, live open state, and
+    // audit mode. Audit still logs the verdict but no longer passes a
+    // denied host through.
+    const effectiveAllow = !denied && (allowed || initialMode === 'audit' || state === 'open');
+    process.stdout.write(
+      `[network-broker] CONNECT ${target.host}:${target.port} -> ${effectiveAllow ? 'allow' : 'deny'}`
+      + `${denied ? ' (denylist)' : initialMode === 'audit' && !allowed ? ' (audit: would deny)' : ''}\n`,
+    );
+    if (!effectiveAllow) {
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+      return;
+    }
+    const upstream = netConnect(target.port, target.host, () => {
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head && head.length) upstream.write(head);
+      upstream.pipe(clientSocket);
+      clientSocket.pipe(upstream);
+    });
+    upstream.on('error', () => { try { clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch { /* ignore */ } });
+    clientSocket.on('error', () => { try { upstream.destroy(); } catch { /* ignore */ } });
+  });
+
+  server.on('error', (err) => {
+    process.stderr.write(`[network-broker] listen failed: ${err.message}\n`);
+    process.exit(1);
+  });
+
+  // Bound on every interface, not just loopback -- a bwrap session reaches
+  // this via slirp4netns's host-loopback forwarding at its netns gateway
+  // address, not at its own loopback. This does widen exposure beyond "local
+  // processes only" -- see the file header's proxy-auth comment: the
+  // per-session token is the actual access boundary here, same posture as
+  // git-broker's own token, not the bind address.
+  server.listen(0, '0.0.0.0', () => {
+    const { port } = server.address();
+    try {
+      writeFileSync(portFile, String(port));
+    } catch (e) {
+      process.stderr.write(`[network-broker] failed to write port file: ${e.message}\n`);
+      process.exit(1);
+    }
+    process.stdout.write(`[network-broker] listening on 127.0.0.1:${port} (${allowedHosts.length} host(s) allow-listed, ${deniedHosts.length} host(s) deny-listed, mode=${initialMode}, state=${state})\n`);
+  });
+
+  const shutdown = () => { try { server.close(); } catch { /* ignore */ } process.exit(0); };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+}
+
+// Launch a fresh network-broker instance for a sandbox session. Mirrors
+// startGitBroker's shape closely: writes the allow-list, spawns `--serve`
+// with a per-session token, busy-waits for the child to report its chosen
+// port, and probes it before returning. Throws on any failure (fail-closed
+// at the infra level, not just at the traffic level) -- callers must treat a
+// thrown startNetworkBroker as a launch failure, same as a failed
+// startGitBroker for a git repo.
+//
+//   mode  - operator-only (sandbox.config.json's network.mode): 'enforce'
+//           (default) or 'audit' (never blocks, only logs verdicts).
+//   state - the LIVE toggle's starting value: 'enforce' or 'open' (default).
+//           Every Linux bwrap launch calls this (see buildSandboxSpawn)
+//           regardless of whether network.isolate is on -- `state` is what
+//           encodes that setting, not whether a broker exists at all. The
+//           running-session toggle (terminal.js's set_network_isolation ->
+//           setNetworkBrokerMode) flips this same value later; it works
+//           identically regardless of the state this call started with.
+//   deniedHosts - absolute deny-list (sandbox.config.json's
+//           network.deniedHosts): same syntax as allowedHosts, but a match
+//           here always wins -- even in live 'open' state and in audit mode.
+export function startNetworkBroker({ allowedHosts = [], deniedHosts = [], mode = 'enforce', state = 'enforce' }) {
+  const dir = join(hostRuntimeDir(), `ccserver-network-broker-${randomUUID()}`);
+  try {
+    ensureHostRuntimeDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch (e) {
+    throw new Error(`network broker failed to start: ${e.message}`);
+  }
+  const allowlistPath = join(dir, 'allowlist.json');
+  const denylistPath = join(dir, 'denylist.json');
+  const portFile = join(dir, 'port');
+  try {
+    writeFileSync(allowlistPath, JSON.stringify(allowedHosts));
+    writeFileSync(denylistPath, JSON.stringify(deniedHosts));
+  } catch (e) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    throw new Error(`network broker failed to start: ${e.message}`);
+  }
+
+  const token = randomBytes(24).toString('base64url');
+  const serveArgs = [__filename, '--serve', '--allowlist', allowlistPath, '--denylist', denylistPath, '--mode', mode, '--state', state, '--port-file', portFile];
+  const proc = spawn(process.execPath, serveArgs, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, CCSANDBOX_NETWORK_BROKER_TOKEN: token },
+  });
+
+  proc.stdout.on('data', (d) => process.stdout.write(`[network-broker] ${d}`));
+  proc.stderr.on('data', (d) => process.stderr.write(`[network-broker] ${d}`));
+
+  let spawnError = null;
+  proc.on('error', (err) => { spawnError = err; });
+  proc.on('exit', (code, signal) => {
+    if (code !== 0 && code !== null) {
+      process.stderr.write(`[network-broker] broker (pid ${proc.pid}) exited code=${code} signal=${signal}\n`);
+    } else if (signal) {
+      process.stderr.write(`[network-broker] broker (pid ${proc.pid}) terminated signal=${signal}\n`);
+    }
+  });
+
+  // Same synchronous busy-wait rationale as startGitBroker: buildSandboxSpawn
+  // is synchronous and every backend's arg-builder needs the broker's real
+  // port to set HTTP_PROXY/HTTPS_PROXY, which only exists once the child has
+  // actually bound its listen socket.
+  const deadline = Date.now() + 2000;
+  while (!existsSync(portFile) && Date.now() < deadline) {
+    if (spawnError) break;
+    if (proc.exitCode !== null || proc.signalCode !== null) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+
+  if (spawnError || proc.exitCode !== null || proc.signalCode !== null || !existsSync(portFile)) {
+    const reason = spawnError ? spawnError.message : proc.exitCode !== null ? `exited code=${proc.exitCode}` : proc.signalCode ? `signal=${proc.signalCode}` : 'port file not ready within 2s';
+    try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    throw new Error(`network broker failed to start: ${reason}`);
+  }
+
+  let port;
+  try {
+    port = Number(readFileSync(portFile, 'utf-8').trim());
+    if (!Number.isInteger(port) || port <= 0) throw new Error('malformed port file');
+  } catch (e) {
+    try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    throw new Error(`network broker failed to start: ${e.message}`);
+  }
+
+  const probed = probeBrokerSync(port, token);
+  if (!probed) {
+    try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    throw new Error(`network broker readiness probe failed on port ${port}`);
+  }
+
+  return { proc, dir, port, token, allowedHosts, deniedHosts, mode, state };
+}
+
+// Synchronous readiness probe: connect and confirm the port actually accepts
+// TCP connections (mirrors git-broker's probeBrokerSync, simplified since
+// there's no line-JSON handshake to speak here -- a bare connect+close is
+// enough to distinguish "listening" from "nothing there yet").
+function probeBrokerSync(port, token, timeoutMs = 700) {
+  void token; // reserved: a full CONNECT probe could also verify auth, kept minimal for now
+  const probeScript = `
+    const net=require('net');
+    const port=Number(process.argv[1]);
+    const c=net.createConnection(port,'127.0.0.1');
+    const t=setTimeout(()=>process.exit(2), ${timeoutMs});
+    c.on('connect',()=>{ clearTimeout(t); c.end(); process.exit(0); });
+    c.on('error',()=>{ clearTimeout(t); process.exit(1); });
+  `;
+  try {
+    execFileSync(process.execPath, ['-e', probeScript, String(port)], {
+      timeout: timeoutMs + 500,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Flips a running broker's live enforce/open state (the running-session UI
+// toggle -- see server/ws/terminal.js's `set_network_isolation` handler).
+// Does NOT touch the sandbox's network boundary itself, only this broker's
+// in-process policy flag -- instant, no sandbox restart. Resolves to true on
+// success, false on any failure (network error, wrong token, broker gone).
+export async function setNetworkBrokerMode({ port, token }, mode) {
+  if (mode !== 'enforce' && mode !== 'open') return false;
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ mode });
+    const req = httpRequest({
+      host: '127.0.0.1',
+      port,
+      path: '/__admin/mode',
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      },
+      timeout: 2000,
+    }, (res) => {
+      res.on('data', () => {});
+      res.on('end', () => resolve(res.statusCode === 200));
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.end(body);
+  });
+}
+
+// Pushes replacement allow/deny-lists to a running broker (the GUI save
+// path with auto-apply -- see sessionManager's pushAllowlistToArmedSessions).
+// Same shape as setNetworkBrokerMode: true on HTTP 200, false on any
+// failure. Both lists are optional; only present keys are replaced.
+// setNetworkBrokerAllowlist stays as the allow-only back-compat wrapper.
+export async function setNetworkBrokerLists({ port, token }, { allowedHosts, deniedHosts } = {}) {
+  const bodyObj = {};
+  if (allowedHosts !== undefined) {
+    if (!Array.isArray(allowedHosts)) return false;
+    bodyObj.hosts = allowedHosts;
+  }
+  if (deniedHosts !== undefined) {
+    if (!Array.isArray(deniedHosts)) return false;
+    bodyObj.deniedHosts = deniedHosts;
+  }
+  if (Object.keys(bodyObj).length === 0) return false;
+  return new Promise((resolve) => {
+    const body = JSON.stringify(bodyObj);
+    const req = httpRequest({
+      host: '127.0.0.1',
+      port,
+      path: '/__admin/allowlist',
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      },
+      timeout: 2000,
+    }, (res) => {
+      res.on('data', () => {});
+      res.on('end', () => resolve(res.statusCode === 200));
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.end(body);
+  });
+}
+
+export async function setNetworkBrokerAllowlist({ port, token }, hosts) {
+  if (!Array.isArray(hosts)) return false;
+  return setNetworkBrokerLists({ port, token }, { allowedHosts: hosts });
+}
+
+// Entry point when this file is spawned directly by startNetworkBroker().
+function parseServeArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--allowlist') out.allowlist = argv[++i];
+    else if (argv[i] === '--denylist') out.denylist = argv[++i];
+    else if (argv[i] === '--mode') out.mode = argv[++i];
+    else if (argv[i] === '--state') out.state = argv[++i];
+    else if (argv[i] === '--port-file') out.portFile = argv[++i];
+  }
+  return out;
+}
+
+// See git-broker.js's matching guard for why argv[1] === __filename matters
+// here too, symmetrically (this file is itself importable).
+if (process.argv[2] === '--serve' && process.argv[1] === __filename) {
+  runServer(parseServeArgs(process.argv.slice(3)));
+}

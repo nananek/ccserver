@@ -284,6 +284,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
   const [showAutoYesLog, setShowAutoYesLog] = useState(false);
+  // Network isolation (see network-broker.js): `armed` is fixed for this
+  // session's whole life (it was launched with isolation on, so a broker/
+  // boundary genuinely exists); `enabled` is the broker's current live
+  // enforce/open policy, which the button below flips without any sandbox
+  // restart. Both arrive from the server (server/ws/terminal.js's
+  // network_isolation_state) -- this session record has no local say in
+  // whether it's armed, only in toggling `enabled` once it is.
+  const [networkIsolateArmed, setNetworkIsolateArmed] = useState(false);
+  const [networkIsolateEnabled, setNetworkIsolateEnabled] = useState(false);
   // Non-sandbox Auto-Y confirmation: enabling Auto-Y outside a sandbox means
   // permission prompts are auto-approved straight on the host (no bwrap
   // isolation), so a first-time "are you sure" dialog with a dismiss flag
@@ -880,6 +889,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             setAutoYes(msg.enabled);
             setAutoYesLog(msg.log || []);
             break;
+          case 'network_isolation_state':
+            setNetworkIsolateArmed(!!msg.armed);
+            setNetworkIsolateEnabled(!!msg.enabled);
+            break;
           case 'schedule_state':
             setSchedule(msg.scheduled || null);
             setScheduleError(msg.error || '');
@@ -1471,6 +1484,22 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 </button>
               )}
             </>
+          )}
+          {networkIsolateArmed && (
+            <button
+              className={`btn network-isolate-toggle${networkIsolateEnabled ? ' active' : ''}`}
+              onClick={() => {
+                const ws = wsRef.current;
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'set_network_isolation', enabled: !networkIsolateEnabled }));
+                }
+              }}
+              title={networkIsolateEnabled
+                ? 'ネットワーク隔離: 有効 (許可リストのみ通信可、クリックで一時解除)'
+                : 'ネットワーク隔離: 一時解除中 (全通信許可、クリックで再度有効化)'}
+            >
+              <svg className="header-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" style={{ color: 'var(--text-muted)' }} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="6"/><ellipse cx="8" cy="8" rx="2.8" ry="6"/><path d="M2 8h12"/>{networkIsolateEnabled && <line x1="2" y1="2" x2="14" y2="14" strokeWidth="2"/>}</svg>
+            </button>
           )}
           <button
             className={`btn schedule-toggle${schedule ? ' active' : ''}`}

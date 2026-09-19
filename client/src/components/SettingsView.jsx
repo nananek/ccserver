@@ -3,6 +3,7 @@ import SandboxSection from './SandboxSection.jsx';
 import PairedInstancesSection from './PairedInstancesSection.jsx';
 import GeneralSection from './GeneralSection.jsx';
 import PasskeysSection from './PasskeysSection.jsx';
+import NetworkIsolationSection from './NetworkIsolationSection.jsx';
 
 // 左メニュー定義。項目追加時はここに1行＋対応コンポーネントの
 // 条件分岐を追加するだけで済む。選択状態は useState のみ
@@ -10,6 +11,7 @@ import PasskeysSection from './PasskeysSection.jsx';
 const SETTINGS_MENUS = [
   { key: 'general', label: '一般' },
   { key: 'sandboxes', label: '作成済みサンドボックス' },
+  { key: 'network', label: 'ネットワーク分離' },
   { key: 'pairing', label: 'ペアリング済みインスタンス' },
   { key: 'passkeys', label: 'パスキー' },
 ];
@@ -82,6 +84,7 @@ export default function SettingsView({
             />
           )}
           {activeKey === 'sandboxes' && <SandboxSection />}
+          {activeKey === 'network' && <NetworkIsolationSection />}
           {activeKey === 'pairing' && <PairedInstancesSection />}
           {activeKey === 'passkeys' && <PasskeysSection />}
         </div>

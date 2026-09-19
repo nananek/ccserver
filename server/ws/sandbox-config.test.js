@@ -360,3 +360,41 @@ test('notify.vikunja defaults: timeoutSeconds=15, verifyTls=true, statusLabelPre
     assert.equal(v.statusLabelPrefix, 'state-');
   });
 });
+
+test('network defaults: isolate=false, mode=enforce, empty lists', () => {
+  withConfig({}, () => {
+    assert.deepEqual(loadSandboxConfig().network, { isolate: false, mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+  });
+});
+
+test('network: isolate/mode/allowedHosts/deniedHosts are read from the config file', () => {
+  withConfig({ network: { isolate: true, mode: 'audit', allowedHosts: ['api.anthropic.com'], deniedHosts: ['evil.example'] } }, () => {
+    assert.deepEqual(loadSandboxConfig().network, { isolate: true, mode: 'audit', allowedHosts: ['api.anthropic.com'], deniedHosts: ['evil.example'] });
+  });
+});
+
+test('network: mode collapses anything but "audit" to "enforce"', () => {
+  withConfig({ network: { mode: 'sometimes' } }, () => {
+    assert.equal(loadSandboxConfig().network.mode, 'enforce');
+  });
+  withConfig({ network: { mode: 'audit' } }, () => {
+    assert.equal(loadSandboxConfig().network.mode, 'audit');
+  });
+});
+
+test('network: allowedHosts/deniedHosts filter out non-string entries', () => {
+  withConfig({ network: { allowedHosts: ['a.example', 42, null, ''], deniedHosts: ['b.example', 42, null, ''] } }, () => {
+    const net = loadSandboxConfig().network;
+    assert.deepEqual(net.allowedHosts, ['a.example']);
+    assert.deepEqual(net.deniedHosts, ['b.example']);
+  });
+});
+
+test('network: a non-object "network" key collapses to defaults', () => {
+  withConfig({ network: 'nope' }, () => {
+    assert.deepEqual(loadSandboxConfig().network, { isolate: false, mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+  });
+  withConfig({ network: ['nope'] }, () => {
+    assert.deepEqual(loadSandboxConfig().network, { isolate: false, mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+  });
+});

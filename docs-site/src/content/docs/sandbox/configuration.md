@@ -35,7 +35,13 @@ cp server/sandbox.config.example.json server/sandbox.config.json
     "subscriptions": []
   },
   "binds": [],
-  "env": {}
+  "env": {},
+  "network": {
+    "isolate": false,
+    "mode": "enforce",
+    "allowedHosts": [],
+    "deniedHosts": []
+  }
 }
 ```
 
@@ -60,6 +66,16 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
 | `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 ([通知と Vikunja 連携](/ccserver/guides/notify/) 参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。`vikunja` は Vikunja タスク連携の設定 (`baseUrl`+`apiToken` で有効化)。 |
 | `federation` | `{}` | 拠点間ペアリング ([federation](/ccserver/guides/federation/) 参照) の設定。`requireTokenForPairing: true` でペアリング開始リクエストに `CCSERVER_TOKEN` の提示を必須化 (既定 `false`)。機能自体の有効/無効は `CCSERVER_FEDERATION_PORT` 環境変数で制御し、ここでは切り替えられません。 |
+| `network` | `{ isolate: false, mode: "enforce", allowedHosts: [], deniedHosts: [] }` | ネットワーク分離 ([下記](#ネットワーク分離)参照)。`isolate` は起動時ポリシー (`true`=enforce起動)、`mode` は `"enforce"`/`"audit"`、`allowedHosts`/`deniedHosts` は完全一致か先頭ドット (`.example.com`) のみの許可/拒否リスト (各最大200件)。設定 UI (設定 → ネットワーク分離) からも編集可能で、`allowedHosts`/`deniedHosts` の保存は稼働中セッションへ自動反映されます。 |
+
+## ネットワーク分離
+
+`network.isolate: true` で起動したセッションは、外向き通信がホスト側の CONNECT プロキシ (`network-broker.js`) 経由に限定されます。TLS はそのままパススルーするプレーンな HTTP CONNECT プロキシで、中身を復号しません。`isolate: false` (既定) で起動したセッションはブローカー自体が起動せず、従来通り通信は制限されません。
+
+- **bwrap (Linux)**: `isolate: true` かつ rootlesskit/slirp4netns/newuidmap が揃っているホストでは、bwrap 起動が私有ネットワーク名前空間 + in-netns ファイアウォール (iptables 優先、nft フォールバック) でラップされ、ブローカーのポートと DNS 以外への通信を構造的に遮断します。起動後は、そのセッションのトグルでいつでも enforce (許可リストのみ) / open (一時的に全通信許可) を切り替えられます — ただし切り替えられるのは境界がある間だけで、`isolate: false` で起動したセッションには切り替え自体が現れません。rootlesskit 系ツールが1つでも欠けているホストでは、`isolate: true` を指定していても境界を作らず、従来どおりの非隔離 bwrap 起動にフォールバックします (起動は失敗せず、警告ログのみ)。
+- **seatbelt (macOS)**: 同じく `isolate: true` で起動したセッションだけ、プロファイルが `(allow network*)` の代わりにブローカーのループバックポートのみを許可するルールに切り替わります (ツール依存はありません)。bwrap のようなカーネルレベルの境界ではなく、同一UIDのプロセスは `KERN_PROCARGS2` 経由でブローカーのトークンを読み取れてしまうため、あくまで defense-in-depth です。
+
+**既知の制限:** enforce 状態のブローカーであっても、CONNECT (HTTP(S) プロキシ) を経由しない生の TCP/UDP 通信 (プロキシ環境変数を見ないツールが直接ソケットを開くケースなど) はそもそも境界の対象外です。bwrap の open 状態でも同様に、境界自体はブローカーのポート宛て以外への通信を落とすため、プロキシ非対応の通信は enforce/open どちらでも届きません。この設定ファイルの `gitBroker` (git/gh の認証情報) はホスト側でネットワーク I/O を行うため、ここには影響されません。
 
 ## 内部の仕組み (docker と gpg の両立)
 

@@ -83,5 +83,13 @@
   "//federation": "拠点間ペアリング (下記 README「拠点間 (federation) ペアリング」)。requireTokenForPairing: true にすると、ペアリング開始リクエスト (bootstrap) にだけこのインスタンスの CCSERVER_TOKEN の提示を必須にする (既定 false)。あくまでスパム対策で、トークンが合っていても双方向の人間承認は省略されない。機能自体の有効/無効はここではなく CCSERVER_FEDERATION_PORT 環境変数で制御する。",
   "federation": {
     "requireTokenForPairing": false
+  },
+
+  "//network": "ネットワーク分離。isolate:true で起動したセッションは、bwrap(Linux)/seatbelt(macOS) いずれのバックエンドでも外向き通信がホスト側の CONNECT プロキシ(network-broker.js)経由に限定される(isolate:false で起動したセッションは従来通り通信は制限されない -- ブローカー自体を起動しない)。isolate: 起動時ポリシー(既定 false)。isolate:true で起動したセッションは、稼働中いつでもそのセッション自身のトグルで enforce/open を切替できる(この切替は sandbox.config.json を書き換えない。isolate:false で起動したセッションにはこのトグル自体が現れない)。mode: 'enforce'(既定、許可外をブロック) または 'audit'(ブロックせず判定のみログに記録。ただし deniedHosts は audit でも貫徹する)。allowedHosts: 完全一致 または 先頭ドット(サブドメイン込み、例 '.anthropic.com')のみ受け付ける -- scheme・ポート・ワイルドカードは不可、最大200件。deniedHosts: 同じ記法の絶対拒否リストで、allow-list・live open state・audit モードすべてに優先する(最大200件)。allowedHosts/deniedHosts の保存は稼働中の分離済みセッションへ自動反映される(isolate/mode の変更は次回起動から)。bwrap は rootlesskit/slirp4netns/newuidmap が揃っているホストでのみ isolate:true を実際に arm できる(揃っていないホストでは isolate:true でも従来通り非隔離で起動し、警告ログを出す)。seatbelt にこのツール依存はない。どちらのバックエンドも defense-in-depth (bwrap はカーネルレベルの netns+ファイアウォールで構造的、seatbelt は同一UIDプロセスからの KERN_PROCARGS2 経由のトークン読み取りを防げないためプロファイルレベルのみ)。",
+  "network": {
+    "isolate": false,
+    "mode": "enforce",
+    "allowedHosts": [],
+    "deniedHosts": []
   }
 }

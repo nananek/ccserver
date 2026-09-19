@@ -27,6 +27,8 @@ import {
   pathVariantsDeep,
   releaseSeatbeltOverlay,
   seatbeltEnvArgs,
+  seatbeltIsolatedNetworkRules,
+  SEATBELT_ISOLATED_BROKER_HOST,
   seedClaudeCredentialsFromHostKeychain,
   keychainAccount,
   _resetKeychainProbeForTest,
@@ -130,6 +132,66 @@ test('buildSeatbeltProfileText is deny-by-default with open egress', () => {
   assert.ok(text.includes('(allow file-read* (regex #"^/usr(/.*)?$")'));
   assert.ok(text.includes('(allow file-write* (regex #"^/srv/proj(/.*)?$")'));
   assert.ok(text.includes('(deny file-write* (regex #"^/home/u/.ssh(/.*)?$")'));
+});
+
+test('buildSeatbeltProfileText with networkIsolate replaces open egress with broker-only rules', () => {
+  const text = buildSeatbeltProfileText({
+    readRegexes: ['^/usr(/.*)?$'],
+    writeRegexes: ['^/srv/proj(/.*)?$'],
+    denyNetOutboundLiterals: ['/tmp/ccserver-runtime-501/ccserver-pty-host.sock'],
+    networkIsolate: { brokerPort: 54321 },
+  });
+  assert.ok(!text.includes('(allow network*)'), 'no broad allow: it would silently win back open egress');
+  assert.ok(text.includes('(deny network-outbound (remote tcp))'), 'IP/TCP denied by default');
+  assert.ok(text.includes('(deny network-outbound (remote udp))'), 'UDP (incl. DNS) denied by default');
+  assert.ok(
+    text.includes('(allow network-outbound (remote tcp "localhost:54321"))'),
+    'the per-launch broker port is re-allowed (last-match-wins)',
+  );
+  assert.ok(text.includes('(allow network-outbound (remote unix-socket))'), 'unix IPC stays allowed');
+  assert.ok(
+    text.includes('(deny network-outbound (remote unix-socket (path-literal "/tmp/ccserver-runtime-501/ccserver-pty-host.sock")))'),
+    'control-plane unix pins survive',
+  );
+  // Ordering: broad denies -> broker re-allow -> unix pins last.
+  const denyTcpAt = text.indexOf('(deny network-outbound (remote tcp))');
+  const brokerAt = text.indexOf('(remote tcp "localhost:54321")');
+  const pinAt = text.indexOf('path-literal "/tmp/ccserver-runtime-501/ccserver-pty-host.sock"');
+  assert.ok(denyTcpAt >= 0 && brokerAt > denyTcpAt, 'broker re-allow comes after the broad deny');
+  assert.ok(pinAt > brokerAt, 'control-plane unix pins stay last');
+  // Every emitted rule line must be paren-balanced (an unbalanced SBPL rule
+  // fails the whole profile compile -- fail-closed for every launch).
+  for (const l of text.split('\n')) {
+    if (!l.trim() || l.trim().startsWith(';;')) continue;
+    assert.equal((l.match(/\(/g) || []).length, (l.match(/\)/g) || []).length, `balanced rule line: ${l}`);
+  }
+});
+
+test('seatbeltIsolatedNetworkRules pins the concrete broker port', () => {
+  const rules = seatbeltIsolatedNetworkRules(1234);
+  assert.ok(rules.some((r) => r.includes('localhost:1234')), 'concrete port embedded');
+  assert.ok(!rules.some((r) => r.includes('(allow network*)')), 'never the broad allow');
+});
+
+test('buildSeatbeltLaunch with networkBroker injects proxy env (loopback broker)', () => {
+  const sb = buildSeatbeltLaunch(baseOpts({ networkBroker: { port: 54321, token: 'tok123' } }));
+  trackDir(sb.dir);
+  const expected = `http://networkbroker:tok123@${SEATBELT_ISOLATED_BROKER_HOST}:54321`;
+  assert.equal(sb.env.HTTP_PROXY, expected);
+  assert.equal(sb.env.HTTPS_PROXY, expected);
+  assert.equal(sb.env.http_proxy, expected);
+  assert.equal(sb.env.https_proxy, expected);
+  const profile = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(!profile.includes('(allow network*)'), 'isolated launch profile has no open egress');
+  assert.ok(profile.includes('(remote tcp "localhost:54321")'), 'isolated launch profile pins the broker port');
+});
+
+test('buildSeatbeltLaunch without networkBroker keeps open egress and sets no proxy env', () => {
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  assert.equal(sb.env.HTTP_PROXY, undefined);
+  const profile = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(profile.includes('(allow network*)'), 'historical open egress preserved');
 });
 
 test('profile allows reading the root directory itself (macOS startup requirement)', () => {

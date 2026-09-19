@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { PtyStore } from './ptyStore.js';
 import { createRpcServer } from './rpcServer.js';
 import { GitBrokerRegistry } from './gitBrokerRegistry.js';
+import { NetworkBrokerRegistry } from './networkBrokerRegistry.js';
 // Issue #119 Step6: both modules are pure/leaf (appLaunch.js has no imports
 // at all; ptyHostSessionMeta.js only node:fs/path/url) -- safe to import from
 // pty-host without risking the circular dependency this file's own header
@@ -161,7 +162,13 @@ export async function startPtyHost({ sockPath = getPtyHostSockPath(), shardIndex
     console.log(`[pty-host] startup cleanup: ${reaped.killed}/${reaped.found} orphaned git-broker(s) from a previous run killed`);
   }
 
-  const ptyStore = new PtyStore({ gitBrokerRegistry });
+  const networkBrokerRegistry = new NetworkBrokerRegistry();
+  const reapedNetworkBrokers = networkBrokerRegistry.reapOrphans();
+  if (reapedNetworkBrokers.found > 0) {
+    console.log(`[pty-host] startup cleanup: ${reapedNetworkBrokers.killed}/${reapedNetworkBrokers.found} orphaned network-broker(s) from a previous run killed`);
+  }
+
+  const ptyStore = new PtyStore({ gitBrokerRegistry, networkBrokerRegistry });
 
   // Issue #119 Step6-3: before opening the RPC listener (so no client -- in
   // particular server本体's own reconnect -- can see a partially-resumed

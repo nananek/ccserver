@@ -6,6 +6,7 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
 import { releaseSeatbeltOverlay } from './sandbox-seatbelt.js';
+import { setNetworkBrokerLists } from './network-broker.js';
 import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
@@ -261,6 +262,19 @@ function buildSessionRecord(id, ptyProcess, meta) {
     sandboxCommitGuardDir: meta.sandboxCommitGuardDir ?? null, // commit-msg guard's runtime dir (config json only, no process), removed on teardown
     sandboxSeatbeltDir: meta.sandboxSeatbeltDir ?? null, // seatbelt profile/shim runtime dir (macOS only), removed on teardown
     sandboxSeatbeltFiles: meta.sandboxSeatbeltFiles ?? null, // orchestrator rule copies in the project dir (macOS only), unlinked on teardown
+    // Network-isolation broker (see network-broker.js): port/token/armed/mode
+    // are plain data, needed regardless of spawn mode for the running-session
+    // toggle's and pushAllowlistToArmedSessions's live HTTP calls straight
+    // from this process. sandboxNetworkBrokerProc/Dir (the process
+    // handle/runtime dir to kill/remove on teardown) is direct-spawn-only --
+    // pty-host owns and tears down its own broker child itself, same as
+    // sandboxGitBrokerProc/Dir.
+    networkBrokerPort: meta.networkBrokerPort ?? null,
+    networkBrokerToken: meta.networkBrokerToken ?? null,
+    networkIsolateArmed: !!meta.networkIsolateArmed,
+    networkIsolateMode: meta.networkIsolateMode ?? null, // 'enforce' | 'open', mutated live by the running-session toggle
+    sandboxNetworkBrokerProc: meta.sandboxNetworkBrokerProc ?? null,
+    sandboxNetworkBrokerDir: meta.sandboxNetworkBrokerDir ?? null,
     reuseSandboxHome: meta.reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
     // Plan5 Step5: which pty-host instance this session's pty actually lives
     // on. Decided once at creation (createSession()'s usePtyHost branch) and
@@ -984,6 +998,19 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxCommitGuardDir = null;
   let sandboxSeatbeltDir = null;
   let sandboxSeatbeltFiles = null;
+  // Network-isolation broker (see network-broker.js): port/token/armed/mode
+  // are plain data needed here regardless of spawn mode (the running-session
+  // toggle and pushAllowlistToArmedSessions make live HTTP calls to the
+  // broker straight from this process). sandboxNetworkBrokerProc/Dir are the
+  // process handle/runtime dir to kill/remove on teardown -- direct-spawn
+  // only, same as sandboxGitBrokerProc/Dir (pty-host owns and tears down its
+  // own broker child, see server/pty-host/ptyStore.js).
+  let networkBrokerPort = null;
+  let networkBrokerToken = null;
+  let networkIsolateArmed = false;
+  let networkIsolateMode = null;
+  let sandboxNetworkBrokerProc = null;
+  let sandboxNetworkBrokerDir = null;
   let ptyProcess;
   // Plan5 Step5 (partitioning): decided once here and reused for BOTH the
   // spawn() call below and the subscribe() call after buildSessionRecord --
@@ -1094,6 +1121,15 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       sandboxSeatbeltFiles = Array.isArray(rpty.sandboxInfo?.seatbeltFiles)
         ? rpty.sandboxInfo.seatbeltFiles
         : null;
+      // Network-isolation broker: port/token/armed/mode are plain data
+      // pty-host relays back (like docker etc. above), needed here for the
+      // running-session toggle's HTTP call. sandboxNetworkBrokerProc/Dir stay
+      // null in this mode -- pty-host owns and tears down its own broker
+      // child itself (see server/pty-host/ptyStore.js), same as gitBroker.
+      networkBrokerPort = rpty.sandboxInfo?.networkBrokerPort || null;
+      networkBrokerToken = rpty.sandboxInfo?.networkBrokerToken || null;
+      networkIsolateArmed = !!rpty.sandboxInfo?.networkIsolateArmed;
+      networkIsolateMode = rpty.sandboxInfo?.networkIsolateMode || null;
       // sandboxGitBrokerProc/sandboxGitBrokerDir/sandboxCommitGuardDir stay
       // null: pty-host itself owns and tears down whatever it built --
       // git-broker's process/dir (plan5 2.1) and, since this branch's own
@@ -1122,6 +1158,17 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         sandboxOpts: useSandbox ? (sandboxOpts || null) : null,
         docker: sandboxDocker,
         sandboxStateDir,
+        // Restores the running-session toggle's target across a server本体
+        // restart (pty-host itself, and its broker child, stay alive across
+        // that -- only this process's own `sessions` Map view is rebuilt). A
+        // pty-host-side crash is a different case: ptyStore.spawn() rebuilds
+        // the whole sandbox (including a fresh broker, new port/token) from
+        // this same meta's launch-input fields, exactly like gitBroker's
+        // "does not survive to be reused" fate -- see gitBrokerRegistry.js.
+        networkBrokerPort,
+        networkBrokerToken,
+        networkIsolateArmed,
+        networkIsolateMode,
         reuseSandboxHome,
         startedClaudeSessionId: claudeSessionId || null,
         // Plan5 Step5: persisted, not recomputed on restore -- see this
@@ -1203,6 +1250,12 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         sandboxCommitGuardDir = spawn.commitGuardDir || null;
         sandboxSeatbeltDir = spawn.seatbeltDir || null;
         sandboxSeatbeltFiles = spawn.seatbeltFiles || null;
+        networkBrokerPort = spawn.networkBrokerPort || null;
+        networkBrokerToken = spawn.networkBrokerToken || null;
+        networkIsolateArmed = !!spawn.networkIsolateArmed;
+        networkIsolateMode = spawn.networkIsolateMode || null;
+        sandboxNetworkBrokerProc = spawn.sandboxNetworkBrokerProc || null;
+        sandboxNetworkBrokerDir = spawn.sandboxNetworkBrokerDir || null;
         useSandbox = true;
       } catch (err) {
         return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
@@ -1263,6 +1316,8 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       if (sandboxGitBrokerDir) { try { rmSync(sandboxGitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (sandboxCommitGuardDir) { try { rmSync(sandboxCommitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (sandboxSeatbeltDir) { try { rmSync(sandboxSeatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (sandboxNetworkBrokerProc) { try { sandboxNetworkBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
+      if (sandboxNetworkBrokerDir) { try { rmSync(sandboxNetworkBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (Array.isArray(sandboxSeatbeltFiles)) {
         // Same guard as destroySession(): a concurrent launch from the same
         // orchestratorDir may already own these paths. (The failed session
@@ -1295,6 +1350,12 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     sandboxCommitGuardDir,
     sandboxSeatbeltDir,
     sandboxSeatbeltFiles,
+    networkBrokerPort,
+    networkBrokerToken,
+    networkIsolateArmed,
+    networkIsolateMode,
+    sandboxNetworkBrokerProc,
+    sandboxNetworkBrokerDir,
     reuseSandboxHome,
     cols,
     rows,
@@ -1649,6 +1710,34 @@ export function sandboxHomeInUsePath(homePath) {
     if (sandboxHomeConflict(homePath, [s])) n++;
   }
   return n;
+}
+
+// Pushes a replacement allow/deny-list to every live session whose sandbox
+// is armed for network isolation (see network-broker.js): the Settings GUI's
+// save path (server/routes/networkAllowlist.js) calls this so a running
+// session's egress policy updates without a restart. Fails soft per session
+// -- one dead/unreachable broker (session exiting mid-push, race with
+// teardown) must not stop the rest, and the file save itself already
+// succeeded regardless. Works in both spawn modes: port/token are plain data
+// on the session record either way (see buildSessionRecord), so the HTTP
+// call is made straight from this process even for a pty-host-hosted
+// session whose broker child lives in a different process.
+export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }) {
+  let ok = 0;
+  let failed = 0;
+  for (const s of sessions.values()) {
+    if (!s.networkIsolateArmed || !s.networkBrokerPort || !s.networkBrokerToken) continue;
+    try {
+      const applied = await setNetworkBrokerLists(
+        { port: s.networkBrokerPort, token: s.networkBrokerToken },
+        { allowedHosts, deniedHosts },
+      );
+      if (applied) ok++; else failed++;
+    } catch {
+      failed++;
+    }
+  }
+  return { ok, failed };
 }
 
 // Detach the schedule from a session that's going away, but keep it armed so it
@@ -2337,6 +2426,20 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
     if (session.sandboxSeatbeltDir) {
       try {
         rmSync(session.sandboxSeatbeltDir, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
+    }
+    if (session.sandboxNetworkBrokerProc) {
+      try {
+        session.sandboxNetworkBrokerProc.kill('SIGTERM');
+      } catch {
+        // already dead
+      }
+    }
+    if (session.sandboxNetworkBrokerDir) {
+      try {
+        rmSync(session.sandboxNetworkBrokerDir, { recursive: true, force: true });
       } catch {
         // best effort
       }
