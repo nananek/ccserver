@@ -57,6 +57,42 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // spoof X-Forwarded-Proto to influence its own response.
 const fastify = Fastify({ logger: true, trustProxy: ['127.0.0.1', '::1'] });
 
+// L5 fix (vuln_scan report): no security headers were set at all. The
+// client build has no inline scripts and no external resources at all
+// (verified: client/dist/index.html loads only same-origin /assets/*.js
+// and /assets/*.css; PreviewDialog.jsx's markdown renderer already
+// deliberately turns every <img> into a text placeholder and strips
+// every auto-fetching attribute via DOMPurify rather than relying on CSP
+// for that -- see its own header comment), so a same-origin-only CSP
+// costs nothing functionally while closing off script injection as a
+// no-op even if some other XSS-shaped bug ever put attacker HTML on the
+// page. style-src keeps 'unsafe-inline' (a much narrower risk than
+// script-src) since React/xterm.js set inline style attributes via the
+// DOM API in the ordinary course of rendering. No @fastify/helmet
+// dependency -- same "a few lines beats a plugin" reasoning as
+// authSessions.js's own manual cookie handling.
+const SECURITY_HEADERS = {
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "object-src 'none'",
+  ].join('; '),
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Cross-Origin-Opener-Policy': 'same-origin',
+};
+fastify.addHook('onSend', async (request, reply) => {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) reply.header(name, value);
+});
+
 // SQLite (worker presets today, more stores in later phases): open + migrate
 // before anything that might touch it -- notably the CCSERVER_AUTH_MODE=passkey
 // hook below, which queries auth_sessions on every request (Issue #141 Step1

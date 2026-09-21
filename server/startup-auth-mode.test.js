@@ -276,3 +276,20 @@ test('an unknown CCSERVER_AUTH_MODE value refuses to boot', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// L5 (vuln_scan report): no security headers were ever set. Reuses this
+// file's real-server harness (unrelated to auth mode itself, but the only
+// place that already boots a real server and hits it with fetch()) to
+// confirm the onSend hook in index.js is actually wired in, not just
+// present as dead code.
+test('L5: security headers (CSP, X-Frame-Options, etc.) are present on every response', async () => {
+  await withServer({ CCSERVER_HOST: '127.0.0.1' }, async (server) => {
+    const res = await fetch(`${server.baseUrl}/api/auth/mode`);
+    assert.match(res.headers.get('content-security-policy') || '', /default-src 'self'/);
+    assert.match(res.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(res.headers.get('x-frame-options'), 'DENY');
+    assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(res.headers.get('cross-origin-opener-policy'), 'same-origin');
+  });
+});
