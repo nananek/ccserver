@@ -351,6 +351,31 @@ describe('gh-exec PR-body guard (plan8)', () => {
     });
     assert.equal(r.ok, true);
   });
+
+  // H2 regression (vuln_scan p2): --body-file is a HOST path (gh runs on the
+  // host, not inside the sandbox), so it must never be able to point outside
+  // the session's own project tree -- even when no content guard is
+  // configured at all (the plain `broker`, exactly like these first two).
+  test('H2: an absolute --body-file outside the session tree is denied, even with no content guard', async () => {
+    const outside = join(root, 'outside-secret.txt');
+    writeFileSync(outside, 'top secret host file that must never reach gh\n');
+    const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', outside] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'file-arg-out-of-tree');
+    assert.equal(r.field, 'body-file');
+  });
+
+  test('H2: a relative --body-file that escapes via ../ is denied, even with no content guard', async () => {
+    const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', '../outside-secret.txt'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'file-arg-out-of-tree');
+  });
+
+  test('H2: a --body-file inside the session tree still works normally', async () => {
+    writeFileSync(join(repoDir, 'inside-body.txt'), 'perfectly fine PR body\n');
+    const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', 'inside-body.txt'] });
+    assert.equal(r.ok, true);
+  });
 });
 
 // hostRuntimeDir (macOS Seatbelt support): XDG_RUNTIME_DIR wins when set;

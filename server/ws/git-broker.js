@@ -47,12 +47,12 @@
 // commitMessageGuard.enabled); omitted entirely, this is a no-op, same as
 // before plan8.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeGitAllowlist, normalizeGitUrl, resolveOriginUrl } from './gitAllowlist.js';
 import { classifyGhInvocation, extractGhTextFields } from './ghAllowlist.js';
@@ -205,26 +205,52 @@ function execGh(argv, cwd, stdinBuf) {
   });
 }
 
-// Checks a `pr create`/`edit`/`comment`/`review` invocation's title/body
-// text (see ghAllowlist.js's extractGhTextFields) against ctx.guardPatterns
-// (compiled once in runServer from the same commitMessageGuard config used
-// for local commits -- see commitGuard.js). Returns {field, match} for the
-// first blocked value found, or null.
-//
-// 'file' entries ("-" for --body-file) resolve to real text here: "-" means
-// "read from stdin", which the gh wrapper already forwarded as req.stdin
-// (base64) regardless of subcommand; anything else is a path, read relative
-// to ctx.cwd -- the exact same cwd execGh() below runs the real gh in (see
-// sandbox.js: cwd is bind-mounted at the same absolute path inside and
-// outside the sandbox), so this sees exactly what gh itself would read.
-// Fails OPEN on any read error (missing file, not UTF-8, whatever) by
-// skipping just that one field -- an unreadable --body-file must not block
-// an otherwise-legitimate gh call outright; only an actual pattern match
-// ever denies the command.
+// Confines a --body-file/-F path argument to ctx.cwd (the session's own
+// project tree, the exact same cwd execGh() below runs the real gh in).
+// gh runs on the HOST, reachable from well outside whatever the sandbox's
+// bind mounts let the agent see directly -- without this, a sandboxed agent
+// that can never read e.g. /etc/passwd itself could still point --body-file
+// at it (absolute, or relative with `../` escapes) and have the real gh read
+// it and hand the content to an allow-listed repo (H2 -- see vuln_scan p2).
+// Lexical containment catches every escape whether or not the target exists
+// yet; a second realpath containment pass catches a symlink planted inside
+// cwd that resolves outside it. Returns the resolved absolute path when it's
+// safely inside ctx.cwd, or null when it escapes.
+function resolveContainedGhFileArg(cwd, value) {
+  const cwdResolved = resolve(cwd);
+  const target = resolve(isAbsolute(value) ? value : join(cwd, value));
+  if (target !== cwdResolved && !target.startsWith(`${cwdResolved}/`)) return null;
+  let realCwd;
+  try {
+    realCwd = realpathSync(cwdResolved);
+  } catch {
+    return null;
+  }
+  let realTarget;
+  try {
+    realTarget = realpathSync(target);
+  } catch {
+    // Doesn't exist (yet) / unresolvable -- lexical containment above is all
+    // that can be checked; readFileSync below will fail on its own terms.
+    return target;
+  }
+  if (realTarget !== realCwd && !realTarget.startsWith(`${realCwd}/`)) return null;
+  return realTarget;
+}
+
+// Checks a gh invocation's title/body fields (see ghAllowlist.js's
+// extractGhTextFields): every 'file' field's path must resolve inside the
+// session tree (always enforced, regardless of commitMessageGuard config --
+// this is a filesystem boundary, not a content policy), and -- only when
+// commitMessageGuard patterns are configured -- every field's actual text
+// (literal, stdin, or file content) is checked against ctx.guardPatterns
+// (compiled once in runServer from the same config used for local commits,
+// see commitGuard.js). Returns {field, match, reason} for the first blocked
+// value found, or null.
 function findBlockedGhText(req, ctx) {
-  if (!ctx.guardPatterns || !ctx.guardPatterns.length) return null;
   const fields = extractGhTextFields(req.argv);
   if (!fields.length) return null;
+  const hasGuardPatterns = !!(ctx.guardPatterns && ctx.guardPatterns.length);
 
   let stdinText;
   const decodeStdin = () => {
@@ -240,13 +266,19 @@ function findBlockedGhText(req, ctx) {
   for (const f of fields) {
     let text;
     if (f.kind === 'literal') {
+      if (!hasGuardPatterns) continue;
       text = f.value;
     } else if (f.value === '-') {
+      if (!hasGuardPatterns) continue;
       text = decodeStdin();
     } else {
+      const contained = resolveContainedGhFileArg(ctx.cwd, f.value);
+      if (!contained) {
+        return { field: f.field, match: { source: 'path escapes the session tree' }, reason: 'file-arg-out-of-tree' };
+      }
+      if (!hasGuardPatterns) continue;
       try {
-        const path = isAbsolute(f.value) ? f.value : join(ctx.cwd, f.value);
-        text = readFileSync(path, 'utf-8');
+        text = readFileSync(contained, 'utf-8');
       } catch {
         continue; // fail open: unreadable body-file, skip this field only
       }
@@ -286,8 +318,9 @@ async function handleGhExec(req, conn, ctx) {
 
   const blocked = findBlockedGhText(req, ctx);
   if (blocked) {
-    process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (blocked pattern in --${blocked.field}: ${blocked.match.source})\n`);
-    conn.end(`${JSON.stringify({ ok: false, reason: 'blocked-message', field: blocked.field })}\n`);
+    const reason = blocked.reason || 'blocked-message';
+    process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (${reason} in --${blocked.field}: ${blocked.match.source})\n`);
+    conn.end(`${JSON.stringify({ ok: false, reason, field: blocked.field })}\n`);
     return;
   }
 
