@@ -501,9 +501,25 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // OSC 52 (clipboard) extraction: apps like opencode write the clipboard
     // via OSC 52, which xterm.js ignores. Handle it here and strip the
     // sequences from the stream.
+    //
+    // M3 fix (vuln_scan report): a *query* (\x1b]52;c;?\x07) used to be
+    // answered automatically with no user interaction at all -- any agent
+    // output could silently read the real browser clipboard. Gate it behind
+    // an explicit confirm() the first time this session asks; the answer is
+    // remembered for the rest of the session so a legitimate workflow that
+    // checks the clipboard repeatedly isn't nagged on every query, but an
+    // agent can never read it without the user having approved at least once.
+    let osc52ReadDecision = null; // null = not asked yet this session
     const osc52 = createOsc52Handler({
       onWrite: (text) => writeClipboardText(text),
       onQuery: () => {
+        if (osc52ReadDecision === null) {
+          osc52ReadDecision = window.confirm(
+            'このセッションのエージェントがクリップボードの内容を読み取ろうとしています。許可しますか?\n'
+            + '(この選択はこのターミナルセッションの間、記憶されます)',
+          );
+        }
+        if (!osc52ReadDecision) return;
         readClipboardText().then((text) => {
           if (text == null) return;
           const ws = wsRef.current;
