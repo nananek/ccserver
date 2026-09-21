@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test';
 
-// Settings 左メニュー: 5項目の表示と切り替えを検証する。
-// サンドボックス/ネットワーク隔離/ペアリング/パスキーの実データには依存しない
-// (見出しと空表示のいずれかが現れればよい) ため、bwrap 等の環境条件は不要。
+// Settings 左メニュー: 6項目の表示と切り替えを検証する。
+// サンドボックス/ネットワーク隔離/ペアリング/パスキー/GPG連携の実データには
+// 依存しない (見出しと空表示のいずれかが現れればよい) ため、bwrap 等の環境条件は不要。
 test.describe('Settings left menu', () => {
   test('menus switch sections', async ({ page }) => {
     await page.goto('/');
@@ -13,10 +13,10 @@ test.describe('Settings left menu', () => {
     const settings = page.locator('.settings-view');
     await expect(settings).toBeVisible();
 
-    // 左メニューの5項目がタブとして表示される (一般が先頭)。
+    // 左メニューの6項目がタブとして表示される (一般が先頭)。
     const sidebar = settings.locator('.settings-sidebar');
     const tabs = sidebar.getByRole('tab');
-    await expect(tabs).toHaveText(['一般', '作成済みサンドボックス', 'ネットワーク隔離', 'ペアリング済みインスタンス', 'パスキー']);
+    await expect(tabs).toHaveText(['一般', '作成済みサンドボックス', 'ネットワーク隔離', 'ペアリング済みインスタンス', 'パスキー', 'GPG連携']);
     const panel = settings.locator('[role="tabpanel"]');
     await expect(panel).toBeVisible();
 
@@ -43,6 +43,11 @@ test.describe('Settings left menu', () => {
     await sidebar.getByRole('tab', { name: 'パスキー' }).click();
     await expect(sidebar.getByRole('tab', { name: 'パスキー' })).toHaveAttribute('aria-selected', 'true');
     await expect(panel).toContainText('パスキー');
+
+    // GPG連携に切り替え (plan: gpg-agent-vault)。
+    await sidebar.getByRole('tab', { name: 'GPG連携' }).click();
+    await expect(sidebar.getByRole('tab', { name: 'GPG連携' })).toHaveAttribute('aria-selected', 'true');
+    await expect(panel).toContainText('GPG連携');
 
     // 一般に戻れる。
     await sidebar.getByRole('tab', { name: '一般' }).click();
