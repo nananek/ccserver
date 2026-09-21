@@ -56,6 +56,7 @@
 //     after launch -- only this in-process policy flag does, which is why
 //     the toggle is instant and needs no sandbox restart.
 
+import { lookup as dnsLookup } from 'node:dns';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { createServer, request as httpRequest } from 'node:http';
@@ -99,6 +100,51 @@ export function isHostAllowed(host, allowedHosts) {
 // over the allow-list, the live open state, and audit mode.
 export function isHostDenied(host, deniedHosts) {
   return isHostMatched(host, deniedHosts);
+}
+
+// M2 fix (vuln_scan report / PoC p5): isHostMatched/isHostDenied above are a
+// plain string comparison against the CONNECT target's host field as
+// written on the wire -- but node:net's own connector (and DNS resolvers in
+// general) accept a much looser IPv4 grammar than "four decimal octets"
+// (classic BSD inet_aton rules: 1-4 dot-separated parts, each decimal, 0x-
+// hex, or 0-octal, with the last part absorbing any missing bytes). So
+// "2130706433" / "0x7f000001" / "0177.0.0.1" / "127.1" all end up
+// connecting to 127.0.0.1 while sailing straight past a denylist of
+// ["127.0.0.1"], which only ever matches the literal string "127.0.0.1".
+// This canonicalizes any such non-canonical-but-still-a-real-IPv4 host
+// string to strict dotted-decimal form, so the caller can match THAT
+// instead. Returns null for anything that isn't this loose IPv4 grammar
+// (an ordinary hostname, an IPv6 literal, garbage) -- those are left to
+// isHostMatched exactly as before.
+export function canonicalizeIPv4Literal(host) {
+  if (typeof host !== 'string' || !host) return null;
+  const parts = host.split('.');
+  const n = parts.length;
+  if (n < 1 || n > 4) return null;
+  const vals = [];
+  for (const p of parts) {
+    let v;
+    if (/^0x[0-9a-fA-F]+$/i.test(p)) v = parseInt(p.slice(2), 16);
+    else if (/^0[0-7]+$/.test(p)) v = parseInt(p, 8);
+    else if (/^(0|[1-9][0-9]*)$/.test(p)) v = parseInt(p, 10);
+    else return null;
+    if (!Number.isFinite(v) || v < 0) return null;
+    vals.push(v);
+  }
+  // Every part but the last must fit one byte; the last absorbs whatever
+  // bytes remain (a lone part IS the whole 32-bit value, two parts are
+  // byte.24bits, three are byte.byte.16bits, four are byte.byte.byte.byte).
+  for (let i = 0; i < n - 1; i++) {
+    if (vals[i] > 0xff) return null;
+  }
+  const lastWidth = 4 - (n - 1);
+  const lastMax = 256 ** lastWidth - 1;
+  if (vals[n - 1] > lastMax) return null;
+  let total = 0;
+  for (let i = 0; i < n - 1; i++) total = total * 256 + vals[i];
+  total = total * (256 ** lastWidth) + vals[n - 1];
+  if (total > 0xffffffff) return null;
+  return [24, 16, 8, 0].map((shift) => Math.floor(total / 2 ** shift) % 256).join('.');
 }
 
 // Canonical allow-list entry validation/normalization, shared by the config
@@ -410,38 +456,93 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState, a
       clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
       return;
     }
-    const denied = isHostDenied(target.host, deniedHosts);
-    const allowed = isHostMatched(target.host, allowedHosts);
-    // Deny-list wins over everything: allow-list, live open state, and
-    // audit mode. Audit still logs the verdict but no longer passes a
-    // denied host through.
-    const effectiveAllow = !denied && (allowed || initialMode === 'audit' || state === 'open');
-    process.stdout.write(
-      `[network-broker] CONNECT ${target.host}:${target.port} -> ${effectiveAllow ? 'allow' : 'deny'}`
-      + `${denied ? ' (denylist)' : initialMode === 'audit' && !allowed ? ' (audit: would deny)' : ''}\n`,
-    );
-    if (!effectiveAllow) {
-      clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
-      return;
-    }
+    // M2 fix: match against the CANONICAL address when target.host is any
+    // non-standard-but-still-real IPv4 literal encoding (see
+    // canonicalizeIPv4Literal) -- otherwise a denylist of ["127.0.0.1"]
+    // never matches "2130706433"/"0x7f000001"/"0177.0.0.1"/"127.1" even
+    // though all four connect straight to 127.0.0.1. Returns null for an
+    // ordinary hostname, which is matched exactly as before.
+    const literalIPv4 = canonicalizeIPv4Literal(target.host);
+    const matchHost = literalIPv4 || target.host;
+
+    const verdictFor = (host) => {
+      const denied = isHostDenied(host, deniedHosts);
+      const allowed = isHostMatched(host, allowedHosts);
+      // Deny-list wins over everything: allow-list, live open state, and
+      // audit mode. Audit still logs the verdict but no longer passes a
+      // denied host through.
+      const effectiveAllow = !denied && (allowed || initialMode === 'audit' || state === 'open');
+      process.stdout.write(
+        `[network-broker] CONNECT ${target.host}:${target.port} -> ${effectiveAllow ? 'allow' : 'deny'}`
+        + `${denied ? ' (denylist)' : initialMode === 'audit' && !allowed ? ' (audit: would deny)' : ''}\n`,
+      );
+      return effectiveAllow;
+    };
+
     // Pre-200 only: once the 200 is sent and piping starts (below), an
     // upstream error must just tear the tunnel down -- writing more HTTP
     // bytes over an error at that point would corrupt whatever TLS/
     // application data is already flowing through the pipe.
     const respond502 = () => { try { clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch { /* ignore */ } };
-    const upstreamConn = netConnect(target.port, target.host, () => {
-      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      upstreamConn.off('error', respond502);
-      upstreamConn.on('error', () => { try { clientSocket.destroy(); } catch { /* ignore */ } });
-      if (head && head.length) upstreamConn.write(head);
-      upstreamConn.pipe(clientSocket);
-      clientSocket.pipe(upstreamConn);
+    const connectTo = (address) => {
+      const upstreamConn = netConnect(target.port, address, () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        upstreamConn.off('error', respond502);
+        upstreamConn.on('error', () => { try { clientSocket.destroy(); } catch { /* ignore */ } });
+        if (head && head.length) upstreamConn.write(head);
+        upstreamConn.pipe(clientSocket);
+        clientSocket.pipe(upstreamConn);
+      });
+      upstream = upstreamConn;
+      upstreamConn.on('error', respond502);
+      // See clientSocket's matching 'close' handler above for why this is
+      // needed alongside 'error'.
+      upstreamConn.on('close', () => { try { clientSocket.destroy(); } catch { /* ignore */ } });
+    };
+
+    if (literalIPv4) {
+      // Already a concrete address (whatever encoding it arrived in) -- no
+      // DNS involved, so there is nothing left to pin: match and connect to
+      // it directly.
+      if (!verdictFor(matchHost)) {
+        clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+        return;
+      }
+      connectTo(literalIPv4);
+      return;
+    }
+    // An ordinary hostname: resolve it HERE, once, so (a) the deny-list can
+    // be re-checked against the address actually about to be reached -- an
+    // allow-listed hostname that resolves to a denied/internal address is
+    // still refused (M2's DNS-rebinding case) -- and (b) the eventual
+    // connect below reuses this exact resolved address instead of letting
+    // node:net re-resolve independently, which is what pins it: a second,
+    // later resolution could legitimately return something different.
+    if (!verdictFor(matchHost)) {
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+      return;
+    }
+    // `all: true` -- a bare dns.lookup() returns only ONE candidate (the
+    // resolver's own ordering preference, e.g. an AAAA before the A record),
+    // which would leave every OTHER address this hostname could resolve to
+    // completely unchecked. Every candidate must be denylist-clean before
+    // any of them is used.
+    dnsLookup(target.host, { all: true }, (err, addresses) => {
+      if (err || !Array.isArray(addresses) || addresses.length === 0) { respond502(); return; }
+      const blocked = addresses.find((a) => isHostDenied(a.address, deniedHosts));
+      if (blocked) {
+        process.stdout.write(`[network-broker] CONNECT ${target.host}:${target.port} -> deny (resolved to denylisted ${blocked.address})\n`);
+        clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+        return;
+      }
+      // Prefer an IPv4 candidate when one exists: most target services (and
+      // this broker's own test fixtures) are only actually reachable over
+      // v4, and the resolver's own ordering (which the bare, non-`all`
+      // dns.lookup() used to hand straight to net.connect()) isn't a
+      // reachability signal -- it can just as easily put an AAAA first.
+      const chosen = addresses.find((a) => a.family === 4) || addresses[0];
+      connectTo(chosen.address);
     });
-    upstream = upstreamConn;
-    upstreamConn.on('error', respond502);
-    // See clientSocket's matching 'close' handler above for why this is
-    // needed alongside 'error'.
-    upstreamConn.on('close', () => { try { clientSocket.destroy(); } catch { /* ignore */ } });
   });
 
   // Malformed HTTP on the port (not a valid CONNECT/admin request) -- destroy

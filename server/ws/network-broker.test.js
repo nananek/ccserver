@@ -12,7 +12,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isHostAllowed, isHostDenied, isHostMatched, startNetworkBroker, setNetworkBrokerMode, setNetworkBrokerLists, networkBrokerProxyUrl, buildIsolatedProxyEnv } from './network-broker.js';
+import { isHostAllowed, isHostDenied, isHostMatched, canonicalizeIPv4Literal, startNetworkBroker, setNetworkBrokerMode, setNetworkBrokerLists, networkBrokerProxyUrl, buildIsolatedProxyEnv } from './network-broker.js';
 
 const NETWORK_BROKER_PATH = fileURLToPath(new URL('./network-broker.js', import.meta.url));
 
@@ -152,6 +152,67 @@ test('state: "open" starts the broker unrestricted, no toggle needed', async () 
 
   const { statusLine } = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
   assert.match(statusLine, /^HTTP\/1\.1 200/, 'open-start session begins fully open, not enforced');
+});
+
+// --- M2 (vuln_scan report / PoC p5): non-canonical IPv4 / DNS rebinding ----
+
+test('canonicalizeIPv4Literal: decimal/hex/octal/short forms all normalize to 127.0.0.1', () => {
+  for (const [input, expected] of [
+    ['127.0.0.1', '127.0.0.1'],
+    ['2130706433', '127.0.0.1'],
+    ['0x7f000001', '127.0.0.1'],
+    ['0177.0.0.1', '127.0.0.1'],
+    ['127.1', '127.0.0.1'],
+    ['127.0.1', '127.0.0.1'],
+    ['0.0.0.0', '0.0.0.0'],
+    ['0xff.0xff.0xff.0xff', '255.255.255.255'],
+  ]) {
+    assert.equal(canonicalizeIPv4Literal(input), expected, `${input} -> ${expected}`);
+  }
+});
+
+test('canonicalizeIPv4Literal: returns null for anything that is not this loose IPv4 grammar', () => {
+  for (const input of ['example.com', 'not-allowlisted.example', '256.0.0.1', '1.2.3.4.5', '', 'localhost', '::1']) {
+    assert.equal(canonicalizeIPv4Literal(input), null, `${input} must not be treated as an IPv4 literal`);
+  }
+});
+
+test('M2: a denylisted IP cannot be reached via a non-canonical encoding (decimal/hex/octal/short)', async () => {
+  const targetPort = await startEchoServer();
+  const broker = startNetworkBroker({ allowedHosts: [], deniedHosts: ['127.0.0.1'], mode: 'audit' });
+  brokers.push(broker);
+
+  for (const encoded of ['2130706433', '0x7f000001', '0177.0.0.1', '127.1']) {
+    const { statusLine } = await rawConnect(broker.port, `${encoded}:${targetPort}`, basicAuth(broker.token));
+    assert.match(statusLine, /^HTTP\/1\.1 403/, `${encoded} (-> 127.0.0.1) must still be denied, even in audit mode`);
+  }
+});
+
+test('M2: an allow-listed hostname that resolves to a denylisted address is refused (DNS-rebinding defense)', async () => {
+  const targetPort = await startEchoServer();
+  // 'localhost' is allow-listed BY NAME (the string-based check alone would
+  // pass it), but it resolves to 127.0.0.1/::1, and 127.0.0.1 is denylisted
+  // -- the connect-time resolved-address re-check must still refuse it.
+  const broker = startNetworkBroker({ allowedHosts: ['localhost'], deniedHosts: ['127.0.0.1'] });
+  brokers.push(broker);
+
+  const { statusLine } = await rawConnect(broker.port, `localhost:${targetPort}`, basicAuth(broker.token));
+  assert.match(statusLine, /^HTTP\/1\.1 403/);
+});
+
+test('M2: an ordinary allow-listed hostname with no deny-list conflict still connects and relays data', async () => {
+  const targetPort = await startEchoServer();
+  const broker = startNetworkBroker({ allowedHosts: ['localhost'] });
+  brokers.push(broker);
+
+  const { statusLine, sock } = await rawConnect(broker.port, `localhost:${targetPort}`, basicAuth(broker.token));
+  assert.match(statusLine, /^HTTP\/1\.1 200/, 'the resolved-address pinning must not break a legitimate hostname connect');
+  const echoed = await new Promise((resolve) => {
+    sock.once('data', (d) => resolve(d.toString()));
+    sock.write('ping\n');
+  });
+  assert.equal(echoed, 'ping\n');
+  sock.destroy();
 });
 
 test('live toggle: setNetworkBrokerMode flips enforce <-> open without restarting', async () => {
