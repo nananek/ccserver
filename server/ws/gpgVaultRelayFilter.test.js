@@ -54,15 +54,19 @@ const REAL_SIGNING_TRACE = [
   'BYE',
 ];
 
-test('assuan: the real git-signing trace is forwarded verbatim, except allow-pinentry-notify', () => {
+test('assuan: the real git-signing trace is forwarded verbatim', () => {
   const h = harness(createAssuanFilter);
   const input = REAL_SIGNING_TRACE.map((l) => `${l}\n`).join('');
   h.filter.fromClient(Buffer.from(input, 'latin1'));
-  // gpg sends allow-pinentry-notify unconditionally and ignores the error
-  // (plan §1.2(b) denies it); everything else reaches the agent as is.
-  const expected = REAL_SIGNING_TRACE.filter((l) => l !== 'OPTION allow-pinentry-notify').map((l) => `${l}\n`).join('');
-  assert.equal(h.forwarded(), expected);
-  assert.equal(h.replied(), ASSUAN_FORBIDDEN_LINE);
+  // allow-pinentry-notify must reach the agent: it only makes the agent send
+  // a passive "S PINENTRY_LAUNCHED" status line before starting a pinentry
+  // (a separate agent<->pinentry channel; this client<->agent one never gets
+  // an INQUIRE from it), so forwarding it grants no extra capability. GnuPG
+  // 2.4.9 tolerates a refusal here, but 2.4.4 (Ubuntu 24.04) treats it as
+  // fatal to the whole handshake -- every later command then fails with
+  // "no gpg-agent running in this session".
+  assert.equal(h.forwarded(), input);
+  assert.equal(h.replied(), '');
   assert.deepEqual(h.aborted, []);
 });
 
@@ -101,7 +105,6 @@ test('assuan: every export/import/keygen/passphrase command is refused and never
     'OPTION pinentry-mode=loopback\t',
     'OPTION pinentry-mode=',
     'OPTION pinentry-mode=bogus',
-    'OPTION allow-pinentry-notify',
     'OPTION -ttyname=/dev/pts/0', // single dash: libassuan rejects it anyway
     'OPTION cache-ttl-opt-preset=-1',
     'OPTION',

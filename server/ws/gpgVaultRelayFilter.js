@@ -41,12 +41,17 @@ const ALLOWED_ASSUAN_COMMANDS = new Set([
 ]);
 
 // OPTION names gpg sends for ordinary operation (display/tty/locale
-// plumbing and version negotiation). Deliberately absent (remediation plan
-// §1.2(b)): allow-pinentry-notify -- gpg sends it unconditionally but
-// ignores a refusal, and denying it keeps the agent from ever opening an
-// INQUIRE (the only state in which client data lines are accepted).
+// plumbing and version negotiation). allow-pinentry-notify must stay allowed:
+// it only makes the agent send a passive "S PINENTRY_LAUNCHED" status line
+// before starting a pinentry (agent<->pinentry is a separate channel; this
+// client<->agent one never gets an INQUIRE from it), so it grants no extra
+// capability. Rejecting it looked harmless on GnuPG 2.4.9 (which tolerates
+// the ERR and moves on), but GnuPG 2.4.4 (Ubuntu 24.04's default, and what
+// CI runs) treats the failure as fatal to the whole agent handshake: every
+// later command on that connection then fails with "no gpg-agent running in
+// this session", which broke git-style signing through the relay.
 const ALLOWED_OPTIONS = new Set([
-  'agent-awareness',
+  'agent-awareness', 'allow-pinentry-notify',
   'ttyname', 'ttytype', 'display', 'xauthority', 'lc-ctype', 'lc-messages',
   'putenv', 'pinentry-user-data', 'use-cache-for-signing', 'no-grab',
 ]);
