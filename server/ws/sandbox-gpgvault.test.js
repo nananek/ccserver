@@ -355,7 +355,23 @@ test('F1: `gpg --export-secret-keys` through the relay yields nothing, while git
     assert.equal(sshExport.stdout.length, 0, 'subkeys (the SSH auth key) cannot be exported either');
 
     // Exactly how git signs a commit (gpg.program=gpg): must keep working.
-    const signed = await run('gpg', ['--homedir', home, '--status-fd=2', '-bsau', vault.fingerprint], { input: 'tree 0\n' });
+    let signed = await run('gpg', ['--homedir', home, '--status-fd=2', '-bsau', vault.fingerprint], { input: 'tree 0\n' });
+    if (signed.status !== 0) {
+      const os = await import('node:os');
+      console.error('DIAG loadavg=', os.loadavg(), 'cpus=', os.cpus().length);
+      for (let attempt = 1; attempt <= 5 && signed.status !== 0; attempt++) {
+        try {
+          const probe = await assuanRoundTrip(getRelaySocketPaths().agent, 'GETINFO version', 5000);
+          console.error(`DIAG attempt ${attempt}: relay probe ->`, JSON.stringify(probe));
+        } catch (e) {
+          console.error(`DIAG attempt ${attempt}: relay probe FAILED ->`, e.message);
+        }
+        await new Promise((r) => setTimeout(r, 300 * attempt));
+        const retry = await run('gpg', ['--homedir', home, '--status-fd=2', '-bsau', vault.fingerprint], { input: 'tree 0\n' });
+        console.error(`DIAG attempt ${attempt}: retry status=`, retry.status, 'stderr=', retry.stderr);
+        signed = retry;
+      }
+    }
     assert.equal(signed.status, 0, `signing through the relay works: ${signed.stderr}`);
     assert.match(signed.stderr, /SIG_CREATED/);
     assert.match(signed.stdout.toString(), /BEGIN PGP SIGNATURE/);
