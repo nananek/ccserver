@@ -19,13 +19,16 @@ import * as tools from './metaTools.js';
 const MY_SESSION_ID = 'meta-session-0001';
 const MY_GROUP_ID = null; // standalone launch (plan section 6-1)
 
-function fakeIdentitySession(sandboxOpts = null) {
-  return { id: MY_SESSION_ID, cwd: '/srv/meta', app: 'claude', shell: false, sandboxOpts };
+function fakeIdentitySession(sandboxOpts = null, sandbox = false) {
+  return {
+    id: MY_SESSION_ID, cwd: '/srv/meta', app: 'claude', shell: false, sandboxOpts, sandbox,
+  };
 }
 
 function makeDeps({
   identity = { sessionId: MY_SESSION_ID, groupId: MY_GROUP_ID },
   mySandboxOpts = null,
+  mySandbox = false,
 } = {}) {
   const calls = {
     approvals: [],
@@ -40,7 +43,7 @@ function makeDeps({
     browsed: [],
   };
 
-  const mySession = fakeIdentitySession(mySandboxOpts);
+  const mySession = fakeIdentitySession(mySandboxOpts, mySandbox);
   const sessions = new Map([[MY_SESSION_ID, mySession]]);
 
   const groups = new Map();
@@ -254,6 +257,34 @@ test('launch_session caps sandboxOpts against the meta agent\'s own grant and at
   }]);
   assert.equal(out.sessionId, 'new-session-1');
   assert.deepEqual(out.sandboxOpts, { gpg: true, sshAgent: false }, 'result shows the EFFECTIVE grant');
+});
+
+// L6 (vuln_scan report): sandboxOpts was already capped against the meta
+// agent's own grant, but the plain `sandbox` boolean (sandboxed at all, vs.
+// not) was passed straight through unchecked -- a sandboxed meta agent
+// could request sandbox:false and get an unsandboxed child running
+// directly on the host, escaping its own confinement.
+test('launch_session forces sandbox:true when the meta agent itself is sandboxed, even if sandbox:false is requested', async () => {
+  const deps = makeDeps({ mySandbox: true });
+  const out = await tools.launchSession(deps, { cwd: '/srv/proj', sandbox: false });
+  assert.equal(deps.calls.createdViaApi[0].sandbox, true, 'a sandboxed caller can never request an unsandboxed child');
+  assert.equal(out.sandbox, true, 'result shows the EFFECTIVE (capped) grant');
+});
+
+test('launch_session leaves sandbox: false alone when the meta agent itself is unsandboxed', async () => {
+  const deps = makeDeps({ mySandbox: false });
+  const out = await tools.launchSession(deps, { cwd: '/srv/proj', sandbox: false });
+  assert.equal(deps.calls.createdViaApi[0].sandbox, false, 'an unsandboxed caller already has full host access -- nothing to cap');
+  assert.equal(out.sandbox, false);
+});
+
+test('launch_session leaves sandbox: true untouched regardless of the meta agent\'s own sandbox state', async () => {
+  for (const mySandbox of [true, false]) {
+    const deps = makeDeps({ mySandbox });
+    const out = await tools.launchSession(deps, { cwd: '/srv/proj', sandbox: true });
+    assert.equal(deps.calls.createdViaApi[0].sandbox, true);
+    assert.equal(out.sandbox, true);
+  }
 });
 
 test('launch_session caps sandboxOpts.tools against the meta agent\'s own grant (regression: PR#114 review, capSandboxOpts used to drop tools)', async () => {

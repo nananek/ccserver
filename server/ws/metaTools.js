@@ -100,6 +100,15 @@ function mySandboxOpts(deps) {
   return (id ? deps.sessionManager.getSession(id)?.sandboxOpts : null) ?? null;
 }
 
+// Whether the meta agent's OWN current session is itself sandboxed --
+// the cap for the plain `sandbox` boolean requested for something it
+// launches (see launchSession below). Mirrors mySandboxOpts's "resolved
+// live from its session record" approach.
+function mySandbox(deps) {
+  const id = mySessionId(deps);
+  return !!(id && deps.sessionManager.getSession(id)?.sandbox);
+}
+
 function requestedBy(deps) {
   const id = mySessionId(deps);
   return id ? `meta-agent:${id}` : 'meta-agent';
@@ -251,11 +260,20 @@ export async function createDirectory(deps, args = {}) {
 
 export async function launchSession(deps, args = {}) {
   const capped = capSandboxOpts(args.sandboxOpts, mySandboxOpts(deps));
+  // L6 fix (vuln_scan report): sandboxOpts (the finer-grained capabilities
+  // WITHIN a sandbox) was already capped above, but the plain `sandbox`
+  // boolean -- whether the launched session is sandboxed AT ALL -- was
+  // passed straight through unchecked. A sandboxed meta agent could request
+  // sandbox:false and get a session running directly on the host, escaping
+  // its own confinement. Same rule as capSandboxOpts: a grant this caller
+  // does not itself hold can never be handed to something it launches -- a
+  // sandboxed caller can never request an unsandboxed child.
+  const cappedSandbox = args.sandbox === false && mySandbox(deps) ? true : args.sandbox;
   const res = await deps.sessionsApi.createSessionViaApi({
     cwd: args.cwd,
     ...(args.app !== undefined ? { app: args.app } : {}),
     ...(args.model !== undefined ? { model: args.model } : {}),
-    ...(args.sandbox !== undefined ? { sandbox: args.sandbox } : {}),
+    ...(cappedSandbox !== undefined ? { sandbox: cappedSandbox } : {}),
     ...(capped !== undefined ? { sandboxOpts: capped } : {}),
     // HOME bookkeeping attribution ('meta-agent:<sessionId>').
     requestedBy: requestedBy(deps),
