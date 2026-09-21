@@ -17,19 +17,17 @@ export const MIN_SESSION_EXITED_TIMEOUT_MS = 1000;
 // time would get the exact opposite: immediate teardown.
 const MAX_TIMEOUT_MS = 2147483647;
 
-// `logPrefix` (e.g. '[session]') keeps warnings attributable to whichever
-// caller actually parsed the bad value.
-export function parseTimeoutEnv(raw, { name, fallback, min, logPrefix }) {
+export function parseTimeoutEnv(raw, { name, fallback, min }) {
   if (raw == null || String(raw).trim() === '') return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n)) {
-    console.warn(`${logPrefix} ignoring invalid ${name}=${raw} (not a number); using ${fallback}ms`);
+    console.warn(`[session] ignoring invalid ${name}=${raw} (not a number); using ${fallback}ms`);
     return fallback;
   }
   const ms = Math.trunc(n);
   if (ms > MAX_TIMEOUT_MS) {
     console.warn(
-      `${logPrefix} ${name}=${raw} exceeds setTimeout's ${MAX_TIMEOUT_MS}ms ceiling; `
+      `[session] ${name}=${raw} exceeds setTimeout's ${MAX_TIMEOUT_MS}ms ceiling; `
       + 'clamping to it (set 0 to disable the timeout instead of using a huge value)'
     );
     return MAX_TIMEOUT_MS;

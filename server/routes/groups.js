@@ -460,7 +460,7 @@ export async function groupsRoute(fastify, opts) {
       // scrollback + restore metadata for no benefit (issue: Linux
       // orchestrator-restart regression).
       if (s && Array.isArray(s.sandboxSeatbeltFiles)) {
-        await retireSessionForReuse(existing);
+        retireSessionForReuse(existing);
       }
     }
 

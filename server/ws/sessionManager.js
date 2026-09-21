@@ -59,7 +59,6 @@ export function resolveSessionTimeoutMs(env = process.env) {
     name: 'CCSERVER_SESSION_TIMEOUT_MS',
     fallback: DEFAULT_SESSION_TIMEOUT_MS,
     min: 0,
-    logPrefix: '[session]',
   });
 }
 
@@ -71,7 +70,6 @@ export function resolveExitedTimeoutMs(env = process.env) {
     name: 'CCSERVER_SESSION_EXITED_TIMEOUT_MS',
     fallback: DEFAULT_SESSION_EXITED_TIMEOUT_MS,
     min: MIN_SESSION_EXITED_TIMEOUT_MS,
-    logPrefix: '[session]',
   });
 }
 
@@ -281,7 +279,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
     timeoutTimer: null,
     claudeSessionId: null,
     idleTimer: null,
-    settled: !!meta.settled, // reached the first idle gap (TUI init burst over) -- the send_input settle gate
+    settled: false, // reached the first idle gap (TUI init burst over) -- the send_input settle gate
     settleWaiters: [], // resolvers waiting on `settled` (see waitUntilSettled)
     lastOutputAt: null, // epoch ms of the most recent output chunk; null until the first one (activity timestamp, Issue #16)
     // Workers (groupRole in 'workerX' form) always run inside the sandbox, so
@@ -1019,23 +1017,13 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   } catch (err) {
     // The sandbox (if any) was already built by this point -- clean up what
     // buildSandboxSpawn created (brokers, guard/profile dirs). Otherwise a
-    // failed launch leaks a live broker process and its runtime dirs.
-    if (sandboxStateDir) { try { rmSync(sandboxStateDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-    if (sandboxGitBrokerProc) { try { sandboxGitBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
-    if (sandboxGitBrokerDir) { try { rmSync(sandboxGitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-    if (sandboxCommitGuardDir) { try { rmSync(sandboxCommitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-    if (sandboxSeatbeltDir) { try { rmSync(sandboxSeatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-    if (sandboxNetworkBrokerProc) { try { sandboxNetworkBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
-    if (sandboxNetworkBrokerDir) { try { rmSync(sandboxNetworkBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-    if (Array.isArray(sandboxSeatbeltFiles)) {
-      // Same guard as destroySession(): a concurrent launch from the same
-      // orchestratorDir may already own these paths. (The failed session
-      // itself is not registered yet, so no self-exclusion is needed.)
-      releaseSeatbeltOverlay(
-        sandboxSeatbeltFiles,
-        [...sessions.values()].map((other) => other.sandboxSeatbeltFiles),
-      );
-    }
+    // failed launch leaks a live broker process and its runtime dirs. (The
+    // failed session itself was never registered, so no self-exclusion is
+    // needed -- see releaseSandboxArtifacts.)
+    releaseSandboxArtifacts({
+      sandboxStateDir, sandboxGitBrokerProc, sandboxGitBrokerDir, sandboxCommitGuardDir,
+      sandboxSeatbeltDir, sandboxNetworkBrokerProc, sandboxNetworkBrokerDir, sandboxSeatbeltFiles,
+    });
     return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
   }
 
@@ -1609,7 +1597,7 @@ async function fireSchedule(scheduleId) {
     for (const s of [...sessions.values()]) {
       if (s.exited && s.groupId === entry.groupId && s.groupRole === entry.groupRole
           && Array.isArray(s.sandboxSeatbeltFiles)) {
-        await retireSessionForReuse(s.id);
+        retireSessionForReuse(s.id);
       }
     }
   }
@@ -1962,6 +1950,40 @@ export function detachSocket(id, socketToDetach) {
   removeViewer(session, socketToDetach);
 }
 
+// Best-effort teardown of every sandbox artifact a launch may have built --
+// shared by destroySession() (a live session's own teardown) and
+// createSession()'s spawn-failure cleanup (the launch never got far enough
+// to register a session). `excludeFromSiblings` is the session record itself
+// when called from destroySession() (already registered, so it must be
+// excluded from the seatbelt-overlay sibling scan) -- left undefined from
+// createSession(), where the failed launch was never registered in the
+// first place, so nothing needs excluding.
+function releaseSandboxArtifacts(artifacts, excludeFromSiblings) {
+  const {
+    sandboxStateDir, sandboxGitBrokerProc, sandboxGitBrokerDir, sandboxCommitGuardDir,
+    sandboxSeatbeltDir, sandboxNetworkBrokerProc, sandboxNetworkBrokerDir, sandboxSeatbeltFiles,
+  } = artifacts;
+  if (sandboxStateDir) { try { rmSync(sandboxStateDir, { recursive: true, force: true }); } catch { /* nothing to remove / still held — harmless */ } }
+  if (sandboxGitBrokerProc) { try { sandboxGitBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
+  if (sandboxGitBrokerDir) { try { rmSync(sandboxGitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  if (sandboxCommitGuardDir) { try { rmSync(sandboxCommitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  if (sandboxSeatbeltDir) { try { rmSync(sandboxSeatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  if (sandboxNetworkBrokerProc) { try { sandboxNetworkBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
+  if (sandboxNetworkBrokerDir) { try { rmSync(sandboxNetworkBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  // Orchestrator rule files materialized into the project dir by the
+  // seatbelt backend (NOT under seatbeltDir -- unlink each best-effort). A
+  // successor launched from the same deterministic orchestratorDir (restart
+  // / scheduled auto-resume) owns the same paths: only unlink files no other
+  // registered session still references, or the successor's overlay is
+  // deleted out from under it mid-session.
+  if (Array.isArray(sandboxSeatbeltFiles)) {
+    releaseSeatbeltOverlay(
+      sandboxSeatbeltFiles,
+      [...sessions.values()].filter((other) => other !== excludeFromSiblings).map((other) => other.sandboxSeatbeltFiles),
+    );
+  }
+}
+
 // `reason` is for the teardown log only -- it has no effect on behavior. It
 // exists because sessions used to vanish with no record of which path took
 // them (idle timeout? pty exit cleanup? an explicit teardown? a restart?),
@@ -2024,68 +2046,7 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
   // --unshare-pid tree the kill above reaps), and remove the commit-message
   // guard's runtime dir (see startCommitGuard, sandbox.js -- just a JSON
   // config file, no process, unlike gitBroker there's nothing to kill).
-  if (session.sandboxStateDir) {
-    try {
-      rmSync(session.sandboxStateDir, { recursive: true, force: true });
-    } catch {
-      // nothing to remove / still held — harmless
-    }
-  }
-
-  if (session.sandboxGitBrokerProc) {
-    try {
-      session.sandboxGitBrokerProc.kill('SIGTERM');
-    } catch {
-      // already dead
-    }
-  }
-  if (session.sandboxGitBrokerDir) {
-    try {
-      rmSync(session.sandboxGitBrokerDir, { recursive: true, force: true });
-    } catch {
-      // best effort
-    }
-  }
-  if (session.sandboxCommitGuardDir) {
-    try {
-      rmSync(session.sandboxCommitGuardDir, { recursive: true, force: true });
-    } catch {
-      // best effort
-    }
-  }
-  if (session.sandboxSeatbeltDir) {
-    try {
-      rmSync(session.sandboxSeatbeltDir, { recursive: true, force: true });
-    } catch {
-      // best effort
-    }
-  }
-  if (session.sandboxNetworkBrokerProc) {
-    try {
-      session.sandboxNetworkBrokerProc.kill('SIGTERM');
-    } catch {
-      // already dead
-    }
-  }
-  if (session.sandboxNetworkBrokerDir) {
-    try {
-      rmSync(session.sandboxNetworkBrokerDir, { recursive: true, force: true });
-    } catch {
-      // best effort
-    }
-  }
-  // Orchestrator rule files materialized into the project dir by the
-  // seatbelt backend (NOT under seatbeltDir -- unlink each best-effort).
-  // A successor launched from the same deterministic orchestratorDir
-  // (restart / scheduled auto-resume) owns the same paths: only unlink
-  // files no other registered session still references, or the successor's
-  // overlay is deleted out from under it mid-session.
-  if (Array.isArray(session.sandboxSeatbeltFiles)) {
-    releaseSeatbeltOverlay(
-      session.sandboxSeatbeltFiles,
-      [...sessions.values()].filter((other) => other !== session).map((other) => other.sandboxSeatbeltFiles),
-    );
-  }
+  releaseSandboxArtifacts(session, session);
 
   sessions.delete(id);
 }
