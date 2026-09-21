@@ -367,12 +367,33 @@ test('F1: `gpg --export-secret-keys` through the relay yields nothing, while git
         sock.once('connect', () => console.error('DIAG raw connect via SYMLINK: connected'));
         sock.once('error', (e) => { clearTimeout(timer); console.error('DIAG raw connect via SYMLINK error:', e.message); resolve(); });
       });
-      const verbose = await run('gpg', [
-        '--homedir', home, '--status-fd=2', '--verbose', '--debug-level', 'guru', '--debug', 'ipc,extprog',
-        '-bsau', vault.fingerprint,
+      const ls1 = await run('ls', ['-la', home]);
+      console.error('DIAG ls -la home:\n', ls1.stdout.toString());
+      const ls2 = await run('ls', ['-la', getRelaySocketPaths().agent.replace(/\/[^/]+$/, '')]);
+      console.error('DIAG ls -la relay dir:\n', ls2.stdout.toString());
+      const idOut = await run('id', []);
+      console.error('DIAG id:', idOut.stdout.toString().trim());
+      const straceCheck = await run('which', ['strace']);
+      console.error('DIAG which strace status=', straceCheck.status, straceCheck.stdout.toString().trim());
+      if (straceCheck.status !== 0) {
+        const install = await run('sudo', ['apt-get', 'install', '-y', 'strace'], { timeoutMs: 60000 });
+        console.error('DIAG strace install status=', install.status, install.stderr.toString().slice(-500));
+      }
+      const stracePath = '/tmp/ccv-strace.out';
+      const straceRun = await run('strace', [
+        '-f', '-tt', '-s', '200',
+        '-e', 'trace=network,connect,socket,stat,lstat,newfstatat,readlink,access,openat',
+        '-o', stracePath,
+        'gpg', '--homedir', home, '--status-fd=2', '-bsau', vault.fingerprint,
       ], { input: 'tree 0\n' });
-      console.error('DIAG verbose/debug-ipc run status=', verbose.status);
-      console.error('DIAG verbose/debug-ipc stderr:\n', verbose.stderr);
+      console.error('DIAG strace-wrapped run status=', straceRun.status);
+      try {
+        const { readFileSync } = await import('node:fs');
+        const traceContent = readFileSync(stracePath, 'utf8');
+        console.error('DIAG strace output:\n', traceContent);
+      } catch (e) {
+        console.error('DIAG could not read strace output:', e.message);
+      }
     }
     assert.equal(signed.status, 0, `signing through the relay works: ${signed.stderr}`);
     assert.match(signed.stderr, /SIG_CREATED/);
