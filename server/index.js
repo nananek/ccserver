@@ -162,6 +162,30 @@ if (AUTH_MODE === 'token') {
   process.exit(1);
 }
 
+// H3 fix (vuln_scan report): AUTH_MODE=none (the default when neither
+// CCSERVER_AUTH_MODE nor CCSERVER_TOKEN is set) plus the server's own
+// 0.0.0.0 bind meant every file/dir/session API was reachable with zero
+// authentication to anyone who could reach this host on the network --
+// safePath() in routes/files.js is intentionally host-wide (see
+// files.test.js), so this was full unauthenticated host file read/write,
+// not just "someone browses your project". Cross-device session sharing
+// (README's "複数端末からのセッション共有") genuinely needs a non-loopback
+// bind, so the fix isn't to force loopback by default -- it's to refuse the
+// specific none+non-loopback combination at boot unless an operator
+// explicitly opts in (e.g. a trusted isolated LAN with no other feasible
+// auth), rather than silently exposing it.
+const HOST = process.env.CCSERVER_HOST || '0.0.0.0';
+const isLoopbackHost = (h) => h === '127.0.0.1' || h === '::1' || h === 'localhost';
+if (AUTH_MODE === 'none' && !isLoopbackHost(HOST) && process.env.CCSERVER_ALLOW_UNAUTHENTICATED_LAN !== '1') {
+  fastify.log.error(
+    `Refusing to start: CCSERVER_AUTH_MODE=none with a non-loopback bind (host=${HOST}) would expose every file/session `
+    + 'API unauthenticated to anyone who can reach this host on the network. Set CCSERVER_AUTH_MODE=token '
+    + '(with CCSERVER_TOKEN) or CCSERVER_AUTH_MODE=passkey, set CCSERVER_HOST=127.0.0.1 for loopback-only access, '
+    + 'or set CCSERVER_ALLOW_UNAUTHENTICATED_LAN=1 to accept this risk explicitly.'
+  );
+  process.exit(1);
+}
+
 await fastify.register(websocket);
 await fastify.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } });
 await fastify.register(dirsRoute, { prefix: '/api' });
@@ -326,7 +350,7 @@ try {
   fastify.log.error({ err }, 'Failed to start ccserver federation listener');
 }
 
-await fastify.listen({ port: PORT, host: '0.0.0.0' });
+await fastify.listen({ port: PORT, host: HOST });
 
 // Re-arm scheduled prompts persisted before the last shutdown/restart. Missed
 // ones (server was down at their time) fire shortly after startup; live ones

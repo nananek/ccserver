@@ -166,10 +166,43 @@ async function withServer(extraEnv, fn) {
   }
 }
 
-test('none mode (CCSERVER_AUTH_MODE/CCSERVER_TOKEN both unset): unauthenticated requests reach protected routes', async () => {
-  await withServer({}, async (server) => {
+test('none mode (CCSERVER_AUTH_MODE/CCSERVER_TOKEN both unset), loopback bind: unauthenticated requests reach protected routes', async () => {
+  // H3 fix: none mode now requires an explicit loopback bind (or the opt-in
+  // escape hatch below) to boot at all -- see the two tests after this one.
+  await withServer({ CCSERVER_HOST: '127.0.0.1' }, async (server) => {
     const res = await fetch(`${server.baseUrl}/api/dirs/home`);
     assert.equal(res.status, 200, `expected 200 with no auth in none mode; logs:\n${server.logs()}`);
+  });
+});
+
+// H3 (vuln_scan report): AUTH_MODE=none used to combine with the server's
+// unconditional 0.0.0.0 bind to expose every file/session API unauthenticated
+// to anyone on the network. The fix refuses to boot in that specific
+// combination unless the operator explicitly opts in.
+test('H3: none mode with a non-loopback bind refuses to boot by default', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-startup-auth-mode-h3-'));
+  const port = await getFreePort();
+  // CCSERVER_HOST intentionally left unset -- '0.0.0.0' is still the default.
+  const server = new Server(childEnv(dir, { PORT: String(port) }));
+  try {
+    server.spawn();
+    const code = await server.waitForExit();
+    assert.notEqual(code, 0, `server must refuse to boot as none+0.0.0.0; logs:\n${server.logs()}`);
+    assert.match(
+      server.logs(),
+      /Refusing to start: CCSERVER_AUTH_MODE=none with a non-loopback bind/,
+      'the refusal must explain itself, not fail opaquely'
+    );
+  } finally {
+    await server.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H3: none mode with a non-loopback bind boots when CCSERVER_ALLOW_UNAUTHENTICATED_LAN=1 opts in explicitly', async () => {
+  await withServer({ CCSERVER_HOST: '0.0.0.0', CCSERVER_ALLOW_UNAUTHENTICATED_LAN: '1' }, async (server) => {
+    const res = await fetch(`${server.baseUrl}/api/dirs/home`);
+    assert.equal(res.status, 200, `expected the explicit opt-in to still work; logs:\n${server.logs()}`);
   });
 });
 

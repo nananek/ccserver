@@ -170,6 +170,10 @@ class Instance {
       CCSERVER_GROUPS_PATH: this.opts.groupsPath,
       CCSERVER_SAVED_SESSIONS_PATH: this.opts.savedSessionsPath,
       CCSERVER_HOSTNAME: '127.0.0.1',
+      // This suite isn't about auth/bind posture -- pin loopback so the H3
+      // boot guard (none-mode + non-loopback bind refuses to start) doesn't
+      // fire before these instances ever come up.
+      CCSERVER_HOST: '127.0.0.1',
     };
     delete env.CCSERVER_TOKEN;
     delete env.CCSERVER_AUTH_MODE;

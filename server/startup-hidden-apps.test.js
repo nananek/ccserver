@@ -60,6 +60,10 @@ test('server refuses to start when hiddenApps hides every installed app id', asy
       CCSERVER_DB_PATH: join(dir, 'db.sqlite3'),
       CCSERVER_GROUPS_PATH: join(dir, 'groups.json'),
       CCSERVER_SAVED_SESSIONS_PATH: join(dir, 'sessions.json'),
+      // Loopback-only: this test isn't about auth/bind posture at all, and
+      // without it the H3 boot guard (none-mode + non-loopback bind refuses
+      // to start) would fire before the hiddenApps check even runs.
+      CCSERVER_HOST: '127.0.0.1',
       PORT: '0',
     });
 
@@ -95,6 +99,8 @@ test('server boots normally when hiddenApps leaves at least one app selectable',
         CCSERVER_DB_PATH: join(dir, 'db.sqlite3'),
         CCSERVER_GROUPS_PATH: join(dir, 'groups.json'),
         CCSERVER_SAVED_SESSIONS_PATH: join(dir, 'sessions.json'),
+        // See the H3-guard comment in the test above.
+        CCSERVER_HOST: '127.0.0.1',
         PORT: '0',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
