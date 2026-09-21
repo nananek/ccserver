@@ -272,7 +272,16 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
   // sandbox.config.json's network.initialState) -- 'enforce' unless the
   // operator set initialState to 'open'.
   let state = initialState === 'open' ? 'open' : 'enforce';
+  // Two independent tokens (H1 fix): `token` authenticates CONNECT proxy
+  // traffic and is the one embedded in HTTP_PROXY/HTTPS_PROXY -- so it is
+  // readable from *inside* the sandbox by design (see buildIsolatedProxyEnv).
+  // `adminToken` authenticates /__admin/* and is only ever handed to the
+  // host-side ccserver process (see startNetworkBroker) -- it must never be
+  // derivable from anything visible inside the sandbox, or a sandboxed agent
+  // could read it off its own env and use it to disable its own egress
+  // allow-list, exactly like a stolen proxy token used to be able to.
   const token = process.env.CCSANDBOX_NETWORK_BROKER_TOKEN || '';
+  const adminToken = process.env.CCSANDBOX_NETWORK_BROKER_ADMIN_TOKEN || '';
 
   const server = createServer((req, res) => {
     // Socket aborts (RST after 403/407/404 etc.) surface as 'error' on
@@ -284,7 +293,7 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
     // else on this port is proxy traffic (CONNECT, handled below) or noise.
     if (req.method === 'POST' && (req.url === '/__admin/mode' || req.url === '/__admin/allowlist')) {
       const suppliedToken = tokenFromBearerAuth(req.headers.authorization);
-      if (!tokenEq(suppliedToken, token)) {
+      if (!tokenEq(suppliedToken, adminToken)) {
         res.writeHead(401).end('unauthorized');
         return;
       }
@@ -496,11 +505,15 @@ export function startNetworkBroker({ allowedHosts = [], deniedHosts = [], mode =
     throw new Error(`network broker failed to start: ${e.message}`);
   }
 
+  // Two independent, unguessable tokens -- see runServer's comment. Only
+  // `token` is ever destined for the sandbox's env (buildIsolatedProxyEnv,
+  // called by sandbox.js); `adminToken` must stay host-side only.
   const token = randomBytes(24).toString('base64url');
+  const adminToken = randomBytes(24).toString('base64url');
   const serveArgs = [__filename, '--serve', '--allowlist', allowlistPath, '--denylist', denylistPath, '--mode', mode, '--state', state, '--port-file', portFile];
   const proc = spawn(process.execPath, serveArgs, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, CCSANDBOX_NETWORK_BROKER_TOKEN: token },
+    env: { ...process.env, CCSANDBOX_NETWORK_BROKER_TOKEN: token, CCSANDBOX_NETWORK_BROKER_ADMIN_TOKEN: adminToken },
   });
 
   proc.stdout.on('data', (d) => process.stdout.write(`[network-broker] ${d}`));
@@ -551,7 +564,7 @@ export function startNetworkBroker({ allowedHosts = [], deniedHosts = [], mode =
     throw new Error(`network broker readiness probe failed on port ${port}`);
   }
 
-  return { proc, dir, port, token, allowedHosts, deniedHosts, mode, state };
+  return { proc, dir, port, token, adminToken, allowedHosts, deniedHosts, mode, state };
 }
 
 // Synchronous readiness probe: connect and confirm the port actually accepts

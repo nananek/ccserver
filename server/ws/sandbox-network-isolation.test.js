@@ -134,6 +134,7 @@ function fakeBrokerStarter(calls) {
       dir: join(tmpRoot, `fake-netbroker-${calls.length}`),
       port: 54321,
       token: 'fake-token',
+      adminToken: 'fake-admin-token',
       allowedHosts: opts.allowedHosts,
       mode: opts.mode,
       state: opts.state,
@@ -198,6 +199,12 @@ test('buildSandboxSpawn: network.isolate:true enables structural isolation (Linu
   assert.equal(spawn.networkIsolateMode, 'enforce');
   assert.equal(spawn.networkBrokerPort, 54321);
   assert.equal(spawn.networkBrokerToken, 'fake-token');
+  // H1 regression: the admin token (used for the host-side /__admin/* live
+  // toggle) must be a distinct value from the proxy token embedded in the
+  // sandbox's HTTP_PROXY env above -- a sandboxed agent that reads its own
+  // env must never recover a credential that can flip its own allow-list.
+  assert.equal(spawn.networkBrokerAdminToken, 'fake-admin-token');
+  assert.notEqual(spawn.networkBrokerAdminToken, env.HTTP_PROXY.match(/networkbroker:([^@]+)@/)[1]);
 });
 
 test('buildSandboxSpawn: a plain bwrap launch (network.isolate off) never starts a broker, even when tooling exists', { skip: process.platform === 'darwin' }, () => {

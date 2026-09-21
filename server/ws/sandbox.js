@@ -1399,6 +1399,7 @@ const NO_NETWORK_BROKER_HANDLE = Object.freeze({
   sandboxNetworkBrokerDir: null,
   networkBrokerPort: null,
   networkBrokerToken: null,
+  networkBrokerAdminToken: null,
   networkIsolateArmed: false,
   networkIsolateMode: null,
 });
@@ -2518,6 +2519,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         sandboxNetworkBrokerDir: networkBroker.dir,
         networkBrokerPort: networkBroker.port,
         networkBrokerToken: networkBroker.token,
+        networkBrokerAdminToken: networkBroker.adminToken,
         networkIsolateArmed: true,
         networkIsolateMode: networkBroker.state,
       } : {}),
@@ -2593,6 +2595,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       sandboxNetworkBrokerDir: networkBroker.dir,
       networkBrokerPort: networkBroker.port,
       networkBrokerToken: networkBroker.token,
+      networkBrokerAdminToken: networkBroker.adminToken,
       networkIsolateArmed: true,
       networkIsolateMode: networkBroker.state,
     } : {}),

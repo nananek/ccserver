@@ -326,9 +326,9 @@ export function attachTerminalHandler(chan) {
       case 'set_network_isolation': {
         if (currentSessionId) {
           const session = getSession(currentSessionId);
-          if (session && session.networkIsolateArmed && session.networkBrokerPort && session.networkBrokerToken) {
+          if (session && session.networkIsolateArmed && session.networkBrokerPort && session.networkBrokerAdminToken) {
             const mode = msg.enabled ? 'enforce' : 'open';
-            const ok = await setNetworkBrokerMode({ port: session.networkBrokerPort, token: session.networkBrokerToken }, mode);
+            const ok = await setNetworkBrokerMode({ port: session.networkBrokerPort, token: session.networkBrokerAdminToken }, mode);
             if (ok) {
               session.networkIsolateMode = mode;
             }

@@ -257,6 +257,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
     // to kill/remove on teardown) mirror sandboxGitBrokerProc/Dir.
     networkBrokerPort: meta.networkBrokerPort ?? null,
     networkBrokerToken: meta.networkBrokerToken ?? null,
+    networkBrokerAdminToken: meta.networkBrokerAdminToken ?? null,
     networkIsolateArmed: !!meta.networkIsolateArmed,
     networkIsolateMode: meta.networkIsolateMode ?? null, // 'enforce' | 'open', mutated live by the running-session toggle
     sandboxNetworkBrokerProc: meta.sandboxNetworkBrokerProc ?? null,
@@ -915,6 +916,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // sandboxGitBrokerProc/Dir.
   let networkBrokerPort = null;
   let networkBrokerToken = null;
+  let networkBrokerAdminToken = null;
   let networkIsolateArmed = false;
   let networkIsolateMode = null;
   let sandboxNetworkBrokerProc = null;
@@ -960,6 +962,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       sandboxSeatbeltFiles = spawn.seatbeltFiles || null;
       networkBrokerPort = spawn.networkBrokerPort || null;
       networkBrokerToken = spawn.networkBrokerToken || null;
+      networkBrokerAdminToken = spawn.networkBrokerAdminToken || null;
       networkIsolateArmed = !!spawn.networkIsolateArmed;
       networkIsolateMode = spawn.networkIsolateMode || null;
       sandboxNetworkBrokerProc = spawn.sandboxNetworkBrokerProc || null;
@@ -1049,6 +1052,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     sandboxSeatbeltFiles,
     networkBrokerPort,
     networkBrokerToken,
+    networkBrokerAdminToken,
     networkIsolateArmed,
     networkIsolateMode,
     sandboxNetworkBrokerProc,
@@ -1376,7 +1380,7 @@ export function sandboxHomeInUsePath(homePath) {
 // (see buildSessionRecord), so the HTTP call is made straight from this
 // process.
 export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }) {
-  const armed = [...sessions.values()].filter((s) => s.networkIsolateArmed && s.networkBrokerPort && s.networkBrokerToken);
+  const armed = [...sessions.values()].filter((s) => s.networkIsolateArmed && s.networkBrokerPort && s.networkBrokerAdminToken);
   // Parallel, not sequential: each session's push is an independent HTTP
   // round-trip to a different broker process, so awaiting them one at a time
   // in a for...of would block the Settings PUT handler (which awaits this)
@@ -1386,7 +1390,7 @@ export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }
   const results = await Promise.all(armed.map(async (s) => {
     try {
       return await setNetworkBrokerLists(
-        { port: s.networkBrokerPort, token: s.networkBrokerToken },
+        { port: s.networkBrokerPort, token: s.networkBrokerAdminToken },
         { allowedHosts, deniedHosts },
       );
     } catch {

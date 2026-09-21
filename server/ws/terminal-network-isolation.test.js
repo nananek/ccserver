@@ -52,6 +52,7 @@ async function isolationEnabledSession() {
   session.networkIsolateArmed = true;
   session.networkBrokerPort = broker.port;
   session.networkBrokerToken = broker.token;
+  session.networkBrokerAdminToken = broker.adminToken;
   session.networkIsolateMode = 'enforce';
   return { sessionId: res.sessionId, session, broker };
 }

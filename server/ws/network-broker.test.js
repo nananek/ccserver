@@ -156,12 +156,12 @@ test('live toggle: setNetworkBrokerMode flips enforce <-> open without restartin
   const denied = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
   assert.match(denied.statusLine, /^HTTP\/1\.1 403/, 'starts in enforce with an empty allow-list');
 
-  const flipped = await setNetworkBrokerMode(broker, 'open');
+  const flipped = await setNetworkBrokerMode({ port: broker.port, token: broker.adminToken }, 'open');
   assert.equal(flipped, true);
   const opened = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
   assert.match(opened.statusLine, /^HTTP\/1\.1 200/, 'open state lets everything through, same broker process');
 
-  const flippedBack = await setNetworkBrokerMode(broker, 'enforce');
+  const flippedBack = await setNetworkBrokerMode({ port: broker.port, token: broker.adminToken }, 'enforce');
   assert.equal(flippedBack, true);
   const deniedAgain = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
   assert.match(deniedAgain.statusLine, /^HTTP\/1\.1 403/, 'flipping back to enforce re-applies the allow-list immediately');
@@ -171,8 +171,31 @@ test('setNetworkBrokerMode rejects an invalid mode and a wrong token', async () 
   const broker = startNetworkBroker({ allowedHosts: [] });
   brokers.push(broker);
 
-  assert.equal(await setNetworkBrokerMode(broker, 'not-a-real-mode'), false);
+  assert.equal(await setNetworkBrokerMode({ port: broker.port, token: broker.adminToken }, 'not-a-real-mode'), false);
   assert.equal(await setNetworkBrokerMode({ port: broker.port, token: 'wrong' }, 'open'), false);
+});
+
+// H1 fix regression: before this fix, the proxy token embedded in the
+// sandbox's HTTP_PROXY/HTTPS_PROXY env (readable by anything running inside
+// the sandbox) was the SAME value that authenticated /__admin/mode and
+// /__admin/allowlist -- a sandboxed agent could read it off its own env and
+// use it to disable its own network egress allow-list. The two tokens must
+// now be independent, and the proxy token alone must never authenticate an
+// admin call.
+test('H1: the proxy token (visible inside the sandbox) cannot authenticate admin endpoints', async () => {
+  const broker = startNetworkBroker({ allowedHosts: ['allowed.example'] });
+  brokers.push(broker);
+
+  assert.notEqual(broker.token, broker.adminToken, 'proxy token and admin token must be independent secrets');
+
+  const rejectedMode = await adminPost(broker.port, '/__admin/mode', broker.token, { mode: 'open' });
+  assert.match(rejectedMode.statusLine, /^HTTP\/1\.1 401/, 'proxy token must not open the live allow-list toggle');
+
+  const rejectedAllowlist = await adminPost(broker.port, '/__admin/allowlist', broker.token, { hosts: ['evil.example'] });
+  assert.match(rejectedAllowlist.statusLine, /^HTTP\/1\.1 401/, 'proxy token must not replace the allow-list');
+
+  const acceptedMode = await adminPost(broker.port, '/__admin/mode', broker.adminToken, { mode: 'open' });
+  assert.match(acceptedMode.statusLine, /^HTTP\/1\.1 200/, 'the real admin token still works');
 });
 
 test('networkBrokerProxyUrl embeds the token as Basic-auth userinfo', () => {
@@ -258,7 +281,7 @@ test('allowlist endpoint: live replacement flips verdicts without restarting', a
   assert.match(denied.statusLine, /^HTTP\/1\.1 403/);
   denied.sock.destroy();
 
-  const replaced = await adminPost(broker.port, '/__admin/allowlist', broker.token, { hosts: [' 127.0.0.1 '] });
+  const replaced = await adminPost(broker.port, '/__admin/allowlist', broker.adminToken, { hosts: [' 127.0.0.1 '] });
   assert.match(replaced.statusLine, /^HTTP\/1\.1 200/, 'normalizes + applies');
   assert.equal(JSON.parse(replaced.body).count, 1);
 
@@ -275,7 +298,7 @@ test('allowlist endpoint: 401 without token, 400 on bad lists', async () => {
   assert.match(noAuth.statusLine, /^HTTP\/1\.1 401/);
 
   for (const body of [{ hosts: ['https://evil.example'] }, { hosts: 'nope' }, { nope: [] }]) {
-    const res = await adminPost(broker.port, '/__admin/allowlist', broker.token, body);
+    const res = await adminPost(broker.port, '/__admin/allowlist', broker.adminToken, body);
     assert.match(res.statusLine, /^HTTP\/1\.1 400/, `rejects ${JSON.stringify(body)}`);
   }
 
@@ -334,12 +357,12 @@ test('denylist endpoint: live replacement via setNetworkBrokerLists', async () =
   assert.match(before.statusLine, /^HTTP\/1\.1 200/);
   before.sock.destroy();
 
-  assert.equal(await setNetworkBrokerLists(broker, { deniedHosts: ['127.0.0.1'] }), true);
+  assert.equal(await setNetworkBrokerLists({ port: broker.port, token: broker.adminToken }, { deniedHosts: ['127.0.0.1'] }), true);
   const denied = await rawConnect(broker.port, target, basicAuth(broker.token));
   assert.match(denied.statusLine, /^HTTP\/1\.1 403/, 'live deny push blocks without restart');
   denied.sock.destroy();
 
-  assert.equal(await setNetworkBrokerLists(broker, { deniedHosts: [] }), true);
+  assert.equal(await setNetworkBrokerLists({ port: broker.port, token: broker.adminToken }, { deniedHosts: [] }), true);
   const reopened = await rawConnect(broker.port, target, basicAuth(broker.token));
   assert.match(reopened.statusLine, /^HTTP\/1\.1 200/, 'clearing the deny-list restores the allow verdict');
   reopened.sock.destroy();
