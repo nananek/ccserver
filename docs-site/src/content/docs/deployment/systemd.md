@@ -72,13 +72,15 @@ systemctl --user restart ccserver
 systemctl --user stop ccserver
 ```
 
-## 6. pty-host 分離でサーバー再起動をまたいでセッションを維持する（デフォルト有効）
+## 6. pty-host 分離でサーバー再起動をまたいでセッションを維持する（撤回済み・デフォルト無効）
+
+> **2026-09時点でこの分離機能は撤回されています。** 実装の複雑さに見合う効果がなく、プロセス分離由来のバグの温床になっていました（例: GPG vault のアンロック状態は `ccserver` 本体プロセスのメモリにしか存在しないため、pty-host 側から見ると常に locked 扱いになり、サンドボックス起動が `SPAWN_FAILED` で失敗する、といった不整合）。デフォルトは無効（直接 spawn 方式のみ）に戻っており、下記の手順で明示的にオプトインしない限り有効になりません。新規デプロイでは有効化しないことを推奨します。
 
 通常の構成では、`systemctl --user restart ccserver` のたびに、実行中の全ターミナルセッション（Claude Code / opencode / codex などの子プロセス）が終了します。実行中の長時間コマンドやバックグラウンドジョブの状態はこの再起動で失われます（会話自体は resume 機能で再開できますが、プロセスの状態は失われます）。
 
-これを緩和するため、PTY プロセスの生成・管理を `ccserver` 本体から切り離した常駐プロセス **pty-host** に分離しています。`ccserver` を再起動しても pty-host 側のプロセスには触れないため、再起動後に既存セッションへ再接続できます。この分離はデフォルトで有効です。`ccserver-pty-host.service` を起動していれば、`ccserver` は起動時に自動的にそれを検出して使い始めます（後述の「手順」参照）。
+これを緩和する目的で、PTY プロセスの生成・管理を `ccserver` 本体から切り離した常駐プロセス **pty-host** への分離を実験していました。`ccserver` を再起動しても pty-host 側のプロセスには触れないため、再起動後に既存セッションへ再接続できます。ただし上記の理由で撤回済みのため、`Environment=CCSERVER_PTY_HOST=1`（またはその他 `0` 以外の値）を明示的に設定しない限り、`ccserver-pty-host.service` を起動していても使われません（後述の「手順」参照）。
 
-`ccserver-pty-host.service` をまだ起動していない場合は、`ccserver` は起動時にそれを検出できず、自動的に従来どおりの直接 spawn 方式（`ccserver` 自身が PTY プロセスの親になる、再起動でセッションが失われる方式）にフォールバックします。ログに警告が出ますが、動作自体は既存デプロイと変わらず継続します。無効化を明示したい場合、または警告ログを止めたい場合は `Environment=CCSERVER_PTY_HOST=0` を設定してください（`docs/ccserver.service` にコメント付きの例が入っています）。
+`CCSERVER_PTY_HOST=1` を設定しても `ccserver-pty-host.service` が起動していない場合は、`ccserver` は起動時にそれを検出できず、自動的に従来どおりの直接 spawn 方式（`ccserver` 自身が PTY プロセスの親になる、再起動でセッションが失われる方式）にフォールバックします。ログに警告が出ますが、動作自体はデフォルト構成と変わらず継続します。
 
 pty-host 自体がクラッシュした場合（`Restart=on-failure` で自動再起動される想定）も、直前まで保持していたセッションをそのセッションIDのまま自動的に再起動時に再launchします（自動resume）。ただし現時点では以下の制約が残ります。
 
@@ -97,7 +99,7 @@ pty-host 自体がクラッシュした場合（`Restart=on-failure` で自動�
    systemctl --user enable --now ccserver-pty-host
    ```
 
-2. `ccserver` を（再）起動します。デフォルトで有効なので追加の設定変更は不要です。起動時に pty-host への到達性を確認し、到達できればそのまま使い始めます。
+2. `ccserver.service` に `Environment=CCSERVER_PTY_HOST=1` を設定してから、`ccserver` を（再）起動します（デフォルトは無効なので、この設定なしでは pty-host を起動していても使われません）。起動時に pty-host への到達性を確認し、到達できればそのまま使い始めます。
 
    ```bash
    systemctl --user daemon-reload

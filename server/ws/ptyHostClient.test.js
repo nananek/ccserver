@@ -366,25 +366,25 @@ test('getAllPtyHostClients returns exactly shardCount() clients, indexed 0..N-1'
   }
 });
 
-// Issue #119 Step7-2: isPtyHostEnabled() now defaults to ON (unset/empty),
-// flipped from the historical default-OFF -- only an explicit '0' opts out.
-// Exercised via the injected `env` param (a plain object, not process.env)
-// so this stays a pure-function test with no global mutation/restore.
-test('isPtyHostEnabled defaults to true when unset or empty, false only for an explicit "0"', () => {
-  assert.equal(isPtyHostEnabled({}), true, 'unset means enabled by default');
-  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '' }), true, 'empty string means enabled by default');
-  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '0' }), false, 'explicit "0" is the only way to opt out');
-  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '1' }), true, 'the historical explicit "1" still means enabled');
-  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: 'yes' }), true, 'any other non-"0" value stays enabled, not just "1"');
+// pty-host分離は撤回済み(ptyHostClient.js's isPtyHostEnabled()参照) -- デフォ
+// ルトは再びOFF、明示的な非"0"値(例: "1")でのみオプトインできる。Exercised
+// via the injected `env` param (a plain object, not process.env) so this
+// stays a pure-function test with no global mutation/restore.
+test('isPtyHostEnabled defaults to false when unset or empty, true only for an explicit non-"0" value', () => {
+  assert.equal(isPtyHostEnabled({}), false, 'unset means disabled by default');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '' }), false, 'empty string means disabled by default');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '0' }), false, 'explicit "0" stays disabled');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '1' }), true, 'explicit "1" opts in');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: 'yes' }), true, 'any other non-"0" value opts in too');
 });
 
 test('isPtyHostEnabled reads process.env by default when no env argument is given', () => {
   const prev = process.env.CCSERVER_PTY_HOST;
   try {
-    process.env.CCSERVER_PTY_HOST = '0';
-    assert.equal(isPtyHostEnabled(), false);
-    delete process.env.CCSERVER_PTY_HOST;
+    process.env.CCSERVER_PTY_HOST = '1';
     assert.equal(isPtyHostEnabled(), true);
+    delete process.env.CCSERVER_PTY_HOST;
+    assert.equal(isPtyHostEnabled(), false);
   } finally {
     if (prev === undefined) delete process.env.CCSERVER_PTY_HOST;
     else process.env.CCSERVER_PTY_HOST = prev;

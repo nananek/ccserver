@@ -1,8 +1,9 @@
-// Issue #119 Step7-3: isPtyHostEnabled() now defaults to ON (see
-// ws/ptyHostClient.js), so an existing deployment that never started
-// ccserver-pty-host.service must not have every session creation fail
-// outright the moment it upgrades. index.js probes pty-host reachability
-// once at boot (checkPtyHostReachable()) and, if it's not actually there,
+// pty-host分離は撤回済み(ws/ptyHostClient.js's isPtyHostEnabled()参照) --
+// isPtyHostEnabled() defaults to OFF again when CCSERVER_PTY_HOST is unset,
+// so a default deployment never even probes pty-host and always uses direct
+// spawn. index.js's boot-time probe (checkPtyHostReachable()) only runs at
+// all for a deployment that explicitly opted in via CCSERVER_PTY_HOST=1 (or
+// any other non-"0" value); if pty-host isn't actually reachable there, it
 // overrides process.env.CCSERVER_PTY_HOST='0' for the rest of that run.
 //
 // Same "spawn the real entrypoint" approach as startup-hidden-apps.test.js:
@@ -85,7 +86,29 @@ function tempEnvPaths(dir) {
   };
 }
 
-test('server falls back to direct spawn and logs a warning when pty-host is unreachable at boot (CCSERVER_PTY_HOST left unset)', async () => {
+test('server never probes pty-host at boot when CCSERVER_PTY_HOST is left unset (new default: direct spawn only)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-startup-ptyhost-default-off-'));
+  try {
+    const result = await runServerAndCapture({
+      ...tempEnvPaths(dir),
+      // A path that will never have anything listening on it -- if the
+      // server probed it at all, this would produce an "unreachable"
+      // fallback log. CCSERVER_PTY_HOST itself is deliberately left UNSET so
+      // isPtyHostEnabled()'s default-OFF is what's actually under test here.
+      CCSERVER_PTY_HOST_SOCK: join(dir, 'nothing-listens-here.sock'),
+    });
+    assert.equal(result.exitedEarly, false, `server must stay up; stdout=${result.stdout}\nstderr=${result.stderr}`);
+    assert.doesNotMatch(
+      result.stdout + result.stderr,
+      /pty-host (un)?reachable at boot/,
+      'an unset (default-off) CCSERVER_PTY_HOST must skip the probe entirely -- pty-host is opt-in, not opt-out'
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('server falls back to direct spawn and logs a warning when pty-host is unreachable at boot (CCSERVER_PTY_HOST=1 opted in explicitly)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-startup-ptyhost-fallback-'));
   try {
     // checkPtyHostReachable() now retries across its whole ~3000ms budget
@@ -97,9 +120,10 @@ test('server falls back to direct spawn and logs a warning when pty-host is unre
     // give it more room here specifically.
     const result = await runServerAndCapture({
       ...tempEnvPaths(dir),
-      // A path that will never have anything listening on it -- CCSERVER_PTY_HOST
-      // itself is deliberately left UNSET so isPtyHostEnabled()'s new
-      // default-ON is what's actually under test here.
+      // pty-host分離は撤回済み(デフォルトOFF)なので、このシナリオは
+      // CCSERVER_PTY_HOST=1で明示的にオプトインしたデプロイでのみ起こる。
+      CCSERVER_PTY_HOST: '1',
+      // A path that will never have anything listening on it.
       CCSERVER_PTY_HOST_SOCK: join(dir, 'nothing-listens-here.sock'),
     }, { aliveForMs: 7000 });
     assert.equal(result.exitedEarly, false, `server must stay up despite the unreachable pty-host; stdout=${result.stdout}\nstderr=${result.stderr}`);
@@ -113,7 +137,7 @@ test('server falls back to direct spawn and logs a warning when pty-host is unre
   }
 });
 
-test('server detects a reachable pty-host at boot and does not fall back', async () => {
+test('server detects a reachable pty-host at boot and does not fall back (CCSERVER_PTY_HOST=1 opted in explicitly)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-startup-ptyhost-reachable-'));
   const sockPath = join(dir, 'pty-host.sock');
   let host;
@@ -123,6 +147,9 @@ test('server detects a reachable pty-host at boot and does not fall back', async
 
     const result = await runServerAndCapture({
       ...tempEnvPaths(dir),
+      // pty-host分離は撤回済み(デフォルトOFF)なので、このシナリオは
+      // CCSERVER_PTY_HOST=1で明示的にオプトインしたデプロイでのみ起こる。
+      CCSERVER_PTY_HOST: '1',
       CCSERVER_PTY_HOST_SOCK: sockPath,
     });
     assert.equal(result.exitedEarly, false, `server must stay up; stdout=${result.stdout}\nstderr=${result.stderr}`);

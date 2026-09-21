@@ -239,20 +239,17 @@ try {
 
 const PORT = process.env.PORT || 3001;
 
-// Issue #119 Step7-3: isPtyHostEnabled() now defaults to ON when
-// CCSERVER_PTY_HOST is unset (ptyHostClient.js), so an existing deployment
-// that has never started ccserver-pty-host.service would otherwise have
-// every createSession() call below fail outright the moment it upgrades.
-// Probe reachability once, up front, and fall back to direct spawn for this
-// run if pty-host isn't actually there. Overriding process.env.CCSERVER_PTY_HOST
-// (rather than some separate in-memory flag) is deliberate: isPtyHostEnabled()
-// re-reads it fresh on every call, so this one write is automatically
-// honored by every pty-host call site below -- this file's own
-// initPtyHost*Handler calls just after, and every usePtyHost check inside
-// sessionManager.js -- with no extra plumbing. A deployment that already has
-// pty-host running is unaffected, and one that explicitly opted out via
-// CCSERVER_PTY_HOST=0 never reaches this block at all (isPtyHostEnabled()
-// is already false).
+// pty-host分離は撤回済み(ptyHostClient.js's isPtyHostEnabled()のコメント参照)
+// -- isPtyHostEnabled()はCCSERVER_PTY_HOST未設定時デフォルトでfalseを返すため、
+// このブロックは明示的にCCSERVER_PTY_HOST=1等を設定したデプロイでしか実行され
+// ない。そのようなデプロイでのみ、起動時にpty-hostへの到達性を一度probeし、
+// 実際にいなければこのプロセスの寿命の間だけ直spawnにフォールバックする。
+// Overriding process.env.CCSERVER_PTY_HOST (rather than some separate
+// in-memory flag) is deliberate: isPtyHostEnabled() re-reads it fresh on
+// every call, so this one write is automatically honored by every pty-host
+// call site below -- this file's own initPtyHost*Handler calls just after,
+// and every usePtyHost check inside sessionManager.js -- with no extra
+// plumbing.
 //
 // Only probes shard 0 (getPtyHostClient()'s default): the scenario this
 // guards against is "pty-host was never set up on this host at all", which

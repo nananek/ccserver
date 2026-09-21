@@ -1,5 +1,5 @@
 [Unit]
-Description=ccserver pty-host — persistent PTY session daemon (used automatically unless CCSERVER_PTY_HOST=0)
+Description=ccserver pty-host — persistent PTY session daemon (withdrawn feature, opt-in only: not used unless ccserver.service sets CCSERVER_PTY_HOST=1, see docs-site deployment/systemd.md section 6)
 After=network.target
 
 [Service]

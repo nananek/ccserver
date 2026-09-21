@@ -584,20 +584,19 @@ export function getAllPtyHostClients() {
   return result;
 }
 
-// Issue #119 Step7-2: defaults to ON now that pty-host (Step1-6) is
-// considered feature-complete -- unset/empty means "enabled", matching a
-// fresh install that never touched this var. Only an explicit '0' opts out;
-// any other value (including the historical '1') stays ON, so a deployment
-// that already set CCSERVER_PTY_HOST=1 sees no behavior change. `env`
-// defaults to `process.env` but is overridable so callers (this file's own
-// unit tests) can check the logic without mutating the real process env.
-// See server/index.js's boot-time reachability probe for the other half of
-// the rollout story: this function alone doesn't know whether pty-host is
-// actually reachable, only whether the deployment wants it.
+// pty-host分離は撤回済み(実装の複雑さの割に見合う効果がなく、プロセス分離
+// 由来のバグの温床になっていた -- 例: GPG vault(server/ws/gpgVaultAgent.js)
+// のアンロック状態がメインサーバープロセスのメモリにしか存在せず、pty-host
+// プロセス側からは常にlocked扱いになっていた)。デフォルトを再びOFFに戻し、
+// 直spawn(sessionManager.jsのusePtyHost=false経路)だけが使われるようにする。
+// コード自体は残すが(server/pty-host/、この後段のロジック、関連テスト)、
+// 明示的にCCSERVER_PTY_HOST=1等を指定しない限り有効化されない。`env` defaults
+// to `process.env` but is overridable so callers (this file's own unit tests)
+// can check the logic without mutating the real process env.
 export function isPtyHostEnabled(env = process.env) {
   const raw = env.CCSERVER_PTY_HOST;
-  if (raw == null || raw === '') return true;
-  return raw !== '0';
+  if (raw == null || raw === '' || raw === '0') return false;
+  return true;
 }
 
 // Issue #119 Step7-3: probes whether `client`'s pty-host is actually up, used
