@@ -24,6 +24,22 @@ export function appDisplayName(app) {
   return 'Claude Code';
 }
 
+// M9 fix (vuln_scan report): resumeId/model both end up as their own argv
+// token right after a flag that expects a value (--resume <id>, --model
+// <model>, etc.) -- a CLI's own arg parser decides what a token means purely
+// from whether it starts with '-', not from its position, so an id/model
+// value of e.g. "--dangerously-skip-permissions" is parsed as a NEW option
+// of the launched CLI, not as --resume's argument (PoC: appResumeArgs
+// resolved to ['--resume', '--dangerously-skip-permissions']). Real
+// session ids (UUIDs) and model names (e.g. "claude-3-5-sonnet",
+// "anthropic/claude-opus-4.1") never need a leading '-' or anything outside
+// this charset, so anything else is simply dropped -- treated the same as
+// "no id supplied" -- rather than ever reaching argv.
+function isSafeCliArgValue(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256
+    && !value.startsWith('-') && /^[A-Za-z0-9._:@/-]+$/.test(value);
+}
+
 // CLI args to start `app` fresh, or to resume a conversation:
 //   claude   -> claude [--resume <id>] | claude --continue (resume last)
 //   opencode -> opencode [--session <id>] | opencode -c (resume last)
@@ -33,6 +49,7 @@ export function appDisplayName(app) {
 // no session id is known, e.g. scheduled prompts / orchestrator restart where
 // the TUI never exposed an id.
 export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
+  if (resumeId != null && !isSafeCliArgValue(resumeId)) resumeId = null;
   if (app === 'opencode') {
     if (resumeId) return ['--session', resumeId];
     if (resumeLast) return ['-c'];
@@ -84,7 +101,7 @@ export function appSupportsModelFlag(app) {
 // a model is never sent to an app that can't accept it.
 export function appModelArgs(app, model) {
   if (!appSupportsModelFlag(app)) return [];
-  if (typeof model !== 'string' || model.length === 0) return [];
+  if (!isSafeCliArgValue(model)) return [];
   return ['--model', model];
 }
 

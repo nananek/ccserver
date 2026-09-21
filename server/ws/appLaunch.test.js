@@ -165,8 +165,11 @@ test('appModelArgs: copilot emits --model for a non-empty string model', () => {
   assert.deepEqual(appModelArgs('copilot', 42), [], 'non-string model must be omitted');
 });
 
-test('appModelArgs: codex preserves arbitrary model names as one argv value', () => {
-  assert.deepEqual(appModelArgs('codex', 'gpt-5.6 terra'), ['--model', 'gpt-5.6 terra']);
+test('appModelArgs: codex accepts a model name in the safe charset as one argv value', () => {
+  assert.deepEqual(appModelArgs('codex', 'gpt-5.6-terra'), ['--model', 'gpt-5.6-terra']);
+  // M9 fix: a space (and anything else outside [A-Za-z0-9._:@/-]) is no
+  // longer preserved -- see isSafeCliArgValue in appLaunch.js.
+  assert.deepEqual(appModelArgs('codex', 'gpt-5.6 terra'), []);
   assert.deepEqual(appModelArgs('codex', ''), []);
   assert.deepEqual(appModelArgs('codex', null), []);
   assert.deepEqual(appModelArgs('codex', 42), []);
@@ -189,6 +192,42 @@ test('appModelArgs: claude never emits --model unless the capability is enabled'
     if (before === undefined) delete process.env.CCSERVER_CLAUDE_MODEL;
     else process.env.CCSERVER_CLAUDE_MODEL = before;
   }
+});
+
+// M9 (vuln_scan report): an untrusted WS init message's claudeSessionId/
+// model used to flow straight into argv with no format check at all, so a
+// value shaped like a CLI flag became a NEW option of the launched CLI
+// (--resume <the-attacker-value> is parsed by the CLI's own arg parser as
+// two separate tokens: --resume with no value the parser accepts, followed
+// by a bare new flag). PoC: appResumeArgs('claude',
+// '--dangerously-skip-permissions') used to resolve to
+// ['--resume', '--dangerously-skip-permissions'].
+test('M9: appResumeArgs drops a flag-shaped resumeId instead of ever putting it in argv', () => {
+  for (const evil of [
+    '--dangerously-skip-permissions',
+    '--settings=/tmp/evil.json',
+    '--help',
+    '-x',
+  ]) {
+    assert.deepEqual(appResumeArgs('claude', evil), [], `must drop ${evil}, never resume`);
+    assert.deepEqual(appResumeArgs('opencode', evil), [], `must drop ${evil}, never resume`);
+    assert.deepEqual(appResumeArgs('codex', evil), [], `must drop ${evil}, never resume`);
+    assert.deepEqual(appResumeArgs('commandcode', evil), [], `must drop ${evil}, never resume`);
+    // resumeLast still works even when the (now-dropped) id was hostile.
+    assert.deepEqual(appResumeArgs('claude', evil, { resumeLast: true }), ['--continue']);
+  }
+  // A real-shaped session id still resumes normally.
+  assert.deepEqual(appResumeArgs('claude', 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'),
+    ['--resume', 'a1b2c3d4-e5f6-7890-abcd-ef1234567890']);
+});
+
+test('M9: appModelArgs drops a flag-shaped model instead of ever putting it in argv', () => {
+  for (const evil of ['--dangerously-skip-permissions', '--help', '-x']) {
+    assert.deepEqual(appModelArgs('opencode', evil), [], `must drop ${evil}, never --model`);
+    assert.deepEqual(appModelArgs('codex', evil), [], `must drop ${evil}, never --model`);
+  }
+  // A real-shaped model name still works normally.
+  assert.deepEqual(appModelArgs('opencode', 'anthropic/claude-sonnet-4.5'), ['--model', 'anthropic/claude-sonnet-4.5']);
 });
 
 test('normalizePermissionMode: known modes pass through, everything else is standard', () => {
