@@ -5,6 +5,7 @@ import { writeFileSync, readFileSync, unlinkSync, rmSync, statSync } from 'node:
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
+import * as gpgVaultRelay from './gpgVaultRelay.js';
 import { releaseSeatbeltOverlay } from './sandbox-seatbelt.js';
 import { setNetworkBrokerLists } from './network-broker.js';
 import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
@@ -255,6 +256,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
     sandbox: !!meta.sandbox,
     sandboxOpts: meta.sandbox ? (meta.sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
     docker: !!meta.docker, // whether THIS session's sandbox launched with docker (see dockerAvailability)
+    gpgVaultActive: !!meta.gpgVaultActive, // effective gpgVault flag at launch (server/ws/sandbox.js's resolved `gpgVault`, not just the raw sandboxOpts override) -- see terminal.js's `session` WS message / listSessions()
     dockerTag: meta.docker && meta.sandboxStateDir ? basename(meta.sandboxStateDir) : null, // matches CCSANDBOX_DOCKERD_TAG (sandbox.js), identifies this session's dockerd in the status file
     sandboxStateDir: meta.sandboxStateDir ?? null, // rootlesskit state dir to remove on teardown (docker only)
     sandboxGitBrokerProc: meta.sandboxGitBrokerProc ?? null, // host-side git-broker child process, killed on teardown
@@ -992,6 +994,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   const usePtyHost = isPtyHostEnabled();
   let useSandbox = false;
   let sandboxDocker = false;
+  let gpgVaultActive = false;
   let sandboxStateDir = null;
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
@@ -1244,6 +1247,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         command = spawn.command;
         args = spawn.args;
         sandboxDocker = !!spawn.docker;
+        gpgVaultActive = !!spawn.gpgVaultActive;
         sandboxStateDir = spawn.stateDir || null;
         sandboxGitBrokerProc = spawn.gitBrokerProc || null;
         sandboxGitBrokerDir = spawn.gitBrokerDir || null;
@@ -1344,6 +1348,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     sandbox: useSandbox,
     sandboxOpts,
     docker: sandboxDocker,
+    gpgVaultActive,
     sandboxStateDir,
     sandboxGitBrokerProc,
     sandboxGitBrokerDir,
@@ -2167,6 +2172,7 @@ export function listSessions() {
       shell: session.shell,
       sandbox: session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
+      gpgVaultActive: !!session.gpgVaultActive,
       app: session.app,
       model: session.model || null,
       permissionMode: normalizePermissionMode(session.permissionMode),
@@ -2997,6 +3003,9 @@ export function savedSessionPublic(session, claudeId) {
 }
 
 export function gracefulShutdown() {
+  // Independent of the pty-host/direct-spawn branch below: the relay isn't
+  // tied to any session's ptys, just this process's own listeners.
+  gpgVaultRelay.stop();
   // Step4 (plan5): when pty-host is enabled (isPtyHostEnabled()), pty-host
   // owns these ptys as a separate, independently-restarted systemd unit (see
   // server/pty-host/index.js's header comment + Step0's PoC finding that a

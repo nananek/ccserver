@@ -57,6 +57,16 @@ export function vaultExists() {
   return gpgVaultDb.vaultExists();
 }
 
+// gpgVaultRelay.js's only window into this module's private `state`: the
+// CURRENT real socket path for one of state.sockets' keys, or null while
+// locked. Resolved fresh on every call (never cached by the caller) so a
+// lock/unlock in between two calls is picked up automatically -- that's the
+// entire mechanism that keeps an already-running gpgVault sandbox working
+// across a relock/re-unlock without needing to be restarted.
+export function getSocketPath(kind) {
+  return state ? (state.sockets[kind] ?? null) : null;
+}
+
 // Host tool availability check (gpg/gpgconf), same existsSync-based spirit as
 // sandbox.js's dockerSandboxAvailable() -- a clean, actionable error at setup
 // time instead of a cryptic ENOENT deep inside key generation.

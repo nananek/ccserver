@@ -162,6 +162,11 @@ export function attachTerminalHandler(chan) {
             // can surface a silent downgrade (flag requested but the broker
             // is off) instead of leaving it invisible.
             isMetaAgent: !!session.isMetaAgent,
+            // Effective gpgVault flag THIS session actually launched with
+            // (server/ws/sandbox.js's resolved value, not just a requested
+            // override) -- lets the client show whether GPGボルト is really
+            // active for this specific session (gpgVaultBadge.js).
+            gpgVaultActive: !!session.gpgVaultActive,
             // How many clients (this one included) are watching the session.
             viewers: session.sockets.size,
           })
@@ -221,6 +226,7 @@ export function attachTerminalHandler(chan) {
             rows: session.rows,
             isReconnect: true,
             isMetaAgent: !!session.isMetaAgent,
+            gpgVaultActive: !!session.gpgVaultActive,
             viewers: session.sockets.size,
           })
         );

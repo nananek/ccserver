@@ -1,4 +1,6 @@
 import TabIcon from './TabIcon.jsx';
+import { useGpgVaultStatusContext } from './GpgVaultStatusProvider.jsx';
+import { gpgVaultBadgeState } from '../gpgVaultBadge.js';
 
 export function baseName(path) {
   if (!path) return '';
@@ -33,6 +35,7 @@ export default function SessionList({
   unopenedGroups,
   onOpenGroup,
 }) {
+  const vaultStatus = useGpgVaultStatusContext();
   const handleRowContextMenu = (e, id, currentLabel) => {
     if (!id || !onRowContextMenu) return;
     e.preventDefault();
@@ -80,6 +83,11 @@ export default function SessionList({
                     )}
                     {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
                     {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
+                    {(() => {
+                      const badge = gpgVaultBadgeState(tab, vaultStatus?.data);
+                      if (!badge) return null;
+                      return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
+                    })()}
                   </span>
                   <span className="session-menu-status">
                     {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
@@ -171,6 +179,11 @@ export default function SessionList({
                   {s.sandbox
                     ? <span className="session-badge sandbox">sandbox</span>
                     : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
+                  {(() => {
+                    const badge = gpgVaultBadgeState(s, vaultStatus?.data);
+                    if (!badge) return null;
+                    return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
+                  })()}
                 </span>
                 <span className="session-menu-status">
                   {s.cwd && <span className="session-menu-path" title={s.cwd}>{baseName(s.cwd)}</span>}

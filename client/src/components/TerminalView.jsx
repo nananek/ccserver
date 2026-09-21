@@ -8,6 +8,8 @@ import { createOsc52Handler } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
 import { displayPath } from '../displayPath.js';
 import { isElevatedPermissionMode } from '../permissionMode.js';
+import { useGpgVaultStatusContext } from './GpgVaultStatusProvider.jsx';
+import { gpgVaultBadgeState } from '../gpgVaultBadge.js';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -293,6 +295,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // whether isolation is enabled for it, only in toggling `enabled` once it is.
   const [networkIsolateArmed, setNetworkIsolateArmed] = useState(false);
   const [networkIsolateEnabled, setNetworkIsolateEnabled] = useState(false);
+  // Effective gpgVault flag THIS session actually launched with (arrives
+  // live over the WS `session` message, server/ws/terminal.js) -- see
+  // gpgVaultBadge.js for why "active" here means "will work right now", not
+  // just "was requested at launch".
+  const [gpgVaultActive, setGpgVaultActive] = useState(false);
+  const vaultStatus = useGpgVaultStatusContext();
   // Non-sandbox Auto-Y confirmation: enabling Auto-Y outside a sandbox means
   // permission prompts are auto-approved straight on the host (no bwrap
   // isolation), so a first-time "are you sure" dialog with a dismiss flag
@@ -849,6 +857,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               applyServerSize();
             }
             if (typeof msg.viewers === 'number') viewerCountRef.current = msg.viewers;
+            if (typeof msg.gpgVaultActive === 'boolean') setGpgVaultActive(msg.gpgVaultActive);
             // 再接続などで同一タブに新しいセッションが始まるケースがあるため、
             // セッション確立のたびにexitedフラグを戻す。
             if (onExitedRef.current) onExitedRef.current(false);
@@ -1501,6 +1510,17 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               <svg className="header-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" style={{ color: 'var(--text-muted)' }} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="6"/><ellipse cx="8" cy="8" rx="2.8" ry="6"/><path d="M2 8h12"/>{networkIsolateEnabled && <line x1="2" y1="2" x2="14" y2="14" strokeWidth="2"/>}</svg>
             </button>
           )}
+          {(() => {
+            const badge = gpgVaultBadgeState({ gpgVaultActive }, vaultStatus?.data);
+            if (!badge) return null;
+            return (
+              <span
+                className={`gpg-vault-indicator${badge.state === 'active' ? ' active' : ''}`}
+                title={badge.reason}
+                aria-label={`GPGボルト: ${badge.reason}`}
+              >🔑</span>
+            );
+          })()}
           <button
             className={`btn schedule-toggle${schedule ? ' active' : ''}`}
             onClick={() => setShowScheduler((v) => !v)}

@@ -28,6 +28,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { buildIsolatedProxyEnv } from './network-broker.js';
+import * as gpgVaultRelay from './gpgVaultRelay.js';
 
 // Base dir for per-launch seatbelt runtime dirs. os.tmpdir() honors $TMPDIR,
 // which on macOS is the per-user /var/folders/... path. Overridable via
@@ -880,13 +881,18 @@ export function buildSeatbeltLaunch({
     // GPG vault (plan: gpg-agent-vault): overrides gnupg/authSock above when
     // both are set (buildSandboxSpawn warns about that combination) --
     // deliberately placed after them so it wins, same "gpgVault wins" rule
-    // as buildBwrapArgs. No mount remapping here (unlike bwrap), so these
-    // point straight at the vault's real host paths; the read/write literal
-    // rules further down are what actually restrict access to just these
-    // specific files/sockets.
+    // as buildBwrapArgs. No mount remapping here (unlike bwrap), so GNUPGHOME
+    // must point at ONE real directory containing everything gpg needs --
+    // gpgVaultRelay.js's fixed dir, not gpgVault.homeDir (this launch's own
+    // ephemeral generation): the relay dir holds a one-time copy of the
+    // public files plus sockets that keep forwarding to whichever generation
+    // is CURRENTLY unlocked, so an already-running sandbox survives a later
+    // lock+re-unlock without needing a restart (see gpgVaultRelay.js's
+    // header). The read/write literal rules further down are what actually
+    // restrict access to just these specific files/sockets.
     if (gpgVault) {
-      env.GNUPGHOME = gpgVault.homeDir;
-      if (gpgVault.sockets.agentSsh) env.SSH_AUTH_SOCK = gpgVault.sockets.agentSsh;
+      env.GNUPGHOME = gpgVaultRelay.getRelayDir();
+      env.SSH_AUTH_SOCK = gpgVaultRelay.getRelaySocketPaths().agentSsh;
     }
     // HOME is remapped to the sandbox home, so $HOME-relative config resolution
     // would miss the real auth/state (bwrap instead overlays the real dirs at
@@ -1149,12 +1155,13 @@ export function buildSeatbeltLaunch({
     // write, and custom locations (e.g. 1Password's ~/Library socket) fall
     // outside every allow tree above. Both spellings (see pathVariants).
     if (authSock) sockPaths.push(...memoVariants(authSock));
-    // GPG vault (plan: gpg-agent-vault): its live sockets, same connect()
-    // treatment as every other socket above -- read+write literal, never a
-    // subtree (see this function's header comment on why: private-keys-v1.d/
-    // etc. must stay unreachable, and a subtree grant on homeDir would
-    // expose them).
-    if (gpgVault) sockPaths.push(...Object.values(gpgVault.sockets).filter(Boolean));
+    // GPG vault (plan: gpg-agent-vault): the relay's fixed sockets (see
+    // env.GNUPGHOME above for why -- never gpgVault.sockets directly), same
+    // connect() treatment as every other socket above -- read+write literal,
+    // never a subtree (see this function's header comment on why:
+    // private-keys-v1.d/ etc. must stay unreachable, and a subtree grant on
+    // homeDir would expose them).
+    if (gpgVault) sockPaths.push(...Object.values(gpgVaultRelay.getRelaySocketPaths()));
     for (const s of new Set(sockPaths)) {
       readLiterals.push(s);
       writeLiterals.push(s); // connect() needs write
@@ -1164,7 +1171,9 @@ export function buildSeatbeltLaunch({
     // GPG vault's public files -- read-ONLY literals (gpg needs the public
     // key/keybox metadata to build a signature packet, and trustdb for its
     // own sanity checks), same read-only treatment as bwrap's --ro-bind-try
-    // for the identical file set. Deliberately NOT in writeLiterals: gpg
+    // for the identical file set. Read from the relay dir's one-time copy
+    // (env.GNUPGHOME above), not gpgVault.homeDir, so this stays valid across
+    // a later lock+re-unlock too. Deliberately NOT in writeLiterals: gpg
     // itself never needs to mutate these from inside the sandbox for a
     // single-key, already-generated vault. Being absent from writeLiterals
     // is NOT sufficient on its own though -- homeDir sits under the broad
@@ -1172,7 +1181,7 @@ export function buildSeatbeltLaunch({
     // below adds the same explicit last-match-wins pin those get.
     if (gpgVault) {
       for (const file of ['pubring.kbx', 'trustdb.gpg', 'gpg.conf']) {
-        const p = join(gpgVault.homeDir, file);
+        const p = join(gpgVaultRelay.getRelayDir(), file);
         if (existsSync(p)) readLiterals.push(p);
       }
     }
@@ -1248,17 +1257,17 @@ export function buildSeatbeltLaunch({
       ...(gitBroker
         ? exactPins(basename(gitBroker.allowlistPath), dirname(gitBroker.allowlistPath))
         : []),
-      // GPG vault (plan: gpg-agent-vault): its homeDir also lives under
+      // GPG vault (plan: gpg-agent-vault): the relay dir also lives under
       // hostRuntimeDir() (the broad tmp write rules above), so pubring.kbx/
       // trustdb.gpg/gpg.conf need the identical explicit deny-write pin as
       // binDir/hooksDir/profilePath above, or the broad tmp allow leaves
       // them agent-writable despite being intentionally read-only literals
       // (see the readLiterals-only comment near sockPaths) -- an
       // agent-corrupted pubring.kbx/trustdb.gpg would then persist into the
-      // SAME real homeDir the live managed gpg-agent uses. Sockets are
+      // SAME relay dir every gpgVault sandbox reads from. Sockets are
       // exempt (need write for connect(), same as every other socket here).
       ...(gpgVault
-        ? ['pubring.kbx', 'trustdb.gpg', 'gpg.conf'].flatMap((f) => exactPins(f, gpgVault.homeDir))
+        ? ['pubring.kbx', 'trustdb.gpg', 'gpg.conf'].flatMap((f) => exactPins(f, gpgVaultRelay.getRelayDir()))
         : []),
       // The per-launch ssh-config (CCSANDBOX_SSH_CONFIG, minted for brokered
       // launches when ssh.realSsh) must stay immutable like bwrap's

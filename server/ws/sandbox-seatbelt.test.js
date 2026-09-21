@@ -37,6 +37,7 @@ import {
 } from './sandbox-seatbelt.js';
 import { forceSandboxUnavailableReason, sandboxBackend, sandboxUnavailableReason, seatbeltControlSockPaths } from './sandbox.js';
 import { PTY_HOST_SOCK_NAME, META_SOCKET_DIR_NAME, hostRuntimeDir } from './git-broker.js';
+import * as gpgVaultRelay from './gpgVaultRelay.js';
 import { getPtyHostSockPath } from '../pty-host/index.js';
 import { getMetaSockPath } from './metaAgent.js';
 
@@ -1227,48 +1228,68 @@ test('buildSeatbeltLaunch: a fully-loaded launch produces a paren-balanced profi
 });
 
 test('buildSeatbeltLaunch: gpgVault (plan: gpg-agent-vault) sets env, pins public files read-only, sockets read+write, and never exposes secret material', () => {
-  // Pure profile-text generation -- no real gpg-agent needed here (that's
-  // gpgVaultAgent.test.js's/sandbox-gpgvault.test.js's job); a plausible
-  // fake object matching getUnlockedAgentInfo()'s shape is enough to
-  // exercise buildSeatbeltLaunch's own wiring.
-  const vaultHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-gpgvault-'));
-  DIRS.push(vaultHome);
-  for (const f of ['pubring.kbx', 'trustdb.gpg', 'gpg.conf']) writeFileSync(join(vaultHome, f), '');
-  const sockets = {
-    agent: join(vaultHome, 'S.gpg-agent'),
-    agentSsh: join(vaultHome, 'S.gpg-agent.ssh'),
-    agentExtra: join(vaultHome, 'S.gpg-agent.extra'),
-    keyboxd: join(vaultHome, 'S.keyboxd'),
-    dirmngr: join(vaultHome, 'S.dirmngr'),
-  };
-  for (const s of Object.values(sockets)) writeFileSync(s, '');
-  // Secret material that must NEVER be referenced -- present on disk (as a
-  // real vault homeDir would have it) specifically so the assertion below
-  // proves omission, not mere non-existence.
-  writeFileSync(join(vaultHome, 'sshcontrol'), 'FAKEKEYGRIP\n');
-  const sb = buildSeatbeltLaunch(baseOpts({
-    gpgVault: { homeDir: vaultHome, sockets, fingerprint: 'FAKEFPR1234567890', nameReal: 'ccserver test', nameEmail: 'ccserver-test@example.invalid' },
-  }));
-  trackDir(sb.dir);
-  assertParenBalanced(readFileSync(sb.profilePath, 'utf-8'));
+  // gpgVaultRelay.js derives its FIXED paths from hostRuntimeDir()
+  // (XDG_RUNTIME_DIR) directly, not from the gpgVault info object passed to
+  // buildSeatbeltLaunch below -- see gpgVaultRelay.js's header for why (a
+  // single server-wide relay, so an already-running sandbox survives a later
+  // lock+re-unlock without a restart). Point XDG_RUNTIME_DIR at a throwaway
+  // dir for this test, same pattern other tests in this file already use
+  // (see the "no runtime-dir deny" test below).
+  const prevXdg = process.env.XDG_RUNTIME_DIR;
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-xdgrt-'));
+  DIRS.push(runtimeDir);
+  process.env.XDG_RUNTIME_DIR = runtimeDir;
+  try {
+    // Pure profile-text generation -- no real gpg-agent/relay listener needed
+    // here (that's gpgVaultAgent.test.js's/sandbox-gpgvault.test.js's job);
+    // just materialize the files buildSeatbeltLaunch expects to find at the
+    // relay's fixed paths (empty files stand in for real socket/pubring
+    // content -- only path wiring is under test here).
+    const relayDir = gpgVaultRelay.getRelayDir();
+    mkdirSync(relayDir, { recursive: true });
+    for (const f of ['pubring.kbx', 'trustdb.gpg', 'gpg.conf']) writeFileSync(join(relayDir, f), '');
+    const relaySockets = gpgVaultRelay.getRelaySocketPaths();
+    for (const s of Object.values(relaySockets)) writeFileSync(s, '');
 
-  assert.equal(sb.env.GNUPGHOME, vaultHome);
-  assert.equal(sb.env.SSH_AUTH_SOCK, sockets.agentSsh);
-  assert.equal(sb.env.GIT_CONFIG_COUNT, '5');
-  const gitConfig = {};
-  for (let i = 0; i < 5; i++) gitConfig[sb.env[`GIT_CONFIG_KEY_${i}`]] = sb.env[`GIT_CONFIG_VALUE_${i}`];
-  assert.equal(gitConfig['user.signingkey'], 'FAKEFPR1234567890');
-  assert.equal(gitConfig['commit.gpgsign'], 'true');
-  assert.equal(gitConfig['gpg.program'], 'gpg');
-  assert.equal(gitConfig['user.name'], 'ccserver test');
-  assert.equal(gitConfig['user.email'], 'ccserver-test@example.invalid');
+    // The launch-time vault info's OWN homeDir -- deliberately a DIFFERENT
+    // dir from the relay dir above, holding secret material that must NEVER
+    // be referenced, so the assertion below proves omission, not mere
+    // non-existence. A plausible fake object matching getUnlockedAgentInfo()'s
+    // shape (fingerprint/nameReal/nameEmail are the only fields
+    // buildSeatbeltLaunch still reads from it -- homeDir/sockets are legacy
+    // shape only, unused for path wiring now).
+    const vaultHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-gpgvault-'));
+    DIRS.push(vaultHome);
+    writeFileSync(join(vaultHome, 'sshcontrol'), 'FAKEKEYGRIP\n');
 
-  const text = readFileSync(sb.profilePath, 'utf-8');
-  assert.ok(text.includes('pubring.kbx'), 'public keybox is referenced');
-  assert.equal(finalWriteVerdict(text, join(vaultHome, 'pubring.kbx')), 'deny', 'public files are read-only, never write-allowed');
-  assert.equal(finalWriteVerdict(text, sockets.agentSsh), 'allow', 'sockets need write for connect()');
-  assert.ok(!text.includes('sshcontrol'), 'sshcontrol (host-only ssh-agent config) must never be referenced in the profile');
-  assert.ok(!text.includes('private-keys-v1.d'), 'private-keys-v1.d must never be referenced in the profile');
+    const sb = buildSeatbeltLaunch(baseOpts({
+      gpgVault: { homeDir: vaultHome, sockets: {}, fingerprint: 'FAKEFPR1234567890', nameReal: 'ccserver test', nameEmail: 'ccserver-test@example.invalid' },
+    }));
+    trackDir(sb.dir);
+    assertParenBalanced(readFileSync(sb.profilePath, 'utf-8'));
+
+    assert.equal(sb.env.GNUPGHOME, relayDir);
+    assert.equal(sb.env.SSH_AUTH_SOCK, relaySockets.agentSsh);
+    assert.equal(sb.env.GIT_CONFIG_COUNT, '5');
+    const gitConfig = {};
+    for (let i = 0; i < 5; i++) gitConfig[sb.env[`GIT_CONFIG_KEY_${i}`]] = sb.env[`GIT_CONFIG_VALUE_${i}`];
+    assert.equal(gitConfig['user.signingkey'], 'FAKEFPR1234567890');
+    assert.equal(gitConfig['commit.gpgsign'], 'true');
+    assert.equal(gitConfig['gpg.program'], 'gpg');
+    assert.equal(gitConfig['user.name'], 'ccserver test');
+    assert.equal(gitConfig['user.email'], 'ccserver-test@example.invalid');
+
+    const text = readFileSync(sb.profilePath, 'utf-8');
+    assert.ok(text.includes('pubring.kbx'), 'public keybox is referenced');
+    assert.equal(finalWriteVerdict(text, join(relayDir, 'pubring.kbx')), 'deny', 'public files are read-only, never write-allowed');
+    assert.equal(finalWriteVerdict(text, relaySockets.agentSsh), 'allow', 'sockets need write for connect()');
+    assert.ok(!text.includes('sshcontrol'), 'sshcontrol (host-only ssh-agent config) must never be referenced in the profile');
+    assert.ok(!text.includes('private-keys-v1.d'), 'private-keys-v1.d must never be referenced in the profile');
+    assert.ok(!text.includes(vaultHome), "the launch's own vault homeDir must never be referenced -- only the relay's fixed paths");
+  } finally {
+    if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = prevXdg;
+  }
 });
 
 test('buildSeatbeltLaunch: gpgVault null (default) sets no GNUPGHOME/GIT_CONFIG -- backward compatible', () => {

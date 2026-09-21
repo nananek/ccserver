@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { authFetch, resolveAuthMode } from '../auth.js';
-import { getPrfAssertion } from '../gpgVaultWebauthn.js';
+import { readJsonError, runGpgVaultStepUp as runStepUp } from '../gpgVaultStepUp.js';
 
 // "GPG連携" section (SettingsView.jsx 左メニュー, plan: gpg-agent-vault).
 // パスキーログイン限定機能: サーバーが専用のGPG鍵を生成・暗号化保管し、
@@ -8,15 +8,10 @@ import { getPrfAssertion } from '../gpgVaultWebauthn.js';
 // アンロック中はコミット署名・SSH push (サンドボックス起動時の「GPGボルトで
 // 署名・SSH pushする」チェックボックス、GeneralSection.jsx/DirectoryBrowser.jsx)
 // に使え、GitHub登録用の公開鍵情報もここに表示する。
-
-async function readJsonError(res) {
-  try {
-    const body = await res.json();
-    return body.error || `HTTP ${res.status}`;
-  } catch {
-    return `HTTP ${res.status}`;
-  }
-}
+//
+// ステップアップ儀式(readJsonError/runGpgVaultStepUp)は
+// GpgVaultQuickUnlockButton.jsx(トップバー)とも共有するため
+// ../gpgVaultStepUp.js に切り出してある。
 
 function writeClipboardText(text) {
   if (navigator.clipboard && window.isSecureContext) {
@@ -89,30 +84,6 @@ export default function GpgVaultSection() {
   useEffect(() => {
     if (mode === 'passkey') refresh();
   }, [mode, refresh]);
-
-  // 共通: <kind>-options を取得 -> PRF儀式 -> <kind>-verify という3ステップの
-  // ステップアップ儀式を1回実行する。setup-verify だけ追加のbodyフィールド
-  // (nameReal/nameEmail) を持つため、verifyExtra で拡張できるようにする。
-  const runStepUp = useCallback(async ({ optionsUrl, verifyUrl, verifyExtra = {} }) => {
-    const optionsRes = await authFetch(optionsUrl, { method: 'POST' });
-    if (!optionsRes.ok) {
-      throw new Error(await readJsonError(optionsRes));
-    }
-    const optionsJSON = await optionsRes.json();
-    if (optionsJSON.alreadyUnlocked) {
-      return optionsJSON;
-    }
-    const response = await getPrfAssertion(optionsJSON);
-    const verifyRes = await authFetch(verifyUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ response, ...verifyExtra }),
-    });
-    if (!verifyRes.ok) {
-      throw new Error(await readJsonError(verifyRes));
-    }
-    return verifyRes.json();
-  }, []);
 
   const handleSetup = useCallback(async () => {
     if (busy) return;

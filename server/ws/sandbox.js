@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCKET_DIR_NAME } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
 import * as gpgVaultAgent from './gpgVaultAgent.js';
+import * as gpgVaultRelay from './gpgVaultRelay.js';
 import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeychain, isBlockedCredentialBind, agentConfigDirs } from './sandbox-seatbelt.js';
 import { startNetworkBroker, buildIsolatedProxyEnv, normalizeNetworkSettings } from './network-broker.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
@@ -1699,20 +1700,29 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     const vault = gpgVault;
     const targetDir = docker ? join(HOME, '.gnupg-vault') : join(XDG_RUNTIME_DIR, 'gnupg-vault');
     args.push('--dir', targetDir);
+    // Public metadata files only, snapshotted from THIS launch's homeDir --
+    // safe to snapshot (unlike the sockets below) because unlockVault()
+    // always re-verifies the imported key's fingerprint against the vault's
+    // stored one (gpgVaultAgent.js), so this content is identical across
+    // every unlock generation of the same vault.
     for (const file of ['pubring.kbx', 'trustdb.gpg', 'gpg.conf']) {
       const src = join(vault.homeDir, file);
       if (existsSync(src)) args.push('--ro-bind-try', src, join(targetDir, file));
     }
-    for (const src of Object.values(vault.sockets)) {
-      if (src && existsSync(src)) args.push('--bind-try', src, join(targetDir, basename(src)));
+    // Sockets bind from gpgVaultRelay.js's FIXED, generation-independent
+    // paths -- never vault.sockets (this launch's own ephemeral generation)
+    // directly. See gpgVaultRelay.js's header: this is what lets an
+    // already-running sandbox keep working across a later lock+re-unlock
+    // without a restart.
+    const relaySockets = gpgVaultRelay.getRelaySocketPaths();
+    for (const src of Object.values(relaySockets)) {
+      args.push('--bind-try', src, join(targetDir, basename(src)));
     }
     args.push('--setenv', 'GNUPGHOME', targetDir);
-    if (vault.sockets.agentSsh && existsSync(vault.sockets.agentSsh)) {
-      // Unlike authSock above (bind source==dest, a live host path), the
-      // vault's ssh socket lands at a different in-sandbox path, so
-      // SSH_AUTH_SOCK must point at the bind TARGET here.
-      args.push('--setenv', 'SSH_AUTH_SOCK', join(targetDir, basename(vault.sockets.agentSsh)));
-    }
+    // Unlike authSock above (bind source==dest, a live host path), the
+    // vault's ssh socket lands at a different in-sandbox path, so
+    // SSH_AUTH_SOCK must point at the bind TARGET here.
+    args.push('--setenv', 'SSH_AUTH_SOCK', join(targetDir, basename(relaySockets.agentSsh)));
   }
 
   // gh: replace wherever it resolves (host PATH or common install paths)
@@ -2292,6 +2302,11 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   // gpgVaultAgent.js. The isUnlocked() check above guarantees this succeeds
   // when gpgVault is true.
   const gpgVaultInfo = gpgVault ? gpgVaultAgent.getUnlockedAgentInfo() : null;
+  // Must exist before buildBwrapArgs/buildSeatbeltLaunch bind its FIXED
+  // socket paths below (see gpgVaultRelay.js's header for why sandboxes bind
+  // those instead of gpgVaultInfo.sockets directly). Idempotent/lazy: a
+  // no-op on every launch after the first gpgVault:true one this server run.
+  if (gpgVault) gpgVaultRelay.ensureStarted();
 
   // ssh-agent forwarding is opt-in (see loadSandboxConfig). When on, an
   // explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
@@ -2503,6 +2518,12 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env), ...seatbeltCmd],
       docker: false,
       stateDir: null,
+      // Effective gpgVault flag for this launch (already resolved from
+      // sandboxOpts + the config default above) -- sessionManager.js threads
+      // this into the session record so clients can show whether GPGボルト
+      // is actually active for this specific session (server/ws/terminal.js's
+      // `session` message / GET /api/sessions), not just requested.
+      gpgVaultActive: gpgVault,
       // Network-isolation broker: isolation-enabled only when this launch requested
       // isolation (the broker was started above iff network.isolate). The
       // live toggle (terminal.js) flips this broker's enforce/open policy
@@ -2568,6 +2589,9 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const gitBrokerFields = {
+    // Effective gpgVault flag for this launch -- see the seatbelt branch's
+    // identical field above for why.
+    gpgVaultActive: gpgVault,
     gitBrokerProc: gitBroker ? gitBroker.proc : null,
     gitBrokerDir: gitBroker ? gitBroker.dir : null,
     // No proc for the commit guard (see startCommitGuard) -- just a runtime

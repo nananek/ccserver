@@ -1032,6 +1032,32 @@ body {
   border-color: var(--border);
 }
 
+.gpg-vault-unlock-btn {
+  align-self: center;
+  margin-right: 4px;
+  padding: 6px 10px;
+  line-height: 1;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.gpg-vault-unlock-btn:hover:not(:disabled) {
+  background: rgba(249, 226, 175, 0.1);
+}
+
+.gpg-vault-unlock-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .right-sidebar {
   width: 300px;
   flex-shrink: 0;
@@ -2407,6 +2433,21 @@ body {
   border: 1px solid rgba(243, 139, 168, 0.35);
 }
 
+/* GPG vault per-session badge (SessionList.jsx) -- same active/inactive
+   judgment as .gpg-vault-indicator (TerminalView.jsx header), see
+   gpgVaultBadge.js. */
+.session-badge.gpg-vault-active {
+  color: var(--success, #a6e3a1);
+  background: rgba(166, 227, 161, 0.12);
+  border: 1px solid rgba(166, 227, 161, 0.35);
+}
+
+.session-badge.gpg-vault-inactive {
+  color: var(--text-muted, #6c7086);
+  background: rgba(108, 112, 134, 0.12);
+  border: 1px solid rgba(108, 112, 134, 0.35);
+}
+
 /* Directory list */
 .dir-list {
   flex: 1;
@@ -3150,6 +3191,29 @@ body {
   color: var(--error);
   border-color: var(--error);
   background: rgba(243, 139, 168, 0.1);
+}
+
+/* GPG vault per-session indicator (TerminalView.jsx header) -- grey means
+   "vault exists but isn't effective for this session right now" (never
+   requested, vault locked, or -- pre-gpgVaultRelay.js -- stale; see
+   gpgVaultBadge.js), colored green means it will actually sign/push. */
+.gpg-vault-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  padding: 4px 8px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  border-radius: 4px;
+}
+
+.gpg-vault-indicator.active {
+  color: var(--success);
+  border-color: var(--success);
+  background: rgba(166, 227, 161, 0.1);
 }
 
 /* Auto-yes log */

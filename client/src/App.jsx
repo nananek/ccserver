@@ -12,6 +12,8 @@ import GroupTabView from './components/GroupTabView.jsx';
 import RemoteInstanceView from './components/RemoteInstanceView.jsx';
 import RightSidebar, { WIDGET_DEFS, MONITOR_WIDGET_IDS } from './components/RightSidebar.jsx';
 import { SystemStatsProvider } from './components/widgets/SystemStatsProvider.jsx';
+import { GpgVaultStatusProvider } from './components/GpgVaultStatusProvider.jsx';
+import GpgVaultQuickUnlockButton from './components/GpgVaultQuickUnlockButton.jsx';
 import { useWidgetPrefs } from './hooks/useWidgetPrefs.js';
 import { useSessionSidebarPrefs } from './hooks/useSessionSidebarPrefs.js';
 import { NARROW_DRAWER_QUERY } from './hooks/viewportQuery.js';
@@ -807,6 +809,19 @@ export default function App() {
   }, [contextMenu]);
 
   const sessionTabs = tabs.filter((t) => t.type === 'terminal');
+  // gpgVaultActive comes from the server (GET /api/sessions, via
+  // listSessions()), not from this tab's own launch-time sandboxOpts prop --
+  // a tab attached to a session started elsewhere (another device/tab)
+  // wouldn't otherwise know it. Only used by SessionList.jsx's badge
+  // (gpgVaultBadge.js); TerminalView.jsx gets its own copy live over the WS
+  // `session` message instead, so its open header badge doesn't depend on
+  // serverSessions' event-driven (not continuously polled) refresh cadence.
+  const serverSessionsById = new Map(serverSessions.map((s) => [s.id, s]));
+  const sessionTabsForList = sessionTabs.map((t) => {
+    const sid = t.sessionId || t.attachSessionId || null;
+    const srv = sid ? serverSessionsById.get(sid) : null;
+    return { ...t, gpgVaultActive: srv?.gpgVaultActive ?? false };
+  });
   const groupTabs = tabs.filter((t) => t.type === 'group');
   const openedTabCount = sessionTabs.length + groupTabs.length;
   const barTabs = tabs.filter((t) => t.type === 'browser' || t.type === 'remote' || t.type === 'settings');
@@ -884,6 +899,7 @@ export default function App() {
   const usageWidgetProps = { hidden: usageHidden, emptyReason: usageEmptyNoCli ? 'no-cli' : null, defaultApp: usageDefaultApp, availableApps, hiddenApps: usagePrefs.hiddenApps };
 
   return (
+    <GpgVaultStatusProvider>
     <div className="app">
       {/* Meta-agent approval requests (ccserver-meta): global banner above
           the tab bar so it is visible no matter which tab is active. */}
@@ -898,7 +914,7 @@ export default function App() {
             open={sessionMenuOpen}
             onToggle={toggleSessionMenu}
             onClose={closeSessionMenu}
-            sessionTabs={sessionTabs}
+            sessionTabs={sessionTabsForList}
             groupTabs={groupTabs}
             activeTabId={activeTabId}
             unopenedSessions={unopenedSessions}
@@ -955,6 +971,7 @@ export default function App() {
         ))}
         <div className="tab-bar-spacer" />
         </div>
+        <GpgVaultQuickUnlockButton />
         <button
           type="button"
           className="btn sidebar-toggle-btn"
@@ -986,7 +1003,7 @@ export default function App() {
           open={sessionSidebarOpen}
           overlay={sessionSidebarPrefs.overlay}
           onOverlayChange={sessionSidebarPrefs.setOverlay}
-          sessionTabs={sessionTabs}
+          sessionTabs={sessionTabsForList}
           groupTabs={groupTabs}
           activeTabId={activeTabId}
           unopenedSessions={unopenedSessions}
@@ -1224,5 +1241,6 @@ export default function App() {
         </div>
       )}
     </div>
+    </GpgVaultStatusProvider>
   );
 }

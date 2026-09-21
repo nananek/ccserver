@@ -14,12 +14,15 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { buildSandboxSpawn } from './sandbox.js';
 import { getDb, closeDb } from '../db.js';
+import { createConnection } from 'node:net';
 import {
   gpgVaultToolsAvailable,
   generateAndStoreVault,
   lockVault,
+  unlockVault,
   isUnlocked,
 } from './gpgVaultAgent.js';
+import { getRelaySocketPaths, stop as stopGpgVaultRelay } from './gpgVaultRelay.js';
 
 const TOOLS_AVAILABLE = gpgVaultToolsAvailable();
 const IS_LINUX_BWRAP = process.platform !== 'darwin';
@@ -65,6 +68,11 @@ before(() => {
 
 after(() => {
   lockVault();
+  // Any gpgVault:true spawnFor() call above lazily started the relay's 5
+  // net.Server listeners under this test's own XDG_RUNTIME_DIR -- without
+  // this, they keep the event loop alive past the last test, hanging this
+  // file's overall run until the test runner's own timeout.
+  stopGpgVaultRelay();
   closeDb();
   try { rmSync(testRuntimeDir, { recursive: true, force: true }); } catch { /* ignore */ }
   if (savedSandboxConfig === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG; else process.env.CCSERVER_SANDBOX_CONFIG = savedSandboxConfig;
@@ -184,4 +192,67 @@ test('isUnlocked() reflects lock/unlock across the test helpers (sanity)', { ski
   assert.equal(isUnlocked(), true);
   lockVault();
   assert.equal(isUnlocked(), false);
+});
+
+// Connects to `sockPath` and resolves with either the first line of data
+// received (proof of a live backend behind the relay -- gpg-agent's Assuan
+// protocol greets every new connection with "OK ..." before any command) or
+// 'closed'/'error' if the relay refused/dropped the connection immediately
+// (the locked-vault case). Bounded by a short timeout so a hung connection
+// fails the test instead of hanging the suite.
+function connectAndReadLine(sockPath, timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    const sock = createConnection(sockPath);
+    const timer = setTimeout(() => { sock.destroy(); reject(new Error('timed out waiting for relay response')); }, timeoutMs);
+    sock.once('data', (chunk) => {
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(chunk.toString('utf-8'));
+    });
+    sock.once('close', () => { clearTimeout(timer); resolve('closed'); });
+    sock.once('error', () => { clearTimeout(timer); resolve('error'); });
+  });
+}
+
+test('gpgVaultRelay: forwards live traffic to the CURRENT backend, refuses while locked, and self-heals across a lock+re-unlock without restarting the sandbox', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
+  const credentialId = 'cred-sb-relay';
+  const prfSecret = randomBytes(32);
+  getDb().prepare('INSERT INTO webauthn_credentials (id, public_key, counter, label, created_at) VALUES (?,?,?,?,?)')
+    .run(credentialId, Buffer.from('pk'), 0, null, Date.now());
+  generateAndStoreVault({
+    nameReal: 'ccserver relay test', nameEmail: 'ccserver-relay-test@example.invalid',
+    credentialId, prfSecret,
+  });
+
+  // Triggers gpgVaultRelay.ensureStarted() (buildSandboxSpawn), same as a
+  // real gpgVault:true launch would -- no bwrap/pty actually runs here (this
+  // file only ever assembles argv), but the relay's real net.Server
+  // listeners DO start for real, which is exactly what this test exercises.
+  const spawn = spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } });
+  cleanupSpawn(spawn);
+
+  const relaySockets = getRelaySocketPaths();
+
+  // 1. Unlocked (generation A): a fresh connection through the relay's FIXED
+  //    path reaches a real, live gpg-agent.
+  const greetingA = await connectAndReadLine(relaySockets.agent);
+  assert.match(greetingA, /^OK/, 'relay forwards to a live gpg-agent while unlocked');
+
+  // 2. Locked: gpgVaultAgent.getSocketPath() now returns null for every
+  //    kind, so a NEW connection through the SAME fixed path is refused
+  //    immediately -- no dangling reference to the now-dead generation-A
+  //    backend (its process was killed and its homeDir wiped by lockVault()).
+  lockVault();
+  const duringLock = await connectAndReadLine(relaySockets.agent);
+  assert.equal(duringLock, 'closed', 'relay refuses new connections while the vault is locked');
+
+  // 3. Re-unlocked (generation B: a brand new homeDir/gpg-agent process/
+  //    socket paths, per unlockVault()'s own design -- see gpgVaultAgent.js).
+  //    THE POINT OF THIS FIX: no sandbox restart, no relay restart, nothing
+  //    re-plumbed -- the exact same fixed relay socket path now reaches the
+  //    NEW backend, because gpgVaultRelay resolves the target fresh on every
+  //    new connection rather than caching generation A's path.
+  unlockVault({ credentialId, prfSecret });
+  const greetingB = await connectAndReadLine(relaySockets.agent);
+  assert.match(greetingB, /^OK/, 'relay forwards to the NEW (generation B) gpg-agent after a re-unlock, with no restart of anything');
 });
