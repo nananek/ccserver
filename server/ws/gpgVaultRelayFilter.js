@@ -99,7 +99,6 @@ function optionAllowed(arg) {
 // Decides one complete client line (without its trailing LF/CR). Returns
 // 'forward' | 'reject' | 'abort'. Exported for direct unit testing.
 export function classifyAssuanClientLine(line, { inquirePending }) {
-  if (process.env.CCV_TRACE_RELAY) console.error('CCV_TRACE_RELAY line=', JSON.stringify(line), 'inquirePending=', inquirePending);
   if (inquirePending) {
     // While the agent waits on an INQUIRE, the client may only send data
     // lines and terminate them. Anything else is a protocol violation.
@@ -151,7 +150,6 @@ export function createAssuanFilter({ forward, reply, abort }) {
         let line = raw.subarray(0, nl).toString('latin1');
         if (line.endsWith('\r')) line = line.slice(0, -1);
         const verdict = classifyAssuanClientLine(line, { inquirePending });
-        if (process.env.CCV_TRACE_RELAY) console.error('CCV_TRACE_RELAY verdict=', verdict, 'for', JSON.stringify(line));
         if (verdict === 'abort') return kill(`unexpected line during INQUIRE: ${line.slice(0, 40)}`);
         if (verdict === 'reject') {
           reply(Buffer.from(ASSUAN_FORBIDDEN_LINE, 'latin1'));
@@ -170,7 +168,6 @@ export function createAssuanFilter({ forward, reply, abort }) {
       // carry so a misbehaving agent cannot grow it unbounded.
       if (serverBuf.length > ASSUAN_MAX_LINE * 4) serverBuf = serverBuf.slice(-ASSUAN_MAX_LINE);
       for (const l of lines) {
-        if (process.env.CCV_TRACE_RELAY) console.error('CCV_TRACE_RELAY server line=', JSON.stringify(l));
         if (l.startsWith('INQUIRE ') || l === 'INQUIRE') inquirePending = true;
       }
     },

@@ -8,10 +8,10 @@
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { buildSandboxSpawn } from './sandbox.js';
 import { getDb, closeDb } from '../db.js';
@@ -318,12 +318,27 @@ function assuanRoundTrip(sockPath, command, timeoutMs = 3000) {
 // agent socket -- the same view a sandbox has (public keyring + relay
 // socket, nothing else). no-autostart so gpg can never fall back to spawning
 // a local agent of its own.
+//
+// gpg does NOT always look for S.gpg-agent inside $GNUPGHOME. When a real
+// /run/user/<uid> exists (true on this host; false inside the bwrap sandbox
+// this is meant to imitate, since sandbox.js mounts a fresh --tmpfs /run
+// there), GnuPG's "socketdir" scheme puts every socket under
+// /run/user/<uid>/gnupg/d.<hash-of-homedir>/ instead and never even stats
+// $GNUPGHOME/S.gpg-agent -- confirmed with strace, not something worth
+// guessing at from the docs. `gpgconf --list-dirs agent-socket` reports
+// whichever path gpg will actually use, so ask it instead of assuming
+// $home/S.gpg-agent.
 function relayOnlyGnupgHome(vaultHomeDir, relayAgentSock) {
   const home = mkdtempSync('/tmp/cgvc');
   execFileSync('cp', [join(vaultHomeDir, 'pubring.kbx'), join(vaultHomeDir, 'trustdb.gpg'), home]);
   writeFileSync(join(home, 'gpg.conf'), 'no-autostart\n');
-  symlinkSync(relayAgentSock, join(home, 'S.gpg-agent'));
-  return home;
+  const agentSocketPath = execFileSync(
+    'gpgconf', ['--homedir', home, '--list-dirs', 'agent-socket'], { timeout: 5000, encoding: 'utf8' },
+  ).trim();
+  const socketDir = dirname(agentSocketPath);
+  if (socketDir !== home) mkdirSync(socketDir, { recursive: true, mode: 0o700 });
+  symlinkSync(relayAgentSock, agentSocketPath);
+  return { home, extraSocketDir: socketDir === home ? null : socketDir };
 }
 
 test('F1: every relay-exposed socket reaches ONLY the restricted agent, and export commands are Forbidden', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
@@ -345,7 +360,7 @@ test('F1: `gpg --export-secret-keys` through the relay yields nothing, while git
   const vault = setUpUnlockedVault();
   cleanupSpawn(spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
   const info = getUnlockedAgentInfo();
-  const home = relayOnlyGnupgHome(info.homeDir, getRelaySocketPaths().agent);
+  const { home, extraSocketDir } = relayOnlyGnupgHome(info.homeDir, getRelaySocketPaths().agent);
   try {
     const exported = await run('gpg', ['--homedir', home, '--batch', '--pinentry-mode', 'loopback', '--export-secret-keys', vault.fingerprint]);
     assert.equal(exported.stdout.length, 0, 'no secret key material is exported');
@@ -355,51 +370,13 @@ test('F1: `gpg --export-secret-keys` through the relay yields nothing, while git
     assert.equal(sshExport.stdout.length, 0, 'subkeys (the SSH auth key) cannot be exported either');
 
     // Exactly how git signs a commit (gpg.program=gpg): must keep working.
-    let signed = await run('gpg', ['--homedir', home, '--status-fd=2', '-bsau', vault.fingerprint], { input: 'tree 0\n' });
-    if (signed.status !== 0) {
-      const os = await import('node:os');
-      console.error('DIAG loadavg=', os.loadavg(), 'cpus=', os.cpus().length);
-      console.error('DIAG symlink=', join(home, 'S.gpg-agent'), '-> ', getRelaySocketPaths().agent);
-      await new Promise((resolve, reject) => {
-        const sock = createConnection(join(home, 'S.gpg-agent'));
-        const timer = setTimeout(() => { sock.destroy(); console.error('DIAG raw connect via SYMLINK timed out'); resolve(); }, 3000);
-        sock.once('data', (d) => { clearTimeout(timer); console.error('DIAG raw connect via SYMLINK got data:', JSON.stringify(d.toString('latin1'))); sock.destroy(); resolve(); });
-        sock.once('connect', () => console.error('DIAG raw connect via SYMLINK: connected'));
-        sock.once('error', (e) => { clearTimeout(timer); console.error('DIAG raw connect via SYMLINK error:', e.message); resolve(); });
-      });
-      const ls1 = await run('ls', ['-la', home]);
-      console.error('DIAG ls -la home:\n', ls1.stdout.toString());
-      const ls2 = await run('ls', ['-la', getRelaySocketPaths().agent.replace(/\/[^/]+$/, '')]);
-      console.error('DIAG ls -la relay dir:\n', ls2.stdout.toString());
-      const idOut = await run('id', []);
-      console.error('DIAG id:', idOut.stdout.toString().trim());
-      const straceCheck = await run('which', ['strace']);
-      console.error('DIAG which strace status=', straceCheck.status, straceCheck.stdout.toString().trim());
-      if (straceCheck.status !== 0) {
-        const install = await run('sudo', ['apt-get', 'install', '-y', 'strace'], { timeoutMs: 60000 });
-        console.error('DIAG strace install status=', install.status, install.stderr.toString().slice(-500));
-      }
-      const stracePath = '/tmp/ccv-strace.out';
-      const straceRun = await run('strace', [
-        '-f', '-tt', '-s', '200',
-        '-e', 'trace=network,connect,socket,stat,lstat,newfstatat,readlink,access,openat',
-        '-o', stracePath,
-        'gpg', '--homedir', home, '--status-fd=2', '-bsau', vault.fingerprint,
-      ], { input: 'tree 0\n' });
-      console.error('DIAG strace-wrapped run status=', straceRun.status);
-      try {
-        const { readFileSync } = await import('node:fs');
-        const traceContent = readFileSync(stracePath, 'utf8');
-        console.error('DIAG strace output:\n', traceContent);
-      } catch (e) {
-        console.error('DIAG could not read strace output:', e.message);
-      }
-    }
+    const signed = await run('gpg', ['--homedir', home, '--status-fd=2', '-bsau', vault.fingerprint], { input: 'tree 0\n' });
     assert.equal(signed.status, 0, `signing through the relay works: ${signed.stderr}`);
     assert.match(signed.stderr, /SIG_CREATED/);
     assert.match(signed.stdout.toString(), /BEGIN PGP SIGNATURE/);
   } finally {
     rmSync(home, { recursive: true, force: true });
+    if (extraSocketDir) rmSync(extraSocketDir, { recursive: true, force: true });
   }
 });
 
