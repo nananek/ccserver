@@ -32,6 +32,8 @@ import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { buildSeatbeltLaunch, seatbeltEnvArgs } from './sandbox-seatbelt.js';
 import { SANDBOX_PATH, buildSandboxSpawn } from './sandbox.js';
+import * as gpgVaultRelay from './gpgVaultRelay.js';
+import { createServer } from 'node:net';
 
 const HOME = homedir();
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
@@ -737,6 +739,56 @@ test('env arrives via /usr/bin/env (HOME/PATH/CCSANDBOX_DOCKER)', SKIP_OPTS, (t)
   assert.ok(lines.has('CCSANDBOX_DOCKER=0'), `CCSANDBOX_DOCKER missing: ${fmtResult(res)}`);
   const pathLine = res.stdout.split('\n').find((l) => l.startsWith('PATH='));
   assert.ok(pathLine && pathLine.slice('PATH='.length).split(':')[0] === sb.binDir, `shim dir not first on PATH: ${fmtResult(res)}`);
+});
+
+// Security audit F3: the GPG vault relay listens at FIXED paths under the
+// host runtime dir. A launch WITHOUT gpgVault must not be able to connect()
+// to them (connect() is network-outbound under Seatbelt, so only the explicit
+// unix-socket deny pin stops it); a gpgVault launch must still connect. A
+// real listener is bound at the relay's agent path and a node one-liner
+// inside the sandbox attempts the connect. connect() completes at the kernel
+// level via the listen backlog, so the parent's blocked event loop
+// (spawnSync) does not matter.
+test('F3: relay sockets are unreachable without gpgVault and reachable with it', SKIP_OPTS, async (t) => {
+  if (!checkRunnable(t)) return;
+  const prevXdg = process.env.XDG_RUNTIME_DIR;
+  // Short base: sockaddr_un.sun_path is 104 bytes on macOS.
+  const runtimeDir = trackDir(mkdtempSync('/tmp/ccsbrl-'));
+  process.env.XDG_RUNTIME_DIR = runtimeDir;
+  const server = createServer((c) => c.destroy());
+  try {
+    const relayDir = gpgVaultRelay.getRelayDir();
+    mkdirSync(relayDir, { recursive: true, mode: 0o700 });
+    const agentSock = gpgVaultRelay.getRelaySocketPaths().agent;
+    await new Promise((resolveListen, rejectListen) => {
+      server.once('error', rejectListen);
+      server.listen(agentSock, resolveListen);
+    });
+    const probe = [
+      realpathSync(process.execPath), '-e',
+      `require('net').connect(${JSON.stringify(agentSock)})`
+      + `.on('connect',()=>{console.log('CONNECTED');process.exit(0)})`
+      + `.on('error',(e)=>{console.log('ERR '+e.code);process.exit(3)})`,
+    ];
+
+    const noVault = buildSeatbeltLaunch(baseOpts());
+    trackDir(noVault.dir);
+    const denied = runInSeatbelt(noVault, probe);
+    assertDenied(denied, noVault, 'non-gpgVault connect to the vault relay');
+    assert.doesNotMatch(denied.stdout || '', /CONNECTED/);
+
+    const withVault = buildSeatbeltLaunch(baseOpts({
+      gpgVault: { homeDir: relayDir, sockets: {}, fingerprint: 'FAKEFPR', nameReal: 'ccserver test', nameEmail: 't@example.invalid' },
+    }));
+    trackDir(withVault.dir);
+    const allowed = runInSeatbelt(withVault, probe);
+    assertAllowed(allowed, withVault, 'gpgVault connect to the vault relay');
+    assert.match(allowed.stdout, /CONNECTED/);
+  } finally {
+    server.close();
+    if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = prevXdg;
+  }
 });
 
 test('cwd=/ is refused fail-closed (no sandbox-exec spawn)', () => {

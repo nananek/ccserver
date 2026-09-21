@@ -5,27 +5,32 @@
 //
 // Key hierarchy (see server/ws/gpgVaultAgent.js for how these are used):
 //
-//   GPG_VAULT_PRF_SALT (fixed constant below)
+//   prf_salt_C (32B random per credential, rotated on every unlock)
 //     --[live WebAuthn PRF ceremony against credential C]--> prfSecret (32B)
 //     --[HKDF-SHA256(ikm=prfSecret, salt=empty, info=...credentialId)]--> wrappingKey_C
 //     --[AES-256-GCM(wrappingKey_C)]--> wraps/unwraps VK (32B random, made once)
 //   VK --[AES-256-GCM(VK)]--> encrypts/decrypts the `gpg --export-secret-keys` blob
 //
-// Two different "salt" concepts appear here and must not be confused:
-// GPG_VAULT_PRF_SALT is an input to the *authenticator* (WebAuthn's PRF
+// Two different "salt" concepts appear here and must not be confused: the
+// per-credential PRF salt is an input to the *authenticator* (WebAuthn's PRF
 // `eval.first`) that scopes its PRF output; HKDF's own `salt` parameter below
 // is deliberately left empty since the PRF output is already a uniformly
 // distributed 32-byte value (RFC 5869) -- context separation instead comes
 // from HKDF's `info` parameter, bound to the credential id.
 
-import { randomBytes, hkdfSync, createCipheriv, createDecipheriv, createHash } from 'node:crypto';
+import { randomBytes, hkdfSync, createCipheriv, createDecipheriv } from 'node:crypto';
 
-// sha256("ccserver-gpg-vault-prf-salt-v1"). Fixed, public (it is sent to the
-// browser on every step-up ceremony), single-purpose -- never reused as an
-// HKDF salt or for anything else.
-export const GPG_VAULT_PRF_SALT = createHash('sha256')
-  .update('ccserver-gpg-vault-prf-salt-v1')
-  .digest();
+// Fresh random PRF salt (security audit F6). Replaces the old fixed, public
+// constant sha256("ccserver-gpg-vault-prf-salt-v1"): with one fixed salt the
+// PRF output of a credential never changed, so one leaked output (XSS + a
+// single tap) was a permanent unlock key. Each credential's wrap now has its
+// own salt, and every unlock re-wraps under a NEW salt (PRF `second`), so a
+// captured output stops working after the owner's next unlock. Wraps with no
+// salt (the old constant) only exist in pre-fix vaults, which are disabled
+// outright (gpgVaultDb.isLegacyVault()).
+export function generatePrfSalt() {
+  return randomBytes(32);
+}
 
 // Derives this credential's wrapping key from its live PRF output. Same
 // prfSecret + credentialId always yields the same wrappingKey (HKDF is

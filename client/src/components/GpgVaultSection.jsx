@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { authFetch, resolveAuthMode } from '../auth.js';
-import { readJsonError, runGpgVaultStepUp as runStepUp } from '../gpgVaultStepUp.js';
+import {
+  readJsonError,
+  runGpgVaultStepUp as runStepUp,
+  runGpgVaultAddCredential,
+  runGpgVaultDelete,
+} from '../gpgVaultStepUp.js';
 
 // "GPG連携" section (SettingsView.jsx 左メニュー, plan: gpg-agent-vault).
 // パスキーログイン限定機能: サーバーが専用のGPG鍵を生成・暗号化保管し、
@@ -12,6 +17,13 @@ import { readJsonError, runGpgVaultStepUp as runStepUp } from '../gpgVaultStepUp
 // ステップアップ儀式(readJsonError/runGpgVaultStepUp)は
 // GpgVaultQuickUnlockButton.jsx(トップバー)とも共有するため
 // ../gpgVaultStepUp.js に切り出してある。
+//
+// セキュリティ監査対応:
+//  - F2: パスキー追加は「既に登録済みのパスキー」+「追加するパスキー」の
+//    2回の認証で行う。サーバーのアンロック状態には依存しないため、ロック中
+//    でも追加できる。
+//  - F1.4: 修正前に作成されたVault (legacyDisabled) は無効化されている。
+//    アンロック/追加はできず、GitHubから旧鍵を削除したうえで削除・再作成する。
 
 function writeClipboardText(text) {
   if (navigator.clipboard && window.isSecureContext) {
@@ -47,6 +59,7 @@ export default function GpgVaultSection() {
   const [actionError, setActionError] = useState(null);
   const [nameReal, setNameReal] = useState('');
   const [nameEmail, setNameEmail] = useState('');
+  const [addStep, setAddStep] = useState(null); // null | 'authorizer' | 'candidate'
 
   const refresh = useCallback(async () => {
     try {
@@ -144,20 +157,41 @@ export default function GpgVaultSection() {
 
   const handleAddCredential = useCallback(async () => {
     if (busy) return;
+    if (!window.confirm(
+      'パスキーの追加には2回の認証が必要です。\n'
+      + '1回目: このVaultを既に解錠できるパスキー\n'
+      + '2回目: 追加したいパスキー (事前に「パスキー」画面で登録しておいてください)',
+    )) return;
     setBusy(true);
     setActionError(null);
     try {
-      await runStepUp({
-        optionsUrl: '/api/gpg-vault/credentials/add-options',
-        verifyUrl: '/api/gpg-vault/credentials/add-verify',
-      });
+      await runGpgVaultAddCredential({ onStep: setAddStep });
       await refresh();
     } catch (err) {
       setActionError(err.message || 'パスキーの追加に失敗しました');
     } finally {
+      setAddStep(null);
       setBusy(false);
     }
-  }, [busy, runStepUp, refresh]);
+  }, [busy, refresh]);
+
+  const handleDelete = useCallback(async () => {
+    if (busy) return;
+    const warning = status?.legacyDisabled
+      ? 'このGPGボルトを削除します。GitHubに登録した旧GPG鍵/SSH鍵は漏洩した可能性があるため、GitHub側からも必ず削除してください。続けますか?'
+      : 'このGPGボルトを削除します。鍵は復元できません (GitHubに登録した公開鍵も使えなくなります)。続けますか?';
+    if (!window.confirm(warning)) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await runGpgVaultDelete();
+      await refresh();
+    } catch (err) {
+      setActionError(err.message || 'Vaultの削除に失敗しました');
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, status, refresh]);
 
   return (
     <section className="settings-section">
@@ -214,29 +248,52 @@ export default function GpgVaultSection() {
                 </>
               )}
 
+              {status.exists && status.legacyDisabled && (
+                <div className="settings-error">
+                  <p>
+                    <strong>このGPGボルトは無効化されています。</strong>
+                    セキュリティ修正より前に作成されたため、サンドボックスから秘密鍵を持ち出せる状態にありました
+                    (秘密鍵が漏洩した可能性があります)。アンロック・パスキー追加はできません。
+                  </p>
+                  <p>
+                    1. 下の公開鍵情報で旧鍵を確認し、GitHub の Settings &gt; SSH and GPG keys
+                    (およびリポジトリの Deploy keys) から削除してください。<br />
+                    2. 「Vaultを削除」で削除し、新しいVaultを作成してGitHubに登録し直してください。
+                  </p>
+                </div>
+              )}
+
               {status.exists && (
                 <>
                   <p className="settings-hint">
-                    状態: {status.unlocked ? 'アンロック中' : 'ロック中'}
+                    状態: {status.legacyDisabled ? '無効 (要再作成)' : status.unlocked ? 'アンロック中' : 'ロック中'}
                     {' / '}フィンガープリント: {status.fingerprint}
                     {' / '}登録済みパスキー: {status.credentialCount}個
                   </p>
-                  {!status.unlocked && (
+                  {!status.legacyDisabled && !status.unlocked && (
                     <button type="button" className="btn btn-secondary" onClick={handleUnlock} disabled={busy}>
                       {busy ? 'アンロック中…' : 'アンロック'}
                     </button>
                   )}
-                  {status.unlocked && (
+                  {!status.legacyDisabled && status.unlocked && (
+                    <button type="button" className="btn btn-secondary" onClick={handleLock} disabled={busy}>
+                      {busy ? 'ロック中…' : 'ロック'}
+                    </button>
+                  )}
+                  {!status.legacyDisabled && (
                     <>
-                      <button type="button" className="btn btn-secondary" onClick={handleLock} disabled={busy}>
-                        {busy ? 'ロック中…' : 'ロック'}
-                      </button>
                       {' '}
                       <button type="button" className="btn btn-secondary" onClick={handleAddCredential} disabled={busy}>
-                        {busy ? '追加中…' : 'このVaultを解錠できるパスキーを追加'}
+                        {addStep === 'authorizer' && '1/2: 登録済みパスキーで認証中…'}
+                        {addStep === 'candidate' && '2/2: 追加するパスキーで認証中…'}
+                        {!addStep && 'このVaultを解錠できるパスキーを追加'}
                       </button>
                     </>
                   )}
+                  {' '}
+                  <button type="button" className="btn btn-secondary" onClick={handleDelete} disabled={busy}>
+                    Vaultを削除
+                  </button>
 
                   {githubInfo && (
                     <div className="settings-subsection">

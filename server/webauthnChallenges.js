@@ -24,7 +24,7 @@ export const FLOW_TTL_MS = 5 * 60 * 1000;
 export const WEBAUTHN_USER_ID = new TextEncoder().encode('ccserver-user');
 export const WEBAUTHN_USER_NAME = 'ccserver';
 
-const flows = new Map(); // flowId -> { challenge, kind, expiresAt }
+const flows = new Map(); // flowId -> { challenge, kind, expiresAt, data }
 
 function sweepExpired(now) {
   for (const [flowId, flow] of flows) {
@@ -38,11 +38,14 @@ function sweepExpired(now) {
 // flowId, returned for the caller to put in a flow cookie. `kind`
 // ('registration' | 'authentication') stops a flow cookie minted for one
 // ceremony from being replayed against the other's verify endpoint.
-export function startChallengeFlow(kind, challenge) {
+// `data` (optional) is server-side-only state the verify step needs and the
+// client must never get to choose -- e.g. the GPG vault's per-ceremony PRF
+// salts and add-credential's second challenge (routes/gpgVault.js).
+export function startChallengeFlow(kind, challenge, data = null) {
   const now = Date.now();
   sweepExpired(now);
   const flowId = randomBytes(32).toString('base64url');
-  flows.set(flowId, { challenge, kind, expiresAt: now + FLOW_TTL_MS });
+  flows.set(flowId, { challenge, kind, expiresAt: now + FLOW_TTL_MS, data });
   return flowId;
 }
 
@@ -52,13 +55,19 @@ export function startChallengeFlow(kind, challenge) {
 // cookie, unknown flowId, expired, or a kind mismatch) -- callers 400/401 on
 // null without distinguishing why, same as login-token's flat error.
 export function consumeChallengeFlow(request, kind) {
+  return consumeChallengeFlowData(request, kind)?.challenge ?? null;
+}
+
+// Same one-time consume as consumeChallengeFlow, but returns
+// { challenge, data } (data as stored by startChallengeFlow) or null.
+export function consumeChallengeFlowData(request, kind) {
   const flowId = parseCookieHeader(request.headers.cookie)[FLOW_COOKIE_NAME];
   if (!flowId) return null;
   const flow = flows.get(flowId);
   if (!flow) return null;
   flows.delete(flowId);
   if (flow.kind !== kind || flow.expiresAt <= Date.now()) return null;
-  return flow.challenge;
+  return { challenge: flow.challenge, data: flow.data };
 }
 
 // Set-Cookie header value handing the browser a flowId. `secure` mirrors

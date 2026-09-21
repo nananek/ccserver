@@ -28,6 +28,25 @@ export default function GpgVaultQuickUnlockButton() {
 
   if (!vault?.data?.exists || vault.data.unlocked) return null;
 
+  // セキュリティ監査 F1.4: 修正前に作成されたVaultは無効化されており、
+  // アンロックはできない。アンロックボタンの位置に警告を出して、設定画面での
+  // 削除・再作成を促す。
+  if (vault.data.legacyDisabled) {
+    const message = 'GPGボルトは修正前に作成されたため無効化されています (秘密鍵が漏洩した可能性があります)。'
+      + '設定 > GPG連携 から削除して再作成してください。';
+    return (
+      <button
+        type="button"
+        className="btn gpg-vault-unlock-btn"
+        onClick={() => window.alert(message)}
+        title={message}
+        aria-label="GPGボルトは無効化されています"
+      >
+        ⚠️ GPG Vault 無効 (要再作成)
+      </button>
+    );
+  }
+
   return (
     <button
       type="button"

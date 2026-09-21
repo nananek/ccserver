@@ -406,6 +406,38 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    // v9: security audit remediation, P0 (doc "remediation-plan" r2).
+    version: 9,
+    up(db) {
+      db.exec(`
+        -- F2: who may register a passkey. auth_method records how the
+        -- session was created ('login-token' | 'passkey'); stepup_at is the
+        -- last fresh user-verified passkey assertion on THIS session;
+        -- registration_grant is the single-use permission carried over from
+        -- a CLI token issued with --allow-passkey-registration. NULL/0 for
+        -- every pre-existing session: none of them may register a passkey
+        -- without a fresh step-up.
+        ALTER TABLE auth_sessions ADD COLUMN auth_method TEXT;
+        ALTER TABLE auth_sessions ADD COLUMN credential_id TEXT;
+        ALTER TABLE auth_sessions ADD COLUMN stepup_at INTEGER;
+        ALTER TABLE auth_sessions ADD COLUMN registration_grant INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE login_tokens ADD COLUMN allow_passkey_registration INTEGER NOT NULL DEFAULT 0;
+
+        -- F1.4: vaults created before this migration are treated as leaked
+        -- (the relay used to expose the agent's main socket, which exported
+        -- the secret key on request). DEFAULT 1 marks every existing row as
+        -- pre-fix; generateAndStoreVault() writes 2. See
+        -- gpgVaultDb.isLegacyVault().
+        ALTER TABLE gpg_vault ADD COLUMN format_version INTEGER NOT NULL DEFAULT 1;
+
+        -- F6: per-credential random PRF salt, rotated on every unlock. NULL
+        -- only ever occurs on pre-fix wraps (every post-fix wrap is created
+        -- with a salt), and a NULL salt also marks the vault as legacy.
+        ALTER TABLE gpg_vault_credentials ADD COLUMN prf_salt BLOB;
+      `);
+    },
+  },
 ];
 
 // Runs pending migrations in order. Each one executes inside BEGIN IMMEDIATE

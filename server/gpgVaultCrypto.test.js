@@ -2,15 +2,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import {
-  GPG_VAULT_PRF_SALT,
+  generatePrfSalt,
   deriveWrappingKey,
   generateVaultKey,
   aesGcmEncrypt,
   aesGcmDecrypt,
 } from './gpgVaultCrypto.js';
 
-test('GPG_VAULT_PRF_SALT is exactly 32 bytes', () => {
-  assert.equal(GPG_VAULT_PRF_SALT.length, 32);
+test('generatePrfSalt returns 32 fresh random bytes each call (audit F6: no fixed public salt)', () => {
+  const a = generatePrfSalt();
+  const b = generatePrfSalt();
+  assert.equal(a.length, 32);
+  assert.equal(b.length, 32);
+  assert.notDeepEqual(a, b);
 });
 
 test('deriveWrappingKey is deterministic for the same secret+credentialId', () => {

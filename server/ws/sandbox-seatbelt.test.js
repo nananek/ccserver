@@ -1298,6 +1298,77 @@ test('buildSeatbeltLaunch: gpgVault null (default) sets no GNUPGHOME/GIT_CONFIG 
   assert.equal(sb.env.GNUPGHOME, undefined);
 });
 
+// Security audit F3: a launch WITHOUT gpgVault must not be able to connect()
+// to the vault relay's fixed sockets. connect() is network-outbound under
+// Seatbelt (so the runtime-dir write pins cannot stop it); only a
+// last-match-wins `(deny network-outbound (remote unix-socket ...))` does.
+function relayNetDenyIndex(text, path) {
+  const needle = `(remote unix-socket (path-literal "${path}"))`;
+  const idx = text.indexOf(needle);
+  if (idx === -1) return -1;
+  const lineStart = text.lastIndexOf('\n', idx) + 1;
+  return text.slice(lineStart, idx).includes('(deny network-outbound') ? idx : -1;
+}
+
+for (const isolate of [false, true]) {
+  test(`F3: non-gpgVault launch deny-pins every vault relay socket after the network allow (isolation=${isolate})`, () => {
+    const prevXdg = process.env.XDG_RUNTIME_DIR;
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-xdgrt-'));
+    DIRS.push(runtimeDir);
+    process.env.XDG_RUNTIME_DIR = runtimeDir;
+    try {
+      const sb = buildSeatbeltLaunch(baseOpts(isolate ? { networkBroker: { port: 41234, token: 'tok' } } : {}));
+      trackDir(sb.dir);
+      const text = readFileSync(sb.profilePath, 'utf-8');
+      assertParenBalanced(text);
+      const allowIdx = isolate
+        ? text.indexOf('(allow network-outbound (remote unix-socket))')
+        : text.indexOf('(allow network*)');
+      assert.ok(allowIdx !== -1, 'the broad unix-socket allow under test is present');
+      const all = gpgVaultRelay.getAllRelaySocketPathsForDeny();
+      // Current AND retired basenames (S.gpg-agent.extra, S.keyboxd,
+      // S.dirmngr) -- a stale socket from an older build must stay pinned.
+      assert.equal(all.length, 5);
+      for (const p of all) {
+        const idx = relayNetDenyIndex(text, p);
+        assert.ok(idx !== -1, `relay socket ${p} is network-outbound denied`);
+        assert.ok(idx > allowIdx, `deny for ${p} comes after the allow (last match wins)`);
+        const priv = p.replace(tmpdir(), realpathSync(tmpdir()));
+        assert.ok(text.includes(`(path-literal "${priv}")`), `symlink-resolved spelling of ${p} pinned too`);
+        assert.equal(finalWriteVerdict(text, p), 'deny', `relay socket file ${p} is not writable/replaceable`);
+      }
+    } finally {
+      if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
+      else process.env.XDG_RUNTIME_DIR = prevXdg;
+    }
+  });
+}
+
+test('F3: gpgVault launch is NOT deny-pinned on its own relay sockets (and only 2 are exposed)', () => {
+  const prevXdg = process.env.XDG_RUNTIME_DIR;
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-xdgrt-'));
+  DIRS.push(runtimeDir);
+  process.env.XDG_RUNTIME_DIR = runtimeDir;
+  try {
+    const relayDir = gpgVaultRelay.getRelayDir();
+    mkdirSync(relayDir, { recursive: true });
+    const relaySockets = gpgVaultRelay.getRelaySocketPaths();
+    assert.deepEqual(Object.keys(relaySockets).sort(), ['agent', 'agentSsh']);
+    for (const s of Object.values(relaySockets)) writeFileSync(s, '');
+    const sb = buildSeatbeltLaunch(baseOpts({
+      gpgVault: { homeDir: relayDir, sockets: {}, fingerprint: 'FAKEFPR', nameReal: 'ccserver test', nameEmail: 't@example.invalid' },
+    }));
+    trackDir(sb.dir);
+    const text = readFileSync(sb.profilePath, 'utf-8');
+    for (const p of Object.values(relaySockets)) {
+      assert.equal(relayNetDenyIndex(text, p), -1, `${p} must stay connectable for a gpgVault launch`);
+    }
+  } finally {
+    if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = prevXdg;
+  }
+});
+
 test('buildSeatbeltLaunch pins controlSockDenies for network-outbound', () => {
   const sockDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-socks-'));
   DIRS.push(sockDir);

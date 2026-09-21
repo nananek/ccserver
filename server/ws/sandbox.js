@@ -1690,10 +1690,14 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
   // otherwise) is deliberately distinct from `gnupgHome`/`gnupg` above so the
   // two mechanisms cannot collide on-path even if both are enabled at once
   // (buildSandboxSpawn warns when that happens). Security-critical: only
-  // individual PUBLIC files (pubring.kbx/trustdb.gpg/gpg.conf) and live
-  // sockets are ever bound here -- never the whole homeDir -- so
+  // individual PUBLIC files (pubring.kbx/trustdb.gpg/gpg.conf) and the
+  // relay's sockets are ever bound here -- never the whole homeDir -- so
   // private-keys-v1.d/, openpgp-revocs.d/, and sshcontrol stay unreachable
-  // from the sandbox by construction (see gpgVaultAgent.js's header comment).
+  // from the sandbox by construction. That alone is NOT sufficient (audit
+  // F1): a socket onto the agent's main socket would still hand out the
+  // secret key via KEYWRAP_KEY/EXPORT_KEY. The relay sockets bound here
+  // reach only the agent's restricted extra socket, through a protocol
+  // allowlist (gpgVaultRelay.js / gpgVaultRelayFilter.js).
   // gpgVault is the caller-resolved object (see this function's own header
   // comment) -- reused as-is by the git-identity injection further down.
   if (gpgVault) {
@@ -2253,11 +2257,17 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   // explicitly asked to sign/push with a specific key, and launching without
   // it would be a silent downgrade of what the caller requested.
   if (gpgVault && !gpgVaultAgent.isUnlocked()) {
-    throw new Error(
-      gpgVaultAgent.vaultExists()
-        ? 'gpgVault was requested but the GPG vault is currently locked -- unlock it from Settings before launching.'
-        : 'gpgVault was requested but no GPG vault has been set up yet -- set one up from Settings first.',
-    );
+    let message;
+    if (!gpgVaultAgent.vaultExists()) {
+      message = 'gpgVault was requested but no GPG vault has been set up yet -- set one up from Settings first.';
+    } else if (gpgVaultAgent.isLegacyVault()) {
+      // Security audit F1.4: pre-fix vaults are disabled for good.
+      message = 'gpgVault was requested but the GPG vault was created before the security fix and has been disabled '
+        + '(its secret key may have leaked) -- delete and recreate it from Settings.';
+    } else {
+      message = 'gpgVault was requested but the GPG vault is currently locked -- unlock it from Settings before launching.';
+    }
+    throw new Error(message);
   }
   // gpgVault uses its own target path (~/.gnupg-vault / XDG_RUNTIME_DIR/
   // gnupg-vault, see buildBwrapArgs) specifically so it cannot collide

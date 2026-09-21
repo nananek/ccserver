@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { getDb, closeDb } from '../db.js';
 import { generateLoginToken, hashLoginToken } from '../loginTokens.js';
-import { SESSION_COOKIE_NAME } from '../authSessions.js';
+import { SESSION_COOKIE_NAME, createSession, STEPUP_WINDOW_MS } from '../authSessions.js';
 import { FLOW_COOKIE_NAME } from '../webauthnChallenges.js';
 import { generateAuthenticatorKeyPair, createRegistrationResponse, createAuthenticationResponse } from './webauthnTestAuthenticator.js';
 import { authRoute } from './auth.js';
@@ -46,6 +46,12 @@ after(async () => {
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 
+// A logged-in session with a fresh step-up (as right after a passkey
+// login). Registration now requires one (security audit F2), so the
+// registration-mechanics tests below run as this session; the gate itself
+// is exercised separately at the end of this file.
+let stepUpCookie;
+
 beforeEach(() => {
   closeDb();
   const db = getDb();
@@ -53,15 +59,16 @@ beforeEach(() => {
   db.exec('DELETE FROM auth_sessions');
   db.exec('DELETE FROM webauthn_credentials');
   process.env.CCSERVER_AUTH_MODE = 'passkey';
+  stepUpCookie = `${SESSION_COOKIE_NAME}=${createSession({ authMethod: 'passkey' })}`;
 });
 
-function insertToken({ expiresInMs = 15 * 60 * 1000, usedAt = null } = {}) {
+function insertToken({ expiresInMs = 15 * 60 * 1000, usedAt = null, allowPasskeyRegistration = false } = {}) {
   const db = getDb();
   const { token, tokenHash } = generateLoginToken();
   const now = Date.now();
   db.prepare(
-    'INSERT INTO login_tokens (id, token_hash, created_at, expires_at, used_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(randomUUID(), tokenHash, now, now + expiresInMs, usedAt);
+    'INSERT INTO login_tokens (id, token_hash, created_at, expires_at, used_at, allow_passkey_registration) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(randomUUID(), tokenHash, now, now + expiresInMs, usedAt, allowPasskeyRegistration ? 1 : 0);
   return token;
 }
 
@@ -180,7 +187,7 @@ async function registerCredential({ label } = {}) {
   const optionsRes = await app.inject({
     method: 'POST',
     url: '/api/auth/webauthn/register-options',
-    headers: { host: RP_HOST },
+    headers: { host: RP_HOST, cookie: stepUpCookie },
   });
   assert.equal(optionsRes.statusCode, 200);
   const options = optionsRes.json();
@@ -200,7 +207,7 @@ async function registerCredential({ label } = {}) {
   const verifyRes = await app.inject({
     method: 'POST',
     url: '/api/auth/webauthn/register-verify',
-    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}` },
+    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}; ${stepUpCookie}` },
     payload: label === undefined ? { response } : { response, label },
   });
   assert.equal(verifyRes.statusCode, 200, `register-verify failed: ${verifyRes.body}`);
@@ -235,12 +242,12 @@ test('GET /api/auth/webauthn/credentials: lists registered credentials without e
 
 test('POST /api/auth/webauthn/register-options: 400 when CCSERVER_AUTH_MODE is not passkey', async () => {
   process.env.CCSERVER_AUTH_MODE = 'token';
-  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST } });
+  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie: stepUpCookie } });
   assert.equal(res.statusCode, 400);
 });
 
 test('POST /api/auth/webauthn/register-options: returns discoverable-credential options and a flow cookie', async () => {
-  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST } });
+  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie: stepUpCookie } });
   assert.equal(res.statusCode, 200);
   const options = res.json();
   assert.equal(options.rp.id, RP_HOST);
@@ -257,7 +264,7 @@ test('POST /api/auth/webauthn/register-options: returns discoverable-credential 
 
 test('POST /api/auth/webauthn/register-options: excludes already-registered credential ids', async () => {
   const { credentialId } = await registerCredential();
-  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST } });
+  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie: stepUpCookie } });
   const options = res.json();
   const excludedIds = options.excludeCredentials.map((c) => c.id);
   assert.ok(excludedIds.includes(credentialId.toString('base64url')));
@@ -270,12 +277,12 @@ test('POST /api/auth/webauthn/register-verify: 400 when CCSERVER_AUTH_MODE is no
 });
 
 test('POST /api/auth/webauthn/register-verify: 400 when response is missing from the body', async () => {
-  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-verify', payload: {} });
+  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-verify', headers: { cookie: stepUpCookie }, payload: {} });
   assert.equal(res.statusCode, 400);
 });
 
 test('POST /api/auth/webauthn/register-verify: 401 with no flow cookie at all', async () => {
-  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-verify', payload: { response: {} } });
+  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-verify', headers: { cookie: stepUpCookie }, payload: { response: {} } });
   assert.equal(res.statusCode, 401);
 });
 
@@ -285,14 +292,14 @@ test('POST /api/auth/webauthn/register-verify: 401 when the flow cookie is an au
   const res = await app.inject({
     method: 'POST',
     url: '/api/auth/webauthn/register-verify',
-    headers: { cookie: `${FLOW_COOKIE_NAME}=${flowId}` },
+    headers: { cookie: `${FLOW_COOKIE_NAME}=${flowId}; ${stepUpCookie}` },
     payload: { response: {} },
   });
   assert.equal(res.statusCode, 401);
 });
 
 test('POST /api/auth/webauthn/register-verify: 401 for a response that fails verification (bad signature/challenge)', async () => {
-  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST } });
+  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie: stepUpCookie } });
   const flowId = flowIdFrom(optionsRes);
   const { publicKey } = generateAuthenticatorKeyPair();
   const response = createRegistrationResponse({
@@ -305,14 +312,14 @@ test('POST /api/auth/webauthn/register-verify: 401 for a response that fails ver
   const res = await app.inject({
     method: 'POST',
     url: '/api/auth/webauthn/register-verify',
-    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}` },
+    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}; ${stepUpCookie}` },
     payload: { response },
   });
   assert.equal(res.statusCode, 401);
 });
 
 test('POST /api/auth/webauthn/register-verify: 401 when the response was built for a different rpID', async () => {
-  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST } });
+  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie: stepUpCookie } });
   const options = optionsRes.json();
   const flowId = flowIdFrom(optionsRes);
   const { publicKey } = generateAuthenticatorKeyPair();
@@ -328,7 +335,7 @@ test('POST /api/auth/webauthn/register-verify: 401 when the response was built f
   const res = await app.inject({
     method: 'POST',
     url: '/api/auth/webauthn/register-verify',
-    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}` },
+    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}; ${stepUpCookie}` },
     payload: { response },
   });
   assert.equal(res.statusCode, 401);
@@ -356,14 +363,14 @@ test('POST /api/auth/webauthn/register-verify: label is optional (stored as NULL
 });
 
 test('POST /api/auth/webauthn/register-verify: the flow cookie is one-time use', async () => {
-  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST } });
+  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie: stepUpCookie } });
   const options = optionsRes.json();
   const flowId = flowIdFrom(optionsRes);
   const { publicKey } = generateAuthenticatorKeyPair();
   const credentialId = randomBytes(16);
   const response = createRegistrationResponse({ rpID: RP_HOST, origin: ORIGIN, challenge: options.challenge, credentialId, publicKey });
 
-  const cookieHeader = { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}` };
+  const cookieHeader = { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}; ${stepUpCookie}` };
   const first = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-verify', headers: cookieHeader, payload: { response } });
   assert.equal(first.statusCode, 200);
   const second = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-verify', headers: cookieHeader, payload: { response } });
@@ -407,7 +414,7 @@ test('POST /api/auth/webauthn/authenticate-verify: 401 for an unregistered crede
   const res = await app.inject({
     method: 'POST',
     url: '/api/auth/webauthn/authenticate-verify',
-    headers: { cookie: `${FLOW_COOKIE_NAME}=${flowId}` },
+    headers: { cookie: `${FLOW_COOKIE_NAME}=${flowId}; ${stepUpCookie}` },
     payload: { response: { id: 'not-a-registered-credential' } },
   });
   assert.equal(res.statusCode, 401);
@@ -431,7 +438,7 @@ test('POST /api/auth/webauthn/authenticate-verify: valid assertion sets a sessio
   const res = await app.inject({
     method: 'POST',
     url: '/api/auth/webauthn/authenticate-verify',
-    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}` },
+    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}; ${stepUpCookie}` },
     payload: { response },
   });
   assert.equal(res.statusCode, 200, `authenticate-verify failed: ${res.body}`);
@@ -499,9 +506,190 @@ test('POST /api/auth/webauthn/authenticate-verify: the flow cookie is one-time u
     rpID: RP_HOST, origin: ORIGIN, challenge: options.challenge, credentialId, privateKey, counter: 1,
   });
 
-  const cookieHeader = { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}` };
+  const cookieHeader = { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowId}; ${stepUpCookie}` };
   const first = await app.inject({ method: 'POST', url: '/api/auth/webauthn/authenticate-verify', headers: cookieHeader, payload: { response } });
   assert.equal(first.statusCode, 200);
   const second = await app.inject({ method: 'POST', url: '/api/auth/webauthn/authenticate-verify', headers: cookieHeader, payload: { response } });
   assert.equal(second.statusCode, 401);
+});
+
+// ---------------------------------------------------------------------------
+// Security audit F2: registering a passkey needs more than a session.
+// The audit's chain started with a session thief enrolling their own
+// passkey with no re-authentication; everything below pins that shut.
+
+// Logs in through the real login-token endpoint and returns the session
+// cookie ("name=value").
+async function loginWithToken({ allowPasskeyRegistration = false } = {}) {
+  const token = insertToken({ allowPasskeyRegistration });
+  const res = await app.inject({ method: 'POST', url: '/api/auth/login-token', payload: { token } });
+  assert.equal(res.statusCode, 200);
+  const cookie = findCookie(res, SESSION_COOKIE_NAME);
+  return cookie.split(';')[0];
+}
+
+async function tryRegister(sessionCookie) {
+  const headersFor = (flowId) => ({ host: RP_HOST, cookie: [flowId && `${FLOW_COOKIE_NAME}=${flowId}`, sessionCookie].filter(Boolean).join('; ') });
+  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: headersFor(null) });
+  if (optionsRes.statusCode !== 200) return { stage: 'options', res: optionsRes };
+  const options = optionsRes.json();
+  const { publicKey, privateKey } = generateAuthenticatorKeyPair();
+  const credentialId = randomBytes(16);
+  const response = createRegistrationResponse({ rpID: RP_HOST, origin: ORIGIN, challenge: options.challenge, credentialId, publicKey });
+  const verifyRes = await app.inject({
+    method: 'POST', url: '/api/auth/webauthn/register-verify',
+    headers: headersFor(flowIdFrom(optionsRes)), payload: { response },
+  });
+  return { stage: 'verify', res: verifyRes, credentialId, privateKey };
+}
+
+function credentialCount() {
+  return getDb().prepare('SELECT COUNT(*) AS c FROM webauthn_credentials').get().c;
+}
+
+test('F2: register-options/verify with NO session at all -> 403, nothing registered', async () => {
+  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST } });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().code, 'PASSKEY_REGISTRATION_NOT_ALLOWED');
+  const verify = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-verify', payload: { response: {} } });
+  assert.equal(verify.statusCode, 403);
+});
+
+test('F2: a plain login-token session (no --allow-passkey-registration) cannot register -- even when zero passkeys exist', async () => {
+  assert.equal(credentialCount(), 0, 'precondition: bootstrap situation');
+  const cookie = await loginWithToken();
+  const attempt = await tryRegister(cookie);
+  assert.equal(attempt.stage, 'options');
+  assert.equal(attempt.res.statusCode, 403);
+  assert.equal(credentialCount(), 0);
+});
+
+test('F2 (audit chain step 1): a stolen passkey-login session whose step-up has gone stale cannot enroll the thief\'s passkey', async () => {
+  const sessionId = createSession({ authMethod: 'passkey' });
+  getDb().prepare('UPDATE auth_sessions SET stepup_at = ? WHERE id = ?').run(Date.now() - STEPUP_WINDOW_MS - 1000, sessionId);
+  const attempt = await tryRegister(`${SESSION_COOKIE_NAME}=${sessionId}`);
+  assert.equal(attempt.res.statusCode, 403);
+  assert.equal(credentialCount(), 0);
+});
+
+test('F2: step-up expiring between options and verify is re-checked at verify', async () => {
+  const sessionId = createSession({ authMethod: 'passkey' });
+  const cookie = `${SESSION_COOKIE_NAME}=${sessionId}`;
+  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie } });
+  assert.equal(optionsRes.statusCode, 200);
+  getDb().prepare('UPDATE auth_sessions SET stepup_at = ? WHERE id = ?').run(Date.now() - STEPUP_WINDOW_MS - 1000, sessionId);
+  const { publicKey } = generateAuthenticatorKeyPair();
+  const response = createRegistrationResponse({ rpID: RP_HOST, origin: ORIGIN, challenge: optionsRes.json().challenge, credentialId: randomBytes(16), publicKey });
+  const verifyRes = await app.inject({
+    method: 'POST', url: '/api/auth/webauthn/register-verify',
+    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowIdFrom(optionsRes)}; ${cookie}` }, payload: { response },
+  });
+  assert.equal(verifyRes.statusCode, 403);
+  assert.equal(credentialCount(), 0);
+});
+
+test('F2: an --allow-passkey-registration token session registers exactly ONE passkey (bootstrap), then the grant is spent', async () => {
+  const cookie = await loginWithToken({ allowPasskeyRegistration: true });
+  const sessionId = cookie.split('=')[1];
+  const row = getDb().prepare('SELECT auth_method, registration_grant FROM auth_sessions WHERE id = ?').get(sessionId);
+  assert.equal(row.auth_method, 'login-token');
+  assert.equal(row.registration_grant, 1);
+
+  const first = await tryRegister(cookie);
+  assert.equal(first.res.statusCode, 200, first.res.body);
+  assert.equal(credentialCount(), 1);
+  assert.equal(getDb().prepare('SELECT registration_grant FROM auth_sessions WHERE id = ?').get(sessionId).registration_grant, 0);
+
+  const second = await tryRegister(cookie);
+  assert.equal(second.res.statusCode, 403, 'grant is single-use');
+  assert.equal(credentialCount(), 1);
+});
+
+test('F2: the grant is not spent by merely requesting options, and two concurrent ceremonies cannot both use it', async () => {
+  const cookie = await loginWithToken({ allowPasskeyRegistration: true });
+  const optsA = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie } });
+  const optsB = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie } });
+  assert.equal(optsA.statusCode, 200);
+  assert.equal(optsB.statusCode, 200, 'options alone does not consume the grant');
+  const verify = async (optsRes) => {
+    const { publicKey } = generateAuthenticatorKeyPair();
+    const response = createRegistrationResponse({ rpID: RP_HOST, origin: ORIGIN, challenge: optsRes.json().challenge, credentialId: randomBytes(16), publicKey });
+    return app.inject({
+      method: 'POST', url: '/api/auth/webauthn/register-verify',
+      headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowIdFrom(optsRes)}; ${cookie}` }, payload: { response },
+    });
+  };
+  const [a, b] = await Promise.all([verify(optsA), verify(optsB)]);
+  assert.deepEqual([a.statusCode, b.statusCode].sort(), [200, 403]);
+  assert.equal(credentialCount(), 1);
+});
+
+test('F2: a plain login-token session can register after a fresh passkey step-up (stepup-options/verify)', async () => {
+  // An existing passkey (registered via the bootstrap grant).
+  const bootstrap = await tryRegister(await loginWithToken({ allowPasskeyRegistration: true }));
+  assert.equal(bootstrap.res.statusCode, 200);
+
+  const cookie = await loginWithToken();
+  assert.equal((await tryRegister(cookie)).res.statusCode, 403, 'no step-up yet');
+
+  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/stepup-options', headers: { host: RP_HOST, cookie } });
+  assert.equal(optionsRes.statusCode, 200);
+  const options = optionsRes.json();
+  assert.equal(options.userVerification, 'required');
+  assert.deepEqual(options.allowCredentials.map((c) => c.id), [bootstrap.credentialId.toString('base64url')]);
+  const response = createAuthenticationResponse({
+    rpID: RP_HOST, origin: ORIGIN, challenge: options.challenge,
+    credentialId: bootstrap.credentialId, privateKey: bootstrap.privateKey, counter: 1,
+  });
+  const verifyRes = await app.inject({
+    method: 'POST', url: '/api/auth/webauthn/stepup-verify',
+    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowIdFrom(optionsRes)}; ${cookie}` }, payload: { response },
+  });
+  assert.equal(verifyRes.statusCode, 200, verifyRes.body);
+
+  const after = await tryRegister(cookie);
+  assert.equal(after.res.statusCode, 200, after.res.body);
+  assert.equal(credentialCount(), 2);
+});
+
+test('F2: stepup-verify rejects a forged assertion and grants nothing', async () => {
+  const bootstrap = await tryRegister(await loginWithToken({ allowPasskeyRegistration: true }));
+  const cookie = await loginWithToken();
+  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/stepup-options', headers: { host: RP_HOST, cookie } });
+  const { privateKey: attackerKey } = generateAuthenticatorKeyPair();
+  const response = createAuthenticationResponse({
+    rpID: RP_HOST, origin: ORIGIN, challenge: optionsRes.json().challenge,
+    credentialId: bootstrap.credentialId, privateKey: attackerKey, counter: 1, // wrong key
+  });
+  const verifyRes = await app.inject({
+    method: 'POST', url: '/api/auth/webauthn/stepup-verify',
+    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowIdFrom(optionsRes)}; ${cookie}` }, payload: { response },
+  });
+  assert.equal(verifyRes.statusCode, 401);
+  assert.equal((await tryRegister(cookie)).res.statusCode, 403);
+});
+
+test('F2: stepup-verify without a session -> 401', async () => {
+  const res = await app.inject({ method: 'POST', url: '/api/auth/webauthn/stepup-verify', payload: { response: {} } });
+  assert.equal(res.statusCode, 401);
+});
+
+test('F2: a passkey login starts a session with a fresh step-up (auth_method=passkey)', async () => {
+  const cred = await tryRegister(await loginWithToken({ allowPasskeyRegistration: true }));
+  const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/authenticate-options', headers: { host: RP_HOST } });
+  const response = createAuthenticationResponse({
+    rpID: RP_HOST, origin: ORIGIN, challenge: optionsRes.json().challenge,
+    credentialId: cred.credentialId, privateKey: cred.privateKey, counter: 1,
+  });
+  const res = await app.inject({
+    method: 'POST', url: '/api/auth/webauthn/authenticate-verify',
+    headers: { host: RP_HOST, cookie: `${FLOW_COOKIE_NAME}=${flowIdFrom(optionsRes)}` }, payload: { response },
+  });
+  assert.equal(res.statusCode, 200);
+  const sessionId = findCookie(res, SESSION_COOKIE_NAME).split(';')[0].split('=')[1];
+  const row = getDb().prepare('SELECT auth_method, credential_id, stepup_at, registration_grant FROM auth_sessions WHERE id = ?').get(sessionId);
+  assert.equal(row.auth_method, 'passkey');
+  assert.equal(row.credential_id, cred.credentialId.toString('base64url'));
+  assert.ok(Date.now() - row.stepup_at < 5000);
+  assert.equal(row.registration_grant, 0);
 });

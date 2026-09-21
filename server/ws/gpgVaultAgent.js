@@ -14,13 +14,16 @@
 // start when its own socket path is too long).
 //
 // Security-critical invariant, load-bearing for every caller of
-// getUnlockedAgentInfo(): only the live agent SOCKETS plus the *public*
-// pubring.kbx/trustdb.gpg/gpg.conf are ever handed to sandbox.js for
-// bind-mounting. private-keys-v1.d/, openpgp-revocs.d/, and sshcontrol are
-// never exposed via any accessor here -- callers must keep enumerating
-// individual files (never the whole homeDir) when wiring this into a
-// sandbox, exactly like sandbox.js already does for the unrelated
-// host-forwarding `gpg:true` flag.
+// getUnlockedAgentInfo(): only the *public* pubring.kbx/trustdb.gpg/gpg.conf
+// plus gpgVaultRelay.js's sockets are ever handed to a sandbox.
+// private-keys-v1.d/, openpgp-revocs.d/, and sshcontrol are never exposed via
+// any accessor here -- callers must keep enumerating individual files (never
+// the whole homeDir) when wiring this into a sandbox. Keeping the key FILES
+// out of the sandbox is not enough on its own (security audit F1): the
+// agent's MAIN socket answers KEYWRAP_KEY/EXPORT_KEY for this
+// %no-protection key, so a sandbox must never reach it. Sandboxes only ever
+// reach the RESTRICTED extra socket (`sockets.agentExtra`), and only through
+// gpgVaultRelay.js's protocol allowlist.
 
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
@@ -55,6 +58,75 @@ export function isUnlocked() {
 
 export function vaultExists() {
   return gpgVaultDb.vaultExists();
+}
+
+// Security audit F1.4: see gpgVaultDb.isLegacyVault(). Re-checked from the
+// DB on every call (not cached at startup) so a vault replaced underneath a
+// running server is judged on what is actually stored.
+export function isLegacyVault() {
+  return gpgVaultDb.isLegacyVault();
+}
+
+export const LEGACY_VAULT_MESSAGE = 'このGPGボルトは修正前 (セキュリティ監査 F1) に作成されたため、秘密鍵が漏洩した可能性があり無効化されています。'
+  + 'GitHubから旧鍵を削除し、ボルトを削除して再作成してください。';
+
+function assertNotLegacy() {
+  if (gpgVaultDb.isLegacyVault()) {
+    const err = new Error(LEGACY_VAULT_MESSAGE);
+    err.code = 'GPG_VAULT_LEGACY_DISABLED';
+    throw err;
+  }
+}
+
+// Unwraps VK with one enrolled credential's PRF output. Returns
+// { vk, wrapRow } (vk is the caller's to zero) or throws a generic error.
+// The wrappingKey never outlives this function.
+function unwrapVaultKey(credentialId, prfSecret) {
+  const wrapRow = gpgVaultDb.getCredentialWrap(credentialId);
+  if (!wrapRow) {
+    const err = new Error('this passkey cannot unlock the GPG vault');
+    err.code = 'GPG_VAULT_CREDENTIAL_NOT_ENROLLED';
+    throw err;
+  }
+  const wrappingKey = deriveWrappingKey(prfSecret, credentialId);
+  try {
+    const vk = aesGcmDecrypt(
+      wrappingKey,
+      Buffer.from(wrapRow.wrapped_key), Buffer.from(wrapRow.wrap_nonce), Buffer.from(wrapRow.wrap_tag),
+      credentialId,
+    );
+    return { vk, wrapRow };
+  } catch {
+    throw new Error('failed to unlock the GPG vault (wrong PRF output or corrupted data)');
+  } finally {
+    wrappingKey.fill(0);
+  }
+}
+
+function wrapVaultKey(vk, credentialId, prfSecret) {
+  const wrappingKey = deriveWrappingKey(prfSecret, credentialId);
+  try {
+    return aesGcmEncrypt(wrappingKey, vk, credentialId);
+  } finally {
+    wrappingKey.fill(0);
+  }
+}
+
+// Salt rotation (security audit F6): re-wraps VK for `credentialId` under
+// the NEXT salt's PRF output (obtained in the same ceremony as PRF
+// `second`), so the PRF output just used stops being an unlock key. Best
+// effort: a failed/raced rotation leaves the previous, still-valid wrap in
+// place. Returns true iff rotated.
+function rotateWrap(vk, wrapRow, rotation) {
+  if (!rotation || !rotation.nextPrfSecret || !rotation.nextSalt) return false;
+  const credentialId = wrapRow.credential_id;
+  const wrap = wrapVaultKey(vk, credentialId, rotation.nextPrfSecret);
+  return gpgVaultDb.rotateCredentialWrap({
+    credentialId,
+    expectedOldTag: Buffer.from(wrapRow.wrap_tag),
+    wrappedKey: wrap.ciphertext, wrapNonce: wrap.iv, wrapTag: wrap.tag,
+    prfSalt: rotation.nextSalt,
+  });
 }
 
 // gpgVaultRelay.js's only window into this module's private `state`: the
@@ -251,7 +323,8 @@ function startAutoLockSweep() {
 // reusing the same values here matters (a signed commit's author identity
 // should match the signing key's own UID, and an unset user.name/user.email
 // would break `git commit` outright in an ephemeral sandbox HOME).
-export function generateAndStoreVault({ nameReal, nameEmail, credentialId, prfSecret }) {
+export function generateAndStoreVault({ nameReal, nameEmail, credentialId, prfSecret, prfSalt }) {
+  if (!prfSalt) throw new Error('generateAndStoreVault: prfSalt is required');
   if (gpgVaultDb.vaultExists()) {
     throw new Error('a GPG vault already exists');
   }
@@ -294,8 +367,7 @@ export function generateAndStoreVault({ nameReal, nameEmail, credentialId, prfSe
     secretKeyBuf.fill(0);
     secretKeyBuf = null;
 
-    const wrappingKey = deriveWrappingKey(prfSecret, credentialId);
-    const wrap = aesGcmEncrypt(wrappingKey, vk, credentialId);
+    const wrap = wrapVaultKey(vk, credentialId, prfSecret);
     vk.fill(0); // createVault/addCredentialWrap below only need the encrypted forms
 
     gpgVaultDb.createVault({
@@ -304,7 +376,7 @@ export function generateAndStoreVault({ nameReal, nameEmail, credentialId, prfSe
       encryptedSecretKey: enc.ciphertext, encryptionNonce: enc.iv, encryptionTag: enc.tag,
     });
     gpgVaultDb.addCredentialWrap({
-      credentialId, wrappedKey: wrap.ciphertext, wrapNonce: wrap.iv, wrapTag: wrap.tag,
+      credentialId, wrappedKey: wrap.ciphertext, wrapNonce: wrap.iv, wrapTag: wrap.tag, prfSalt,
     });
   } finally {
     killAgentAt(tmp);
@@ -318,19 +390,66 @@ export function generateAndStoreVault({ nameReal, nameEmail, credentialId, prfSe
   return unlockVault({ credentialId, prfSecret });
 }
 
-// Adds another PRF-capable credential's wrap of the SAME vault key. Requires
-// the vault to already be unlocked (the running process needs VK in memory
-// to wrap it again) -- routes/gpgVault.js's add-credential endpoints check
-// isUnlocked() before even starting the ceremony.
-export function addCredentialToVault({ credentialId, prfSecret }) {
-  if (!state) {
-    throw new Error('the GPG vault must be unlocked before a new passkey can be added to it');
+// Adds another passkey's wrap of the vault key (security audit F2).
+//
+// Authorization is proof, not state: `authorizer` must be a credential that
+// is ALREADY enrolled in the vault, and its PRF output must actually decrypt
+// its own wrap right now. The old version only required the server-wide
+// "unlocked" flag, so anyone holding a session while the owner had the vault
+// unlocked could enroll their own passkey (with a PRF value of their own
+// choosing -- PRF results are not covered by the assertion signature) and
+// unlock alone forever after. Because VK comes from the authorizer's unwrap,
+// this works whether or not the vault is currently unlocked.
+//
+// `candidate` must not be enrolled yet (addCredentialWrap is a plain INSERT
+// -- an existing wrap can never be overwritten through here). Its PRF output
+// is inherently unverifiable server-side; that is fine, the authorization
+// above is what gates enrolment.
+export function addCredentialWithAuthorizer({ authorizer, candidate }) {
+  assertNotLegacy();
+  if (!gpgVaultDb.vaultExists()) {
+    const err = new Error('no GPG vault has been set up yet');
+    err.code = 'GPG_VAULT_NOT_SET_UP';
+    throw err;
   }
-  const wrappingKey = deriveWrappingKey(prfSecret, credentialId);
-  const wrap = aesGcmEncrypt(wrappingKey, state.vk, credentialId);
-  gpgVaultDb.addCredentialWrap({
-    credentialId, wrappedKey: wrap.ciphertext, wrapNonce: wrap.iv, wrapTag: wrap.tag,
-  });
+  if (!candidate.prfSalt) throw new Error('addCredentialWithAuthorizer: candidate.prfSalt is required');
+  // Authorizer first: until it has proven itself, nothing about the
+  // candidate is looked at (and no candidate-specific error is revealed).
+  const { vk, wrapRow } = unwrapVaultKey(authorizer.credentialId, authorizer.prfSecret);
+  try {
+    // Covers authorizer === candidate too: the authorizer is enrolled.
+    if (gpgVaultDb.getCredentialWrap(candidate.credentialId)) {
+      const err = new Error('this passkey is already enrolled in the GPG vault');
+      err.code = 'GPG_VAULT_CREDENTIAL_ALREADY_ENROLLED';
+      throw err;
+    }
+    const wrap = wrapVaultKey(vk, candidate.credentialId, candidate.prfSecret);
+    gpgVaultDb.addCredentialWrap({
+      credentialId: candidate.credentialId,
+      wrappedKey: wrap.ciphertext, wrapNonce: wrap.iv, wrapTag: wrap.tag,
+      prfSalt: candidate.prfSalt,
+    });
+    rotateWrap(vk, wrapRow, authorizer.rotation);
+  } finally {
+    vk.fill(0);
+  }
+}
+
+// Proves `credentialId`'s PRF output unwraps its enrolled wrap, without
+// unlocking anything (used to authorize deleting a post-fix vault). Throws
+// on failure.
+export function verifyEnrolledCredential({ credentialId, prfSecret }) {
+  const { vk } = unwrapVaultKey(credentialId, prfSecret);
+  vk.fill(0);
+}
+
+// Security audit F1.4: the only way out of a pre-fix (disabled) vault, and
+// the prerequisite for re-running setup. Locks first so no agent keeps
+// serving the old key. Callers authorize (routes/gpgVault.js, or host
+// access for cli/gpg-vault-reset.js).
+export function deleteVault() {
+  lockVault();
+  gpgVaultDb.deleteVault();
 }
 
 // Decrypts the stored GPG secret key via a live PRF ceremony against an
@@ -339,32 +458,20 @@ export function addCredentialToVault({ credentialId, prfSecret }) {
 // vault unlocked. Idempotent: if already unlocked, returns the current
 // public info without doing anything (callers that need to distinguish
 // "was already unlocked" from "just unlocked" check isUnlocked() first).
-export function unlockVault({ credentialId, prfSecret }) {
+//
+// `rotation` ({ nextSalt, nextPrfSecret }, optional): after a successful
+// unlock, re-wrap this credential's copy of VK under the next PRF salt
+// (security audit F6). Returns the public info plus `rotated`.
+export function unlockVault({ credentialId, prfSecret, rotation = null }) {
   if (!gpgVaultDb.vaultExists()) {
     const err = new Error('no GPG vault has been set up yet');
     err.code = 'GPG_VAULT_NOT_SET_UP';
     throw err;
   }
+  assertNotLegacy();
   if (state) return gpgVaultDb.getVaultPublicInfo();
 
-  const wrapRow = gpgVaultDb.getCredentialWrap(credentialId);
-  if (!wrapRow) {
-    const err = new Error('this passkey cannot unlock the GPG vault');
-    err.code = 'GPG_VAULT_CREDENTIAL_NOT_ENROLLED';
-    throw err;
-  }
-
-  const wrappingKey = deriveWrappingKey(prfSecret, credentialId);
-  let vk;
-  try {
-    vk = aesGcmDecrypt(
-      wrappingKey,
-      Buffer.from(wrapRow.wrapped_key), Buffer.from(wrapRow.wrap_nonce), Buffer.from(wrapRow.wrap_tag),
-      credentialId,
-    );
-  } catch {
-    throw new Error('failed to unlock the GPG vault (wrong PRF output or corrupted data)');
-  }
+  const { vk, wrapRow } = unwrapVaultKey(credentialId, prfSecret);
 
   const vaultRow = gpgVaultDb.getVaultRow();
   let secretKeyBuf;
@@ -426,7 +533,15 @@ export function unlockVault({ credentialId, prfSecret }) {
 
     state = { vk, homeDir, sockets, fingerprint: importedFingerprint, unlockedAt: Date.now() };
     startAutoLockSweep();
-    return gpgVaultDb.getVaultPublicInfo();
+    let rotated = false;
+    try {
+      rotated = rotateWrap(vk, wrapRow, rotation);
+    } catch (err) {
+      // Never fail an otherwise-successful unlock over a rotation hiccup: the
+      // previous wrap is still in place and valid.
+      console.warn(`[gpg-vault] PRF salt rotation failed (previous wrap kept): ${err.message}`);
+    }
+    return { ...gpgVaultDb.getVaultPublicInfo(), rotated };
   } catch (err) {
     killAgentAt(homeDir);
     wipeHomeDir(homeDir);

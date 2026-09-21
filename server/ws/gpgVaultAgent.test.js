@@ -17,11 +17,15 @@ import {
   vaultExists,
   gpgVaultToolsAvailable,
   generateAndStoreVault,
-  addCredentialToVault,
+  addCredentialWithAuthorizer,
   unlockVault,
   lockVault,
   getUnlockedAgentInfo,
+  isLegacyVault,
+  deleteVault,
+  verifyEnrolledCredential,
 } from './gpgVaultAgent.js';
+import { getCredentialWrap } from '../gpgVaultDb.js';
 
 const TOOLS_AVAILABLE = gpgVaultToolsAvailable();
 
@@ -96,7 +100,7 @@ test('full lifecycle: generate -> unlock -> sign -> ssh -> lock -> sockets gone'
 
   const info = generateAndStoreVault({
     nameReal: 'ccserver test', nameEmail: 'ccserver-test@example.invalid',
-    credentialId: 'cred-1', prfSecret,
+    credentialId: 'cred-1', prfSecret, prfSalt: randomBytes(32),
   });
 
   assert.equal(vaultExists(), true);
@@ -110,6 +114,8 @@ test('full lifecycle: generate -> unlock -> sign -> ssh -> lock -> sockets gone'
   const agentInfo = getUnlockedAgentInfo();
   assert.ok(existsSync(agentInfo.sockets.agent), 'S.gpg-agent must exist while unlocked');
   assert.ok(existsSync(agentInfo.sockets.agentSsh), 'S.gpg-agent.ssh must exist while unlocked');
+  // The restricted socket the sandbox relay targets (security audit F1).
+  assert.ok(existsSync(agentInfo.sockets.agentExtra), 'S.gpg-agent.extra must exist while unlocked');
 
   // Real signing round trip through the live socket.
   const msgPath = join(tmpRoot, 'msg.txt');
@@ -146,7 +152,7 @@ test('unlockVault with an unenrolled credential throws GPG_VAULT_CREDENTIAL_NOT_
   insertCredential('cred-a');
   insertCredential('cred-b');
   generateAndStoreVault({
-    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-a', prfSecret: randomBytes(32),
+    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-a', prfSecret: randomBytes(32), prfSalt: randomBytes(32),
   });
   lockVault();
   assert.throws(
@@ -158,7 +164,7 @@ test('unlockVault with an unenrolled credential throws GPG_VAULT_CREDENTIAL_NOT_
 test('unlockVault with the wrong PRF secret for an enrolled credential fails closed', { skip: !TOOLS_AVAILABLE }, () => {
   insertCredential('cred-c');
   generateAndStoreVault({
-    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-c', prfSecret: randomBytes(32),
+    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-c', prfSecret: randomBytes(32), prfSalt: randomBytes(32),
   });
   lockVault();
   assert.throws(() => unlockVault({ credentialId: 'cred-c', prfSecret: randomBytes(32) }));
@@ -168,24 +174,30 @@ test('unlockVault with the wrong PRF secret for an enrolled credential fails clo
 test('generateAndStoreVault refuses when a vault already exists', { skip: !TOOLS_AVAILABLE }, () => {
   insertCredential('cred-d');
   generateAndStoreVault({
-    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-d', prfSecret: randomBytes(32),
+    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-d', prfSecret: randomBytes(32), prfSalt: randomBytes(32),
   });
   assert.throws(() => generateAndStoreVault({
-    nameReal: 'y', nameEmail: 'y@example.invalid', credentialId: 'cred-d', prfSecret: randomBytes(32),
+    nameReal: 'y', nameEmail: 'y@example.invalid', credentialId: 'cred-d', prfSecret: randomBytes(32), prfSalt: randomBytes(32),
   }), /already exists/);
 });
 
-test('addCredentialToVault lets a second passkey unlock the same vault independently', { skip: !TOOLS_AVAILABLE }, () => {
+// Security audit F2: adding a passkey is authorized by an ENROLLED
+// passkey's PRF decrypting its own wrap -- not by the vault being unlocked.
+test('addCredentialWithAuthorizer: a second passkey can then unlock independently, and it works while LOCKED', { skip: !TOOLS_AVAILABLE }, () => {
   insertCredential('cred-e1');
   insertCredential('cred-e2');
   const secret1 = randomBytes(32);
   const secret2 = randomBytes(32);
 
   const info1 = generateAndStoreVault({
-    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-e1', prfSecret: secret1,
+    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-e1', prfSecret: secret1, prfSalt: randomBytes(32),
   });
-  addCredentialToVault({ credentialId: 'cred-e2', prfSecret: secret2 });
   lockVault();
+  addCredentialWithAuthorizer({
+    authorizer: { credentialId: 'cred-e1', prfSecret: secret1 },
+    candidate: { credentialId: 'cred-e2', prfSecret: secret2, prfSalt: randomBytes(32) },
+  });
+  assert.equal(isUnlocked(), false, 'adding a passkey never unlocks the vault');
 
   const info2 = unlockVault({ credentialId: 'cred-e2', prfSecret: secret2 });
   assert.equal(info2.fingerprint, info1.fingerprint, 'both credentials must unlock the same underlying key');
@@ -195,17 +207,111 @@ test('addCredentialToVault lets a second passkey unlock the same vault independe
   assert.equal(info3.fingerprint, info1.fingerprint);
 });
 
-test('addCredentialToVault refuses while the vault is locked', { skip: !TOOLS_AVAILABLE }, () => {
-  insertCredential('cred-f1');
-  insertCredential('cred-f2');
+test('addCredentialWithAuthorizer: refuses a wrong authorizer PRF even while the vault is UNLOCKED (audit F2 core)', { skip: !TOOLS_AVAILABLE }, () => {
+  insertCredential('cred-g1');
+  insertCredential('cred-attacker');
   generateAndStoreVault({
-    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-f1', prfSecret: randomBytes(32),
+    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-g1', prfSecret: randomBytes(32), prfSalt: randomBytes(32),
   });
+  assert.equal(isUnlocked(), true, 'precondition: owner has the vault unlocked');
+  assert.throws(() => addCredentialWithAuthorizer({
+    authorizer: { credentialId: 'cred-g1', prfSecret: randomBytes(32) }, // attacker cannot produce the real PRF
+    candidate: { credentialId: 'cred-attacker', prfSecret: randomBytes(32), prfSalt: randomBytes(32) },
+  }));
+  assert.equal(getCredentialWrap('cred-attacker'), null, 'attacker passkey was NOT enrolled');
+});
+
+test('addCredentialWithAuthorizer: an authorizer that is not itself enrolled is refused', { skip: !TOOLS_AVAILABLE }, () => {
+  insertCredential('cred-h1');
+  insertCredential('cred-h2');
+  insertCredential('cred-h3');
+  generateAndStoreVault({
+    nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-h1', prfSecret: randomBytes(32), prfSalt: randomBytes(32),
+  });
+  assert.throws(() => addCredentialWithAuthorizer({
+    authorizer: { credentialId: 'cred-h2', prfSecret: randomBytes(32) },
+    candidate: { credentialId: 'cred-h3', prfSecret: randomBytes(32), prfSalt: randomBytes(32) },
+  }), (err) => err.code === 'GPG_VAULT_CREDENTIAL_NOT_ENROLLED');
+  assert.equal(getCredentialWrap('cred-h3'), null);
+});
+
+test('addCredentialWithAuthorizer: an already-enrolled candidate is never overwritten', { skip: !TOOLS_AVAILABLE }, () => {
+  insertCredential('cred-i1');
+  insertCredential('cred-i2');
+  const s1 = randomBytes(32);
+  const s2 = randomBytes(32);
+  generateAndStoreVault({ nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-i1', prfSecret: s1, prfSalt: randomBytes(32) });
+  addCredentialWithAuthorizer({
+    authorizer: { credentialId: 'cred-i1', prfSecret: s1 },
+    candidate: { credentialId: 'cred-i2', prfSecret: s2, prfSalt: randomBytes(32) },
+  });
+  const before = Buffer.from(getCredentialWrap('cred-i2').wrapped_key);
+  assert.throws(() => addCredentialWithAuthorizer({
+    authorizer: { credentialId: 'cred-i1', prfSecret: s1 },
+    candidate: { credentialId: 'cred-i2', prfSecret: randomBytes(32), prfSalt: randomBytes(32) },
+  }), (err) => err.code === 'GPG_VAULT_CREDENTIAL_ALREADY_ENROLLED');
+  assert.deepEqual(Buffer.from(getCredentialWrap('cred-i2').wrapped_key), before);
   lockVault();
-  assert.throws(
-    () => addCredentialToVault({ credentialId: 'cred-f2', prfSecret: randomBytes(32) }),
-    /unlocked/,
-  );
+  assert.doesNotThrow(() => unlockVault({ credentialId: 'cred-i2', prfSecret: s2 }), 'original owner still unlocks');
+});
+
+// Security audit F6: a PRF output that has been used once stops working
+// after the next unlock re-wraps under a new salt.
+test('unlockVault with rotation: the previous PRF output no longer unlocks, the next one does', { skip: !TOOLS_AVAILABLE }, () => {
+  insertCredential('cred-r');
+  const s1 = randomBytes(32);
+  const salt1 = randomBytes(32);
+  generateAndStoreVault({ nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-r', prfSecret: s1, prfSalt: salt1 });
+  lockVault();
+
+  const s2 = randomBytes(32);
+  const salt2 = randomBytes(32);
+  const info = unlockVault({ credentialId: 'cred-r', prfSecret: s1, rotation: { nextSalt: salt2, nextPrfSecret: s2 } });
+  assert.equal(info.rotated, true);
+  assert.deepEqual(Buffer.from(getCredentialWrap('cred-r').prf_salt), salt2);
+  lockVault();
+
+  assert.throws(() => unlockVault({ credentialId: 'cred-r', prfSecret: s1 }), 'a captured old PRF output is dead');
+  assert.equal(isUnlocked(), false);
+  unlockVault({ credentialId: 'cred-r', prfSecret: s2 });
+  assert.equal(isUnlocked(), true);
+});
+
+test('verifyEnrolledCredential: passes for the right PRF, throws for a wrong one, never unlocks', { skip: !TOOLS_AVAILABLE }, () => {
+  insertCredential('cred-v');
+  const s = randomBytes(32);
+  generateAndStoreVault({ nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-v', prfSecret: s, prfSalt: randomBytes(32) });
+  lockVault();
+  assert.doesNotThrow(() => verifyEnrolledCredential({ credentialId: 'cred-v', prfSecret: s }));
+  assert.throws(() => verifyEnrolledCredential({ credentialId: 'cred-v', prfSecret: randomBytes(32) }));
+  assert.equal(isUnlocked(), false);
+});
+
+// Security audit F1.4: a pre-fix vault is disabled for good.
+test('legacy (pre-fix) vault: unlock and add-credential are refused with GPG_VAULT_LEGACY_DISABLED; delete works', { skip: !TOOLS_AVAILABLE }, () => {
+  insertCredential('cred-l1');
+  insertCredential('cred-l2');
+  const s1 = randomBytes(32);
+  generateAndStoreVault({ nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-l1', prfSecret: s1, prfSalt: randomBytes(32) });
+  lockVault();
+  // What db.js v9 does to every vault that existed before the fix.
+  getDb().prepare('UPDATE gpg_vault SET format_version = 1').run();
+  assert.equal(isLegacyVault(), true);
+
+  assert.throws(() => unlockVault({ credentialId: 'cred-l1', prfSecret: s1 }), (err) => err.code === 'GPG_VAULT_LEGACY_DISABLED');
+  assert.equal(isUnlocked(), false, 'even the correct PRF cannot unlock a legacy vault');
+  assert.throws(() => addCredentialWithAuthorizer({
+    authorizer: { credentialId: 'cred-l1', prfSecret: s1 },
+    candidate: { credentialId: 'cred-l2', prfSecret: randomBytes(32), prfSalt: randomBytes(32) },
+  }), (err) => err.code === 'GPG_VAULT_LEGACY_DISABLED');
+
+  deleteVault();
+  assert.equal(vaultExists(), false);
+  assert.equal(isLegacyVault(), false);
+  // Recreate: a fresh post-fix vault is usable again.
+  generateAndStoreVault({ nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-l1', prfSecret: s1, prfSalt: randomBytes(32) });
+  assert.equal(isLegacyVault(), false);
+  assert.equal(isUnlocked(), true);
 });
 
 test('lockVault is idempotent when already locked', { skip: !TOOLS_AVAILABLE }, () => {

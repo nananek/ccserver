@@ -47,8 +47,9 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | GET/POST/DELETE | `/api/federation/instances/:id/{sessions,groups,dirs}` | `active` なペアへの薄いプロキシ。ボディ/レスポンス形状はそれぞれ `/api/sessions`・`/api/groups`・`/api/dirs` と同一 |
 | GET | `/api/auth/mode` | `{ mode: 'none' \| 'token' \| 'passkey' }` — 現在の `CCSERVER_AUTH_MODE`。認証不要 (`token` モードのみ、他の `/api` と同様にトークン必須) |
 | GET | `/api/auth/session` | セッション Cookie の有効性確認専用 (200/401 のみが意味を持つ)。`passkey` モード限定 |
-| POST | `/api/auth/login-token` | `{ token }` — `node server/cli/issue-login-token.js` が発行したワンタイムトークンを検証し、セッション Cookie を発行する (`passkey` モード限定、use-once) |
-| POST | `/api/auth/webauthn/register-options` / `register-verify` | パスキー登録 (要セッション、[認証ガイド](/ccserver/guides/auth/) フロー2、`passkey` モード限定) |
+| POST | `/api/auth/login-token` | `{ token }` — `node server/cli/issue-login-token.js` が発行したワンタイムトークンを検証し、セッション Cookie を発行する (`passkey` モード限定、use-once)。`--allow-passkey-registration` 付きで発行したトークンなら、そのセッションはパスキーを1つ登録できる |
+| POST | `/api/auth/webauthn/stepup-options` / `stepup-verify` | セッションのステップアップ: 登録済みパスキーでのユーザー検証付き認証 (要セッション、`passkey` モード限定)。以後 5 分間、パスキー登録と修正前GPGボルトの削除が可能になる |
+| POST | `/api/auth/webauthn/register-options` / `register-verify` | パスキー登録 (要セッション + 5 分以内のステップアップ、またはトークン由来の登録権限。満たさなければ 403 `PASSKEY_REGISTRATION_NOT_ALLOWED`。[認証ガイド](/ccserver/guides/auth/) フロー2、`passkey` モード限定) |
 | POST | `/api/auth/webauthn/authenticate-options` / `authenticate-verify` | パスキー認証 (未ログインで許可、フロー3、`passkey` モード限定) |
 | GET | `/api/auth/webauthn/credentials` | 登録済みパスキー一覧 (要セッション、`{ id, label, createdAt, lastUsedAt }[]`、`passkey` モード限定) |
 

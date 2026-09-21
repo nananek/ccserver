@@ -10,7 +10,7 @@
 // register->authenticate round trip through the actual verification code
 // instead of mocking it away.
 
-import { generateKeyPairSync, createHash, sign as cryptoSign } from 'node:crypto';
+import { generateKeyPairSync, createHash, createHmac, sign as cryptoSign } from 'node:crypto';
 import { isoCBOR, isoBase64URL, isoUint8Array, cose } from '@simplewebauthn/server/helpers';
 
 function pad32(buf) {
@@ -100,7 +100,10 @@ export function createRegistrationResponse({ rpID, origin, challenge, credential
 // ceremony against a real registered credential happened, so a fake-but-
 // consistent value here exercises the exact same code path a real
 // PRF-capable authenticator would drive.
-export function createAuthenticationResponse({ rpID, origin, challenge, credentialId, privateKey, counter, prfResultFirst }) {
+//
+// `prfResultSecond` (optional) likewise fakes PRF `second` (the next salt's
+// output, used for per-unlock salt rotation -- security audit F6).
+export function createAuthenticationResponse({ rpID, origin, challenge, credentialId, privateKey, counter, prfResultFirst, prfResultSecond }) {
   const authData = buildAuthenticatorData({ rpID, counter, attestedCredential: null });
   const clientDataJSON = buildClientDataJSON('webauthn.get', challenge, origin);
   const clientDataHash = createHash('sha256').update(clientDataJSON).digest();
@@ -115,8 +118,24 @@ export function createAuthenticationResponse({ rpID, origin, challenge, credenti
       signature: isoBase64URL.fromBuffer(signature),
     },
     clientExtensionResults: prfResultFirst
-      ? { prf: { results: { first: isoBase64URL.fromBuffer(prfResultFirst) } } }
+      ? {
+        prf: {
+          results: {
+            first: isoBase64URL.fromBuffer(prfResultFirst),
+            ...(prfResultSecond ? { second: isoBase64URL.fromBuffer(prfResultSecond) } : {}),
+          },
+        },
+      }
       : {},
     type: 'public-key',
   };
+}
+
+// A deterministic stand-in for an authenticator's PRF (hmac-secret): the same
+// credential secret + salt always yields the same 32 bytes, different salts
+// yield unrelated outputs -- exactly the property the vault's per-credential
+// salts and salt rotation rely on. `saltB64u` is the base64url salt string
+// as it appears in the server's options (eval / evalByCredential).
+export function simulatePrf(credentialSecret, saltB64u) {
+  return createHmac('sha256', credentialSecret).update(isoBase64URL.toBuffer(saltB64u)).digest();
 }

@@ -1,12 +1,19 @@
 import { useState, useEffect, useCallback } from 'react';
 import { startRegistration, browserSupportsWebAuthn } from '@simplewebauthn/browser';
 import { authFetch, resolveAuthMode } from '../auth.js';
+import { runPasskeyStepUp } from '../gpgVaultStepUp.js';
 
 // "パスキー" section (SettingsView.jsx 左メニュー, Issue #141 Step4). The
 // third of the Issue's three login導線 -- パスキー登録 (フロー2) -- lives
 // here rather than LoginView because it requires already being logged in.
 // Registered-credential list + new-registration only; deletion is out of
 // scope (Issue本文のStep4に明記が無いため見送り、plan-141-step4参照)。
+//
+// セキュリティ監査 F2: 登録にはセッションだけでは足りない。既存パスキーでの
+// 5分以内のステップアップか、`--allow-passkey-registration` 付きで発行した
+// ログイントークンでのログインが必要。サーバーが 403
+// PASSKEY_REGISTRATION_NOT_ALLOWED を返したら、既存パスキーがあれば
+// ステップアップしてから1回だけ再試行する。
 
 function formatTime(ms) {
   if (!Number.isFinite(ms) || ms <= 0) return null;
@@ -59,7 +66,25 @@ export default function PasskeysSection() {
     setRegistering(true);
     setRegisterError(null);
     try {
-      const optionsRes = await authFetch('/api/auth/webauthn/register-options', { method: 'POST' });
+      let optionsRes = await authFetch('/api/auth/webauthn/register-options', { method: 'POST' });
+      if (optionsRes.status === 403) {
+        const body = await optionsRes.json().catch(() => ({}));
+        if (body.code === 'PASSKEY_REGISTRATION_NOT_ALLOWED') {
+          if (credentials.length === 0) {
+            setRegisterError(
+              '最初のパスキーを登録するには、ホストで `npm run login-token -- --allow-passkey-registration` '
+              + 'を実行して発行したトークンでログインし直してください。',
+            );
+            return;
+          }
+          window.alert('新しいパスキーを登録する前に、登録済みのパスキーで本人確認を行います。');
+          await runPasskeyStepUp();
+          optionsRes = await authFetch('/api/auth/webauthn/register-options', { method: 'POST' });
+        } else {
+          setRegisterError(body.error || `開始に失敗しました (HTTP ${optionsRes.status})`);
+          return;
+        }
+      }
       if (!optionsRes.ok) {
         const body = await optionsRes.json().catch(() => ({}));
         setRegisterError(body.error || `開始に失敗しました (HTTP ${optionsRes.status})`);
@@ -88,7 +113,7 @@ export default function PasskeysSection() {
     } finally {
       setRegistering(false);
     }
-  }, [registering, refresh]);
+  }, [registering, refresh, credentials.length]);
 
   const webauthnSupported = browserSupportsWebAuthn();
 

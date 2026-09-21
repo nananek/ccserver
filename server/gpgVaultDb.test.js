@@ -14,7 +14,14 @@ import {
   listUnlockableCredentialIds,
   countCredentialWraps,
   addCredentialWrap,
+  rotateCredentialWrap,
+  listUnlockableCredentials,
+  isLegacyVault,
+  deleteVault,
+  VAULT_FORMAT_VERSION,
 } from './gpgVaultDb.js';
+
+const SALT = Buffer.alloc(32, 7);
 
 let tmpRoot;
 const savedEnv = process.env.CCSERVER_DB_PATH;
@@ -106,8 +113,8 @@ test('addCredentialWrap + getCredentialWrap round trip, listUnlockableCredential
   insertCredential('credB');
   assert.equal(countCredentialWraps(), 0);
 
-  addCredentialWrap({ credentialId: 'credA', wrappedKey: Buffer.from('wA'), wrapNonce: Buffer.from('nA'), wrapTag: Buffer.from('tA') });
-  addCredentialWrap({ credentialId: 'credB', wrappedKey: Buffer.from('wB'), wrapNonce: Buffer.from('nB'), wrapTag: Buffer.from('tB') });
+  addCredentialWrap({ credentialId: 'credA', wrappedKey: Buffer.from('wA'), wrapNonce: Buffer.from('nA'), wrapTag: Buffer.from('tA'), prfSalt: SALT });
+  addCredentialWrap({ credentialId: 'credB', wrappedKey: Buffer.from('wB'), wrapNonce: Buffer.from('nB'), wrapTag: Buffer.from('tB'), prfSalt: SALT });
 
   assert.equal(countCredentialWraps(), 2);
   const ids = listUnlockableCredentialIds().sort();
@@ -120,19 +127,67 @@ test('addCredentialWrap + getCredentialWrap round trip, listUnlockableCredential
   assert.equal(getCredentialWrap('nonexistent'), null);
 });
 
-test('addCredentialWrap is idempotent (re-adding the same credential replaces, not errors)', () => {
+// Security audit F2: the old INSERT OR REPLACE let add-credential overwrite
+// a legitimate passkey's wrap with an attacker-chosen value.
+test('addCredentialWrap never overwrites an existing wrap (throws, original kept)', () => {
   createVault(vaultFixture({ fingerprint: 'FPR4', keyId: 'KEYID4', sshPublicKey: 'ssh-ed25519 DDD' }));
   insertCredential('credC');
-  addCredentialWrap({ credentialId: 'credC', wrappedKey: Buffer.from('v1'), wrapNonce: Buffer.from('n1'), wrapTag: Buffer.from('t1') });
-  addCredentialWrap({ credentialId: 'credC', wrappedKey: Buffer.from('v2'), wrapNonce: Buffer.from('n2'), wrapTag: Buffer.from('t2') });
+  addCredentialWrap({ credentialId: 'credC', wrappedKey: Buffer.from('v1'), wrapNonce: Buffer.from('n1'), wrapTag: Buffer.from('t1'), prfSalt: SALT });
+  assert.throws(() => addCredentialWrap({ credentialId: 'credC', wrappedKey: Buffer.from('v2'), wrapNonce: Buffer.from('n2'), wrapTag: Buffer.from('t2'), prfSalt: SALT }));
   assert.equal(countCredentialWraps(), 1);
-  assert.deepEqual(Buffer.from(getCredentialWrap('credC').wrapped_key), Buffer.from('v2'));
+  assert.deepEqual(Buffer.from(getCredentialWrap('credC').wrapped_key), Buffer.from('v1'));
+});
+
+test('addCredentialWrap requires a PRF salt (audit F6: no unsalted post-fix wraps)', () => {
+  createVault(vaultFixture({ fingerprint: 'FPR6', keyId: 'KEYID6', sshPublicKey: 'ssh-ed25519 FFF' }));
+  insertCredential('credE');
+  assert.throws(() => addCredentialWrap({ credentialId: 'credE', wrappedKey: Buffer.from('w'), wrapNonce: Buffer.from('n'), wrapTag: Buffer.from('t') }), /prfSalt/);
+});
+
+test('rotateCredentialWrap replaces only when the expected old tag still matches (optimistic lock)', () => {
+  createVault(vaultFixture({ fingerprint: 'FPR7', keyId: 'KEYID7', sshPublicKey: 'ssh-ed25519 GGG' }));
+  insertCredential('credR');
+  addCredentialWrap({ credentialId: 'credR', wrappedKey: Buffer.from('w1'), wrapNonce: Buffer.from('n1'), wrapTag: Buffer.from('t1'), prfSalt: SALT });
+  const salt2 = Buffer.alloc(32, 9);
+  assert.equal(rotateCredentialWrap({ credentialId: 'credR', expectedOldTag: Buffer.from('stale'), wrappedKey: Buffer.from('wX'), wrapNonce: Buffer.from('nX'), wrapTag: Buffer.from('tX'), prfSalt: salt2 }), false);
+  assert.deepEqual(Buffer.from(getCredentialWrap('credR').wrapped_key), Buffer.from('w1'));
+  assert.equal(rotateCredentialWrap({ credentialId: 'credR', expectedOldTag: Buffer.from('t1'), wrappedKey: Buffer.from('w2'), wrapNonce: Buffer.from('n2'), wrapTag: Buffer.from('t2'), prfSalt: salt2 }), true);
+  const row = getCredentialWrap('credR');
+  assert.deepEqual(Buffer.from(row.wrapped_key), Buffer.from('w2'));
+  assert.deepEqual(Buffer.from(row.prf_salt), salt2);
+  assert.deepEqual(listUnlockableCredentials(), [{ credentialId: 'credR', prfSalt: salt2 }]);
+});
+
+test('isLegacyVault: false for no vault and for a post-fix vault; true for format_version 1 or an unsalted wrap', () => {
+  assert.equal(isLegacyVault(), false);
+  createVault(vaultFixture({ fingerprint: 'FPR8', keyId: 'KEYID8', sshPublicKey: 'ssh-ed25519 HHH' }));
+  assert.equal(getVaultRow().format_version, VAULT_FORMAT_VERSION);
+  insertCredential('credL');
+  addCredentialWrap({ credentialId: 'credL', wrappedKey: Buffer.from('w'), wrapNonce: Buffer.from('n'), wrapTag: Buffer.from('t'), prfSalt: SALT });
+  assert.equal(isLegacyVault(), false);
+
+  getDb().prepare('UPDATE gpg_vault_credentials SET prf_salt = NULL').run();
+  assert.equal(isLegacyVault(), true, 'an unsalted wrap marks the vault as pre-fix');
+
+  getDb().prepare('UPDATE gpg_vault_credentials SET prf_salt = ?').run(SALT);
+  getDb().prepare('UPDATE gpg_vault SET format_version = 1').run();
+  assert.equal(isLegacyVault(), true, 'format_version 1 marks the vault as pre-fix');
+});
+
+test('deleteVault removes the vault and every wrap', () => {
+  createVault(vaultFixture({ fingerprint: 'FPR9', keyId: 'KEYID9', sshPublicKey: 'ssh-ed25519 III' }));
+  insertCredential('credZ');
+  addCredentialWrap({ credentialId: 'credZ', wrappedKey: Buffer.from('w'), wrapNonce: Buffer.from('n'), wrapTag: Buffer.from('t'), prfSalt: SALT });
+  deleteVault();
+  assert.equal(vaultExists(), false);
+  assert.equal(countCredentialWraps(), 0);
+  assert.equal(isLegacyVault(), false);
 });
 
 test('deleting the underlying webauthn_credentials row cascades to gpg_vault_credentials', () => {
   createVault(vaultFixture({ fingerprint: 'FPR5', keyId: 'KEYID5', sshPublicKey: 'ssh-ed25519 EEE' }));
   insertCredential('credD');
-  addCredentialWrap({ credentialId: 'credD', wrappedKey: Buffer.from('w'), wrapNonce: Buffer.from('n'), wrapTag: Buffer.from('t') });
+  addCredentialWrap({ credentialId: 'credD', wrappedKey: Buffer.from('w'), wrapNonce: Buffer.from('n'), wrapTag: Buffer.from('t'), prfSalt: SALT });
   assert.equal(countCredentialWraps(), 1);
   getDb().prepare('DELETE FROM webauthn_credentials WHERE id = ?').run('credD');
   assert.equal(countCredentialWraps(), 0);

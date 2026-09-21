@@ -12,26 +12,32 @@
 // Fix: sandboxes never touch the vault's raw (per-unlock-generation) sockets
 // directly. Instead they see this module's FIXED, generation-independent
 // directory, which:
-//  - listens on 5 sockets NAMED EXACTLY as GnuPG itself names them
-//    (S.gpg-agent, S.gpg-agent.ssh, S.gpg-agent.extra, S.keyboxd, S.dirmngr
-//    -- see gpgVaultAgent.js's resolveDirs()/gpgconf --list-dirs) and
-//    forwards each new connection to whichever real socket gpgVaultAgent.js
-//    CURRENTLY has (resolved fresh per connection, never cached) -- same
-//    "host-side process mediates access to the live state" shape as
-//    git-broker.js/network-broker.js, but dumb byte-level forwarding only
-//    (no protocol parsing) since, unlike git-broker, there is nothing to
-//    authorize here: the vault is a single, server-wide singleton, not
-//    scoped per session/repo.
-//  - holds a one-time COPY of the public pubring.kbx/trustdb.gpg/gpg.conf
-//    files, so this directory is a complete, generation-independent
-//    GNUPGHOME substitute usable as-is by macOS Seatbelt (which has no bind
-//    mounts, so GNUPGHOME must be one real directory containing everything).
-//    Safe to copy once and never refresh: unlockVault() always re-verifies
-//    the freshly-imported key's fingerprint against the vault's permanently
-//    stored one, and generateAndStoreVault() refuses to ever create a second
-//    vault (gpgVaultDb's gpg_vault table is a fixed-id singleton row), so
-//    this content is identical across every unlock generation for the
-//    lifetime of this server's vault.
+//  - listens on exactly 2 sockets NAMED as GnuPG itself names them
+//    (S.gpg-agent, S.gpg-agent.ssh) and forwards each new connection to
+//    whichever real socket gpgVaultAgent.js CURRENTLY has (resolved fresh
+//    per connection, never cached).
+//  - SECURITY (audit F1): S.gpg-agent forwards to the agent's RESTRICTED
+//    extra socket, never its main socket. The main socket answers
+//    KEYWRAP_KEY/EXPORT_KEY, and the vault key is %no-protection, so a dumb
+//    pipe onto it let any gpgVault:true sandbox run
+//    `gpg --export-secret-keys` and exfiltrate the whole vault secret key.
+//    Restricted mode forbids every export/import/keygen/passphrase command
+//    (verified against GnuPG 2.4.9) while still allowing signing.
+//  - Independently of that, every client->agent byte goes through
+//    gpgVaultRelayFilter.js's protocol allowlists (Assuan for S.gpg-agent,
+//    ssh-agent for S.gpg-agent.ssh), so the invariant does not rest on one
+//    GnuPG version's restricted-mode command list alone.
+//  - keyboxd/dirmngr/extra are deliberately NOT relayed any more: signing
+//    needs none of them, and dirmngr performs network fetches from the HOST,
+//    outside any per-sandbox network isolation.
+//  - holds a COPY of the public pubring.kbx/trustdb.gpg/gpg.conf files, so
+//    this directory is a complete, generation-independent GNUPGHOME
+//    substitute usable as-is by macOS Seatbelt (which has no bind mounts, so
+//    GNUPGHOME must be one real directory containing everything). Refreshed
+//    on every gpgVault:true launch (ensureStarted), not just the first: the
+//    content is identical across unlock generations of ONE vault, but a
+//    vault can now be deleted and recreated (audit F1 remediation: pre-fix
+//    vaults must be replaced), which changes the key.
 //
 // Deliberately NOT a separate child process (unlike git-broker.js): it holds
 // no secrets of its own (only forwards to whatever gpgVaultAgent.js already
@@ -44,18 +50,22 @@ import { copyFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 import * as gpgVaultAgent from './gpgVaultAgent.js';
+import { createAssuanFilter, createSshAgentFilter } from './gpgVaultRelayFilter.js';
 
-// Same keys as gpgVaultAgent.js's `sockets` object (getUnlockedAgentInfo()),
-// mapped to the exact basename GnuPG itself uses for each (see this file's
-// header) -- load-bearing: a sandbox's gpg/ssh client looks these up by
-// these conventional names under $GNUPGHOME, not by any name of our choosing.
-const SOCKET_BASENAMES = {
-  agent: 'S.gpg-agent',
-  agentSsh: 'S.gpg-agent.ssh',
-  agentExtra: 'S.gpg-agent.extra',
-  keyboxd: 'S.keyboxd',
-  dirmngr: 'S.dirmngr',
+// Relayed sockets: in-sandbox basename (what gpg/ssh look up under
+// $GNUPGHOME / via SSH_AUTH_SOCK), the gpgVaultAgent.js `sockets` key it
+// forwards to, and the protocol filter guarding it. `agent` -> `agentExtra`
+// is the audit-F1 fix: see this file's header.
+const RELAYS = {
+  agent: { basename: 'S.gpg-agent', target: 'agentExtra', createFilter: createAssuanFilter },
+  agentSsh: { basename: 'S.gpg-agent.ssh', target: 'agentSsh', createFilter: createSshAgentFilter },
 };
+
+// Every basename this relay dir has EVER exposed (including the ones dropped
+// by the audit-F1 fix). sandbox-seatbelt.js deny-pins all of these for
+// non-gpgVault launches, so a stale socket from an older server build (or a
+// future re-addition) can never become silently reachable.
+const ALL_KNOWN_BASENAMES = ['S.gpg-agent', 'S.gpg-agent.ssh', 'S.gpg-agent.extra', 'S.keyboxd', 'S.dirmngr'];
 
 const PUBLIC_FILES = ['pubring.kbx', 'trustdb.gpg', 'gpg.conf'];
 
@@ -88,12 +98,20 @@ export function getRelayDir() {
 // listener behind them until ensureStarted() actually runs.
 export function getRelaySocketPaths() {
   const dir = relayDir();
-  return Object.fromEntries(Object.entries(SOCKET_BASENAMES).map(([kind, name]) => [kind, join(dir, name)]));
+  return Object.fromEntries(Object.entries(RELAYS).map(([kind, r]) => [kind, join(dir, r.basename)]));
 }
 
-// Idempotent, synchronous: called from buildSandboxSpawn (server/ws/sandbox.js)
-// right before it snapshots gpgVaultInfo, so the relay sockets (and, on
-// first call, the public-file copies) are guaranteed to exist before
+// Deny-list form for launches WITHOUT gpgVault (audit F3): every socket path
+// this relay dir has ever used, current or retired.
+export function getAllRelaySocketPathsForDeny() {
+  const dir = relayDir();
+  return ALL_KNOWN_BASENAMES.map((name) => join(dir, name));
+}
+
+// Idempotent (listeners start once; public files refresh on every call),
+// synchronous: called from buildSandboxSpawn (server/ws/sandbox.js) right
+// before it snapshots gpgVaultInfo, so the relay sockets and the public-file
+// copies are guaranteed to exist before
 // bwrap's --bind-try / seatbelt's profile-building runs later in the same
 // call. Only ever called while the vault is unlocked (buildSandboxSpawn
 // gates gpgVault:true launches on isUnlocked() first), so
@@ -102,13 +120,12 @@ export function getRelaySocketPaths() {
 // opens local net.Server listeners -- synchronous enough in practice that no
 // readiness dance is needed.
 export function ensureStarted() {
-  if (servers) return;
   ensureHostRuntimeDir();
   const dir = relayDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
 
-  // One-time copy of the public metadata files -- see header comment on why
-  // this is safe to never refresh.
+  // Public metadata files, refreshed on every call -- see header comment on
+  // why (vault delete + recreate changes the key).
   const vault = gpgVaultAgent.getUnlockedAgentInfo();
   for (const file of PUBLIC_FILES) {
     const src = join(vault.homeDir, file);
@@ -116,10 +133,18 @@ export function ensureStarted() {
       try { copyFileSync(src, join(dir, file)); } catch { /* best effort; bwrap still binds the real per-launch file directly */ }
     }
   }
+  if (servers) return;
+
+  // Retired sockets from an older build (unclean shutdown) must not linger
+  // in the relay dir looking live.
+  for (const name of ALL_KNOWN_BASENAMES) {
+    if (Object.values(RELAYS).some((r) => r.basename === name)) continue;
+    try { unlinkSync(join(dir, name)); } catch { /* usually absent */ }
+  }
 
   const paths = getRelaySocketPaths();
   const started = new Map();
-  for (const kind of Object.keys(SOCKET_BASENAMES)) {
+  for (const [kind, relay] of Object.entries(RELAYS)) {
     const sockPath = paths[kind];
     // Stale socket file from a previous server run (unclean shutdown) --
     // listen() refuses to bind over an existing path.
@@ -127,7 +152,7 @@ export function ensureStarted() {
     const server = createServer({ allowHalfOpen: true }, (inbound) => {
       // Resolved fresh on EVERY new connection -- this is the whole point:
       // a lock/unlock in between two connections is transparently picked up.
-      const target = gpgVaultAgent.getSocketPath(kind);
+      const target = gpgVaultAgent.getSocketPath(relay.target);
       if (!target) {
         // Locked right now: refuse immediately rather than hang, mirroring
         // how a real "no such agent" failure looks to the client (gpg/ssh
@@ -143,12 +168,26 @@ export function ensureStarted() {
         inbound.destroy();
         outbound.destroy();
       };
+      const filter = relay.createFilter({
+        forward: (buf) => { if (!outbound.destroyed) outbound.write(buf); },
+        reply: (buf) => { if (!inbound.destroyed) inbound.write(buf); },
+        abort: (reason) => {
+          console.warn(`[gpg-vault-relay] ${kind}: dropping connection (${reason})`);
+          cleanup();
+        },
+      });
       inbound.on('error', cleanup);
       outbound.on('error', cleanup);
       inbound.on('close', cleanup);
       outbound.on('close', cleanup);
-      inbound.pipe(outbound);
-      outbound.pipe(inbound);
+      inbound.on('end', () => { if (!outbound.destroyed) outbound.end(); });
+      outbound.on('end', () => { if (!inbound.destroyed) inbound.end(); });
+      // Client -> agent goes through the allowlist filter; never piped raw.
+      inbound.on('data', (chunk) => filter.fromClient(chunk));
+      outbound.on('data', (chunk) => {
+        filter.fromServer(chunk);
+        if (!inbound.destroyed) inbound.write(chunk);
+      });
     });
     server.on('error', (err) => {
       console.warn(`[gpg-vault-relay] ${kind} listen failed: ${err.message}`);

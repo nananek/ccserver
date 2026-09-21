@@ -8,7 +8,8 @@
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -21,6 +22,7 @@ import {
   lockVault,
   unlockVault,
   isUnlocked,
+  getUnlockedAgentInfo,
 } from './gpgVaultAgent.js';
 import { getRelaySocketPaths, stop as stopGpgVaultRelay } from './gpgVaultRelay.js';
 
@@ -38,9 +40,9 @@ const savedSandboxConfig = process.env.CCSERVER_SANDBOX_CONFIG;
 // derived from process.env after a restore.
 const testRuntimeDir = `/tmp/cgvsb${process.pid}`;
 
-function spawnFor(json) {
+function spawnFor(json, { targetCommand = ['claude'], gpgVault = true } = {}) {
   writeFileSync(cfgPath, JSON.stringify(json));
-  return buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: { gpgVault: true } });
+  return buildSandboxSpawn({ cwd: tmpRoot, targetCommand, app: 'claude', sandboxOpts: { gpgVault } });
 }
 
 function findSetenv(args, name) {
@@ -68,7 +70,7 @@ before(() => {
 
 after(() => {
   lockVault();
-  // Any gpgVault:true spawnFor() call above lazily started the relay's 5
+  // Any gpgVault:true spawnFor() call above lazily started the relay's
   // net.Server listeners under this test's own XDG_RUNTIME_DIR -- without
   // this, they keep the event loop alive past the last test, hanging this
   // file's overall run until the test runner's own timeout.
@@ -96,7 +98,7 @@ function setUpUnlockedVault() {
     .run('cred-sb-1', Buffer.from('pk'), 0, null, Date.now());
   return generateAndStoreVault({
     nameReal: 'ccserver sandbox test', nameEmail: 'ccserver-sandbox-test@example.invalid',
-    credentialId: 'cred-sb-1', prfSecret: randomBytes(32),
+    credentialId: 'cred-sb-1', prfSecret: randomBytes(32), prfSalt: randomBytes(32),
   });
 }
 
@@ -221,7 +223,7 @@ test('gpgVaultRelay: forwards live traffic to the CURRENT backend, refuses while
     .run(credentialId, Buffer.from('pk'), 0, null, Date.now());
   generateAndStoreVault({
     nameReal: 'ccserver relay test', nameEmail: 'ccserver-relay-test@example.invalid',
-    credentialId, prfSecret,
+    credentialId, prfSecret, prfSalt: randomBytes(32),
   });
 
   // Triggers gpgVaultRelay.ensureStarted() (buildSandboxSpawn), same as a
@@ -256,3 +258,212 @@ test('gpgVaultRelay: forwards live traffic to the CURRENT backend, refuses while
   const greetingB = await connectAndReadLine(relaySockets.agent);
   assert.match(greetingB, /^OK/, 'relay forwards to the NEW (generation B) gpg-agent after a re-unlock, with no restart of anything');
 });
+
+// ---------------------------------------------------------------------------
+// Security audit F1 regression: the relay must never hand out the vault's
+// secret key. The audit reproduced `gpg --export-secret-keys` from inside a
+// gpgVault:true bwrap sandbox, imported the result on the host, and signed
+// with it. Everything below replays that attack against the fixed relay.
+
+// Async child process: the relay under test runs on THIS process's event
+// loop, so a synchronous spawn would deadlock the very relay it talks to.
+function run(cmd, args, { input = null, env = process.env, timeoutMs = 30000 } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { env });
+    const out = [];
+    const err = [];
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.stdout.on('data', (d) => out.push(d));
+    child.stderr.on('data', (d) => err.push(d));
+    child.on('close', (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout: Buffer.concat(out), stderr: Buffer.concat(err).toString('utf8') });
+    });
+    if (input != null) child.stdin.end(input); else child.stdin.end();
+  });
+}
+
+// Sends one Assuan command over a fresh relay connection (after the agent's
+// greeting) and resolves with the first response line.
+function assuanRoundTrip(sockPath, command, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    const sock = createConnection(sockPath);
+    let buf = '';
+    let greeted = false;
+    const timer = setTimeout(() => { sock.destroy(); reject(new Error(`timed out on ${command}`)); }, timeoutMs);
+    sock.on('data', (chunk) => {
+      buf += chunk.toString('latin1');
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!greeted) {
+          greeted = true;
+          sock.write(`${command}\n`);
+          continue;
+        }
+        if (/^(OK|ERR)\b/.test(line)) {
+          clearTimeout(timer);
+          sock.destroy();
+          resolve(line);
+          return;
+        }
+      }
+    });
+    sock.once('error', (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
+// A throwaway GNUPGHOME that talks to the vault ONLY through the relay's
+// agent socket -- the same view a sandbox has (public keyring + relay
+// socket, nothing else). no-autostart so gpg can never fall back to spawning
+// a local agent of its own.
+function relayOnlyGnupgHome(vaultHomeDir, relayAgentSock) {
+  const home = mkdtempSync('/tmp/cgvc');
+  execFileSync('cp', [join(vaultHomeDir, 'pubring.kbx'), join(vaultHomeDir, 'trustdb.gpg'), home]);
+  writeFileSync(join(home, 'gpg.conf'), 'no-autostart\n');
+  symlinkSync(relayAgentSock, join(home, 'S.gpg-agent'));
+  return home;
+}
+
+test('F1: every relay-exposed socket reaches ONLY the restricted agent, and export commands are Forbidden', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
+  setUpUnlockedVault();
+  cleanupSpawn(spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+  const relaySockets = getRelaySocketPaths();
+  assert.deepEqual(Object.keys(relaySockets).sort(), ['agent', 'agentSsh'], 'only the agent + ssh sockets are relayed');
+
+  // GETINFO restricted answers OK only on a restricted (extra-socket)
+  // connection: proof the relay targets the extra socket, not the main one.
+  assert.match(await assuanRoundTrip(relaySockets.agent, 'GETINFO restricted'), /^OK/);
+
+  for (const cmd of ['KEYWRAP_KEY --export', 'EXPORT_KEY 0000000000000000000000000000000000000000', 'IMPORT_KEY', 'PASSWD 00', 'GENKEY', 'PRESET_PASSPHRASE 00 -1 00']) {
+    assert.match(await assuanRoundTrip(relaySockets.agent, cmd), /^ERR 67109115 /, `${cmd} is Forbidden through the relay`);
+  }
+});
+
+test('F1: `gpg --export-secret-keys` through the relay yields nothing, while git-style signing still works', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
+  const vault = setUpUnlockedVault();
+  cleanupSpawn(spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+  const info = getUnlockedAgentInfo();
+  const home = relayOnlyGnupgHome(info.homeDir, getRelaySocketPaths().agent);
+  try {
+    const exported = await run('gpg', ['--homedir', home, '--batch', '--pinentry-mode', 'loopback', '--export-secret-keys', vault.fingerprint]);
+    assert.equal(exported.stdout.length, 0, 'no secret key material is exported');
+    const exportedNoLoopback = await run('gpg', ['--homedir', home, '--batch', '--export-secret-keys', vault.fingerprint]);
+    assert.equal(exportedNoLoopback.stdout.length, 0, 'no secret key material is exported (default pinentry mode either)');
+    const sshExport = await run('gpg', ['--homedir', home, '--batch', '--export-secret-subkeys', vault.fingerprint]);
+    assert.equal(sshExport.stdout.length, 0, 'subkeys (the SSH auth key) cannot be exported either');
+
+    // Exactly how git signs a commit (gpg.program=gpg): must keep working.
+    const signed = await run('gpg', ['--homedir', home, '--status-fd=2', '-bsau', vault.fingerprint], { input: 'tree 0\n' });
+    assert.equal(signed.status, 0, `signing through the relay works: ${signed.stderr}`);
+    assert.match(signed.stderr, /SIG_CREATED/);
+    assert.match(signed.stdout.toString(), /BEGIN PGP SIGNATURE/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('F1: the relayed ssh-agent lists and signs with the vault key but refuses to add/remove/lock keys', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
+  const vault = setUpUnlockedVault();
+  cleanupSpawn(spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+  const env = { ...process.env, SSH_AUTH_SOCK: getRelaySocketPaths().agentSsh };
+  const keyBlob = vault.sshPublicKey.split(' ')[1];
+  const listed = await run('ssh-add', ['-L'], { env });
+  assert.ok(listed.stdout.toString().includes(keyBlob), 'the vault SSH key is offered through the relay');
+
+  const removeAll = await run('ssh-add', ['-D'], { env });
+  assert.notEqual(removeAll.status, 0, 'REMOVE_ALL_IDENTITIES is refused');
+  // Still intact afterwards.
+  assert.ok((await run('ssh-add', ['-L'], { env })).stdout.toString().includes(keyBlob));
+});
+
+// Replays the audit's exact repro inside a REAL bwrap sandbox built by
+// buildSandboxSpawn (not just argv inspection): the sandbox's own gpg, with
+// the GNUPGHOME/SSH_AUTH_SOCK the launch sets up, tries to export the key.
+test('F1 (real bwrap): inside a gpgVault:true sandbox, export-secret-keys yields nothing, signing and ssh still work', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP || !bwrapUsable() }, async (t) => {
+  const vault = setUpUnlockedVault();
+  const script = [
+    'set -u',
+    'export LC_ALL=C',
+    `n=$(gpg --batch --pinentry-mode loopback --export-secret-keys ${vault.fingerprint} 2>/dev/null | wc -c)`,
+    'echo "EXPORT_BYTES=$n"',
+    `m=$(gpg --batch --export-secret-subkeys ${vault.fingerprint} 2>/dev/null | wc -c)`,
+    'echo "SUBKEY_EXPORT_BYTES=$m"',
+    'echo "KEYWRAP=$(gpg-connect-agent --no-autostart "KEYWRAP_KEY --export" /bye 2>&1 | grep -m1 -E "^(OK|ERR|D)")"',
+    `if echo tree | gpg --batch --status-fd=1 -bsau ${vault.fingerprint} 2>/dev/null | grep -q SIG_CREATED; then echo SIGN=ok; else echo SIGN=fail; fi`,
+    'if ssh-add -L >/dev/null 2>&1; then echo SSH=ok; else echo SSH=fail; fi',
+    'ls "$GNUPGHOME"',
+  ].join('\n');
+  const sb = spawnFor(
+    { docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } },
+    { targetCommand: ['bash', '-c', script] },
+  );
+  try {
+    const res = await run(sb.command, sb.args, { timeoutMs: 60000 });
+    const out = `${res.stdout}\n${res.stderr}`;
+    if (sandboxDidNotStart(res)) {
+      t.skip(`bwrap could not assemble the sandbox on this host: ${res.stderr.trim().split('\n')[0]}`);
+      return;
+    }
+    assert.match(out, /EXPORT_BYTES=0\b/, `secret key export must yield 0 bytes inside the sandbox:\n${out}`);
+    assert.match(out, /SUBKEY_EXPORT_BYTES=0\b/, out);
+    assert.match(out, /KEYWRAP=ERR 67109115 /, out);
+    assert.match(out, /SIGN=ok/, `signing must still work inside the sandbox:\n${out}`);
+    assert.match(out, /SSH=ok/, out);
+    // What the sandbox can see of the vault homedir: public files and the two
+    // relay sockets, nothing else.
+    assert.doesNotMatch(out, /private-keys-v1\.d|sshcontrol|S\.gpg-agent\.extra|S\.keyboxd|S\.dirmngr/, out);
+  } finally {
+    cleanupSpawn(sb);
+  }
+});
+
+// Negative control (audit): a sandbox launched WITHOUT gpgVault cannot see
+// the relay at all on Linux/bwrap.
+test('F3 negative control (real bwrap): a sandbox without gpgVault cannot reach the relay sockets', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP || !bwrapUsable() }, async (t) => {
+  setUpUnlockedVault();
+  // Make sure the relay is actually listening on the host.
+  cleanupSpawn(spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+  const relay = getRelaySocketPaths();
+  const script = Object.values(relay).map((p) => `if [ -e '${p}' ]; then echo "VISIBLE ${p}"; else echo "ABSENT ${p}"; fi`).join('\n');
+  const sb = spawnFor(
+    { docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } },
+    { targetCommand: ['bash', '-c', script], gpgVault: false },
+  );
+  try {
+    const res = await run(sb.command, sb.args, { timeoutMs: 60000 });
+    const out = `${res.stdout}\n${res.stderr}`;
+    if (sandboxDidNotStart(res)) {
+      t.skip(`bwrap could not assemble the sandbox on this host: ${res.stderr.trim().split('\n')[0]}`);
+      return;
+    }
+    for (const p of Object.values(relay)) assert.match(out, new RegExp(`ABSENT ${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), out);
+    assert.doesNotMatch(out, /VISIBLE/, out);
+  } finally {
+    cleanupSpawn(sb);
+  }
+});
+
+// Real-bwrap tests need a host where a full sandbox launch works at all
+// (bwrap present and unprivileged user namespaces allowed). Note: if they
+// fail with "bwrap: Can't bind mount ~/.claude.json", the host's
+// ~/.claude.json is a stale bind of an unlinked inode (seen when the test
+// itself runs inside a ccserver sandbox) -- run with a clean HOME, e.g.
+// `HOME=$(mktemp -d) node --test ws/sandbox-gpgvault.test.js`.
+// bwrap failed while ASSEMBLING the sandbox (a bind source it cannot mount),
+// i.e. our script never ran at all: nothing about the vault was tested, so
+// the caller skips with the reason instead of reporting a false failure. A
+// real regression cannot hide here -- it needs the script to run and print.
+function sandboxDidNotStart(res) {
+  return res.status !== 0 && res.stdout.length === 0 && /^bwrap: /m.test(res.stderr);
+}
+
+function bwrapUsable() {
+  try {
+    execFileSync('bwrap', ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', 'true'], { stdio: 'ignore', timeout: 10000 });
+    return true;
+  } catch {
+    return false;
+  }
+}

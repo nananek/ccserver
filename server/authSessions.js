@@ -67,14 +67,64 @@ export function verifySessionCookie(request) {
 // goes into the session cookie. 32 bytes of CSPRNG output, base64url-encoded,
 // same reasoning as loginTokens.js's generateLoginToken(): this id alone
 // grants access, so randomUUID()'s 128 bits (some fixed) would be weaker.
-export function createSession() {
+//
+// Security audit F2: the session also records HOW it was created
+// (authMethod 'login-token' | 'passkey', and which passkey), and whether it
+// carries a single-use passkey-registration grant (only ever from a CLI
+// token issued with --allow-passkey-registration). A passkey login counts as
+// a fresh step-up (stepup_at = now): the user just completed a
+// user-verified assertion on this very session.
+export function createSession({ authMethod = null, credentialId = null, registrationGrant = false } = {}) {
   const db = getDb();
   const id = randomBytes(32).toString('base64url');
   const now = Date.now();
   db.prepare(
-    'INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, NULL)'
-  ).run(id, now, now + SESSION_TTL_MS);
+    'INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at, auth_method, credential_id, stepup_at, registration_grant) '
+    + 'VALUES (?, ?, ?, NULL, ?, ?, ?, ?)'
+  ).run(id, now, now + SESSION_TTL_MS, authMethod, credentialId, authMethod === 'passkey' ? now : null, registrationGrant ? 1 : 0);
   return id;
+}
+
+// How long a step-up (a fresh user-verified passkey assertion) authorizes
+// sensitive operations on the same session: registering another passkey
+// (routes/auth.js) and deleting a pre-fix GPG vault (routes/gpgVault.js).
+export const STEPUP_WINDOW_MS = 5 * 60 * 1000;
+
+// The session id from the request's cookie, or null. Routes behind
+// server/index.js's onRequest hook already know the session is valid; this
+// only identifies WHICH session so per-session state can be read/written.
+export function getRequestSessionId(request) {
+  return parseCookieHeader(request.headers.cookie)[SESSION_COOKIE_NAME] || null;
+}
+
+// The live (unexpired) auth_sessions row for this request, or null.
+export function getRequestSession(request) {
+  const id = getRequestSessionId(request);
+  if (!id) return null;
+  const row = getDb().prepare(
+    'SELECT id, created_at, expires_at, auth_method, credential_id, stepup_at, registration_grant FROM auth_sessions WHERE id = ?'
+  ).get(id);
+  if (!row || row.expires_at <= Date.now()) return null;
+  return row;
+}
+
+export function hasFreshStepUp(session, now = Date.now()) {
+  return !!session && typeof session.stepup_at === 'number' && now - session.stepup_at < STEPUP_WINDOW_MS;
+}
+
+export function markStepUp(sessionId, credentialId) {
+  getDb().prepare('UPDATE auth_sessions SET stepup_at = ?, credential_id = COALESCE(?, credential_id) WHERE id = ?')
+    .run(Date.now(), credentialId, sessionId);
+}
+
+// Single-use: atomically clears the grant, returning true only if this call
+// is the one that consumed it (two concurrent registrations cannot both use
+// the same grant).
+export function consumeRegistrationGrant(sessionId) {
+  const result = getDb().prepare(
+    'UPDATE auth_sessions SET registration_grant = 0 WHERE id = ? AND registration_grant = 1'
+  ).run(sessionId);
+  return result.changes === 1;
 }
 
 // Serializes a Set-Cookie header value for a session id. `secure` should

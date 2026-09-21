@@ -1339,8 +1339,15 @@ export function buildSeatbeltLaunch({
     // (/private/tmp) spelling regardless of how many components are missing --
     // a raw-only pin would let connect() walk around the deny via the
     // resolved path Seatbelt actually mediates.
+    // Security audit F3: the GPG vault relay listens at FIXED paths under
+    // hostRuntimeDir(), and connect() is mediated as network-outbound (the
+    // broad unix-socket allow above), so without an explicit pin a launch
+    // that never asked for gpgVault could still reach the vault agent. Pin
+    // every path the relay dir has ever used for such launches; gpgVault
+    // launches get them via the read/write literals above instead.
+    const relayDenies = gpgVault ? [] : gpgVaultRelay.getAllRelaySocketPathsForDeny();
     const netDenyLiterals = [...new Set(
-      (controlSockDenies || []).filter(Boolean).flatMap((s) => memoDeep(s)),
+      [...(controlSockDenies || []), ...relayDenies].filter(Boolean).flatMap((s) => memoDeep(s)),
     )];
     // The pinned sockets' files themselves must also stay unwritable:
     // file-write* covers unlink/rename, so without these pins the agent can

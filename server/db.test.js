@@ -178,3 +178,34 @@ test('safeDb returns the fn result on success and the fallback on failure', () =
   assert.equal(safeDb((db) => db.prepare('PRAGMA user_version').get().user_version, -1), MIGRATIONS[MIGRATIONS.length - 1].version, 'first call initializes the DB');
   assert.equal(safeDb(() => { throw new Error('boom'); }, 'fb'), 'fb');
 });
+
+// Security audit remediation P0 (v9): upgrading a DB that already holds a GPG
+// vault must mark that vault as pre-fix (format_version 1, unsalted wrap), and
+// every pre-existing session / login token must come out WITHOUT any
+// passkey-registration permission.
+test('v9 migration: an existing vault becomes legacy; existing sessions/tokens get no registration grant', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  const upToV8 = MIGRATIONS.filter((m) => m.version <= 8);
+  migrate(db, upToV8);
+  const now = Date.now();
+  db.prepare('INSERT INTO webauthn_credentials (id, public_key, counter, label, created_at) VALUES (?,?,?,?,?)').run('c1', Buffer.from('pk'), 0, null, now);
+  db.prepare(`INSERT INTO gpg_vault (id, fingerprint, key_id, name_real, name_email, public_key_armored, ssh_public_key,
+    encrypted_secret_key, encryption_nonce, encryption_tag, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .run('default', 'FPR', 'KID', 'n', 'e@x.y', 'pk', 'ssh-ed25519 A', Buffer.from('c'), Buffer.from('n'), Buffer.from('t'), now);
+  db.prepare('INSERT INTO gpg_vault_credentials (credential_id, vault_id, wrapped_key, wrap_nonce, wrap_tag, created_at) VALUES (?,?,?,?,?,?)')
+    .run('c1', 'default', Buffer.from('w'), Buffer.from('n'), Buffer.from('t'), now);
+  db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?,?,?,NULL)').run('s1', now, now + 1000);
+  db.prepare('INSERT INTO login_tokens (id, token_hash, created_at, expires_at, used_at) VALUES (?,?,?,?,NULL)').run('t1', 'h', now, now + 1000);
+
+  migrate(db);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, MIGRATIONS[MIGRATIONS.length - 1].version);
+  assert.equal(db.prepare('SELECT format_version FROM gpg_vault').get().format_version, 1);
+  assert.equal(db.prepare('SELECT prf_salt FROM gpg_vault_credentials').get().prf_salt, null);
+  const session = db.prepare('SELECT auth_method, stepup_at, registration_grant FROM auth_sessions').get();
+  assert.equal(session.auth_method, null);
+  assert.equal(session.stepup_at, null);
+  assert.equal(session.registration_grant, 0);
+  assert.equal(db.prepare('SELECT allow_passkey_registration FROM login_tokens').get().allow_passkey_registration, 0);
+  db.close();
+});

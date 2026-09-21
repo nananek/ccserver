@@ -41,7 +41,7 @@ import { initDb, dbPath } from './db.js';
 import { selectableAppIds, installedApps } from './ws/sandbox.js';
 import { verifySessionCookie } from './authSessions.js';
 import { resolveAuthMode } from './authMode.js';
-import { lockVault } from './ws/gpgVaultAgent.js';
+import { lockVault, isLegacyVault } from './ws/gpgVaultAgent.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // trustProxy scoped to loopback only (Issue #141 Step2): the documented HTTPS
@@ -75,6 +75,16 @@ try {
   // opportunity to catch up before the first browser poll does.
   const expiredPairings = sweepExpiredPending();
   if (expiredPairings > 0) fastify.log.info(`Expired ${expiredPairings} stale federation pairing request(s)`);
+  // Security audit F1.4: a GPG vault created before the relay fix may have
+  // had its secret key exported from a sandbox, so it is disabled for good.
+  // Nothing to actively do here -- the vault always boots locked, and every
+  // unlock/add path re-checks isLegacyVault() -- but say so loudly once.
+  if (isLegacyVault()) {
+    fastify.log.warn(
+      'GPG vault was created before the security fix (audit F1) and is DISABLED: its secret key may have leaked. '
+      + 'Remove its GPG/SSH keys from GitHub, then delete the vault (Settings, or `node server/cli/gpg-vault-reset.js`) and recreate it.',
+    );
+  }
 } catch (err) {
   fastify.log.error({ err }, `Failed to initialize SQLite database (${dbPath()}): ${err.message}`);
   process.exit(1);

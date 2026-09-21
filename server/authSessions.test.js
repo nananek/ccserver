@@ -11,6 +11,11 @@ import {
   SESSION_COOKIE_NAME,
   SESSION_TTL_MS,
   SESSION_TOUCH_INTERVAL_MS,
+  STEPUP_WINDOW_MS,
+  getRequestSession,
+  hasFreshStepUp,
+  markStepUp,
+  consumeRegistrationGrant,
 } from './authSessions.js';
 
 let tmpRoot;
@@ -112,4 +117,47 @@ test('sessionCookieHeader: includes HttpOnly/SameSite=Lax/Max-Age but not Secure
 test('sessionCookieHeader: adds Secure when asked', () => {
   const header = sessionCookieHeader('abc', { secure: true });
   assert.ok(header.includes('; Secure'));
+});
+
+// Security audit F2: per-session auth metadata.
+function reqFor(id) {
+  return { headers: { cookie: `${SESSION_COOKIE_NAME}=${id}` } };
+}
+
+test('createSession records auth_method; a passkey login starts with a fresh step-up, a token login does not', () => {
+  const passkey = getRequestSession(reqFor(createSession({ authMethod: 'passkey', credentialId: 'c1' })));
+  assert.equal(passkey.auth_method, 'passkey');
+  assert.equal(passkey.credential_id, 'c1');
+  assert.equal(hasFreshStepUp(passkey), true);
+
+  const token = getRequestSession(reqFor(createSession({ authMethod: 'login-token' })));
+  assert.equal(token.auth_method, 'login-token');
+  assert.equal(hasFreshStepUp(token), false);
+  assert.equal(token.registration_grant, 0);
+});
+
+test('hasFreshStepUp honours the window; markStepUp refreshes it', () => {
+  const id = createSession({ authMethod: 'login-token' });
+  getDb().prepare('UPDATE auth_sessions SET stepup_at = ? WHERE id = ?').run(Date.now() - STEPUP_WINDOW_MS - 1, id);
+  assert.equal(hasFreshStepUp(getRequestSession(reqFor(id))), false);
+  markStepUp(id, 'c9');
+  const row = getRequestSession(reqFor(id));
+  assert.equal(hasFreshStepUp(row), true);
+  assert.equal(row.credential_id, 'c9');
+});
+
+test('consumeRegistrationGrant is single-use', () => {
+  const id = createSession({ authMethod: 'login-token', registrationGrant: true });
+  assert.equal(getRequestSession(reqFor(id)).registration_grant, 1);
+  assert.equal(consumeRegistrationGrant(id), true);
+  assert.equal(consumeRegistrationGrant(id), false);
+  assert.equal(consumeRegistrationGrant(createSession()), false, 'no grant, nothing to consume');
+});
+
+test('getRequestSession: null for no cookie, an unknown id, or an expired session', () => {
+  assert.equal(getRequestSession({ headers: {} }), null);
+  assert.equal(getRequestSession(reqFor('nope')), null);
+  const id = createSession();
+  getDb().prepare('UPDATE auth_sessions SET expires_at = ? WHERE id = ?').run(Date.now() - 1, id);
+  assert.equal(getRequestSession(reqFor(id)), null);
 });

@@ -7,6 +7,7 @@ import {
   WEBAUTHN_USER_NAME,
   startChallengeFlow,
   consumeChallengeFlow,
+  consumeChallengeFlowData,
   flowCookieHeader,
   clearFlowCookieHeader,
   resolveRpID,
@@ -115,4 +116,18 @@ test('flowCookieHeader: adds Secure when asked', () => {
 
 test('clearFlowCookieHeader: empties the value and expires immediately', () => {
   assert.equal(clearFlowCookieHeader(), `${FLOW_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+});
+
+test('consumeChallengeFlowData: returns the server-side data stored with the flow, one-time', () => {
+  const flowId = startChallengeFlow('gpg-vault-unlock', 'chal-d', { nextSalts: { c1: 'salt' } });
+  assert.deepEqual(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'gpg-vault-unlock'), {
+    challenge: 'chal-d', data: { nextSalts: { c1: 'salt' } },
+  });
+  assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'gpg-vault-unlock'), null);
+});
+
+test('consumeChallengeFlowData: kind mismatch is rejected and still consumes the flow', () => {
+  const flowId = startChallengeFlow('gpg-vault-setup', 'chal-e', { salt: 'x' });
+  assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'gpg-vault-add-credential'), null);
+  assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'gpg-vault-setup'), null);
 });
