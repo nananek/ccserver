@@ -124,11 +124,11 @@ function reqFor(id) {
   return { headers: { cookie: `${SESSION_COOKIE_NAME}=${id}` } };
 }
 
-test('createSession records auth_method; a passkey login starts with a fresh step-up, a token login does not', () => {
+test('createSession records auth_method; neither a passkey login nor a token login starts with a step-up', () => {
   const passkey = getRequestSession(reqFor(createSession({ authMethod: 'passkey', credentialId: 'c1' })));
   assert.equal(passkey.auth_method, 'passkey');
   assert.equal(passkey.credential_id, 'c1');
-  assert.equal(hasFreshStepUp(passkey), true);
+  assert.equal(hasFreshStepUp(passkey), false);
 
   const token = getRequestSession(reqFor(createSession({ authMethod: 'login-token' })));
   assert.equal(token.auth_method, 'login-token');

@@ -429,7 +429,13 @@ export function addCredentialWithAuthorizer({ authorizer, candidate }) {
       wrappedKey: wrap.ciphertext, wrapNonce: wrap.iv, wrapTag: wrap.tag,
       prfSalt: candidate.prfSalt,
     });
-    rotateWrap(vk, wrapRow, authorizer.rotation);
+    try {
+      rotateWrap(vk, wrapRow, authorizer.rotation);
+    } catch (err) {
+      // Same as unlockVault(): the candidate is already enrolled, and the
+      // authorizer's previous wrap is still valid -- do not report failure.
+      console.warn(`[gpg-vault] PRF salt rotation failed (previous wrap kept): ${err.message}`);
+    }
   } finally {
     vk.fill(0);
   }

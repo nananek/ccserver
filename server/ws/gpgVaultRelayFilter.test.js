@@ -54,12 +54,15 @@ const REAL_SIGNING_TRACE = [
   'BYE',
 ];
 
-test('assuan: the real git-signing trace is forwarded verbatim, nothing replied', () => {
+test('assuan: the real git-signing trace is forwarded verbatim, except allow-pinentry-notify', () => {
   const h = harness(createAssuanFilter);
   const input = REAL_SIGNING_TRACE.map((l) => `${l}\n`).join('');
   h.filter.fromClient(Buffer.from(input, 'latin1'));
-  assert.equal(h.forwarded(), input);
-  assert.equal(h.replied(), '');
+  // gpg sends allow-pinentry-notify unconditionally and ignores the error
+  // (plan §1.2(b) denies it); everything else reaches the agent as is.
+  const expected = REAL_SIGNING_TRACE.filter((l) => l !== 'OPTION allow-pinentry-notify').map((l) => `${l}\n`).join('');
+  assert.equal(h.forwarded(), expected);
+  assert.equal(h.replied(), ASSUAN_FORBIDDEN_LINE);
   assert.deepEqual(h.aborted, []);
 });
 
@@ -87,6 +90,19 @@ test('assuan: every export/import/keygen/passphrase command is refused and never
     'OPTION --pinentry-mode=loopback',
     'OPTION pinentry-mode loopback',
     'OPTION PINENTRY-MODE=LOOPBACK',
+    // libassuan allows blanks around '=' and tabs as separators; each of
+    // these reaches gpg-agent as pinentry-mode=loopback.
+    'OPTION pinentry-mode = loopback',
+    'OPTION pinentry-mode =loopback',
+    'OPTION pinentry-mode= loopback',
+    'OPTION pinentry-mode\tloopback',
+    'OPTION\tpinentry-mode=loopback',
+    'OPTION pinentry-mode=loopback  ',
+    'OPTION pinentry-mode=loopback\t',
+    'OPTION pinentry-mode=',
+    'OPTION pinentry-mode=bogus',
+    'OPTION allow-pinentry-notify',
+    'OPTION -ttyname=/dev/pts/0', // single dash: libassuan rejects it anyway
     'OPTION cache-ttl-opt-preset=-1',
     'OPTION',
     'D 414243', // data line with no INQUIRE outstanding
@@ -108,8 +124,13 @@ test('assuan: the reply is gpg-agent\'s own GPG_ERR_FORBIDDEN code', () => {
   assert.ok(ASSUAN_FORBIDDEN_LINE.endsWith('\n'));
 });
 
-test('assuan: pinentry-mode other than loopback is allowed', () => {
-  assert.equal(classifyAssuanClientLine('OPTION pinentry-mode=ask', { inquirePending: false }), 'forward');
+test('assuan: pinentry-mode is limited to the non-loopback values', () => {
+  for (const v of ['ask', 'default', 'cancel', 'error']) {
+    assert.equal(classifyAssuanClientLine(`OPTION pinentry-mode=${v}`, { inquirePending: false }), 'forward', v);
+  }
+  assert.equal(classifyAssuanClientLine('OPTION pinentry-mode = ask', { inquirePending: false }), 'forward');
+  assert.equal(classifyAssuanClientLine('OPTION --pinentry-mode=ask', { inquirePending: false }), 'forward');
+  assert.equal(classifyAssuanClientLine('OPTION\tttyname=/dev/pts/0', { inquirePending: false }), 'forward');
   assert.equal(classifyAssuanClientLine('OPTION pinentry-mode=loopback', { inquirePending: false }), 'reject');
 });
 

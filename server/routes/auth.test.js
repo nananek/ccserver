@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { getDb, closeDb } from '../db.js';
 import { generateLoginToken, hashLoginToken } from '../loginTokens.js';
-import { SESSION_COOKIE_NAME, createSession, STEPUP_WINDOW_MS } from '../authSessions.js';
+import { SESSION_COOKIE_NAME, createSession, markStepUp, STEPUP_WINDOW_MS } from '../authSessions.js';
 import { FLOW_COOKIE_NAME } from '../webauthnChallenges.js';
 import { generateAuthenticatorKeyPair, createRegistrationResponse, createAuthenticationResponse } from './webauthnTestAuthenticator.js';
 import { authRoute } from './auth.js';
@@ -52,6 +52,13 @@ after(async () => {
 // is exercised separately at the end of this file.
 let stepUpCookie;
 
+// A passkey-login session that has also completed an explicit step-up.
+function steppedUpSession() {
+  const id = createSession({ authMethod: 'passkey' });
+  markStepUp(id, null);
+  return id;
+}
+
 beforeEach(() => {
   closeDb();
   const db = getDb();
@@ -59,7 +66,7 @@ beforeEach(() => {
   db.exec('DELETE FROM auth_sessions');
   db.exec('DELETE FROM webauthn_credentials');
   process.env.CCSERVER_AUTH_MODE = 'passkey';
-  stepUpCookie = `${SESSION_COOKIE_NAME}=${createSession({ authMethod: 'passkey' })}`;
+  stepUpCookie = `${SESSION_COOKIE_NAME}=${steppedUpSession()}`;
 });
 
 function insertToken({ expiresInMs = 15 * 60 * 1000, usedAt = null, allowPasskeyRegistration = false } = {}) {
@@ -573,7 +580,7 @@ test('F2 (audit chain step 1): a stolen passkey-login session whose step-up has 
 });
 
 test('F2: step-up expiring between options and verify is re-checked at verify', async () => {
-  const sessionId = createSession({ authMethod: 'passkey' });
+  const sessionId = steppedUpSession();
   const cookie = `${SESSION_COOKIE_NAME}=${sessionId}`;
   const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie } });
   assert.equal(optionsRes.statusCode, 200);
@@ -674,7 +681,7 @@ test('F2: stepup-verify without a session -> 401', async () => {
   assert.equal(res.statusCode, 401);
 });
 
-test('F2: a passkey login starts a session with a fresh step-up (auth_method=passkey)', async () => {
+test('F2: a passkey login alone is not a step-up -- registering another passkey still needs stepup-* (plan §2.3(b))', async () => {
   const cred = await tryRegister(await loginWithToken({ allowPasskeyRegistration: true }));
   const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/authenticate-options', headers: { host: RP_HOST } });
   const response = createAuthenticationResponse({
@@ -690,6 +697,8 @@ test('F2: a passkey login starts a session with a fresh step-up (auth_method=pas
   const row = getDb().prepare('SELECT auth_method, credential_id, stepup_at, registration_grant FROM auth_sessions WHERE id = ?').get(sessionId);
   assert.equal(row.auth_method, 'passkey');
   assert.equal(row.credential_id, cred.credentialId.toString('base64url'));
-  assert.ok(Date.now() - row.stepup_at < 5000);
+  assert.equal(row.stepup_at, null);
   assert.equal(row.registration_grant, 0);
+  const attempt = await tryRegister(`${SESSION_COOKIE_NAME}=${sessionId}`);
+  assert.equal(attempt.res.statusCode, 403);
 });

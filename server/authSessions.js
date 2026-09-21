@@ -71,17 +71,18 @@ export function verifySessionCookie(request) {
 // Security audit F2: the session also records HOW it was created
 // (authMethod 'login-token' | 'passkey', and which passkey), and whether it
 // carries a single-use passkey-registration grant (only ever from a CLI
-// token issued with --allow-passkey-registration). A passkey login counts as
-// a fresh step-up (stepup_at = now): the user just completed a
-// user-verified assertion on this very session.
+// token issued with --allow-passkey-registration). A passkey login does NOT
+// count as a step-up: the login ceremony only asks for userVerification
+// 'preferred', and the plan (remediation-plan r2 §2.3(b)) requires a
+// passkey-login-only session to step up explicitly before registering.
 export function createSession({ authMethod = null, credentialId = null, registrationGrant = false } = {}) {
   const db = getDb();
   const id = randomBytes(32).toString('base64url');
   const now = Date.now();
   db.prepare(
     'INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at, auth_method, credential_id, stepup_at, registration_grant) '
-    + 'VALUES (?, ?, ?, NULL, ?, ?, ?, ?)'
-  ).run(id, now, now + SESSION_TTL_MS, authMethod, credentialId, authMethod === 'passkey' ? now : null, registrationGrant ? 1 : 0);
+    + 'VALUES (?, ?, ?, NULL, ?, ?, NULL, ?)'
+  ).run(id, now, now + SESSION_TTL_MS, authMethod, credentialId, registrationGrant ? 1 : 0);
   return id;
 }
 

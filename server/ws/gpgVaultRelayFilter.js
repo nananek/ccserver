@@ -41,24 +41,54 @@ const ALLOWED_ASSUAN_COMMANDS = new Set([
 ]);
 
 // OPTION names gpg sends for ordinary operation (display/tty/locale
-// plumbing and version negotiation). pinentry-mode is handled separately:
-// only loopback is refused -- it is the mode that lets the CLIENT supply
-// passphrases, which is exactly what export flows rely on.
+// plumbing and version negotiation). Deliberately absent (remediation plan
+// §1.2(b)): allow-pinentry-notify -- gpg sends it unconditionally but
+// ignores a refusal, and denying it keeps the agent from ever opening an
+// INQUIRE (the only state in which client data lines are accepted).
 const ALLOWED_OPTIONS = new Set([
-  'agent-awareness', 'allow-pinentry-notify',
+  'agent-awareness',
   'ttyname', 'ttytype', 'display', 'xauthority', 'lc-ctype', 'lc-messages',
   'putenv', 'pinentry-user-data', 'use-cache-for-signing', 'no-grab',
 ]);
 
-function optionAllowed(arg) {
-  // "OPTION name=value", "OPTION name value", or "OPTION --name=value".
-  const m = /^(?:--)?([A-Za-z0-9-]+)(?:[= ](.*))?$/.exec(arg.trim());
-  if (!m) return false;
-  const name = m[1].toLowerCase();
-  if (name === 'pinentry-mode') {
-    return (m[2] || '').trim().toLowerCase() !== 'loopback';
+// pinentry-mode values that keep passphrase entry away from the CLIENT.
+// An allowlist, not "anything but loopback": loopback is the mode export
+// flows rely on, and any spelling the agent might still map to it must not
+// slip through.
+const ALLOWED_PINENTRY_MODES = new Set(['ask', 'default', 'cancel', 'error']);
+
+const isAssuanSpace = (c) => c === ' ' || c === '\t';
+
+// Splits an OPTION argument exactly the way libassuan's std_handler_option
+// does before gpg-agent sees it: leading/trailing blanks dropped, key ends
+// at a blank or '=', then optional blanks, optional '=' with blanks around
+// it, and an optional leading "--" on the key. Returns { name, value } or
+// null for anything libassuan itself would reject. Mirroring the parser
+// matters: a looser regex here once let "pinentry-mode = loopback" through.
+function parseAssuanOption(arg) {
+  let i = 0;
+  while (i < arg.length && isAssuanSpace(arg[i])) i++;
+  const keyStart = i;
+  while (i < arg.length && !isAssuanSpace(arg[i]) && arg[i] !== '=') i++;
+  let key = arg.slice(keyStart, i);
+  while (i < arg.length && isAssuanSpace(arg[i])) i++;
+  if (arg[i] === '=') {
+    i++;
+    while (i < arg.length && isAssuanSpace(arg[i])) i++;
   }
-  return ALLOWED_OPTIONS.has(name);
+  let end = arg.length;
+  while (end > i && isAssuanSpace(arg[end - 1])) end--;
+  const value = arg.slice(i, end);
+  if (key.startsWith('--') && key.length > 2) key = key.slice(2);
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_-]*$/.test(key)) return null;
+  return { name: key.toLowerCase(), value };
+}
+
+function optionAllowed(arg) {
+  const opt = parseAssuanOption(arg);
+  if (!opt) return false;
+  if (opt.name === 'pinentry-mode') return ALLOWED_PINENTRY_MODES.has(opt.value.toLowerCase());
+  return ALLOWED_OPTIONS.has(opt.name);
 }
 
 // Decides one complete client line (without its trailing LF/CR). Returns
@@ -73,7 +103,8 @@ export function classifyAssuanClientLine(line, { inquirePending }) {
   if (line.length === 0) return 'forward';
   // Data/END lines outside an INQUIRE have no legitimate use and are how a
   // client would smuggle bytes into a command that never asked for them.
-  const sp = line.indexOf(' ');
+  // libassuan ends the command word at a space OR a tab.
+  const sp = line.search(/[ \t]/);
   const cmd = (sp === -1 ? line : line.slice(0, sp)).toUpperCase();
   if (!ALLOWED_ASSUAN_COMMANDS.has(cmd)) return 'reject';
   if (cmd === 'OPTION') return optionAllowed(sp === -1 ? '' : line.slice(sp + 1)) ? 'forward' : 'reject';

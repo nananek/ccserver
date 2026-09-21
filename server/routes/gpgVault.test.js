@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getDb, closeDb } from '../db.js';
 import { FLOW_COOKIE_NAME } from '../webauthnChallenges.js';
-import { SESSION_COOKIE_NAME, createSession, STEPUP_WINDOW_MS } from '../authSessions.js';
+import { SESSION_COOKIE_NAME, createSession, markStepUp, STEPUP_WINDOW_MS } from '../authSessions.js';
 import {
   generateAuthenticatorKeyPair,
   createRegistrationResponse,
@@ -77,6 +77,13 @@ after(async () => {
 // carries a fresh step-up (and may therefore register passkeys).
 let ownerCookie;
 
+// A passkey-login session that has also completed an explicit step-up.
+function steppedUpSession() {
+  const id = createSession({ authMethod: 'passkey' });
+  markStepUp(id, null);
+  return id;
+}
+
 beforeEach(() => {
   lockVault();
   closeDb();
@@ -86,7 +93,7 @@ beforeEach(() => {
   db.exec('DELETE FROM webauthn_credentials');
   db.exec('DELETE FROM auth_sessions');
   process.env.CCSERVER_AUTH_MODE = 'passkey';
-  ownerCookie = `${SESSION_COOKIE_NAME}=${createSession({ authMethod: 'passkey' })}`;
+  ownerCookie = `${SESSION_COOKIE_NAME}=${steppedUpSession()}`;
 });
 
 function findCookie(res, name) {

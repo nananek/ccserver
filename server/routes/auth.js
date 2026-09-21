@@ -350,8 +350,8 @@ export async function authRoute(fastify, opts) {
     getDb().prepare('UPDATE webauthn_credentials SET counter = ?, last_used_at = ? WHERE id = ?')
       .run(verification.authenticationInfo.newCounter, Date.now(), row.id);
 
-    // A passkey login is itself a fresh user-verified assertion, so the
-    // new session starts with a step-up (see createSession()).
+    // Not a step-up (see createSession()): this ceremony's UV is only
+    // 'preferred', so registering another passkey still needs stepup-*.
     const sessionId = createSession({ authMethod: 'passkey', credentialId: row.id });
     reply.header('Set-Cookie', sessionCookieHeader(sessionId, { secure: request.protocol === 'https' }));
     return { success: true };
