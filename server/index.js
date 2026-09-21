@@ -21,6 +21,7 @@ import { sandboxesRoute } from './routes/sandboxes.js';
 import { networkAllowlistRoute } from './routes/networkAllowlist.js';
 import { federationRoute } from './routes/federation.js';
 import { authRoute } from './routes/auth.js';
+import { gpgVaultRoute } from './routes/gpgVault.js';
 import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
 import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler, initPtyHostDisconnectedHandler, initPtyHostReconnectedHandler, restorePtyHostSessions } from './ws/sessionManager.js';
@@ -41,6 +42,7 @@ import { initDb, dbPath } from './db.js';
 import { selectableAppIds, installedApps } from './ws/sandbox.js';
 import { verifySessionCookie } from './authSessions.js';
 import { resolveAuthMode } from './authMode.js';
+import { lockVault } from './ws/gpgVaultAgent.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // trustProxy scoped to loopback only (Issue #141 Step2): the documented HTTPS
@@ -170,6 +172,7 @@ await fastify.register(sandboxesRoute, { prefix: '/api' });
 await fastify.register(networkAllowlistRoute, { prefix: '/api' });
 await fastify.register(federationRoute, { prefix: '/api' });
 await fastify.register(authRoute, { prefix: '/api' });
+await fastify.register(gpgVaultRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
 await fastify.register(remoteTerminalWs);
 
@@ -193,6 +196,13 @@ const cleanup = () => {
   stopMetaAgentBroker();
   stopReviewerBroker();
   stopFederationServer();
+  // GPG vault (plan: gpg-agent-vault): the in-memory Vault Key is this
+  // feature's entire "cannot decrypt without logging in" guarantee, so a
+  // graceful restart must not leave a stray gpg-agent process holding a
+  // decrypted key in its tmpfs homedir. Best-effort like the brokers above
+  // -- a failure here just means the next boot's homedir gets orphaned on
+  // tmpfs (gone on unmount/reboot regardless), not a secret leak.
+  try { lockVault(); } catch { /* best-effort */ }
   gracefulShutdown().then(() => process.exit(0));
 };
 process.on('SIGTERM', cleanup);

@@ -609,6 +609,17 @@ function expandAgainstHome(p, hostHome) {
 //   gnupg          - true to expose the host ~/.gnupg keyring (opt-in, like
 //                    bwrap's gpg flag) with GNUPGHOME pointed at it ($HOME
 //                    inside is the sandbox home, so gpg needs the override)
+//   gpgVault       - true to expose the MANAGED vault agent's sockets
+//                    instead (plan: gpg-agent-vault; see buildBwrapArgs'
+//                    twin block) -- a different, newer mechanism from gnupg
+//                    above (which forwards the HOST's own gpg-agent).
+//                    Unlike bwrap there is no mount remapping here, so
+//                    GNUPGHOME/SSH_AUTH_SOCK point straight at the vault's
+//                    real homeDir/socket paths; only those specific public
+//                    files + live sockets are allow-listed as literals
+//                    (never the whole homeDir as a subtree) so
+//                    private-keys-v1.d/, openpgp-revocs.d/, and sshcontrol
+//                    stay unreachable -- same security invariant as bwrap.
 //   app            - agent id ('claude' | 'opencode' | 'copilot' | 'codex' |
 //                    'commandcode') | null: opencode sessions get the host
 //                    XDG dirs (see env below); other apps resolve their
@@ -663,6 +674,7 @@ export function buildSeatbeltLaunch({
   extraEnv = {},
   authSock = null,
   gnupg = false,
+  gpgVault = null,
   app = null,
   claudeDir = null,
   orchestratorClaudeMdSrc = null,
@@ -865,6 +877,17 @@ export function buildSeatbeltLaunch({
     if (groupFilesDir) env.CCSANDBOX_GROUP_FILES_DIR = groupFilesDir;
     if (authSock) env.SSH_AUTH_SOCK = authSock;
     if (gnupg) env.GNUPGHOME = join(hostHome, '.gnupg');
+    // GPG vault (plan: gpg-agent-vault): overrides gnupg/authSock above when
+    // both are set (buildSandboxSpawn warns about that combination) --
+    // deliberately placed after them so it wins, same "gpgVault wins" rule
+    // as buildBwrapArgs. No mount remapping here (unlike bwrap), so these
+    // point straight at the vault's real host paths; the read/write literal
+    // rules further down are what actually restrict access to just these
+    // specific files/sockets.
+    if (gpgVault) {
+      env.GNUPGHOME = gpgVault.homeDir;
+      if (gpgVault.sockets.agentSsh) env.SSH_AUTH_SOCK = gpgVault.sockets.agentSsh;
+    }
     // HOME is remapped to the sandbox home, so $HOME-relative config resolution
     // would miss the real auth/state (bwrap instead overlays the real dirs at
     // the real $HOME path). Point the CLIs that support it at the real dirs.
@@ -920,9 +943,11 @@ export function buildSeatbeltLaunch({
       }
     }
 
-    // GIT_CONFIG_COUNT merges credential.helper (gitBroker) and core.hooksPath
-    // (commitGuard) into one env mechanism -- same rule as buildBwrapArgs'
-    // comment: a future feature reusing it must extend the count here.
+    // GIT_CONFIG_COUNT merges credential.helper (gitBroker), core.hooksPath
+    // (commitGuard), and user.signingkey/commit.gpgsign/gpg.program/
+    // user.name/user.email (gpgVault) into one env mechanism -- same rule as
+    // buildBwrapArgs' comment: a future feature reusing it must extend the
+    // count here, not add a second GIT_CONFIG_COUNT.
     const gitConfigKeys = [];
     if (gitBroker) {
       env.CCSANDBOX_GIT_BROKER_SOCK = gitBroker.sockPath;
@@ -965,6 +990,20 @@ export function buildSeatbeltLaunch({
     if (commitGuard) {
       env.CCSANDBOX_COMMIT_GUARD_CONFIG = commitGuard.configPath;
       gitConfigKeys.push(['core.hooksPath', hooksDir]);
+    }
+    // GPG vault (plan: gpg-agent-vault): signs commits with the vault's key
+    // and sets the committer identity to the SAME name/email used as the
+    // key's own UID (see db.js v8's migration comment / buildBwrapArgs'
+    // twin block for why). gpg.program is the bare command name -- it
+    // resolves via PATH (sandboxPathBase/homebrew, see env.PATH above).
+    if (gpgVault) {
+      gitConfigKeys.push(
+        ['user.signingkey', gpgVault.fingerprint],
+        ['commit.gpgsign', 'true'],
+        ['gpg.program', 'gpg'],
+        ['user.name', gpgVault.nameReal],
+        ['user.email', gpgVault.nameEmail],
+      );
     }
     if (gitConfigKeys.length > 0) {
       env.GIT_CONFIG_COUNT = String(gitConfigKeys.length);
@@ -1110,12 +1149,33 @@ export function buildSeatbeltLaunch({
     // write, and custom locations (e.g. 1Password's ~/Library socket) fall
     // outside every allow tree above. Both spellings (see pathVariants).
     if (authSock) sockPaths.push(...memoVariants(authSock));
+    // GPG vault (plan: gpg-agent-vault): its live sockets, same connect()
+    // treatment as every other socket above -- read+write literal, never a
+    // subtree (see this function's header comment on why: private-keys-v1.d/
+    // etc. must stay unreachable, and a subtree grant on homeDir would
+    // expose them).
+    if (gpgVault) sockPaths.push(...Object.values(gpgVault.sockets).filter(Boolean));
     for (const s of new Set(sockPaths)) {
       readLiterals.push(s);
       writeLiterals.push(s); // connect() needs write
     }
     if (gitBroker) readLiterals.push(gitBroker.allowlistPath);
     if (commitGuard) readLiterals.push(commitGuard.configPath);
+    // GPG vault's public files -- read-ONLY literals (gpg needs the public
+    // key/keybox metadata to build a signature packet, and trustdb for its
+    // own sanity checks), same read-only treatment as bwrap's --ro-bind-try
+    // for the identical file set. Deliberately NOT in writeLiterals: gpg
+    // itself never needs to mutate these from inside the sandbox for a
+    // single-key, already-generated vault. Being absent from writeLiterals
+    // is NOT sufficient on its own though -- homeDir sits under the broad
+    // tmp write-allow rules (like binDir/hooksDir), so denyWriteRegexes
+    // below adds the same explicit last-match-wins pin those get.
+    if (gpgVault) {
+      for (const file of ['pubring.kbx', 'trustdb.gpg', 'gpg.conf']) {
+        const p = join(gpgVault.homeDir, file);
+        if (existsSync(p)) readLiterals.push(p);
+      }
+    }
     // Both spellings (see pathVariants): a server tree or HOME under a
     // symlink would otherwise read-deny these via the other spelling.
     // (The server-tree knownHostsDefault needs no literal: it is copied into
@@ -1187,6 +1247,18 @@ export function buildSeatbeltLaunch({
         : []),
       ...(gitBroker
         ? exactPins(basename(gitBroker.allowlistPath), dirname(gitBroker.allowlistPath))
+        : []),
+      // GPG vault (plan: gpg-agent-vault): its homeDir also lives under
+      // hostRuntimeDir() (the broad tmp write rules above), so pubring.kbx/
+      // trustdb.gpg/gpg.conf need the identical explicit deny-write pin as
+      // binDir/hooksDir/profilePath above, or the broad tmp allow leaves
+      // them agent-writable despite being intentionally read-only literals
+      // (see the readLiterals-only comment near sockPaths) -- an
+      // agent-corrupted pubring.kbx/trustdb.gpg would then persist into the
+      // SAME real homeDir the live managed gpg-agent uses. Sockets are
+      // exempt (need write for connect(), same as every other socket here).
+      ...(gpgVault
+        ? ['pubring.kbx', 'trustdb.gpg', 'gpg.conf'].flatMap((f) => exactPins(f, gpgVault.homeDir))
         : []),
       // The per-launch ssh-config (CCSANDBOX_SSH_CONFIG, minted for brokered
       // launches when ssh.realSsh) must stay immutable like bwrap's

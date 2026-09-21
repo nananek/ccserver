@@ -5,14 +5,18 @@
 
 export const SANDBOX_DEFAULT_GPG_KEY = 'ccserver-default-sandbox-gpg';
 export const SANDBOX_DEFAULT_SSH_AGENT_KEY = 'ccserver-default-sandbox-ssh-agent';
+export const SANDBOX_DEFAULT_GPG_VAULT_KEY = 'ccserver-default-sandbox-gpg-vault';
 export const SANDBOX_DEFAULT_RTK_KEY = 'ccserver-default-sandbox-rtk';
 export const SANDBOX_DEFAULT_CRG_KEY = 'ccserver-default-sandbox-code-review-graph';
 
 // すべて既定オフ。ツール導入は初回コスト (ダウンロード・pip) がかかるため
-// 明示のオプトインとする。
+// 明示のオプトインとする。gpgVault (plan: gpg-agent-vault) はパスキーログイン
+// 限定機能で、かつVaultが未作成/ロック中だと起動自体が失敗するため、
+// なおさら既定オフ。
 export const SANDBOX_DEFAULTS = {
   gpg: false,
   sshAgent: false,
+  gpgVault: false,
   rtk: false,
   codeReviewGraph: false,
 };
@@ -31,6 +35,7 @@ export function loadSandboxDefaults() {
   return {
     gpg: loadFlag(SANDBOX_DEFAULT_GPG_KEY, SANDBOX_DEFAULTS.gpg),
     sshAgent: loadFlag(SANDBOX_DEFAULT_SSH_AGENT_KEY, SANDBOX_DEFAULTS.sshAgent),
+    gpgVault: loadFlag(SANDBOX_DEFAULT_GPG_VAULT_KEY, SANDBOX_DEFAULTS.gpgVault),
     rtk: loadFlag(SANDBOX_DEFAULT_RTK_KEY, SANDBOX_DEFAULTS.rtk),
     codeReviewGraph: loadFlag(SANDBOX_DEFAULT_CRG_KEY, SANDBOX_DEFAULTS.codeReviewGraph),
   };
@@ -40,6 +45,7 @@ export function saveSandboxDefaults(next) {
   try {
     localStorage.setItem(SANDBOX_DEFAULT_GPG_KEY, next.gpg ? '1' : '0');
     localStorage.setItem(SANDBOX_DEFAULT_SSH_AGENT_KEY, next.sshAgent ? '1' : '0');
+    localStorage.setItem(SANDBOX_DEFAULT_GPG_VAULT_KEY, next.gpgVault ? '1' : '0');
     localStorage.setItem(SANDBOX_DEFAULT_RTK_KEY, next.rtk ? '1' : '0');
     localStorage.setItem(SANDBOX_DEFAULT_CRG_KEY, next.codeReviewGraph ? '1' : '0');
   } catch {
@@ -52,6 +58,7 @@ export function defaultSandboxOpts(defaults = SANDBOX_DEFAULTS) {
   return {
     gpg: !!defaults.gpg,
     sshAgent: !!defaults.sshAgent,
+    gpgVault: !!defaults.gpgVault,
     tools: {
       rtk: !!defaults.rtk,
       codeReviewGraph: !!defaults.codeReviewGraph,

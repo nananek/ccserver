@@ -1,4 +1,6 @@
+import { useState, useEffect } from 'react';
 import { getThemeIds, getTheme } from '../themes.js';
+import { resolveAuthMode } from '../auth.js';
 
 // "一般" メニュー: テーマ・終了確認・戻る/進むガード・セッション表示・
 // デスクトップ通知・サンドボックス既定値。
@@ -26,6 +28,16 @@ export default function GeneralSection({
   const updateSandboxDefault = (key, value) => {
     onSandboxDefaultsChange({ ...sandboxDefaults, [key]: value });
   };
+  // gpgVault (plan: gpg-agent-vault) is a passkey-login-only feature -- this
+  // section has no other reason to know authMode, so it resolves it locally
+  // rather than threading a new prop through SettingsView, same independent-
+  // resolution pattern PasskeysSection.jsx already uses.
+  const [authMode, setAuthMode] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    resolveAuthMode().then((m) => { if (!cancelled) setAuthMode(m); });
+    return () => { cancelled = true; };
+  }, []);
   // rtk / code-review-graph are unavailable on macOS (seatbelt has no
   // provisioner -- /api/dirs/home's toolsAvailable). null/absent (older
   // server) leaves both enabled. See issue #22.
@@ -125,6 +137,18 @@ export default function GeneralSection({
         />
         ssh-agentを転送する
       </label>
+      <label className={`general-setting-check${authMode !== 'passkey' ? ' general-setting-check-disabled' : ''}`}>
+        <input
+          type="checkbox"
+          disabled={authMode !== 'passkey'}
+          checked={authMode !== 'passkey' ? false : !!sandboxDefaults.gpgVault}
+          onChange={(e) => updateSandboxDefault('gpgVault', e.target.checked)}
+        />
+        GPGボルトで署名・SSH pushする{authMode !== 'passkey' ? '（パスキーログイン限定）' : ''}
+      </label>
+      <p className="settings-hint">
+        サーバーが保持する専用のGPG鍵でコミット署名とSSH pushを行います。設定 &gt; GPG連携でVaultの作成・アンロックが必要です。
+      </p>
       <label className={`general-setting-check${toolDisabled('rtk') ? ' general-setting-check-disabled' : ''}`}>
         <input
           type="checkbox"

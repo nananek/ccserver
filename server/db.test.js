@@ -76,6 +76,32 @@ test('fresh open runs migrations to the latest version', () => {
   db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?,?,?,NULL)')
     .run('sess1', 1, 2);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM auth_sessions').get().c, 1);
+  // v8 tables exist, usable, and enforce UNIQUE(fingerprint) + the
+  // credential_id -> webauthn_credentials CASCADE (see gpgVaultCrypto.js /
+  // gpgVaultDb.js).
+  db.prepare(`INSERT INTO gpg_vault
+      (id, fingerprint, key_id, name_real, name_email, public_key_armored, ssh_public_key, encrypted_secret_key, encryption_nonce, encryption_tag, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .run('default', 'FPR1', 'KEYID1', 'ccserver', 'ccserver@example.com', '-----BEGIN PGP PUBLIC KEY-----', 'ssh-ed25519 AAAA...', Buffer.from('ct'), Buffer.from('nonce'), Buffer.from('tag'), 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM gpg_vault').get().c, 1);
+  assert.throws(() => {
+    db.prepare(`INSERT INTO gpg_vault
+        (id, fingerprint, key_id, name_real, name_email, public_key_armored, ssh_public_key, encrypted_secret_key, encryption_nonce, encryption_tag, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .run('other', 'FPR1', 'KEYID2', 'ccserver', 'ccserver@example.com', '-----BEGIN PGP PUBLIC KEY-----', 'ssh-ed25519 AAAA...', Buffer.from('ct'), Buffer.from('nonce'), Buffer.from('tag'), 2);
+  }, /UNIQUE/, 'fingerprint must be unique');
+  db.prepare('INSERT INTO webauthn_credentials (id, public_key, counter, label, created_at) VALUES (?,?,?,?,?)')
+    .run('cred-vault-1', Buffer.from('pubkey2'), 0, 'Vault Key', 1);
+  db.prepare(`INSERT INTO gpg_vault_credentials
+      (credential_id, vault_id, wrapped_key, wrap_nonce, wrap_tag, created_at)
+      VALUES (?,?,?,?,?,?)`)
+    .run('cred-vault-1', 'default', Buffer.from('wrapped'), Buffer.from('n'), Buffer.from('t'), 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM gpg_vault_credentials').get().c, 1);
+  db.prepare('DELETE FROM webauthn_credentials WHERE id = ?').run('cred-vault-1');
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS c FROM gpg_vault_credentials').get().c, 0,
+    'ON DELETE CASCADE must drop the vault wrap when its credential is deleted',
+  );
 });
 
 test('reopening is idempotent (migrations do not re-apply) and data survives', () => {

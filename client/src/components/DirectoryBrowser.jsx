@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
-import { authFetch, getToken } from '../auth.js';
+import { authFetch, getToken, resolveAuthMode } from '../auth.js';
 import { displayPath } from '../displayPath.js';
 import { formatSize } from '../formatSize.js';
 import { isPreviewable } from '../previewExts.js';
@@ -105,6 +105,7 @@ function loadSandboxOpts(path, globalDefaults) {
       return {
         gpg: !!parsed.gpg,
         sshAgent: !!parsed.sshAgent,
+        gpgVault: !!parsed.gpgVault,
         tools: {
           rtk: parsed.tools?.rtk ?? fallbackTools.rtk,
           codeReviewGraph: parsed.tools?.codeReviewGraph ?? fallbackTools.codeReviewGraph,
@@ -152,6 +153,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // while null everything stays enabled (old-server fallback, same as
   // availableApps).
   const [sandboxAvailable, setSandboxAvailable] = useState(null);
+  // gpgVault (plan: gpg-agent-vault) is a passkey-login-only feature -- this
+  // component has no other reason to know authMode, so it resolves it
+  // locally rather than threading a new prop through App.jsx, same
+  // independent-resolution pattern GeneralSection.jsx/PasskeysSection.jsx
+  // already use. null until resolved (checkbox stays enabled meanwhile,
+  // same old-server-fallback posture as availableApps/sandboxAvailable).
+  const [authMode, setAuthMode] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    resolveAuthMode().then((m) => { if (!cancelled) setAuthMode(m); });
+    return () => { cancelled = true; };
+  }, []);
   // Which agent CLIs the server can actually launch ({ claude, opencode,
   // copilot, codex, commandcode } booleans), from /api/dirs/home. null until
   // the fetch resolves; while null every picker entry stays enabled
@@ -764,6 +777,15 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           />
           ssh-agentを転送する
         </label>
+        <label className={`open-menu-suboption${authMode !== 'passkey' ? ' open-menu-suboption-disabled' : ''}`} title={authMode !== 'passkey' ? 'パスキーログイン限定機能です' : ''}>
+          <input
+            type="checkbox"
+            disabled={authMode !== 'passkey'}
+            checked={authMode !== 'passkey' ? false : sandboxOpts.gpgVault}
+            onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpgVault: e.target.checked })}
+          />
+          GPGボルトで署名・SSH pushする
+        </label>
         <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
           <input
             type="checkbox"
@@ -1163,6 +1185,15 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                     />
                     ssh-agentを転送する (両ワーカー共通)
                   </label>
+                  <label className={`open-menu-suboption${authMode !== 'passkey' ? ' open-menu-suboption-disabled' : ''}`} title={authMode !== 'passkey' ? 'パスキーログイン限定機能です' : ''}>
+                    <input
+                      type="checkbox"
+                      disabled={authMode !== 'passkey'}
+                      checked={authMode !== 'passkey' ? false : sandboxOpts.gpgVault}
+                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpgVault: e.target.checked })}
+                    />
+                    GPGボルトで署名・SSH pushする (両ワーカー共通)
+                  </label>
                   <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
                     <input
                       type="checkbox"
@@ -1218,6 +1249,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                             }))}
                           />
                           {role} ssh-agent
+                        </label>
+                        <label className={`open-menu-suboption${authMode !== 'passkey' ? ' open-menu-suboption-disabled' : ''}`} title={authMode !== 'passkey' ? 'パスキーログイン限定機能です' : ''}>
+                          <input
+                            type="checkbox"
+                            disabled={authMode !== 'passkey'}
+                            checked={authMode !== 'passkey' ? false : comboRoleSandbox[role].gpgVault}
+                            onChange={(e) => setComboRoleSandbox((s) => ({
+                              ...s,
+                              [role]: { ...s[role], gpgVault: e.target.checked },
+                            }))}
+                          />
+                          {role} GPGボルト
                         </label>
                         <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
                           <input
@@ -1307,6 +1350,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                           }))}
                         />
                         オーケストレーター ssh-agent
+                      </label>
+                      <label className={`open-menu-suboption${authMode !== 'passkey' ? ' open-menu-suboption-disabled' : ''}`} title={authMode !== 'passkey' ? 'パスキーログイン限定機能です' : ''}>
+                        <input
+                          type="checkbox"
+                          disabled={authMode !== 'passkey'}
+                          checked={authMode !== 'passkey' ? false : comboRoleSandbox.orchestrator.gpgVault}
+                          onChange={(e) => setComboRoleSandbox((s) => ({
+                            ...s,
+                            orchestrator: { ...s.orchestrator, gpgVault: e.target.checked },
+                          }))}
+                        />
+                        オーケストレーター GPGボルト
                       </label>
                       <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
                         <input

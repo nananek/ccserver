@@ -41,7 +41,11 @@ import { resolveAuthMode } from '../authMode.js';
 // have a row (the CLI/other routes that would create one all refuse outside
 // passkey mode too), so this stays a clear 400 rather than a confusing
 // "invalid"/"verification failed" for every possible input.
-function requirePasskeyMode(reply) {
+//
+// Exported for routes/gpgVault.js to reuse verbatim (rather than duplicating
+// the check) -- the GPG vault is itself a passkey-only feature (plan:
+// gpg-agent-vault), and two independent copies of this guard could drift.
+export function requirePasskeyMode(reply) {
   if (resolveAuthMode() === 'passkey') return true;
   reply.code(400).send({ error: 'WebAuthn/one-time login tokens are only used when CCSERVER_AUTH_MODE=passkey' });
   return false;
@@ -141,6 +145,13 @@ export async function authRoute(fastify, opts) {
       // sending allowCredentials: [] and letting the browser offer whatever
       // ccserver passkeys it already has for this rpID.
       authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
+      // Requests the PRF (hmac-secret) extension's capability at creation
+      // time (plan: gpg-agent-vault) -- on most authenticators, PRF can only
+      // be evaluated later (at a get() ceremony) for a credential that
+      // requested it here at MakeCredential time. No eval salt needed yet;
+      // routes/gpgVault.js's step-up ceremonies supply one later. Harmless
+      // no-op for an authenticator/browser that doesn't support PRF at all.
+      extensions: { prf: {} },
     });
     const flowId = startChallengeFlow('registration', options.challenge);
     reply.header('Set-Cookie', flowCookieHeader(flowId, { secure: request.protocol === 'https' }));

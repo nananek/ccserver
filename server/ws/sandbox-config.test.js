@@ -53,6 +53,21 @@ test('persistentHome is false only for an explicit false value', () => {
   });
 });
 
+test('gpgVault (plan: gpg-agent-vault) is opt-in and only true for an explicit true value', () => {
+  withConfig({ gpgVault: true }, () => {
+    assert.equal(loadSandboxConfig().gpgVault, true);
+  });
+  withConfig({ gpgVault: false }, () => {
+    assert.equal(loadSandboxConfig().gpgVault, false);
+  });
+  withConfig({ gpgVault: 'yes' }, () => {
+    assert.equal(loadSandboxConfig().gpgVault, false, 'non-boolean falls back to the default (off)');
+  });
+  withConfig({}, () => {
+    assert.equal(loadSandboxConfig().gpgVault, false, 'absent defaults to off, like gpg/sshAgent');
+  });
+});
+
 test('forceSandbox is true only for an explicit true value', () => {
   withConfig({ forceSandbox: true }, () => {
     assert.equal(loadSandboxConfig().forceSandbox, true);

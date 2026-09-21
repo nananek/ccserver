@@ -29,6 +29,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCKET_DIR_NAME } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
+import * as gpgVaultAgent from './gpgVaultAgent.js';
 import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeychain, isBlockedCredentialBind, agentConfigDirs } from './sandbox-seatbelt.js';
 import { startNetworkBroker, buildIsolatedProxyEnv, normalizeNetworkSettings } from './network-broker.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
@@ -620,6 +621,17 @@ export function loadSandboxConfig() {
   // the whole sandboxed process, not just git -- see the docker+gitBroker
   // bypass warning below for how much a live agent socket widens the hole.
   const sshAgent = raw.sshAgent === true;
+  // GPG vault (plan: gpg-agent-vault): forward the MANAGED vault agent's
+  // sockets (server/ws/gpgVaultAgent.js) instead of the host's own
+  // already-unlocked gpg-agent/ssh-agent. Off by default like gpg/sshAgent
+  // above -- buildSandboxSpawn refuses this launch loudly (not silently) if
+  // the vault is locked or was never set up (passkey-mode-only feature).
+  const gpgVault = raw.gpgVault === true;
+  // Lock-policy hardening knob for the vault's auto-lock sweep (see
+  // gpgVaultAgent.js's startAutoLockSweep) -- deliberately read there, not
+  // returned from here: it's read independently of a per-launch spawn, at
+  // lock-policy-decision time, so folding it into this per-launch config
+  // object would be misleading about when it's actually consulted.
   // Repo-scoped git credential broker: HTTPS credential helper + SSH gate,
   // both checked against the session cwd's own repo + submodules, and gh
   // CLI disabled (its API calls can't be repo-scoped without TLS
@@ -773,7 +785,7 @@ export function loadSandboxConfig() {
   // cannot drift apart -- see that function's header comment.
   const network = normalizeNetworkSettings(raw.network);
   return {
-    docker, persistentHome, gpg, sshAgent, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps, network,
+    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps, network,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -1407,7 +1419,12 @@ const NO_NETWORK_BROKER_HANDLE = Object.freeze({
 //   networkBroker / networkBrokerHost - when set, injects HTTP(S)_PROXY env
 //             pointed at the broker (see buildIsolatedProxyEnv) before the
 //             sandbox's own extraEnv, so an operator override still wins.
-function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, mcpToken = null, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null, networkBroker = null, networkBrokerHost = BWRAP_ISOLATION_GATEWAY }) {
+//   gpgVault - { homeDir, sockets, fingerprint, nameReal, nameEmail } from
+//             gpgVaultAgent.getUnlockedAgentInfo(), or null (plan:
+//             gpg-agent-vault). Resolved once by the caller (buildSandboxSpawn),
+//             not fetched in here -- mirrors gitBroker/commitGuard/
+//             networkBroker, which are also caller-resolved objects.
+function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault = null, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, mcpToken = null, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null, networkBroker = null, networkBrokerHost = BWRAP_ISOLATION_GATEWAY }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1665,6 +1682,39 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, extraBinds
     }
   }
 
+  // GPG vault (plan: gpg-agent-vault): forward the MANAGED vault agent's
+  // sockets instead -- a different, newer mechanism from the `gpg` block
+  // above (which forwards the HOST's own already-unlocked gpg-agent). Its
+  // own target dir (~/.gnupg-vault under docker, XDG_RUNTIME_DIR/gnupg-vault
+  // otherwise) is deliberately distinct from `gnupgHome`/`gnupg` above so the
+  // two mechanisms cannot collide on-path even if both are enabled at once
+  // (buildSandboxSpawn warns when that happens). Security-critical: only
+  // individual PUBLIC files (pubring.kbx/trustdb.gpg/gpg.conf) and live
+  // sockets are ever bound here -- never the whole homeDir -- so
+  // private-keys-v1.d/, openpgp-revocs.d/, and sshcontrol stay unreachable
+  // from the sandbox by construction (see gpgVaultAgent.js's header comment).
+  // gpgVault is the caller-resolved object (see this function's own header
+  // comment) -- reused as-is by the git-identity injection further down.
+  if (gpgVault) {
+    const vault = gpgVault;
+    const targetDir = docker ? join(HOME, '.gnupg-vault') : join(XDG_RUNTIME_DIR, 'gnupg-vault');
+    args.push('--dir', targetDir);
+    for (const file of ['pubring.kbx', 'trustdb.gpg', 'gpg.conf']) {
+      const src = join(vault.homeDir, file);
+      if (existsSync(src)) args.push('--ro-bind-try', src, join(targetDir, file));
+    }
+    for (const src of Object.values(vault.sockets)) {
+      if (src && existsSync(src)) args.push('--bind-try', src, join(targetDir, basename(src)));
+    }
+    args.push('--setenv', 'GNUPGHOME', targetDir);
+    if (vault.sockets.agentSsh && existsSync(vault.sockets.agentSsh)) {
+      // Unlike authSock above (bind source==dest, a live host path), the
+      // vault's ssh socket lands at a different in-sandbox path, so
+      // SSH_AUTH_SOCK must point at the bind TARGET here.
+      args.push('--setenv', 'SSH_AUTH_SOCK', join(targetDir, basename(vault.sockets.agentSsh)));
+    }
+  }
+
   // gh: replace wherever it resolves (host PATH or common install paths)
   // with a wrapper that relays to the git-broker instead of running for
   // real inside the sandbox (see sandbox-gh-wrapper.cjs / ghAllowlist.js).
@@ -1764,26 +1814,58 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, extraBinds
   // LOCAL commit records -- no network/credential scope involved -- so it's
   // wired independently and stays active even when gitBroker is disabled.
   //
-  // core.hooksPath is set via the GIT_CONFIG_COUNT/KEY/VALUE env mechanism
-  // (git 2.31+) instead of overwriting ~/.gitconfig the way GENERATED_GITCONFIG
-  // does above: gitBroker's ro-bind is safe to always apply (it replaces a
-  // file this feature already fully owns, credential.helper), but doing the
-  // same thing here -- with commitMessageGuard enabled and gitBroker
-  // disabled -- would newly clobber an agent-written ~/.gitconfig (e.g.
-  // user.name/user.email set inside a persistent HOME) that this feature has
-  // no business touching. GIT_CONFIG_COUNT/KEY_0/VALUE_0 is unused elsewhere
-  // in this codebase (verified) -- a future feature reusing the same
-  // mechanism must extend this block (bump the count) rather than add a
-  // second, colliding one.
+  // core.hooksPath (commit-guard, below) and user.signingkey/commit.gpgsign/
+  // gpg.program/user.name/user.email (GPG vault, below) are set via the
+  // GIT_CONFIG_COUNT/KEY/VALUE env mechanism (git 2.31+) instead of
+  // overwriting ~/.gitconfig the way GENERATED_GITCONFIG does above:
+  // gitBroker's ro-bind is safe to always apply (it replaces a file this
+  // feature already fully owns, credential.helper), but doing the same thing
+  // here would newly clobber an agent-written ~/.gitconfig (e.g. user.name/
+  // user.email set inside a persistent HOME) that these features have no
+  // business touching. Both features push into the same gitConfigEntries
+  // list and share ONE GIT_CONFIG_COUNT -- a future feature reusing this
+  // mechanism must do the same (push here) rather than add a second,
+  // colliding GIT_CONFIG_COUNT block.
+  const gitConfigEntries = [];
+
+  // Commit-message guard: an independently-toggled commit-msg hook (see
+  // commitGuard.js / sandbox-commit-msg-hook.cjs) that blocks a `git commit`
+  // whose message matches a blocked pattern (built-in: a Claude-Session:
+  // trailer or a claude.ai/code/session_ URL -- see loadSandboxConfig's
+  // commitMessageGuard). Unlike gitBroker above, this only concerns what a
+  // LOCAL commit records -- no network/credential scope involved -- so it's
+  // wired independently and stays active even when gitBroker is disabled.
   if (commitGuard) {
     args.push('--ro-bind', COMMIT_MSG_HOOK_SCRIPT, SANDBOX_COMMIT_GUARD_HOOK_PATH);
     args.push('--ro-bind', commitGuard.configPath, SANDBOX_COMMIT_GUARD_CONFIG_PATH);
-    args.push(
-      '--setenv', 'GIT_CONFIG_COUNT', '1',
-      '--setenv', 'GIT_CONFIG_KEY_0', 'core.hooksPath',
-      '--setenv', 'GIT_CONFIG_VALUE_0', SANDBOX_COMMIT_GUARD_HOOKS_DIR,
-      '--setenv', 'CCSANDBOX_COMMIT_GUARD_CONFIG', SANDBOX_COMMIT_GUARD_CONFIG_PATH,
+    args.push('--setenv', 'CCSANDBOX_COMMIT_GUARD_CONFIG', SANDBOX_COMMIT_GUARD_CONFIG_PATH);
+    gitConfigEntries.push(['core.hooksPath', SANDBOX_COMMIT_GUARD_HOOKS_DIR]);
+  }
+
+  // GPG vault (plan: gpg-agent-vault): signs commits with the vault's key
+  // and sets the committer identity to the SAME name/email used as the
+  // key's own UID (see db.js v8's migration comment for why -- an unset
+  // user.name/user.email would break `git commit` outright in an ephemeral
+  // sandbox HOME, and a mismatched identity would be a confusing signed
+  // commit whose author doesn't match the signing key). gpg.program is left
+  // as the bare command name -- it resolves via the sandbox's own PATH to
+  // /usr/bin/gpg (already ro-bound via /usr).
+  if (gpgVault) {
+    const vault = gpgVault;
+    gitConfigEntries.push(
+      ['user.signingkey', vault.fingerprint],
+      ['commit.gpgsign', 'true'],
+      ['gpg.program', 'gpg'],
+      ['user.name', vault.nameReal],
+      ['user.email', vault.nameEmail],
     );
+  }
+
+  if (gitConfigEntries.length > 0) {
+    args.push('--setenv', 'GIT_CONFIG_COUNT', String(gitConfigEntries.length));
+    gitConfigEntries.forEach(([key, value], i) => {
+      args.push('--setenv', `GIT_CONFIG_KEY_${i}`, key, '--setenv', `GIT_CONFIG_VALUE_${i}`, value);
+    });
   }
 
   // User-configured extra binds (ssh keys, custom config, etc.). Use *-try
@@ -2146,7 +2228,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   if (resolve(cwd) === '/') {
     throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
   }
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, commitMessageGuard, network: netCfg, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, network: netCfg, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailableFn();
   // Network isolation (see network-broker.js): server-config-only, no
   // per-launch client override -- the client has no isolation toggle, so
@@ -2170,10 +2252,46 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
   const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
+  const gpgVault = sandboxOpts?.gpgVault ?? cfgGpgVault;
   // Opt-in tool provisioning (rtk / code-review-graph), merged like gpg/sshAgent
   // from the config default + the client's per-session sandboxOpts.tools.
   // Thread cfgTools through instead of re-reading the config file.
   const tools = resolveTools(sandboxOpts, cfgTools);
+
+  // GPG vault (plan: gpg-agent-vault): fail loudly and early, before any
+  // broker starts (gitBroker/commitGuard/networkBroker below all leak a live
+  // child process + runtime dir if a LATER step throws -- see their own
+  // cleanup blocks -- so refusing here, first, needs none of that dance).
+  // A locked/missing vault must never silently degrade to "no GPG" the way a
+  // missing rootlesskit tooling degrades network isolation -- this session
+  // explicitly asked to sign/push with a specific key, and launching without
+  // it would be a silent downgrade of what the caller requested.
+  if (gpgVault && !gpgVaultAgent.isUnlocked()) {
+    throw new Error(
+      gpgVaultAgent.vaultExists()
+        ? 'gpgVault was requested but the GPG vault is currently locked -- unlock it from Settings before launching.'
+        : 'gpgVault was requested but no GPG vault has been set up yet -- set one up from Settings first.',
+    );
+  }
+  // gpgVault uses its own target path (~/.gnupg-vault / XDG_RUNTIME_DIR/
+  // gnupg-vault, see buildBwrapArgs) specifically so it cannot collide
+  // on-path with the legacy gpg/sshAgent host-forwarding flags -- but having
+  // both active is still almost certainly a mistake (two different agents
+  // both offering SSH auth, whichever bind runs last inside buildBwrapArgs
+  // wins on SSH_AUTH_SOCK), so warn instead of silently accepting it, same
+  // posture as the docker+gitBroker+sshAgent warning below.
+  if (gpgVault && (gpg || sshAgent)) {
+    console.warn(
+      '[sandbox] gpgVault is enabled alongside the legacy gpg/sshAgent host-forwarding flags for the same '
+      + 'launch -- gpgVault wins for SSH_AUTH_SOCK. Turn off gpg/sshAgent for this launch if that is not intended.',
+    );
+  }
+  // Resolved once here (like gitBroker/commitGuard/networkBroker below) and
+  // passed down as a plain object -- null when not requested -- rather than
+  // having buildBwrapArgs/buildSeatbeltLaunch each independently reach into
+  // gpgVaultAgent.js. The isUnlocked() check above guarantees this succeeds
+  // when gpgVault is true.
+  const gpgVaultInfo = gpgVault ? gpgVaultAgent.getUnlockedAgentInfo() : null;
 
   // ssh-agent forwarding is opt-in (see loadSandboxConfig). When on, an
   // explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
@@ -2350,7 +2468,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
           meta: metaSocketPath, reviewer: reviewerSocketPath,
         },
         mcpToken,
-        extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, claudeDir: installDir,
+        extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, gpgVault: gpgVaultInfo, claudeDir: installDir,
         orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
         // Network isolation (see seatbeltIsolatedNetworkRules): isolation-enabled
         // only
@@ -2420,7 +2538,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   let bwrapArgs;
   let innerCmd;
   try {
-    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker || needBwrapIsolation, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools, networkBroker });
+    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker || needBwrapIsolation, gpg, gpgVault: gpgVaultInfo, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools, networkBroker });
     // command-code's launcher is a Node script. Run it explicitly via the
     // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
     // otherwise require /usr/bin/node to be present inside the sandbox's PATH.

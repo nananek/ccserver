@@ -1488,7 +1488,9 @@ body {
   padding: 8px 0;
 }
 
-.general-setting-row select {
+.general-setting-row select,
+.general-setting-row input[type="text"],
+.general-setting-row input[type="email"] {
   background: var(--bg-secondary);
   color: var(--text-primary);
   border: 1px solid var(--border);
@@ -1545,6 +1547,25 @@ body {
 .settings-error {
   color: var(--error);
   padding: 16px 0;
+}
+
+/* GPG vault (plan: gpg-agent-vault): GitHub registration info panel. */
+.settings-subsection {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-code-block {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 4px 0 8px;
 }
 
 .sandbox-list {

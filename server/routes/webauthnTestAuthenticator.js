@@ -90,7 +90,17 @@ export function createRegistrationResponse({ rpID, origin, challenge, credential
 // body-shaped for authenticate-verify. `counter` is the value this
 // (simulated) authenticator claims for this specific assertion -- tests use
 // it to exercise both the happy path and counter-replay rejection.
-export function createAuthenticationResponse({ rpID, origin, challenge, credentialId, privateKey, counter }) {
+//
+// `prfResultFirst` (optional, a Buffer) fakes a PRF extension result (plan:
+// gpg-agent-vault) -- legitimate to hand-roll rather than actually simulate
+// hmac-secret, since clientExtensionResults is NOT covered by the assertion
+// signature (verified against @simplewebauthn/server's own verification code
+// while building that feature): the server only ever treats a PRF value as
+// decrypt-or-fail input after the signature above already proved a live
+// ceremony against a real registered credential happened, so a fake-but-
+// consistent value here exercises the exact same code path a real
+// PRF-capable authenticator would drive.
+export function createAuthenticationResponse({ rpID, origin, challenge, credentialId, privateKey, counter, prfResultFirst }) {
   const authData = buildAuthenticatorData({ rpID, counter, attestedCredential: null });
   const clientDataJSON = buildClientDataJSON('webauthn.get', challenge, origin);
   const clientDataHash = createHash('sha256').update(clientDataJSON).digest();
@@ -104,7 +114,9 @@ export function createAuthenticationResponse({ rpID, origin, challenge, credenti
       authenticatorData: isoBase64URL.fromBuffer(authData),
       signature: isoBase64URL.fromBuffer(signature),
     },
-    clientExtensionResults: {},
+    clientExtensionResults: prfResultFirst
+      ? { prf: { results: { first: isoBase64URL.fromBuffer(prfResultFirst) } } }
+      : {},
     type: 'public-key',
   };
 }

@@ -346,6 +346,66 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    // v8: GPG-agent vault (plan: gpg-agent-vault). Passkey-mode-only feature
+    // -- a server-generated, dedicated GPG keypair whose secret key material
+    // is stored only in AES-256-GCM-encrypted form, decryptable only via a
+    // live WebAuthn PRF ceremony against a registered passkey (see
+    // server/gpgVaultCrypto.js). Single-user design, same convention as v7:
+    // no user_id column -- gpg_vault is a true singleton (id is a fixed
+    // constant, 'default', enforced by being the PRIMARY KEY).
+    version: 8,
+    up(db) {
+      db.exec(`
+        -- The one GPG identity this server ever generates.
+        -- public_key_armored/ssh_public_key/fingerprint/key_id/name_real/
+        -- name_email are cached plaintext from setup time -- they are public
+        -- artifacts (exactly what you'd paste into GitHub's "GPG keys"/"SSH
+        -- keys" settings, or set as git's user.name/user.email), not
+        -- secrets, so serving them needs no unlock. name_real/name_email are
+        -- the same values used as the GPG key's own UID (Name-Real/
+        -- Name-Email) at generation time -- sandbox.js reuses them to set
+        -- user.name/user.email for gpgVault-enabled sessions (see
+        -- ws/sandbox.js), so a signed commit's author identity always
+        -- matches the signing key's own UID instead of leaving user.name/
+        -- user.email unset (which would break 'git commit' outright in an
+        -- ephemeral sandbox HOME with no persistent ~/.gitconfig).
+        -- encrypted_secret_key is the AES-256-GCM ciphertext of
+        -- \`gpg --export-secret-keys\` binary output, encrypted under a
+        -- random 32-byte Vault Key (VK) that is never itself stored --
+        -- only wrapped copies of it live in gpg_vault_credentials below.
+        CREATE TABLE gpg_vault (
+          id                    TEXT PRIMARY KEY,
+          fingerprint           TEXT NOT NULL UNIQUE,
+          key_id                TEXT NOT NULL,
+          name_real             TEXT NOT NULL,
+          name_email            TEXT NOT NULL,
+          public_key_armored    TEXT NOT NULL,
+          ssh_public_key        TEXT NOT NULL,
+          encrypted_secret_key  BLOB NOT NULL,
+          encryption_nonce      BLOB NOT NULL,
+          encryption_tag        BLOB NOT NULL,
+          created_at            INTEGER NOT NULL
+        );
+
+        -- One row per passkey that can unlock the vault: VK wrapped under a
+        -- key derived (HKDF-SHA256) from that credential's own WebAuthn PRF
+        -- output. credential_id doubles as the PK -- at most one wrap per
+        -- credential. ON DELETE CASCADE means a future passkey-deletion
+        -- feature automatically drops the matching wrap instead of leaving
+        -- an orphan.
+        CREATE TABLE gpg_vault_credentials (
+          credential_id  TEXT PRIMARY KEY REFERENCES webauthn_credentials(id) ON DELETE CASCADE,
+          vault_id       TEXT NOT NULL REFERENCES gpg_vault(id) ON DELETE CASCADE,
+          wrapped_key    BLOB NOT NULL,
+          wrap_nonce     BLOB NOT NULL,
+          wrap_tag       BLOB NOT NULL,
+          created_at     INTEGER NOT NULL
+        );
+        CREATE INDEX idx_gpg_vault_credentials_vault_id ON gpg_vault_credentials(vault_id);
+      `);
+    },
+  },
 ];
 
 // Runs pending migrations in order. Each one executes inside BEGIN IMMEDIATE
