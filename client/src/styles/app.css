@@ -1821,6 +1821,11 @@ body {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 13px;
   letter-spacing: 0.02em;
+  /* M5 fix: the full fingerprint (not a 4-byte prefix) is what's shown here
+     now, so it must be able to wrap instead of forcing the banner wide or
+     overflowing on narrow viewports. */
+  white-space: normal;
+  word-break: break-all;
 }
 
 .pairing-my-fingerprint {

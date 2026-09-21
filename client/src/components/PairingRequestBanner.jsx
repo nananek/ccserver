@@ -25,12 +25,6 @@ const DIRECTION_LABELS = {
   outbound_initiated: '自分から接続',
 };
 
-function shortFingerprint(fp) {
-  if (typeof fp !== 'string') return '';
-  const parts = fp.split(':');
-  return parts.length > 4 ? `${parts.slice(0, 4).join(':')}…` : fp;
-}
-
 export default function PairingRequestBanner() {
   const [pending, setPending] = useState([]);
   const [busyId, setBusyId] = useState(null);
@@ -96,8 +90,13 @@ export default function PairingRequestBanner() {
           <div key={r.id} className="approval-banner">
             <div className="approval-banner-main">
               <span className="approval-banner-kind">ペアリング要求</span>
+              {/* M5 fix (vuln_scan report): this is the ONLY moment a human
+                  can catch an on-path MITM at TOFU pairing time, so the
+                  FULL fingerprint must be visible directly, not truncated
+                  to a 4-byte prefix behind a hover tooltip that most users
+                  never see. */}
               <span className="pairing-banner-fingerprint" title={r.fingerprint}>
-                {shortFingerprint(r.fingerprint)}
+                {typeof r.fingerprint === 'string' ? r.fingerprint : ''}
               </span>
               <span className="approval-banner-meta">
                 {r.hostnameClaimed && <span title="相手の自己申告ホスト名(認証には使われません)">{r.hostnameClaimed}</span>}
