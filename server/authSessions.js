@@ -8,10 +8,22 @@
 // cookie value back out later, so a minimal manual implementation of both
 // avoids pulling in a plugin for what's a handful of lines.
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { getDb } from './db.js';
 
 export const SESSION_COOKIE_NAME = 'ccserver_session';
+
+// L2 fix (vuln_scan report): auth_sessions.id used to BE the raw session
+// cookie value, stored in the clear -- anyone with read access to the
+// SQLite file (a different local user, a backup, an unrelated file-read
+// bug) could lift a row's id and use it as a live session cookie with no
+// further work, exactly like loginTokens.js already avoids for
+// login_tokens (see its header comment). Same fix here: only the SHA-256
+// digest of the session id is ever persisted; the raw value lives only in
+// the Set-Cookie header and the request that carries it back.
+export function hashSessionId(rawSessionId) {
+  return createHash('sha256').update(rawSessionId).digest('hex');
+}
 
 // Sliding expiration (plan decision 2): 30 days, refreshed on use.
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -45,11 +57,12 @@ export function parseCookieHeader(header) {
 function touchSession(sessionId) {
   const db = getDb();
   const now = Date.now();
-  const row = db.prepare('SELECT expires_at, last_seen_at FROM auth_sessions WHERE id = ?').get(sessionId);
+  const idHash = hashSessionId(sessionId);
+  const row = db.prepare('SELECT expires_at, last_seen_at FROM auth_sessions WHERE id = ?').get(idHash);
   if (!row || row.expires_at <= now) return false;
   if (!row.last_seen_at || now - row.last_seen_at >= SESSION_TOUCH_INTERVAL_MS) {
     db.prepare('UPDATE auth_sessions SET expires_at = ?, last_seen_at = ? WHERE id = ?')
-      .run(now + SESSION_TTL_MS, now, sessionId);
+      .run(now + SESSION_TTL_MS, now, idHash);
   }
   return true;
 }
@@ -82,7 +95,7 @@ export function createSession({ authMethod = null, credentialId = null, registra
   db.prepare(
     'INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at, auth_method, credential_id, stepup_at, registration_grant) '
     + 'VALUES (?, ?, ?, NULL, ?, ?, NULL, ?)'
-  ).run(id, now, now + SESSION_TTL_MS, authMethod, credentialId, registrationGrant ? 1 : 0);
+  ).run(hashSessionId(id), now, now + SESSION_TTL_MS, authMethod, credentialId, registrationGrant ? 1 : 0);
   return id;
 }
 
@@ -104,8 +117,13 @@ export function getRequestSession(request) {
   if (!id) return null;
   const row = getDb().prepare(
     'SELECT id, created_at, expires_at, auth_method, credential_id, stepup_at, registration_grant FROM auth_sessions WHERE id = ?'
-  ).get(id);
+  ).get(hashSessionId(id));
   if (!row || row.expires_at <= Date.now()) return null;
+  // row.id is the stored HASH, not the raw cookie value -- callers that need
+  // to feed a session id back into another lookup (markStepUp,
+  // consumeRegistrationGrant) must use getRequestSessionId(request) instead,
+  // never this field. Kept on the object for identification/logging, not
+  // reuse as a fresh WHERE id = ? argument.
   return row;
 }
 
@@ -113,18 +131,23 @@ export function hasFreshStepUp(session, now = Date.now()) {
   return !!session && typeof session.stepup_at === 'number' && now - session.stepup_at < STEPUP_WINDOW_MS;
 }
 
+// `sessionId` must be the RAW cookie value (e.g. getRequestSessionId(request)),
+// never a session row's .id field (which is the stored hash) -- this hashes
+// its input itself, so passing an already-hashed value would hash it twice
+// and silently match nothing.
 export function markStepUp(sessionId, credentialId) {
   getDb().prepare('UPDATE auth_sessions SET stepup_at = ?, credential_id = COALESCE(?, credential_id) WHERE id = ?')
-    .run(Date.now(), credentialId, sessionId);
+    .run(Date.now(), credentialId, hashSessionId(sessionId));
 }
 
 // Single-use: atomically clears the grant, returning true only if this call
 // is the one that consumed it (two concurrent registrations cannot both use
 // the same grant).
+// `sessionId` must be the RAW cookie value -- see markStepUp's comment.
 export function consumeRegistrationGrant(sessionId) {
   const result = getDb().prepare(
     'UPDATE auth_sessions SET registration_grant = 0 WHERE id = ? AND registration_grant = 1'
-  ).run(sessionId);
+  ).run(hashSessionId(sessionId));
   return result.changes === 1;
 }
 

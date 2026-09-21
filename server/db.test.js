@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -123,6 +123,30 @@ test('pragmas are applied on open', () => {
   // NORMAL = 1
   assert.equal(db.prepare('PRAGMA synchronous').get().synchronous, 1);
   assert.equal(db.prepare('PRAGMA busy_timeout').get().timeout, 5000);
+});
+
+// L2 fix (vuln_scan report): DatabaseSync creates the file with the
+// process's ambient umask (typically 0644 -- world/group-readable) with no
+// way to pass a mode of its own, which is a problem given the file holds
+// session/token hashes, GPG vault wraps, etc. getDb() now force-chmods it
+// to 0600 on every open.
+test('getDb() forces the database file to 0600, regardless of a permissive umask', () => {
+  closeDb();
+  const before = process.umask(0o022);
+  try {
+    const db = getDb();
+    // Simulate a pre-existing file created before this fix (or under a
+    // permissive umask by some other path) to prove getDb() self-heals it,
+    // not just "happens to create it correctly".
+    chmodSync(dbPath(), 0o644);
+    closeDb();
+    const reopened = getDb();
+    assert.equal(statSync(dbPath()).mode & 0o777, 0o600, 'must be forced back to owner-only on every open');
+    void db;
+    void reopened;
+  } finally {
+    process.umask(before);
+  }
 });
 
 test('initDb() resolves the same singleton as getDb()', () => {

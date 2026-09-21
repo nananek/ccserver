@@ -13,9 +13,11 @@ import {
   SESSION_TOUCH_INTERVAL_MS,
   STEPUP_WINDOW_MS,
   getRequestSession,
+  getRequestSessionId,
   hasFreshStepUp,
   markStepUp,
   consumeRegistrationGrant,
+  hashSessionId,
 } from './authSessions.js';
 
 let tmpRoot;
@@ -53,8 +55,12 @@ test('verifySessionCookie: false when the cookie names a session that does not e
 test('verifySessionCookie: true for a live session, parsed out of a multi-cookie header', () => {
   const db = getDb();
   const now = Date.now();
+  // L2 fix: auth_sessions.id is now the SHA-256 hash of the raw session id
+  // (never the raw value itself) -- inserted here directly (bypassing
+  // createSession) to test verifySessionCookie's own hashing/lookup, so the
+  // raw cookie value 's1' must be hashed before it goes in the row.
   db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?,?,?,NULL)')
-    .run('s1', now, now + SESSION_TTL_MS);
+    .run(hashSessionId('s1'), now, now + SESSION_TTL_MS);
   assert.equal(
     verifySessionCookie(requestWithCookie(`other=1; ${SESSION_COOKIE_NAME}=s1; another=2`)),
     true,
@@ -65,7 +71,7 @@ test('verifySessionCookie: false for an expired session', () => {
   const db = getDb();
   const now = Date.now();
   db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?,?,?,NULL)')
-    .run('expired', now - 1000, now - 1);
+    .run(hashSessionId('expired'), now - 1000, now - 1);
   assert.equal(verifySessionCookie(requestWithCookie(`${SESSION_COOKIE_NAME}=expired`)), false);
 });
 
@@ -73,9 +79,9 @@ test('verifySessionCookie: sliding expiration extends expires_at when last_seen_
   const db = getDb();
   const now = Date.now();
   db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?,?,?,NULL)')
-    .run('s2', now, now + 1000);
+    .run(hashSessionId('s2'), now, now + 1000);
   assert.equal(verifySessionCookie(requestWithCookie(`${SESSION_COOKIE_NAME}=s2`)), true);
-  const row = db.prepare('SELECT expires_at, last_seen_at FROM auth_sessions WHERE id = ?').get('s2');
+  const row = db.prepare('SELECT expires_at, last_seen_at FROM auth_sessions WHERE id = ?').get(hashSessionId('s2'));
   assert.ok(row.expires_at >= now + SESSION_TTL_MS, 'expires_at was pushed out to ~now+30d');
   assert.ok(row.last_seen_at !== null, 'last_seen_at was stamped');
 });
@@ -86,11 +92,19 @@ test('verifySessionCookie: throttles the extending UPDATE when last_seen_at is r
   const recentSeen = now - Math.floor(SESSION_TOUCH_INTERVAL_MS / 2);
   const originalExpiry = now + 1000;
   db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?,?,?,?)')
-    .run('s3', now, originalExpiry, recentSeen);
+    .run(hashSessionId('s3'), now, originalExpiry, recentSeen);
   assert.equal(verifySessionCookie(requestWithCookie(`${SESSION_COOKIE_NAME}=s3`)), true);
-  const row = db.prepare('SELECT expires_at, last_seen_at FROM auth_sessions WHERE id = ?').get('s3');
+  const row = db.prepare('SELECT expires_at, last_seen_at FROM auth_sessions WHERE id = ?').get(hashSessionId('s3'));
   assert.equal(row.expires_at, originalExpiry, 'still within the throttle window -- no extending write');
   assert.equal(row.last_seen_at, recentSeen);
+});
+
+test('createSession: the raw id is never the value stored in auth_sessions.id (L2 fix)', () => {
+  const id = createSession();
+  const db = getDb();
+  assert.equal(db.prepare('SELECT id FROM auth_sessions WHERE id = ?').get(id), undefined, 'raw id must not be a row key');
+  const row = db.prepare('SELECT id FROM auth_sessions WHERE id = ?').get(hashSessionId(id));
+  assert.ok(row, 'the SHA-256 hash of the raw id must be the row key instead');
 });
 
 test('createSession: inserts a row that verifySessionCookie then accepts', () => {
@@ -138,12 +152,27 @@ test('createSession records auth_method; neither a passkey login nor a token log
 
 test('hasFreshStepUp honours the window; markStepUp refreshes it', () => {
   const id = createSession({ authMethod: 'login-token' });
-  getDb().prepare('UPDATE auth_sessions SET stepup_at = ? WHERE id = ?').run(Date.now() - STEPUP_WINDOW_MS - 1, id);
+  // L2 fix: the row's key is hashSessionId(id), not id itself.
+  getDb().prepare('UPDATE auth_sessions SET stepup_at = ? WHERE id = ?').run(Date.now() - STEPUP_WINDOW_MS - 1, hashSessionId(id));
   assert.equal(hasFreshStepUp(getRequestSession(reqFor(id))), false);
+  // markStepUp takes the RAW id (like verifySessionCookie/getRequestSession)
+  // and hashes it itself -- see authSessions.js's comment.
   markStepUp(id, 'c9');
   const row = getRequestSession(reqFor(id));
   assert.equal(hasFreshStepUp(row), true);
   assert.equal(row.credential_id, 'c9');
+});
+
+test('markStepUp/consumeRegistrationGrant reject an already-hashed id (must be the raw cookie value)', () => {
+  // Regression for the exact bug the L2 fix could otherwise introduce: a
+  // caller accidentally passing session.id (the stored hash) instead of the
+  // raw cookie id would double-hash and silently match no row.
+  const id = createSession({ authMethod: 'login-token', registrationGrant: true });
+  const wrongInput = hashSessionId(id); // simulates the mistake
+  markStepUp(wrongInput, 'c-should-not-apply');
+  assert.equal(getRequestSession(reqFor(id)).credential_id, null, 'a hashed input must not have matched the row');
+  assert.equal(consumeRegistrationGrant(wrongInput), false, 'a hashed input must not consume the grant either');
+  assert.equal(getRequestSession(reqFor(id)).registration_grant, 1, 'the real grant is untouched');
 });
 
 test('consumeRegistrationGrant is single-use', () => {
@@ -158,6 +187,13 @@ test('getRequestSession: null for no cookie, an unknown id, or an expired sessio
   assert.equal(getRequestSession({ headers: {} }), null);
   assert.equal(getRequestSession(reqFor('nope')), null);
   const id = createSession();
-  getDb().prepare('UPDATE auth_sessions SET expires_at = ? WHERE id = ?').run(Date.now() - 1, id);
+  getDb().prepare('UPDATE auth_sessions SET expires_at = ? WHERE id = ?').run(Date.now() - 1, hashSessionId(id));
   assert.equal(getRequestSession(reqFor(id)), null);
+});
+
+test('getRequestSessionId: the raw cookie value, unmodified (unlike getRequestSession\'s row.id)', () => {
+  assert.equal(getRequestSessionId({ headers: {} }), null);
+  const id = createSession();
+  assert.equal(getRequestSessionId(reqFor(id)), id);
+  assert.notEqual(getRequestSession(reqFor(id)).id, id, 'row.id is the hash, not the raw cookie value');
 });

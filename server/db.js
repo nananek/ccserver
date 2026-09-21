@@ -12,7 +12,7 @@
 //     phases' best-effort operational-state writes, never for user-facing CRUD.
 
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, readFileSync, renameSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -482,6 +482,18 @@ export function getDb() {
     try { mkdirSync(dirname(path), { recursive: true }); } catch { /* open will report */ }
   }
   const db = new DatabaseSync(path);
+  // L2 fix (vuln_scan report): DatabaseSync creates the file using the
+  // process's ambient umask, which on a typical 022 umask leaves it
+  // world/group-readable (0644) -- readable by any other local user despite
+  // holding session tokens, login token hashes, GPG vault wraps, etc. Force
+  // owner-only permissions on every open (idempotent, and self-healing for
+  // a pre-existing file created before this fix). Best-effort: a chmod
+  // failure (unusual filesystem, permissions we don't own) must not block
+  // startup -- the file's contents are still hashed/encrypted for what
+  // actually needs it (see authSessions.js/loginTokens.js/gpgVaultDb.js).
+  if (path !== ':memory:') {
+    try { chmodSync(path, 0o600); } catch { /* best effort */ }
+  }
   applyPragmas(db);
   migrate(db);
   dbInstance = db;

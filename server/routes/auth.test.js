@@ -18,7 +18,9 @@ import { join } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { getDb, closeDb } from '../db.js';
 import { generateLoginToken, hashLoginToken } from '../loginTokens.js';
-import { SESSION_COOKIE_NAME, createSession, markStepUp, STEPUP_WINDOW_MS } from '../authSessions.js';
+import {
+  SESSION_COOKIE_NAME, createSession, markStepUp, STEPUP_WINDOW_MS, hashSessionId,
+} from '../authSessions.js';
 import { FLOW_COOKIE_NAME } from '../webauthnChallenges.js';
 import { generateAuthenticatorKeyPair, createRegistrationResponse, createAuthenticationResponse } from './webauthnTestAuthenticator.js';
 import { authRoute } from './auth.js';
@@ -573,7 +575,7 @@ test('F2: a plain login-token session (no --allow-passkey-registration) cannot r
 
 test('F2 (audit chain step 1): a stolen passkey-login session whose step-up has gone stale cannot enroll the thief\'s passkey', async () => {
   const sessionId = createSession({ authMethod: 'passkey' });
-  getDb().prepare('UPDATE auth_sessions SET stepup_at = ? WHERE id = ?').run(Date.now() - STEPUP_WINDOW_MS - 1000, sessionId);
+  getDb().prepare('UPDATE auth_sessions SET stepup_at = ? WHERE id = ?').run(Date.now() - STEPUP_WINDOW_MS - 1000, hashSessionId(sessionId));
   const attempt = await tryRegister(`${SESSION_COOKIE_NAME}=${sessionId}`);
   assert.equal(attempt.res.statusCode, 403);
   assert.equal(credentialCount(), 0);
@@ -584,7 +586,7 @@ test('F2: step-up expiring between options and verify is re-checked at verify', 
   const cookie = `${SESSION_COOKIE_NAME}=${sessionId}`;
   const optionsRes = await app.inject({ method: 'POST', url: '/api/auth/webauthn/register-options', headers: { host: RP_HOST, cookie } });
   assert.equal(optionsRes.statusCode, 200);
-  getDb().prepare('UPDATE auth_sessions SET stepup_at = ? WHERE id = ?').run(Date.now() - STEPUP_WINDOW_MS - 1000, sessionId);
+  getDb().prepare('UPDATE auth_sessions SET stepup_at = ? WHERE id = ?').run(Date.now() - STEPUP_WINDOW_MS - 1000, hashSessionId(sessionId));
   const { publicKey } = generateAuthenticatorKeyPair();
   const response = createRegistrationResponse({ rpID: RP_HOST, origin: ORIGIN, challenge: optionsRes.json().challenge, credentialId: randomBytes(16), publicKey });
   const verifyRes = await app.inject({
@@ -598,14 +600,14 @@ test('F2: step-up expiring between options and verify is re-checked at verify', 
 test('F2: an --allow-passkey-registration token session registers exactly ONE passkey (bootstrap), then the grant is spent', async () => {
   const cookie = await loginWithToken({ allowPasskeyRegistration: true });
   const sessionId = cookie.split('=')[1];
-  const row = getDb().prepare('SELECT auth_method, registration_grant FROM auth_sessions WHERE id = ?').get(sessionId);
+  const row = getDb().prepare('SELECT auth_method, registration_grant FROM auth_sessions WHERE id = ?').get(hashSessionId(sessionId));
   assert.equal(row.auth_method, 'login-token');
   assert.equal(row.registration_grant, 1);
 
   const first = await tryRegister(cookie);
   assert.equal(first.res.statusCode, 200, first.res.body);
   assert.equal(credentialCount(), 1);
-  assert.equal(getDb().prepare('SELECT registration_grant FROM auth_sessions WHERE id = ?').get(sessionId).registration_grant, 0);
+  assert.equal(getDb().prepare('SELECT registration_grant FROM auth_sessions WHERE id = ?').get(hashSessionId(sessionId)).registration_grant, 0);
 
   const second = await tryRegister(cookie);
   assert.equal(second.res.statusCode, 403, 'grant is single-use');
@@ -694,7 +696,7 @@ test('F2: a passkey login alone is not a step-up -- registering another passkey 
   });
   assert.equal(res.statusCode, 200);
   const sessionId = findCookie(res, SESSION_COOKIE_NAME).split(';')[0].split('=')[1];
-  const row = getDb().prepare('SELECT auth_method, credential_id, stepup_at, registration_grant FROM auth_sessions WHERE id = ?').get(sessionId);
+  const row = getDb().prepare('SELECT auth_method, credential_id, stepup_at, registration_grant FROM auth_sessions WHERE id = ?').get(hashSessionId(sessionId));
   assert.equal(row.auth_method, 'passkey');
   assert.equal(row.credential_id, cred.credentialId.toString('base64url'));
   assert.equal(row.stepup_at, null);

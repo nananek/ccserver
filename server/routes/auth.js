@@ -20,6 +20,7 @@ import {
   createSession,
   sessionCookieHeader,
   getRequestSession,
+  getRequestSessionId,
   hasFreshStepUp,
   markStepUp,
   consumeRegistrationGrant,
@@ -196,7 +197,10 @@ export async function authRoute(fastify, opts) {
     if (!verification.verified) return reply.code(401).send({ error: 'verification failed' });
     getDb().prepare('UPDATE webauthn_credentials SET counter = ?, last_used_at = ? WHERE id = ?')
       .run(verification.authenticationInfo.newCounter, Date.now(), row.id);
-    markStepUp(session.id, row.id);
+    // L2 fix: markStepUp hashes its input itself -- it needs the RAW cookie
+    // value, not session.id (which is now the stored hash; see
+    // authSessions.js's getRequestSession comment).
+    markStepUp(getRequestSessionId(request), row.id);
     return { success: true };
   });
 
@@ -276,7 +280,9 @@ export async function authRoute(fastify, opts) {
     // The grant is spent only on an actually-successful registration (and
     // atomically, so two concurrent ceremonies cannot both use it). A fresh
     // step-up is not consumed -- it simply expires.
-    if (!hasFreshStepUp(session) && !consumeRegistrationGrant(session.id)) {
+    // L2 fix: consumeRegistrationGrant hashes its input itself -- needs the
+    // RAW cookie value, not session.id (the stored hash).
+    if (!hasFreshStepUp(session) && !consumeRegistrationGrant(getRequestSessionId(request))) {
       return rejectRegistration(reply);
     }
 
