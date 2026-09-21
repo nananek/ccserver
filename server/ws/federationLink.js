@@ -117,13 +117,25 @@ async function rpcPairingPropose(params, ctx) {
   }
   const hostnameClaimed = typeof params?.hostnameLabel === 'string' && params.hostnameLabel
     ? params.hostnameLabel.slice(0, 200) : null;
-  const claimedAddr = typeof params?.claimedAddr === 'string' && params.claimedAddr
-    ? params.claimedAddr.slice(0, 200) : ctx.remoteAddr;
+  // M6 fix (vuln_scan report): `addr` here becomes `row.addr`, which
+  // establishAllLinks/reconcilePending dial via _dialOnce -- including for
+  // rows still in pending_local_approval/pending_remote_approval, i.e.
+  // BEFORE any human has approved this peer at all (see establishAllLinks's
+  // header comment for why pending rows are dialed too). Using the peer's
+  // self-reported params.claimedAddr here (as this used to) let an
+  // unapproved, merely-connecting peer point this server's outbound mTLS
+  // dial at any host:port of its choosing -- an internal-network probe/SSRF
+  // primitive that runs before any trust decision is made. The only address
+  // this server can actually trust for an INBOUND request is the real,
+  // observed TCP source (ctx.remoteAddr) -- never a value the peer merely
+  // claims. (claimedAddr is still accepted and ignored: keeping it
+  // unread here, rather than rejecting it outright, keeps compatibility
+  // with an older peer's protocol version that still sends the field.)
   const row = pairing.recordInboundRequest({
     fingerprint: ctx.peerFingerprint,
     certPem: ctx.peerPem,
     hostnameClaimed,
-    addr: claimedAddr,
+    addr: ctx.remoteAddr,
   });
   if (!row) return { ok: false, error: 'this instance previously revoked the pairing' };
   return {
