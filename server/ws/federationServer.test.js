@@ -386,3 +386,34 @@ test('M6: an inbound pairing.propose cannot redirect the dial-back address via c
   assert.notEqual(row.remote_addr, 'internal-service.evil:9999', 'the peer-claimed address must never become the dial target');
   assert.match(row.remote_addr, /^(::ffff:)?127\.0\.0\.1:\d+$/, 'the real observed TCP source address is used instead');
 });
+
+test('M8: requireTokenForPairing never accepts the raw token, only the derived pairing token', { skip }, async () => {
+  const { derivePairingToken } = await import('./federationConfig.js');
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-federation-m8-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ federation: { requireTokenForPairing: true } }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  const prevToken = process.env.CCSERVER_TOKEN;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  process.env.CCSERVER_TOKEN = 'super-secret-admin-token';
+  try {
+    const rawPeer = freshPeerIdentity('m8-raw');
+    const socket1 = await dialAs(rawPeer);
+    const rawResp = await rpc(socket1, 'pairing.propose', { hostnameLabel: 'x', federationToken: 'super-secret-admin-token' });
+    assert.equal(rawResp.ok, false, 'the raw admin token must no longer authenticate the pairing propose');
+    socket1.destroy();
+
+    const derivedPeer = freshPeerIdentity('m8-derived');
+    const socket2 = await dialAs(derivedPeer);
+    const derivedResp = await rpc(socket2, 'pairing.propose', {
+      hostnameLabel: 'x',
+      federationToken: derivePairingToken('super-secret-admin-token'),
+    });
+    assert.equal(derivedResp.ok, true, 'the correctly derived pairing token must still authenticate it');
+    socket2.destroy();
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG; else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    if (prevToken === undefined) delete process.env.CCSERVER_TOKEN; else process.env.CCSERVER_TOKEN = prevToken;
+    rmSync(cfgDir, { recursive: true, force: true });
+  }
+});

@@ -27,6 +27,7 @@ import * as pairing from './federationPairing.js';
 import { resolvedHostname } from './notify.js';
 import { federationPort } from './federationServer.js';
 import { getOrCreateLink } from './federationLink.js';
+import { derivePairingToken } from './federationConfig.js';
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const RPC_TIMEOUT_MS = 15_000;
@@ -156,7 +157,9 @@ export async function initiatePairing({ remoteAddr, remoteToken, label }) {
       params: {
         hostnameLabel: myHostnameLabel(),
         claimedAddr: myClaimedAddr() || undefined,
-        federationToken: typeof remoteToken === 'string' && remoteToken ? remoteToken : undefined,
+        // M8 fix: never put the raw token on the wire -- see
+        // derivePairingToken's comment (federationConfig.js).
+        federationToken: derivePairingToken(remoteToken) || undefined,
       },
     });
   });

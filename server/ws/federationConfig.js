@@ -7,11 +7,28 @@
 //
 // Shape: { "federation": { "requireTokenForPairing": true } }
 
+import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// M8 fix (vuln_scan report): requireTokenForPairing used to send the raw
+// CCSERVER_TOKEN itself over the TOFU bootstrap connection -- which, by
+// definition, has no pinned peer certificate yet (that's what TOFU means):
+// an on-path attacker positioned for the same MITM this feature's fingerprint
+// verification (see M5) exists to catch could also just read the admin API
+// token straight off this exchange. This derives a one-way, pairing-only
+// value from the shared token instead: both sides can compute the SAME
+// derived value iff they hold the SAME raw token (preserving the existing
+// "prove you know the secret" semantics exactly), but the derived value
+// itself is useless against the actual /api/* endpoints (which require the
+// raw token) and cannot be reversed back into it.
+export function derivePairingToken(rawToken) {
+  if (typeof rawToken !== 'string' || !rawToken) return null;
+  return createHmac('sha256', rawToken).update('ccserver-federation-pairing-v1').digest('hex');
+}
 
 export function federationConfig() {
   const configPath = process.env.CCSERVER_SANDBOX_CONFIG

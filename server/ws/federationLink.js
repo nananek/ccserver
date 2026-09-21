@@ -36,7 +36,7 @@ import { randomUUID } from 'node:crypto';
 import { ensureIdentity, peerCertInfo } from './federationIdentity.js';
 import { LineFramer, FRAME_KINDS } from './federationProtocol.js';
 import * as pairing from './federationPairing.js';
-import { federationConfig } from './federationConfig.js';
+import { federationConfig, derivePairingToken } from './federationConfig.js';
 import { resolvedHostname } from './notify.js';
 import { attachTerminalHandler } from './terminal.js';
 import { hostname as osHostname } from 'node:os';
@@ -111,7 +111,9 @@ async function rpcPairingPropose(params, ctx) {
   if (ctx.selfPairing) return { ok: false, error: 'cannot pair with yourself' };
   const cfg = federationConfig();
   if (cfg.requireTokenForPairing && process.env.CCSERVER_TOKEN) {
-    if (params?.federationToken !== process.env.CCSERVER_TOKEN) {
+    // M8 fix: compare against the derived (never the raw) token -- see
+    // derivePairingToken's comment.
+    if (params?.federationToken !== derivePairingToken(process.env.CCSERVER_TOKEN)) {
       return { ok: false, error: 'federation token required' };
     }
   }
