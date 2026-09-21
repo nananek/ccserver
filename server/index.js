@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
+import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { dirsRoute } from './routes/dirs.js';
@@ -104,6 +105,20 @@ try {
 const AUTH_TOKEN = process.env.CCSERVER_TOKEN;
 const AUTH_MODE = resolveAuthMode();
 
+// L3 fix (vuln_scan report): `!==` short-circuits at the first differing
+// byte, so its timing leaks how many leading characters of a guess matched
+// the real token -- the same class of timing side-channel git-broker.js/
+// network-broker.js/mcpBroker.js already guard their own tokens against
+// (see each file's own tokenEq). Same fix here for CCSERVER_TOKEN, the
+// shared secret gating the entire HTTP/WS API in 'token' auth mode.
+function tokenEq(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0) return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  try { return timingSafeEqual(ab, bb); } catch { return false; }
+}
+
 // Endpoints under /api/auth that must work with NO session yet -- the ones
 // that exist to *create* one (login-token; WebAuthn authentication
 // options/verify) plus Step4's mode probe, which the client needs before it
@@ -136,7 +151,7 @@ if (AUTH_MODE === 'token') {
     const token =
       request.query.token ||
       request.headers.authorization?.replace(/^Bearer\s+/i, '');
-    if (token !== AUTH_TOKEN) {
+    if (!tokenEq(token, AUTH_TOKEN)) {
       reply.code(401).send({ error: 'Invalid or missing token' });
     }
   });
