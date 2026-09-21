@@ -28,8 +28,28 @@ export function worktreeRoot() {
     || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'worktrees');
 }
 
+// M1 defense-in-depth (vuln_scan report / PoC p9): the primary fix is that
+// callers must validate `role` before ever reaching here (see
+// groupManager.js's resolveMemberLaunchCwd/resolveGroupMcpSocket), but this
+// is the single choke point every worktree path is built through, so it
+// refuses to hand back a path outside worktreeRoot() even if some future
+// caller forgets that check -- a role like "../../../escape" would otherwise
+// make `join()` resolve straight past projectHash into an arbitrary sibling
+// directory.
 export function worktreePathFor(projectCwd, role) {
-  return join(worktreeRoot(), projectHashForCwd(projectCwd), role);
+  // Bound to this project's own <root>/<hash>/ directory specifically, not
+  // just <root>/ -- a role of "../sibling" would otherwise still pass a
+  // root-only check (it lands in a SIBLING hash-like directory under the
+  // same root, e.g. escaping <root>/<thisHash>/ into <root>/sibling/), which
+  // is still a real containment break (writing into, or colliding with,
+  // another project's worktree namespace) even though it never leaves the
+  // root itself.
+  const projectDir = resolve(join(worktreeRoot(), projectHashForCwd(projectCwd)));
+  const path = resolve(join(projectDir, role));
+  if (path !== projectDir && !path.startsWith(`${projectDir}/`)) {
+    throw new Error(`worktreePathFor: role "${role}" escapes the project's worktree directory`);
+  }
+  return path;
 }
 
 // stderr is piped (not inherited): a non-repo cwd or a routine "prunable"

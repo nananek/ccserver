@@ -31,7 +31,7 @@
 
 import { createServer } from 'node:net';
 import { rmSync, rmdirSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildMetaMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
 import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
@@ -70,9 +70,23 @@ function tokenEq(a, b) {
   try { return timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; }
 }
 
+// M1 defense-in-depth (vuln_scan report / PoC p9): `tag` for a member's
+// handoff channel is `handoff-${role}` (see listenMcp's caller below), and
+// the primary fix is that groupManager.js validates `role` before ever
+// reaching here -- but this is the one choke point every broker socket path
+// is built through, so it refuses to hand back a path outside RUNTIME_BASE
+// even if a future caller forgets that check. A `role`/`tag` containing '/'
+// (e.g. from "../../../evil") would otherwise let `join()` walk the
+// resulting directory name's embedded ".." segments straight out of
+// RUNTIME_BASE.
 function sockPathFor(groupId, tag) {
   const id = String(groupId).replace(/-/g, '');
-  return join(RUNTIME_BASE, `ccserver-mcp-${id}-${tag}.d`, 'sock');
+  const root = resolve(RUNTIME_BASE);
+  const path = resolve(join(root, `ccserver-mcp-${id}-${tag}.d`, 'sock'));
+  if (path !== root && !path.startsWith(`${root}/`)) {
+    throw new Error(`sockPathFor: tag "${tag}" escapes the runtime socket directory`);
+  }
+  return path;
 }
 
 // bwrap's --bind-try snapshots the socket file at mount time, so the file

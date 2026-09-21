@@ -770,6 +770,12 @@ export async function resolveGroupMcpSocket(groupId, groupRole) {
       return null;
     }
   }
+  // M1 fix: groupRole flows into sockPathFor's socket path
+  // (ccserver-mcp-<id>-handoff-<role>.d, see mcpBroker.js) via
+  // createMemberHandoffChannel below -- same reasoning (and same "format
+  // only, membership belongs at the call site" rationale) as
+  // resolveMemberLaunchCwd above.
+  if (!WORKER_ROLE_RE.test(groupRole)) return null;
   const existing = group.handoffChannels.get(groupRole);
   if (existing) return handle(existing);
   try {
@@ -800,6 +806,19 @@ export function resolveMemberLaunchCwd(groupId, role) {
   if (role === 'orchestrator') {
     return group.orchestratorDir ? { cwd: group.orchestratorDir, gitCommonDir: null } : null;
   }
+  // M1 fix (vuln_scan report / PoC p9): callers into this path include
+  // terminal.js's `init` reconnect, which passes a client-supplied
+  // groupRole straight through with no validation of its own. `role` flows
+  // into resolveMemberWorktree -> worktreePathFor (join(root, hash, role)),
+  // so an unvalidated value like "../../../escape" creates a git worktree
+  // outside the worktree root. WORKER_ROLE_RE's charset (letters/digits/_/-
+  // only, no '/' or '.') makes any match structurally incapable of escaping
+  // regardless of what it's joined onto -- format alone is the right check
+  // here (this path is shared with first-time creation, addMemberRole,
+  // where `role` is by definition not a member yet; a membership
+  // requirement belongs at the RE-launch call site instead -- see
+  // terminal.js's `init` handler).
+  if (!WORKER_ROLE_RE.test(role)) return null;
   if (!group.cwd) return null;
   let resolution;
   try {

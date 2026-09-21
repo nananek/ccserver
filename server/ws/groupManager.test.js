@@ -343,6 +343,31 @@ test('addMember refuses to grow a full group (member cap)', async () => {
   groupManager.destroyGroup(gid);
 });
 
+// M1 (vuln_scan report / PoC p9): resolveMemberLaunchCwd/resolveGroupMcpSocket
+// are the two resolvers a client-supplied groupRole reaches through
+// terminal.js's `init` reconnect with no validation of its own (see
+// terminal.js). Both must reject a malformed role outright -- WORKER_ROLE_RE's
+// charset structurally excludes '/' and '.', so a match can never escape
+// wherever it's later joined onto (worktreePathFor / sockPathFor).
+test('M1: resolveMemberLaunchCwd rejects a malformed/traversal role', async () => {
+  const gid = await makeGroup('/srv/proj');
+  groupManager.registerMember(gid, 'workerA', 'sess-a1');
+  for (const bad of ['../../../escape', 'a/../../../evil2', '../evil', 'worker/evil', 'not-worker-prefixed']) {
+    assert.equal(groupManager.resolveMemberLaunchCwd(gid, bad), null, `${bad} must be rejected`);
+  }
+  // A well-formed role still resolves normally (this fixture's cwd is not a
+  // real git repo, so it falls back to sharing it as-is -- see worktree.js).
+  assert.deepEqual(groupManager.resolveMemberLaunchCwd(gid, 'workerA'), { cwd: '/srv/proj', gitCommonDir: null });
+});
+
+test('M1: resolveGroupMcpSocket rejects a malformed/traversal role', async () => {
+  const gid = await makeGroup('/srv/proj');
+  groupManager.registerMember(gid, 'workerA', 'sess-a1');
+  for (const bad of ['../../../escape', 'a/../../../evil2']) {
+    assert.equal(await groupManager.resolveGroupMcpSocket(gid, bad), null, `${bad} must be rejected`);
+  }
+});
+
 test('destroyGroup never removes the orchestratorDir (per-project resource)', async () => {
   const gid = randomUUID();
   const dir = join(runtimeDir, `project-dir-${gid}`);

@@ -67,6 +67,25 @@ export function attachTerminalHandler(chan) {
         let resolvedCwd = null;
         let gitCommonDir = null;
         if (groupId && groupRole) {
+          // M1 fix (vuln_scan report / PoC p9): groupRole here is entirely
+          // client-supplied (msg.groupRole), and this re-launch path is only
+          // ever meant for reconnecting an EXISTING member -- a role that
+          // was never actually created has no business reaching the
+          // resolvers below (resolveMcpSocketForSession/
+          // resolveMemberLaunchCwd already reject a malformed role by
+          // format, but format alone would still let a client "reconnect"
+          // to a real-looking role, e.g. "workerZ", that this group never
+          // had, minting a brand-new worktree/handoff channel for it under
+          // the guise of a reconnect).
+          const memberGroup = getGroup(groupId);
+          if (groupRole !== 'orchestrator' && !(memberGroup && memberGroup.members.has(groupRole))) {
+            chan.send(JSON.stringify({
+              type: 'error',
+              message: `Cannot re-launch group member ${groupRole}: not a member of this group`,
+              code: 'SPAWN_FAILED',
+            }));
+            break;
+          }
           const mcpResolved = await resolveMcpSocketForSession(groupId, groupRole);
           mcpSocketPath = mcpResolved ? mcpResolved.sockPath : null;
           mcpToken = mcpResolved ? mcpResolved.token : null;

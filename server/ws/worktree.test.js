@@ -151,3 +151,26 @@ test('listWorktreeDirs reports every <projectHash>/<role> directory created so f
   const dirs = worktree.listWorktreeDirs();
   assert.ok(dirs.includes(worktree.worktreePathFor(repo, 'workerZ')));
 });
+
+// --- M1 defense-in-depth (vuln_scan report / PoC p9) ------------------------
+
+test('worktreePathFor throws for a role that would escape the worktree root', () => {
+  for (const bad of ['../../../escape', 'a/../../../evil2', '../sibling', 'a/../..']) {
+    assert.throws(
+      () => worktree.worktreePathFor(repo, bad),
+      /escapes the project's worktree directory/,
+      `${bad} must be rejected`,
+    );
+  }
+});
+
+test('worktreePathFor still resolves an ordinary role normally, inside the configured root', () => {
+  const path = worktree.worktreePathFor(repo, 'workerA');
+  assert.ok(path.startsWith(`${worktree.worktreeRoot()}/`), 'stays under CCSERVER_WORKTREE_ROOT');
+  assert.ok(path.endsWith('/workerA'), 'ends in the role name, unmodified');
+});
+
+test('resolveMemberWorktree propagates the escape rejection instead of creating anything outside the root', () => {
+  assert.throws(() => worktree.resolveMemberWorktree(repo, '../../../escape'), /escapes the project's worktree directory/);
+  assert.equal(existsSync(join(runtimeDir, 'escape')), false, 'nothing was created outside CCSERVER_WORKTREE_ROOT');
+});
