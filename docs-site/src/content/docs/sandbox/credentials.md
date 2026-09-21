@@ -35,6 +35,7 @@ broker への接続はセッション毎の乱数トークン (`CCSANDBOX_GIT_BR
 - **PRF儀式が必要なのは「アンロック」操作のときだけです** — 実際のコミット署名やSSH pushは、アンロック済みの管理下gpg-agentとのローカルソケット通信で完結し、ブラウザは関与しません。アンロックの持続時間は既定でログインセッションの有効期限 (30日のスライディング) に連動し、短いアイドルタイマーでは自動ロックしません (無人稼働するAIエージェントセッションを途中で壊さないため)。`sandbox.config.json` の `gpgVaultLockPolicy.idleTimeoutMinutes` で、より厳格な固定タイムアウトをオプトインできます。
 - サンドボックス起動オプションの「GPGボルトで署名・SSH pushする」(`gpgVault`) を有効にした状態でVaultがロック中/未作成だと、**起動自体が明確なエラーで拒否されます** (黙って機能なしで起動することはありません)。稼働中にVaultがロックされた場合は、そのセッション内の以降の署名/SSH pushがエラーで失敗します (フォールバックが無い設計上の割り切りです)。
 - `gpg`/`sshAgent` (ホスト鍵転送) と `gpgVault` を同時に有効にすると `gpgVault` が優先されます (警告ログが出ます)。
+- **署名 (GPG) と SSH push は同じ鍵でもリスクが非対称です。** コミット署名は秘密鍵がボルト内のローカル gpg-agent ソケット通信だけで完結し、ネットワークに一切出ないため安全です。一方 SSH push は上記「git — SSH / ssh-agent 転送」の仕組み (`server/ws/sandbox-ssh-wrapper.cjs`) がそのまま使われており、これは `git-upload-pack`/`git-receive-pack`/`git-upload-archive` コマンドの host+path を照合する薄いラッパーに過ぎず、認証自体 (鍵の使用) は素通しです。**GitHub 側にこのボルトの SSH 公開鍵を登録する際は、「SSH and GPG keys」(Personal Authentication Key、アカウント全体に有効) ではなく、対象リポジトリを 1 つに限定できる Deploy Key (push が必要なら "Allow write access" 付き) として登録してください。** Personal Authentication Key として登録すると、サンドボックス内から上記ラッパーの範囲外 (`$CCSANDBOX_REAL_SSH` の直接呼び出し、`git-upload-pack` 等以外の素の ssh 用途など) を経由してそのアカウントの全リポジトリへの書き込みアクセスに到達でき、`gitBroker` の allow-list による制限が実質的に無意味になります。
 
 ## gh CLI
 
