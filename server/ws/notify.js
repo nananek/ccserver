@@ -23,10 +23,12 @@
 // broker wiring is only touched at runtime, never at module evaluation.
 
 import { randomUUID } from 'node:crypto';
+import { lookup as dnsLookup } from 'node:dns';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Agent } from 'undici';
 import { loadSandboxConfig } from './sandbox.js';
 import { hostRuntimeDir } from './git-broker.js';
 import { vikunjaEnabled, createOrUpdateTask } from './vikunjaClient.js';
@@ -73,8 +75,115 @@ function loadNotifyConfig() {
   };
 }
 
+// H4 SSRF guard (vuln_scan report): notify's `subscribe` tool used to accept
+// any https:// URL and the host process would later POST to it (potentially
+// following redirects) with no restriction at all -- a sandboxed agent could
+// register an internal address and have the HOST (not the sandbox) reach it.
+// Two layers close this:
+//   1. Here: reject a literal loopback/private/link-local/reserved IP host
+//      at subscribe time (cheap, no DNS, catches the obvious case -- e.g.
+//      vuln_scan's PoC p4 registers `https://127.0.0.1:.../redirect`
+//      directly).
+//   2. deliverDispatcher() below: a custom Agent whose `connect.lookup`
+//      validates every resolved address at actual connect time, which is
+//      what actually closes the DNS-rebinding gap a subscribe-time-only
+//      check would leave open for `notify.discordWebhook`/seeded
+//      subscriptions using an ordinary hostname.
+// IPv4 ranges: 0.0.0.0/8, 10/8 (private), 100.64/10 (CGNAT), 127/8
+// (loopback), 169.254/16 (link-local, incl. cloud metadata endpoints),
+// 172.16/12 + 192.168/16 (private), 192.0.0.0/24 (IETF protocol assignments),
+// 224/4 (multicast), 240/4 (reserved).
+function ipv4ToInt(ip) {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return null;
+  const nums = parts.map((p) => Number(p));
+  if (nums.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return ((nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3]) >>> 0;
+}
+
+function isPrivateIPv4(ip) {
+  const n = ipv4ToInt(ip);
+  if (n === null) return false; // not even a valid IPv4 literal -- let the hostname path handle it
+  const inRange = (base, bits) => {
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    return (n & mask) === (ipv4ToInt(base) & mask);
+  };
+  return ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
+    '172.16.0.0/12', '192.168.0.0/16', '192.0.0.0/24', '224.0.0.0/4', '240.0.0.0/4']
+    .some((cidr) => { const [base, bits] = cidr.split('/'); return inRange(base, Number(bits)); });
+}
+
+// IPv6: loopback (::1), unspecified (::), link-local (fe80::/10), unique
+// local (fc00::/7), and an IPv4-mapped address (::ffff:a.b.c.d) unwrapped to
+// its embedded IPv4 and checked the same way. Textual forms only (dns.lookup
+// always returns a canonical textual address, never a compressed variant
+// that would need full parsing here).
+function isPrivateIPv6(ip) {
+  const a = ip.toLowerCase();
+  if (a === '::1' || a === '::') return true;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(a);
+  if (mapped) return isPrivateIPv4(mapped[1]);
+  const firstHextet = parseInt(a.split(':')[0] || '0', 16);
+  if (Number.isNaN(firstHextet)) return false;
+  if (firstHextet >= 0xfe80 && firstHextet <= 0xfebf) return true; // fe80::/10
+  if (firstHextet >= 0xfc00 && firstHextet <= 0xfdff) return true; // fc00::/7
+  return false;
+}
+
+export function isPrivateOrReservedAddress(address, family) {
+  if (family === 6 || address.includes(':')) return isPrivateIPv6(address);
+  return isPrivateIPv4(address);
+}
+
 function isValidWebhookUrl(url) {
-  return typeof url === 'string' && url.startsWith('https://');
+  if (typeof url !== 'string' || !url.startsWith('https://')) return false;
+  let hostnamePart;
+  try {
+    hostnamePart = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+  // URL#hostname keeps an IPv6 literal bracketed ("[::1]") -- strip that
+  // before classifying it, or every IPv6 literal would silently skip the
+  // private/reserved check below.
+  const bare = hostnamePart.startsWith('[') && hostnamePart.endsWith(']')
+    ? hostnamePart.slice(1, -1)
+    : hostnamePart;
+  // Only rejects a literal IP host here -- an ordinary hostname (however it
+  // eventually resolves) is validated at actual connect time instead, by
+  // deliverDispatcher()'s lookup hook below.
+  return !isPrivateOrReservedAddress(bare, bare.includes(':') ? 6 : 4);
+}
+
+// Custom dns.lookup-shaped resolver for the delivery Agent: resolves like
+// dns.lookup normally would, but refuses (calls back with an error instead
+// of an address) when ANY candidate address is private/loopback/link-local/
+// reserved -- this is what actually closes the SSRF, at the point a real
+// socket is about to be opened, immune to a hostname that validates fine at
+// subscribe time and is later re-pointed at an internal address (DNS
+// rebinding).
+function ssrfSafeLookup(hostname_, options, callback) {
+  const cb = typeof options === 'function' ? options : callback;
+  const opts = typeof options === 'function' ? {} : (options || {});
+  dnsLookup(hostname_, { ...opts, all: true }, (err, addresses) => {
+    if (err) { cb(err); return; }
+    const list = Array.isArray(addresses) ? addresses : [addresses];
+    const blocked = list.find((a) => isPrivateOrReservedAddress(a.address, a.family));
+    if (blocked) {
+      cb(new Error(`notify: refusing to connect to private/reserved address ${blocked.address} (SSRF guard)`));
+      return;
+    }
+    if (opts.all) cb(null, list);
+    else cb(null, list[0].address, list[0].family);
+  });
+}
+
+// Lazily created and cached, like vikunjaClient.js's insecureDispatcher --
+// most process lifetimes only ever need one.
+let ssrfSafeDispatcher = null;
+function deliverDispatcher() {
+  if (!ssrfSafeDispatcher) ssrfSafeDispatcher = new Agent({ connect: { lookup: ssrfSafeLookup } });
+  return ssrfSafeDispatcher;
 }
 
 export function getNotifySockPath() {
@@ -221,6 +330,14 @@ async function deliver(url, content) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content, username: 'ccserver' }),
       signal: controller.signal,
+      // H4: never silently follow a redirect -- a webhook host an agent
+      // fully controls could otherwise 30x this POST at an internal
+      // endpoint that never appeared in the subscribed URL at all.
+      redirect: 'error',
+      // H4: validates the resolved address at actual connect time (see
+      // ssrfSafeLookup above) -- catches a hostname that re-resolves to a
+      // private/internal address after passing subscribe-time validation.
+      dispatcher: deliverDispatcher(),
     });
     return res.ok;
   } catch (err) {

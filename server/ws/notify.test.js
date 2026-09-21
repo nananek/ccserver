@@ -18,6 +18,7 @@ import {
   restoreNotify,
   sendNotification,
   resolvedHostname,
+  isPrivateOrReservedAddress,
 } from './notify.js';
 
 // Point CCSERVER_SANDBOX_CONFIG + CCSERVER_NOTIFY_PATH at temp files and
@@ -120,6 +121,25 @@ test('subscribe/unsubscribe/list persist to the state file and restore', async (
         { error: 'invalid-url', message: 'webhook url must be an https:// URL' },
         'non-https urls are rejected',
       );
+
+      // H4 SSRF guard: a literal private/loopback/link-local IP host is
+      // rejected at subscribe time (vuln_scan p4 registered
+      // https://127.0.0.1:.../redirect directly).
+      for (const bad of [
+        'https://127.0.0.1/hook',
+        'https://10.1.2.3/hook',
+        'https://192.168.1.5/hook',
+        'https://169.254.169.254/hook', // cloud metadata endpoint
+        'https://[::1]/hook',
+      ]) {
+        assert.equal(subscribe({ url: bad }).error, 'invalid-url', `${bad} must be rejected`);
+      }
+      // An ordinary hostname is never rejected here -- it's checked again at
+      // actual connect time instead (deliverDispatcher's lookup hook), since
+      // subscribe time can't know what it will resolve to later.
+      const okHostname = subscribe({ url: 'https://not-an-ip.example/hook' });
+      assert.equal(okHostname.ok, true);
+      assert.deepEqual(unsubscribe(okHostname.subscription.id), { ok: true }); // keep registry counts below unaffected
 
       assert.deepEqual(unsubscribe(added.subscription.id), { ok: true });
       assert.equal(listSubscriptions().length, 1);
@@ -564,4 +584,47 @@ test("sendNotification with channels:['vikunja'] skips Discord and every subscri
       });
     },
   );
+});
+
+// --- H4 SSRF guard (vuln_scan report) ---------------------------------------
+
+test('isPrivateOrReservedAddress: IPv4 private/loopback/link-local/reserved ranges', () => {
+  for (const ip of ['127.0.0.1', '10.0.0.1', '10.255.255.255', '172.16.0.1', '172.31.255.255',
+    '192.168.0.1', '192.168.255.255', '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1', '240.0.0.1']) {
+    assert.equal(isPrivateOrReservedAddress(ip, 4), true, `${ip} must be classified private/reserved`);
+  }
+  for (const ip of ['8.8.8.8', '1.1.1.1', '93.184.216.34', '172.15.255.255', '172.32.0.0']) {
+    assert.equal(isPrivateOrReservedAddress(ip, 4), false, `${ip} must be classified public`);
+  }
+});
+
+test('isPrivateOrReservedAddress: IPv6 loopback/unspecified/link-local/ULA/mapped-v4', () => {
+  for (const ip of ['::1', '::', 'fe80::1', 'fc00::1', 'fd12:3456::1', '::ffff:127.0.0.1', '::ffff:10.0.0.1']) {
+    assert.equal(isPrivateOrReservedAddress(ip, 6), true, `${ip} must be classified private/reserved`);
+  }
+  for (const ip of ['2001:4860:4860::8888', '::ffff:8.8.8.8']) {
+    assert.equal(isPrivateOrReservedAddress(ip, 6), false, `${ip} must be classified public`);
+  }
+});
+
+test('H4: deliver() refuses to connect to a hostname that resolves to loopback, even with real (unmocked) fetch/DNS', async () => {
+  // No global.fetch mock here -- this exercises the real dispatcher's
+  // connect-time lookup guard. 'localhost' always resolves to a loopback
+  // address without needing any network access, so this is fully hermetic
+  // (mirrors vuln_scan/pocs/p4_notify_ssrf.mjs, which used a literal
+  // 127.0.0.1 TLS listener to prove the same connect actually reaches an
+  // internal service without this guard).
+  await withNotifyConfig({ notify: { subscriptions: [] } }, async () => {
+    restoreNotify();
+    const added = subscribe({ url: 'https://localhost:1/ssrf-guard-should-block-this' });
+    assert.equal(added.ok, true, 'an ordinary hostname is accepted at subscribe time');
+    try {
+      const res = await sendNotification({ title: 'x', body: 'y' });
+      assert.equal(res.ok, true, 'sendNotification itself never throws');
+      assert.equal(res.delivered.webhooks, 0, 'the loopback-resolving webhook must not count as delivered');
+      assert.equal(res.delivered.failed, 1, 'it must be reported as a failed delivery, not silently dropped');
+    } finally {
+      unsubscribe(added.subscription.id);
+    }
+  });
 });
