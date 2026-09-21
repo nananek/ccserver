@@ -247,7 +247,7 @@ test('smoke: a fully-loaded profile (broker + guard + gnupg + overlay + sock den
     authSock: join(sockDir, 'agent.sock'),
     orchestratorClaudeMdSrc: orch,
     ghPaths: ['/opt/homebrew/bin/gh', '/usr/local/bin/gh'],
-    controlSockDenies: [join(sockDir, 'ccserver-pty-host.sock'), join(sockDir, 'meta', 'meta.sock')],
+    controlSockDenies: [join(sockDir, 'ccserver-control.sock'), join(sockDir, 'meta', 'meta.sock')],
     sockets: { mcp: join(sockDir, 'mcp.sock'), notify: join(sockDir, 'notify.sock') },
     extraBinds: [{ src: '/srv/shared', mode: 'rw' }, { src: '~/.ssh', mode: 'ro' }],
   });

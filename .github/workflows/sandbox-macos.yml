@@ -41,14 +41,10 @@ jobs:
       - name: Run seatbelt unit tests (no exec)
         run: node --test --test-timeout=60000 ws/sandbox-seatbelt.test.js
         working-directory: server
-        env:
-          CCSERVER_PTY_HOST: 0
 
       - name: Run seatbelt exec tests (real sandbox-exec)
         run: node --test --test-timeout=60000 ws/sandbox-seatbelt.exec.test.js
         working-directory: server
-        env:
-          CCSERVER_PTY_HOST: 0
 
       - name: Upload seatbelt temp dirs on failure
         if: failure()

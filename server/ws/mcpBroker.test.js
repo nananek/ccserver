@@ -479,14 +479,13 @@ test('stopBroker destroys established connections', async () => {
 
 // Self-review regression: stopBroker's removeDir option must default to
 // false. notify/usage/meta/reviewer's stopXBroker() calls this bare (no
-// removeDir) from server本体's SIGTERM cleanup -- exactly the restart Issue
-// #143 problem 1 is about -- and a pty-host-owned sandbox surviving that
-// restart still holds a directory bind to this exact path. If stopBroker
-// reclaimed the directory by default, the next startup's listenMcp()
-// (mkdirSync) would recreate it as a brand new directory (a different
-// inode) at the same path, which that surviving sandbox's bind mount would
-// never see -- reintroducing this Issue's own bug one layer up, at
-// directory granularity instead of socket-file granularity. Asserting the
+// removeDir) from server本体's SIGTERM cleanup, and another still-running
+// sandboxed session may hold a bind mount to this exact directory. If
+// stopBroker reclaimed the directory by default, the next startup's
+// listenMcp() (mkdirSync) would recreate it as a brand new directory (a
+// different inode) at the same path, which that other sandbox's bind mount
+// would never see -- breaking it one layer up, at directory granularity
+// instead of socket-file granularity. Asserting the
 // directory's inode is unchanged (not just "still exists") is the point:
 // recreating an empty directory of the same name would pass an
 // existsSync-only check while still breaking every bind mount that predates

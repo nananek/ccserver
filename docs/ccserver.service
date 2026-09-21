@@ -7,14 +7,6 @@ Type=simple
 WorkingDirectory=/path/to/ccserver
 Environment=NODE_ENV=production
 Environment=PORT=3001
-# pty-host separation (keeps terminal sessions alive across `systemctl
-# --user restart ccserver`) has been withdrawn -- not worth its process-split
-# complexity (e.g. it silently broke the GPG vault unlock check, see
-# docs-site deployment/systemd.md section 6). Direct pty spawn is the default
-# again; leave CCSERVER_PTY_HOST unset. Only if you specifically need
-# cross-restart session survival and accept that tradeoff: add
-# ccserver-pty-host.service to After=/Wants= above, and uncomment:
-# Environment=CCSERVER_PTY_HOST=1
 ExecStart=/usr/bin/node server/index.js
 Restart=on-failure
 RestartSec=5

@@ -27,7 +27,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCKET_DIR_NAME } from './git-broker.js';
+import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, META_SOCKET_DIR_NAME } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
 import * as gpgVaultAgent from './gpgVaultAgent.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
@@ -2031,39 +2031,15 @@ function seatbeltGhPaths() {
 }
 
 export function seatbeltControlSockPaths(metaSocketPath) {
-  // Host control-plane unix sockets under hostRuntimeDir() (short /tmp base
-  // on darwin, inside the sandbox's tmp write rules): the pty-host RPC can
-  // spawn with sandbox:false (unsandboxed host exec -- a sandbox escape) and
-  // the meta socket is the privileged meta toolset's channel, so both are
-  // network-outbound deny-pinned for every seatbelt session. The meta pin is
-  // skipped only for the meta-agent session itself (its socket is its
-  // control channel). Filenames come from git-broker.js (leaf module, no
-  // cycle) -- the same constants pty-host/index.js and metaAgent.js build
-  // their socket paths from, so a rename updates the pin automatically.
-  // Also honor CCSERVER_PTY_HOST_SOCK when the operator overrode the
-  // pty-host socket.
+  // Host control-plane unix socket under hostRuntimeDir() (short /tmp base
+  // on darwin, inside the sandbox's tmp write rules): the meta socket is the
+  // privileged meta toolset's channel, so it is network-outbound deny-pinned
+  // for every seatbelt session except the meta-agent session itself (its
+  // socket is its control channel). Filename comes from git-broker.js (leaf
+  // module, no cycle) -- the same constant metaAgent.js builds its socket
+  // path from, so a rename updates the pin automatically.
   const base = hostRuntimeDir();
-  const paths = [join(base, PTY_HOST_SOCK_NAME)];
-  // pty-host may be sharded (Issue #119 / plan5 Step5): shard 0 is
-  // PTY_HOST_SOCK_NAME, shard N>0 is ccserver-pty-host-<N>.sock (see
-  // getPtyHostSockPath() in pty-host/index.js). The shard count is fixed by
-  // CCSERVER_PTY_HOST_SHARDS at deploy time. Every shard's RPC socket accepts
-  // `spawn` with sandbox:false (unsandboxed host exec), so ALL of them -- not
-  // just shard 0 -- must be network-outbound deny-pinned, or a compromised
-  // agent connect()s to shard N and escapes the sandbox.
-  const rawShards = Number.parseInt(process.env.CCSERVER_PTY_HOST_SHARDS, 10);
-  const shardCount = Number.isInteger(rawShards) && rawShards > 0 ? rawShards : 1;
-  for (let i = 1; i < shardCount; i++) {
-    paths.push(join(base, `ccserver-pty-host-${i}.sock`));
-  }
-  if (process.env.CCSERVER_PTY_HOST_SOCK) {
-    // Operator override: shard 0 is the value verbatim, shard N is `<value>-N`
-    // (getPtyHostSockPath() again).
-    paths.push(process.env.CCSERVER_PTY_HOST_SOCK);
-    for (let i = 1; i < shardCount; i++) {
-      paths.push(`${process.env.CCSERVER_PTY_HOST_SOCK}-${i}`);
-    }
-  }
+  const paths = [];
   const meta = join(base, META_SOCKET_DIR_NAME, 'sock');
   if (metaSocketPath !== meta) paths.push(meta);
   return paths;
@@ -2115,7 +2091,7 @@ export function buildMinimalSeatbeltSpawn({ cwd, targetCommand, app = 'claude' }
     scripts: seatbeltScripts(), ssh: seatbeltSsh(),
     gitBroker: null, commitGuard: null,
     // Usage-capture CLIs have no business reaching the host control plane
-    // either (same escape via pty-host RPC / meta broker).
+    // either (same escape via the meta broker).
     controlSockDenies: seatbeltControlSockPaths(null),
     // Deny-write the whole host runtime dir tree so a capture cannot
     // rename/rmdir it out from under live sessions' control plane.
@@ -2463,13 +2439,11 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         // opencode sessions resolve host auth/state via XDG (see
         // buildSeatbeltLaunch); other apps keep the sandbox HOME.
         app,
-        // pty-host's RPC socket and the meta broker live under
-        // hostRuntimeDir() (short /tmp base on darwin) -- inside the
-        // sandbox's tmp write rules. The pty-host RPC can spawn with
-        // sandbox:false (unsandboxed host exec) and the meta socket is the
-        // privileged meta toolset's channel, so both are network-outbound
-        // deny-pinned. The meta pin is skipped only for the meta-agent
-        // session itself (metaSocketPath is set only there).
+        // The meta broker lives under hostRuntimeDir() (short /tmp base on
+        // darwin) -- inside the sandbox's tmp write rules. Its socket is the
+        // privileged meta toolset's channel, so it is network-outbound
+        // deny-pinned. The pin is skipped only for the meta-agent session
+        // itself (metaSocketPath is set only there).
         controlSockDenies: seatbeltControlSockPaths(metaSocketPath),
         // The runtime dir (short /tmp base on darwin) holds every session's
         // control-plane sockets; deny-write the whole tree so this sandbox

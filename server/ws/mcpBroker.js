@@ -363,22 +363,14 @@ export async function startReviewerBroker({ reviewerApi, sockPath }) {
   });
 }
 
-// removeDir must stay opt-in (default false), never the default: the four
-// process-global brokers (notify/usage/meta/reviewer) call this from their
-// stopXBroker() at server本体 shutdown -- exactly the restart Issue #143
-// problem 1 is about -- and a pty-host-owned sandbox that survives the
-// restart still holds a directory bind to the dedicated `.d` dir this would
-// remove. rmdirSync-ing it here would unlink that directory from the host's
-// namespace; listenMcp()'s mkdirSync on the next startup then creates a
-// BRAND NEW directory (a new inode) at the same path, which the surviving
-// sandbox's bind mount never sees -- reintroducing this Issue's own bug one
-// level up (directory identity instead of socket-file identity). Only pass
-// removeDir:true from a call site that can prove no OTHER live sandbox can
-// still be depending on this exact directory (see groupManager.js's call
-// sites for which ones qualify -- notably NOT the role-replacement flow's
-// prevChannel, whose whole point is that the retiring occupant's sandbox is
-// still alive and may need this same directory back if the replacement
-// fails).
+// removeDir must stay opt-in (default false), never the default: this
+// directory may still be in use by another live sandbox this same process is
+// managing. Only pass removeDir:true from a call site that can prove no
+// OTHER live sandbox can still be depending on this exact directory (see
+// groupManager.js's call sites for which ones qualify -- notably NOT the
+// role-replacement flow's prevChannel, whose whole point is that the
+// retiring occupant's sandbox is still alive and may need this same
+// directory back if the replacement fails).
 export function stopBroker({ server, sockPath, connections }, { removeDir = false } = {}) {
   // Drop established connections too: server.close() only stops accepting
   // new ones, and a lingering connected socket would keep its McpServer

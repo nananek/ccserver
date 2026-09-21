@@ -36,9 +36,8 @@ import {
   subtrees,
 } from './sandbox-seatbelt.js';
 import { forceSandboxUnavailableReason, sandboxBackend, sandboxUnavailableReason, seatbeltControlSockPaths } from './sandbox.js';
-import { PTY_HOST_SOCK_NAME, META_SOCKET_DIR_NAME, hostRuntimeDir } from './git-broker.js';
+import { META_SOCKET_DIR_NAME, hostRuntimeDir } from './git-broker.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
-import { getPtyHostSockPath } from '../pty-host/index.js';
 import { getMetaSockPath } from './metaAgent.js';
 
 const HOME = homedir();
@@ -139,7 +138,7 @@ test('buildSeatbeltProfileText with networkIsolate replaces open egress with bro
   const text = buildSeatbeltProfileText({
     readRegexes: ['^/usr(/.*)?$'],
     writeRegexes: ['^/srv/proj(/.*)?$'],
-    denyNetOutboundLiterals: ['/tmp/ccserver-runtime-501/ccserver-pty-host.sock'],
+    denyNetOutboundLiterals: ['/tmp/ccserver-runtime-501/ccserver-control.sock'],
     networkIsolate: { brokerPort: 54321 },
   });
   assert.ok(!text.includes('(allow network*)'), 'no broad allow: it would silently win back open egress');
@@ -151,13 +150,13 @@ test('buildSeatbeltProfileText with networkIsolate replaces open egress with bro
   );
   assert.ok(text.includes('(allow network-outbound (remote unix-socket))'), 'unix IPC stays allowed');
   assert.ok(
-    text.includes('(deny network-outbound (remote unix-socket (path-literal "/tmp/ccserver-runtime-501/ccserver-pty-host.sock")))'),
+    text.includes('(deny network-outbound (remote unix-socket (path-literal "/tmp/ccserver-runtime-501/ccserver-control.sock")))'),
     'control-plane unix pins survive',
   );
   // Ordering: broad denies -> broker re-allow -> unix pins last.
   const denyTcpAt = text.indexOf('(deny network-outbound (remote tcp))');
   const brokerAt = text.indexOf('(remote tcp "localhost:54321")');
-  const pinAt = text.indexOf('path-literal "/tmp/ccserver-runtime-501/ccserver-pty-host.sock"');
+  const pinAt = text.indexOf('path-literal "/tmp/ccserver-runtime-501/ccserver-control.sock"');
   assert.ok(denyTcpAt >= 0 && brokerAt > denyTcpAt, 'broker re-allow comes after the broad deny');
   assert.ok(pinAt > brokerAt, 'control-plane unix pins stay last');
   // Every emitted rule line must be paren-balanced (an unbalanced SBPL rule
@@ -1144,8 +1143,8 @@ test('buildSeatbeltProfileText denies control-plane sockets via path-literal', (
   // (remote unix-socket (path-literal ...)) -- Apple's Sandbox Guide allows
   // only path-literal there, not regex/literal/subpath -- and land AFTER
   // (allow network*) per last-match-wins.
-  const text = buildSeatbeltProfileText({ denyNetOutboundLiterals: ['/tmp/ccserver-runtime-501/ccserver-pty-host.sock'] });
-  assert.ok(text.includes('(deny network-outbound (remote unix-socket (path-literal "/tmp/ccserver-runtime-501/ccserver-pty-host.sock")))'));
+  const text = buildSeatbeltProfileText({ denyNetOutboundLiterals: ['/tmp/ccserver-runtime-501/ccserver-control.sock'] });
+  assert.ok(text.includes('(deny network-outbound (remote unix-socket (path-literal "/tmp/ccserver-runtime-501/ccserver-control.sock")))'));
   assert.ok(text.indexOf('(allow network*)') < text.indexOf('(deny network-outbound'));
   // Every emitted rule line must be paren-balanced (an unbalanced SBPL rule
   // fails the whole profile compile -- fail-closed for all seatbelt launches).
@@ -1193,7 +1192,7 @@ test('buildSeatbeltProfileText compiles balanced with every optional clause popu
     reAllowReadRegexes: ['^/tmp/base/ccserver-seatbelt-abc(/.*)?$'],
     denyWriteRegexes: ['^/home/u/\\.ssh(/.*)?$', '^/home/u/\\.gitconfig$'],
     denyExecLiterals: ['/opt/homebrew/bin/gh', '/tmp/we"ird/gh'],
-    denyNetOutboundLiterals: ['/tmp/rt/ccserver-pty-host.sock', '/tmp/rt/meta/meta.sock'],
+    denyNetOutboundLiterals: ['/tmp/rt/ccserver-control.sock', '/tmp/rt/meta/meta.sock'],
   });
   assertParenBalanced(text);
   // Spot-check the clauses actually co-exist (not silently dropped).
@@ -1218,7 +1217,7 @@ test('buildSeatbeltLaunch: a fully-loaded launch produces a paren-balanced profi
     authSock: join(sockDir, '1password-agent.sock'),
     orchestratorClaudeMdSrc: orch,
     ghPaths: ['/opt/homebrew/bin/gh', '/usr/local/bin/gh'],
-    controlSockDenies: [join(sockDir, 'ccserver-pty-host.sock'), join(sockDir, 'meta', 'meta.sock')],
+    controlSockDenies: [join(sockDir, 'ccserver-control.sock'), join(sockDir, 'meta', 'meta.sock')],
     sockets: { mcp: join(sockDir, 'mcp.sock'), notify: join(sockDir, 'notify.sock'), meta: join(sockDir, 'meta', 'meta.sock') },
     extraBinds: [{ src: '/srv/shared', mode: 'rw' }, { src: '~/.ssh', mode: 'ro' }],
   }));
@@ -1302,16 +1301,16 @@ test('buildSeatbeltLaunch: gpgVault null (default) sets no GNUPGHOME/GIT_CONFIG 
 test('buildSeatbeltLaunch pins controlSockDenies for network-outbound', () => {
   const sockDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-socks-'));
   DIRS.push(sockDir);
-  const ptySock = join(sockDir, 'ccserver-pty-host.sock');
-  writeFileSync(ptySock, '');
-  const sb = buildSeatbeltLaunch(baseOpts({ controlSockDenies: [ptySock] }));
+  const controlSock = join(sockDir, 'ccserver-control.sock');
+  writeFileSync(controlSock, '');
+  const sb = buildSeatbeltLaunch(baseOpts({ controlSockDenies: [controlSock] }));
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
-  assert.ok(text.includes(`(remote unix-socket (path-literal "${ptySock}"))`), 'pty-host socket pinned');
+  assert.ok(text.includes(`(remote unix-socket (path-literal "${controlSock}"))`), 'control socket pinned');
   // The socket FILE itself must also be write-denied (file-write* covers
   // unlink/rename -- otherwise the agent could replace the pinned socket at
   // its fixed path and impersonate the control plane for host-side connects).
-  assert.equal(finalWriteVerdict(text, ptySock), 'deny', 'pinned socket file unwritable');
+  assert.equal(finalWriteVerdict(text, controlSock), 'deny', 'pinned socket file unwritable');
 });
 
 test('control-socket pins cover both /tmp spellings even when the dir is absent', () => {
@@ -1319,7 +1318,7 @@ test('control-socket pins cover both /tmp spellings even when the dir is absent'
   // must fall back to the always-existing parent so the /private/tmp
   // spelling (Seatbelt mediates the resolved path) is pinned too.
   const absentDir = join(tmpdir(), `ccserver-seatbelt-absent-${randomUUID()}`);
-  const sock = join(absentDir, 'ccserver-pty-host.sock');
+  const sock = join(absentDir, 'ccserver-control.sock');
   const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
   // Keep the launch dir OUT of the absent dir (fresh boots put it there).
   process.env.CCSERVER_SANDBOX_SEATBELT_TMP = tmpRoot;
@@ -1337,25 +1336,18 @@ test('control-socket pins cover both /tmp spellings even when the dir is absent'
 });
 
 test('control-plane pin paths track the producers (rename-safe)', () => {
-  // The network-outbound deny is only as good as its path: if pty-host or
-  // meta renames its socket, the pin must follow. Both producers build from
-  // git-broker.js's shared constants, and so does the pin list.
-  const prevPty = process.env.CCSERVER_PTY_HOST_SOCK;
+  // The network-outbound deny is only as good as its path: if meta renames
+  // its socket, the pin must follow. It builds from git-broker.js's shared
+  // constants, and so does the pin list.
   const prevXdg = process.env.XDG_RUNTIME_DIR;
-  delete process.env.CCSERVER_PTY_HOST_SOCK;
   delete process.env.XDG_RUNTIME_DIR;
   try {
-    assert.equal(getPtyHostSockPath(), join(hostRuntimeDir(), PTY_HOST_SOCK_NAME));
     assert.equal(getMetaSockPath(), join(hostRuntimeDir(), META_SOCKET_DIR_NAME, 'sock'));
     const pins = seatbeltControlSockPaths(null);
-    assert.ok(pins.includes(getPtyHostSockPath()), 'pty-host socket pinned');
     assert.ok(pins.includes(getMetaSockPath()), 'meta socket pinned');
     const metaPins = seatbeltControlSockPaths(getMetaSockPath());
     assert.ok(!metaPins.includes(getMetaSockPath()), 'meta session keeps its channel');
-    assert.ok(metaPins.includes(getPtyHostSockPath()), 'pty-host pinned even for meta');
   } finally {
-    if (prevPty === undefined) delete process.env.CCSERVER_PTY_HOST_SOCK;
-    else process.env.CCSERVER_PTY_HOST_SOCK = prevPty;
     if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
     else process.env.XDG_RUNTIME_DIR = prevXdg;
   }
@@ -1397,49 +1389,6 @@ test('buildSeatbeltLaunch pins ghPaths only while the git broker is on', () => {
 });
 
 // --- security review 2026-09-10 fixes A-F -------------------------------------
-
-test('A: seatbeltControlSockPaths pins every pty-host shard, not just shard 0', () => {
-  const prevShards = process.env.CCSERVER_PTY_HOST_SHARDS;
-  const prevSock = process.env.CCSERVER_PTY_HOST_SOCK;
-  const prevXdg = process.env.XDG_RUNTIME_DIR;
-  delete process.env.CCSERVER_PTY_HOST_SOCK;
-  delete process.env.XDG_RUNTIME_DIR;
-  process.env.CCSERVER_PTY_HOST_SHARDS = '3';
-  try {
-    const base = hostRuntimeDir();
-    const pins = seatbeltControlSockPaths(null);
-    // shard 0 keeps its historical name; shards 1..N-1 get sibling paths --
-    // the exact set getPtyHostSockPath() derives (pty-host/index.js).
-    assert.ok(pins.includes(join(base, PTY_HOST_SOCK_NAME)), 'shard 0 pinned');
-    assert.ok(pins.includes(getPtyHostSockPath(1)), 'shard 1 pinned');
-    assert.ok(pins.includes(getPtyHostSockPath(2)), 'shard 2 pinned');
-    assert.ok(!pins.includes(join(base, 'ccserver-pty-host-3.sock')), 'no phantom shard 3');
-  } finally {
-    if (prevShards === undefined) delete process.env.CCSERVER_PTY_HOST_SHARDS;
-    else process.env.CCSERVER_PTY_HOST_SHARDS = prevShards;
-    if (prevSock === undefined) delete process.env.CCSERVER_PTY_HOST_SOCK;
-    else process.env.CCSERVER_PTY_HOST_SOCK = prevSock;
-    if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
-    else process.env.XDG_RUNTIME_DIR = prevXdg;
-  }
-});
-
-test('A: shard pins honor a CCSERVER_PTY_HOST_SOCK override', () => {
-  const prevShards = process.env.CCSERVER_PTY_HOST_SHARDS;
-  const prevSock = process.env.CCSERVER_PTY_HOST_SOCK;
-  process.env.CCSERVER_PTY_HOST_SHARDS = '2';
-  process.env.CCSERVER_PTY_HOST_SOCK = '/tmp/custom-pty.sock';
-  try {
-    const pins = seatbeltControlSockPaths(null);
-    assert.ok(pins.includes('/tmp/custom-pty.sock'), 'override shard 0 pinned');
-    assert.ok(pins.includes('/tmp/custom-pty.sock-1'), 'override shard 1 pinned');
-  } finally {
-    if (prevShards === undefined) delete process.env.CCSERVER_PTY_HOST_SHARDS;
-    else process.env.CCSERVER_PTY_HOST_SHARDS = prevShards;
-    if (prevSock === undefined) delete process.env.CCSERVER_PTY_HOST_SOCK;
-    else process.env.CCSERVER_PTY_HOST_SOCK = prevSock;
-  }
-});
 
 test('B: pathVariantsDeep resolves the symlink spelling through missing components', () => {
   // Existing dir: both spellings, like pathVariants.
@@ -1493,12 +1442,12 @@ test('C: the host runtime dir tree is deny-written, with only this session\'s so
   mkdirSync(brokerDir, { recursive: true });
   const brokerSock = join(brokerDir, 'broker.sock');
   const notifySock = join(runtimeDir, 'ccserver-notify.d', 'sock');
-  const ptySock = join(runtimeDir, PTY_HOST_SOCK_NAME);
+  const controlSock = join(runtimeDir, 'ccserver-control.sock');
   const sb = buildSeatbeltLaunch(baseOpts({
     hostRuntimeDir: runtimeDir,
     gitBroker: { sockPath: brokerSock, allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
     sockets: { notify: notifySock },
-    controlSockDenies: [ptySock],
+    controlSockDenies: [controlSock],
   }));
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
@@ -1509,8 +1458,8 @@ test('C: the host runtime dir tree is deny-written, with only this session\'s so
   // ...but the sockets this session legitimately connect()s to stay writable.
   assert.equal(finalWriteVerdict(text, brokerSock), 'allow', 'broker socket connectable');
   assert.equal(finalWriteVerdict(text, notifySock), 'allow', 'notify socket connectable');
-  // ...while the pty-host control socket stays denied (never re-allowed).
-  assert.equal(finalWriteVerdict(text, ptySock), 'deny', 'pty-host socket stays unwritable');
+  // ...while the control socket stays denied (never re-allowed).
+  assert.equal(finalWriteVerdict(text, controlSock), 'deny', 'control socket stays unwritable');
 });
 
 test('C: no runtime-dir deny is emitted without a hostRuntimeDir (bwrap-path / unset)', () => {

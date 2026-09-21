@@ -65,14 +65,12 @@ const __filename = fileURLToPath(import.meta.url);
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
 // Canonical control-plane socket filenames (single source of truth): the
-// seatbelt profile's network-outbound deny pins must keep matching
-// pty-host/index.js's SOCK_NAME and metaAgent.js's socket path -- a
-// rename in either place would silently void the pin (both modules import
-// these from here, so a rename updates the pin automatically).
-// pty-host stays a single file; meta uses a dedicated `.d/sock` directory
-// (Issue #143 problem 1: directory bind survives a server restart, see
-// mcpBroker.js) so its pin is a directory + 'sock', not a single filename.
-export const PTY_HOST_SOCK_NAME = 'ccserver-pty-host.sock';
+// seatbelt profile's network-outbound deny pin must keep matching
+// metaAgent.js's socket path -- a rename there would silently void the pin
+// (metaAgent.js imports this from here, so a rename updates the pin
+// automatically). Meta uses a dedicated `.d/sock` directory (Issue #143
+// problem 1: directory bind survives a server restart, see mcpBroker.js), so
+// its pin is a directory + 'sock', not a single filename.
 export const META_SOCK_NAME = 'ccserver-meta.sock';
 export const META_SOCKET_DIR_NAME = 'ccserver-meta.d';
 // Host runtime dir for broker sockets and other per-launch state.
@@ -106,10 +104,10 @@ export function ensureHostRuntimeDir() {
   // mkdirSync's mode option never fixes a PRE-existing dir. When THIS uid
   // already owns it, a too-loose mode (a past run's 0755, an earlier tool,
   // a lax host umask) is ours to correct -- self-heal to 0700 rather than
-  // throwing on every sandbox / MCP-broker / pty-host launch on the host
-  // until the dir is deleted by hand (mcpBroker.js and rpcServer.js
-  // deliberately propagate this throw, so a non-heal here bricks those
-  // features). A dir owned by ANOTHER uid is still refused: binding sockets
+  // throwing on every sandbox / MCP-broker launch on the host until the dir
+  // is deleted by hand (mcpBroker.js deliberately propagates this throw, so
+  // a non-heal here bricks that feature). A dir owned by ANOTHER uid is
+  // still refused: binding sockets
   // into a dir its owner can unlink/replace is the exact threat this guard
   // exists for, and chmod cannot take ownership.
   if (st.uid === UID && (st.mode & 0o777) !== 0o700) {

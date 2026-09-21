@@ -57,9 +57,9 @@ export function seatbeltBaseDir() {
 // token refresh in that file itself once it exists).
 //
 // The `security` shell-out is SYNCHRONOUS (execFileSync) on the launch path --
-// the pty-host shard for full sessions, the main server process for /usage
-// captures -- so a `security` that blocks on a GUI prompt would freeze that
-// event loop. Two guards: a 2s timeout (matches Claude Code's own keychain
+// the main server process, for both full sessions and /usage captures -- so
+// a `security` that blocks on a GUI prompt would freeze that event loop. Two
+// guards: a 2s timeout (matches Claude Code's own keychain
 // timeout) and a once-per-process probe (`defaultKeychainProbed`) so a launch
 // storm can't re-stall. Tests inject `deps.runSecurity` to bypass both.
 
@@ -492,12 +492,10 @@ export function buildSeatbeltProfileText({
     ...(networkIsolate
       ? seatbeltIsolatedNetworkRules(networkIsolate.brokerPort)
       : ['(allow network*)']),
-    // Host control-plane unix sockets (pty-host RPC, meta broker) live under
-    // hostRuntimeDir() -- inside the broad tmp write rules on darwin.
-    // connect() is mediated as network-outbound (a file-write* pin cannot
-    // stop it), and neither socket may be reachable from a sandboxed
-    // process: the pty-host RPC accepts `spawn` with sandbox:false
-    // (unsandboxed host exec) and the meta socket is the privileged meta
+    // The host control-plane meta broker socket lives under hostRuntimeDir()
+    // -- inside the broad tmp write rules on darwin. connect() is mediated as
+    // network-outbound (a file-write* pin cannot stop it), and the socket may
+    // not be reachable from a sandboxed process: it is the privileged meta
     // toolset's channel. NOTE: the path filter MUST be path-literal (not
     // regex/literal/subpath) -- per Apple's Sandbox Guide, unix-socket
     // network filters accept only path-literal. Emitted AFTER (allow
@@ -559,12 +557,12 @@ export function buildSeatbeltProfileText({
   // allow above would otherwise leave the dir itself writable: a sandboxed
   // process runs as the server's uid and owns it, and macOS sticky-bit does
   // not stop an owner renaming/rmdir'ing its own entry -- so the agent could
-  // `rename()` the whole dir away and make EVERY other session's pty-host /
-  // meta / notify / usage / reviewer socket resolve to nothing (server-wide
-  // DoS from one sandbox). Deny-write the whole tree, then re-allow only the
+  // `rename()` the whole dir away and make EVERY other session's meta /
+  // notify / usage / reviewer socket resolve to nothing (server-wide DoS
+  // from one sandbox). Deny-write the whole tree, then re-allow only the
   // exact sockets this session legitimately connect()s to (connect() is
-  // mediated as file-write* on the socket path). pty-host / meta stay denied
-  // -- they are never in the re-allow list.
+  // mediated as file-write* on the socket path). meta stays denied -- it is
+  // never in the re-allow list.
   if (runtimeDirDenyWriteRegexes.length > 0) {
     out.push(
       ';; host runtime dir: deny-write the tree (rename/rmdir DoS), keep only',
@@ -635,11 +633,10 @@ function expandAgainstHome(p, hostHome) {
 //                    buildBwrapArgs ro-binds the wrapper over): denied for
 //                    process-exec while the git broker is on, so gh is
 //                    reachable only via the PATH shim
-//   controlSockDenies - host control-plane unix-socket paths (pty-host RPC,
-//                    meta broker, from sandbox.js): denied for
-//                    network-outbound connect() -- file-write* pins cannot
-//                    stop connect(), and both sockets live inside the broad
-//                    tmp write rules on darwin
+//   controlSockDenies - host control-plane unix-socket path (meta broker,
+//                    from sandbox.js): denied for network-outbound connect()
+//                    -- file-write* pins cannot stop connect(), and the
+//                    socket lives inside the broad tmp write rules on darwin
 //   hostRuntimeDir - git-broker.js's hostRuntimeDir() (the short /tmp base on
 //                    darwin holding every session's control-plane sockets):
 //                    the whole tree is deny-written so a sandboxed process
@@ -1334,11 +1331,10 @@ export function buildSeatbeltLaunch({
       if (b.mode === 'rw') writeRegexes.push(...memoSubtrees(src));
     }
 
-    // Control-plane sockets may not exist yet (pty-host/meta boot lazily),
-    // and NEITHER may any of their parent dirs: the pty-host socket sits one
-    // level below the runtime dir, the meta socket two levels below it, and
-    // on a fresh host the runtime dir itself is absent until the first broker
-    // starts. pathVariantsDeep() walks up to the first existing ancestor
+    // The control-plane socket may not exist yet (meta boots lazily), and
+    // neither may its parent dirs: the meta socket sits two levels below the
+    // runtime dir, and on a fresh host the runtime dir itself is absent until
+    // the first broker starts. pathVariantsDeep() walks up to the first existing ancestor
     // (ultimately /tmp) and synthesizes both the raw and the symlink-resolved
     // (/private/tmp) spelling regardless of how many components are missing --
     // a raw-only pin would let connect() walk around the deny via the
@@ -1349,8 +1345,8 @@ export function buildSeatbeltLaunch({
     // The pinned sockets' files themselves must also stay unwritable:
     // file-write* covers unlink/rename, so without these pins the agent can
     // delete or replace a pinned socket at its fixed path (DoS the server's
-    // control plane, or impersonate pty-host/meta for future host-side
-    // connects). Same list as the network-outbound pins -- the meta
+    // control plane, or impersonate meta for future host-side connects).
+    // Same list as the network-outbound pins -- the meta
     // session's own socket is excluded there, so it stays fully usable here.
     denyWriteRegexes.push(...netDenyLiterals.map((s) => `^${escapeSeatbeltRegex(s)}$`));
     // Deny-write the whole host runtime dir tree (see the C fix): the broad
@@ -1359,8 +1355,8 @@ export function buildSeatbeltLaunch({
     // sandboxed process -> server-wide control-plane DoS. Both spellings, and
     // resolvable even before the dir exists (pathVariantsDeep). Re-allow only
     // the sockets THIS session connect()s to (writeLiterals that fall under
-    // the tree) -- pty-host / meta are never in that list, so they stay
-    // denied both here and via the netDenyLiterals pins above.
+    // the tree) -- meta is never in that list, so it stays denied both here
+    // and via the netDenyLiterals pins above.
     let runtimeDirDenyWriteRegexes = [];
     let runtimeSocketAllowLiterals = [];
     if (hostRuntimeDir) {

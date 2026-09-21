@@ -28,8 +28,6 @@ import {
 import { stripAnsi } from './mcpTools.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { recordSessionLimitReset } from '../sessionLimitState.js';
-import { getPtyHostClient, getAllPtyHostClients, shardIndexForKey, shardKeyForSession, isPtyHostEnabled } from './ptyHostClient.js';
-import { setPtyHostSessionMeta, patchPtyHostSessionMeta, deletePtyHostSessionMeta, loadPtyHostSessionMeta } from './ptyHostSessionMeta.js';
 import {
   parseTimeoutEnv,
   DEFAULT_SESSION_TIMEOUT_MS,
@@ -221,18 +219,8 @@ function normalizeModel(model) {
 }
 
 // Builds the `session` record and wires its ptyProcess onData/onExit
-// listeners -- the exact same construction both createSession() (a freshly
-// spawned or pty-host-spawned ptyProcess) and restorePtyHostSessions() (plan5
-// Step3: a ptyProcess re-attached to an already-running pty-host session via
-// PtyHostClient.attach()) need, registers it in `sessions`, and fires
-// sessionCreateListeners. Factored out so the restore path can produce a
-// session indistinguishable from one createSession() itself just launched --
-// AutoYes / session-limit detection / screenModel / outputBuffer accumulation
-// must all behave identically regardless of which path built the record.
-//
-// `meta.settled` defaults to false (a freshly launched TUI is still mid
-// init-burst); restorePtyHostSessions() passes true -- a session being
-// reattached to is by definition not in that initial burst any more.
+// listeners. The only caller is createSession(); factored out to keep that
+// function's spawn logic separate from the record/listener wiring.
 function buildSessionRecord(id, ptyProcess, meta) {
   const session = {
     id,
@@ -265,12 +253,10 @@ function buildSessionRecord(id, ptyProcess, meta) {
     sandboxSeatbeltDir: meta.sandboxSeatbeltDir ?? null, // seatbelt profile/shim runtime dir (macOS only), removed on teardown
     sandboxSeatbeltFiles: meta.sandboxSeatbeltFiles ?? null, // orchestrator rule copies in the project dir (macOS only), unlinked on teardown
     // Network-isolation broker (see network-broker.js): port/token/armed/mode
-    // are plain data, needed regardless of spawn mode for the running-session
-    // toggle's and pushAllowlistToArmedSessions's live HTTP calls straight
-    // from this process. sandboxNetworkBrokerProc/Dir (the process
-    // handle/runtime dir to kill/remove on teardown) is direct-spawn-only --
-    // pty-host owns and tears down its own broker child itself, same as
-    // sandboxGitBrokerProc/Dir.
+    // are plain data, needed for the running-session toggle's and
+    // pushAllowlistToArmedSessions's live HTTP calls straight from this
+    // process. sandboxNetworkBrokerProc/Dir (the process handle/runtime dir
+    // to kill/remove on teardown) mirror sandboxGitBrokerProc/Dir.
     networkBrokerPort: meta.networkBrokerPort ?? null,
     networkBrokerToken: meta.networkBrokerToken ?? null,
     networkIsolateArmed: !!meta.networkIsolateArmed,
@@ -278,15 +264,6 @@ function buildSessionRecord(id, ptyProcess, meta) {
     sandboxNetworkBrokerProc: meta.sandboxNetworkBrokerProc ?? null,
     sandboxNetworkBrokerDir: meta.sandboxNetworkBrokerDir ?? null,
     reuseSandboxHome: meta.reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
-    // Plan5 Step5: which pty-host instance this session's pty actually lives
-    // on. Decided once at creation (createSession()'s usePtyHost branch) and
-    // never recomputed -- see ptyHostClient.js's shardIndexForKey() header
-    // comment on why reshuffling on every call would be wrong. null outside
-    // usePtyHost mode. Callers pass the already-resolved value (createSession
-    // passes null for direct-spawn sessions, restorePtyHostSessions()
-    // resolves a pre-Step5 restore-metadata entry's missing shardIndex to 0
-    // -- see its own comment), so this is a plain readthrough.
-    ptyHostShardIndex: meta.shardIndex ?? null,
     ptyProcess,
     // Every attached viewer, mapped to the viewport it last reported. A
     // session is shared: opening it from a second device adds a socket here
@@ -329,25 +306,6 @@ function buildSessionRecord(id, ptyProcess, meta) {
     limitDetectBuf: '',
     lastAutoLimitResetAt: null,
     startedClaudeSessionId: meta.startedClaudeSessionId ?? null,
-    // Issue #119 Step6: same sliding-window pattern as limitDetectBuf above,
-    // but for continuously tracking the most recent `claude --resume <id>`
-    // hint a live claude session prints (extractResumeSessionId, appLaunch.js)
-    // -- unlike session.claudeSessionId (only ever set once, from onExit,
-    // after the process has already died), this stays current WHILE the
-    // session is still running, so pty-host's own crash-recovery auto-resume
-    // (server/pty-host/index.js) can relaunch with the actual latest id
-    // instead of falling back to an ambiguous resumeLast. Seeded from
-    // meta.startedClaudeSessionId (not null): if this launch itself already
-    // knew an accurate id (a manual resume) and the pty dies before ever
-    // printing a NEW hint, that id is still the best known value, not
-    // "nothing detected yet". Only tracked/written back for app==='claude'
-    // (see the onData handler below) -- every other app's
-    // extractResumeSessionId always returns null (see appLaunch.js), so
-    // there is nothing to track for them.
-    lastKnownResumeId: meta.startedClaudeSessionId ?? null,
-    resumeIdDetectBuf: '',
-    resumeIdWriteTimer: null,
-    resumeIdLastWriteAt: 0,
     scheduleId: null, // key into the module-level `schedules` map, if any
     pendingInjection: null, // { text, at } — scheduled prompt awaiting a freshly-resumed session
     pendingInjectionTimer: null, // RESUME_INJECT_FALLBACK_MS safety net; cleared on teardown
@@ -409,27 +367,6 @@ function buildSessionRecord(id, ptyProcess, meta) {
         }
       } else {
         console.warn(`[session-limit] session ${session.id} hit its limit, but a manual schedule already exists -- not overriding it`);
-      }
-    }
-
-    // Issue #119 Step6-0: continuously track claude's latest `--resume <id>`
-    // hint (see lastKnownResumeId's field comment above) so pty-host's own
-    // crash-recovery auto-resume has an accurate id, not just resumeLast.
-    // Only worth the sliding-window bookkeeping when it can actually go
-    // anywhere: usePtyHost gates the whole point (a direct-spawned session
-    // dies with server本体 itself, same as before pty-host existed -- there is
-    // no separate crash-recovery path for it to feed), and app==='claude'
-    // gates the extraction itself (every other app's extractResumeSessionId
-    // always returns null, see appLaunch.js).
-    if (isPtyHostEnabled() && session.app === 'claude') {
-      session.resumeIdDetectBuf = (session.resumeIdDetectBuf + data).slice(-RESUME_ID_DETECT_BUF_MAX_CHARS);
-      // extractResumeSessionId does its own ANSI-stripping internally (unlike
-      // findSessionLimitReset above), so the raw window is passed straight
-      // through.
-      const detected = extractResumeSessionId('claude', session.resumeIdDetectBuf);
-      if (detected && detected !== session.lastKnownResumeId) {
-        session.lastKnownResumeId = detected;
-        scheduleResumeIdWriteback(session);
       }
     }
 
@@ -554,15 +491,6 @@ function buildSessionRecord(id, ptyProcess, meta) {
     // Keep any pending scheduled prompt alive across this exit: refresh its
     // resume id and detach it so it auto-resumes the conversation at fire time.
     refreshScheduleOnExit(session);
-
-    // Issue #119 Step6-0: a debounced write-back pending when the pty exits
-    // is the last chance to get it onto disk -- no more onData chunks will
-    // ever arrive to trigger the next one, so anything still only in memory
-    // at this point would otherwise be lost the moment server本体 itself
-    // later restarts (or, for a pty-host-hosted session, is exactly the kind
-    // of gap flushResumeIdWriteback's own callers already guard elsewhere --
-    // see initPtyHostDisconnectedHandler below).
-    if (session.resumeIdWriteTimer) flushResumeIdWriteback(session);
 
     for (const fn of sessionExitListeners) {
       try {
@@ -918,16 +846,6 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // host node+bridge). The args must be in the target command before
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
-  // Issue #119 Step6-1: the MCP registration args (injected.args below),
-  // captured separately from the rest of `args` so pty-host's own
-  // crash-recovery auto-resume (server/pty-host/index.js) can replay them
-  // verbatim without re-deriving whether notify/usage/meta/reviewer/group-mcp
-  // apply or rebuilding their identity payloads -- only the resume/model/
-  // permission portion appLaunchArgs() produces needs to be regenerated
-  // fresh (a resume id that was accurate at THIS launch may not be by the
-  // time pty-host relaunches it). See setPtyHostSessionMeta's mcpArgs field
-  // below.
-  let mcpArgs = [];
   // code-review-graph is only provisionable under bwrap (mount-bound
   // provisioner); seatbelt sandboxes never get the binary, so injecting the
   // MCP server there would fail every session.
@@ -975,7 +893,6 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       cwd,
     });
     mcpEnv = injected.env;
-    mcpArgs = injected.args;
     args.push(...injected.args);
   }
 
@@ -983,15 +900,6 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // sandbox-exec on macOS) so it can only see the project directory plus
   // configured paths, with an isolated rootless docker inside on Linux.
   // See sandbox.js.
-  //
-  // usePtyHost (plan5 Step2, section 2.1): pty-host's own spawn() builds the
-  // sandbox itself (server/pty-host/ptyStore.js already imports
-  // buildSandboxSpawn), so this branch sends it the raw command/args plus the
-  // sandbox parameters instead of calling buildSandboxSpawn() here. Only the
-  // checks that depend on server本体's OWN state (the live `sessions` Map,
-  // this project's group-files dir) still run here -- pty-host has no
-  // visibility into either.
-  const usePtyHost = isPtyHostEnabled();
   let useSandbox = false;
   let sandboxDocker = false;
   let gpgVaultActive = false;
@@ -1002,12 +910,11 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxSeatbeltDir = null;
   let sandboxSeatbeltFiles = null;
   // Network-isolation broker (see network-broker.js): port/token/armed/mode
-  // are plain data needed here regardless of spawn mode (the running-session
-  // toggle and pushAllowlistToArmedSessions make live HTTP calls to the
-  // broker straight from this process). sandboxNetworkBrokerProc/Dir are the
-  // process handle/runtime dir to kill/remove on teardown -- direct-spawn
-  // only, same as sandboxGitBrokerProc/Dir (pty-host owns and tears down its
-  // own broker child, see server/pty-host/ptyStore.js).
+  // are plain data needed here (the running-session toggle and
+  // pushAllowlistToArmedSessions make live HTTP calls to the broker straight
+  // from this process). sandboxNetworkBrokerProc/Dir are the process
+  // handle/runtime dir to kill/remove on teardown, same as
+  // sandboxGitBrokerProc/Dir.
   let networkBrokerPort = null;
   let networkBrokerToken = null;
   let networkIsolateArmed = false;
@@ -1015,324 +922,121 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxNetworkBrokerProc = null;
   let sandboxNetworkBrokerDir = null;
   let ptyProcess;
-  // Plan5 Step5 (partitioning): decided once here and reused for BOTH the
-  // spawn() call below and the subscribe() call after buildSessionRecord --
-  // never re-derived via a second getPtyHostClient() call in between. Doing
-  // so would risk shardCount() having changed (env var read at call time) or
-  // simply reading less clearly as "the same client", either of which could
-  // silently send subscribe() to a different pty-host instance than the one
-  // spawn() actually landed on, RPC-ing for a session id that instance has
-  // never heard of. See ptyHostClient.js's header comment on this exact trap.
-  let ptyHostShardIndex = null;
-  let ptyHostShardClient = null;
 
-  if (usePtyHost) {
-    ptyHostShardIndex = shardIndexForKey(shardKeyForSession({ groupId, cwd }));
-    ptyHostShardClient = getPtyHostClient(ptyHostShardIndex);
-    if (sandboxRequested) {
-      // Same conflict backstop as the direct-spawn branch below (see its
-      // comment) -- this check is server本体-only state, so it can't move
-      // into pty-host.
-      if (cfg.persistentHome && !reuseSandboxHome) {
-        const targetPath = persistentHomeDir(cwd);
-        if (sandboxHomeConflict(targetPath, [...sessions.values()])) {
-          return {
-            sessionId: id,
-            session: null,
-            error: 'このプロジェクトのサンドボックスを利用中のセッションがあるため、新規作成（前回環境の破棄）できません。先にタブを閉じてください。',
-          };
-        }
+  if (sandboxRequested) {
+    // A fresh (wipe) sandbox is refused while another sandbox of the same
+    // project is still using the same persistent HOME -- deleting the host dir
+    // under a live bind mount would corrupt that session. The client disables
+    // the "new" option in the same situation (GET /api/sandbox/status), so
+    // this is the authoritative backstop.
+    if (cfg.persistentHome && !reuseSandboxHome) {
+      const targetPath = persistentHomeDir(cwd);
+      if (sandboxHomeConflict(targetPath, [...sessions.values()])) {
+        return {
+          sessionId: id,
+          session: null,
+          error: 'このプロジェクトのサンドボックスを利用中のセッションがあるため、新規作成（前回環境の破棄）できません。先にタブを閉じてください。',
+        };
       }
-    } else if (forceSandbox) {
-      const { reason, hint } = forceSandboxUnavailableReason();
-      return {
-        sessionId: id,
-        session: null,
-        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. ${hint}`,
-      };
     }
+    // Group file exchange: every sandboxed group member gets its group's
+    // blob directory read-only at /ccserver-group-files.
     let resolvedGroupFilesDir = groupFilesDir;
-    if (sandboxRequested && !resolvedGroupFilesDir && groupId) {
+    if (!resolvedGroupFilesDir && groupId) {
       try {
         resolvedGroupFilesDir = getGroupFilesDir(groupId);
         ensureGroupFilesDir(groupId);
       } catch { resolvedGroupFilesDir = null; }
     }
+    try {
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
+      command = spawn.command;
+      args = spawn.args;
+      sandboxDocker = !!spawn.docker;
+      gpgVaultActive = !!spawn.gpgVaultActive;
+      sandboxStateDir = spawn.stateDir || null;
+      sandboxGitBrokerProc = spawn.gitBrokerProc || null;
+      sandboxGitBrokerDir = spawn.gitBrokerDir || null;
+      sandboxCommitGuardDir = spawn.commitGuardDir || null;
+      sandboxSeatbeltDir = spawn.seatbeltDir || null;
+      sandboxSeatbeltFiles = spawn.seatbeltFiles || null;
+      networkBrokerPort = spawn.networkBrokerPort || null;
+      networkBrokerToken = spawn.networkBrokerToken || null;
+      networkIsolateArmed = !!spawn.networkIsolateArmed;
+      networkIsolateMode = spawn.networkIsolateMode || null;
+      sandboxNetworkBrokerProc = spawn.sandboxNetworkBrokerProc || null;
+      sandboxNetworkBrokerDir = spawn.sandboxNetworkBrokerDir || null;
+      useSandbox = true;
+    } catch (err) {
+      return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
+    }
+  } else if (forceSandbox) {
+    const { reason, hint } = forceSandboxUnavailableReason();
+    return {
+      sessionId: id,
+      session: null,
+      error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. ${hint}`,
+    };
+  }
 
-    // Same env recipe as the direct-spawn branch below, computed against
-    // sandboxRequested instead of the (not-yet-known) useSandbox -- pty-host
-    // hasn't attempted the sandbox build yet at this point, but a launch that
-    // requested one and fails is reported as an error below rather than
-    // silently falling through, so this can never end up materially wrong.
-    const ptyEnv = {
+  try {
+    ptyProcess = pty.spawn(command, args, {
+    name: 'xterm-256color',
+    cols,
+    rows,
+    cwd,
+    env: {
       ...cleanEnv,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       FORCE_COLOR: '1',
+      // For claude sessions, keep it drawing to the main buffer instead of the
+      // alternate screen (DECSET 1049). The alt-screen has no scrollback, so
+      // xterm.js's scrollLines()/scroll buttons do nothing while it's active;
+      // disabling it lets scrollback accumulate again. DISABLE_MOUSE_CLICKS
+      // additionally hands the scroll wheel back to xterm.js. Only affects
+      // ccserver-launched claude; shells are left untouched.
       ...(shell || sessionApp !== 'claude' ? {} : {
         CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1',
         CLAUDE_CODE_DISABLE_MOUSE_CLICKS: '1',
       }),
+      // opencode is left with full mouse capture (its default): the TUI keeps
+      // the whole conversation in an internal scrollable area that the wheel
+      // scrolls natively, and its own drag-selection + copy-on-select writes
+      // to the browser clipboard via OSC 52 (handled client-side).
       ...mcpEnv,
-      ...(shell || sessionApp !== 'opencode' || sandboxRequested ? {} : bunTmpdirEnv()),
-    };
-
-    try {
-      const rpty = await ptyHostShardClient.spawn({
-        id,
-        cwd,
-        cols,
-        rows,
-        command,
-        args,
-        env: ptyEnv,
-        sandbox: !!sandboxRequested,
-        sandboxOpts,
-        // pty-host's ptyStore.spawn() refuses sandbox:true without an "app"
-        // (server/pty-host/ptyStore.js) -- stricter than buildSandboxSpawn's
-        // own resolveApp(app), which already treats a null/unrecognized app
-        // as "resolve the claude binary" (none of its app-specific branches
-        // match). shell:true forces sessionApp to null above, and shell +
-        // sandbox is a real, reachable combination (plain POST /api/sessions,
-        // and RemoteInstanceView.jsx's independently-toggleable シェル/
-        // サンドボックス checkboxes) that worked before pty-host existed.
-        // Falling back to the same default here (only used inside pty-host's
-        // sandbox branch -- session.app itself stays sessionApp, i.e. null,
-        // for shell sessions) keeps that combination working unchanged.
-        app: sessionApp || 'claude',
-        mcpSocketPath,
-        mcpToken,
-        notifySocketPath,
-        usageSocketPath,
-        metaSocketPath,
-        reviewerSocketPath,
-        reuseSandboxHome,
-        orchestratorClaudeMdSrc,
-        gitCommonDir,
-        groupFilesDir: resolvedGroupFilesDir,
-        sandboxHomeCreatedBy,
-      });
-      ptyProcess = rpty;
-      useSandbox = !!sandboxRequested;
-      sandboxDocker = !!rpty.sandboxInfo?.docker;
-      sandboxStateDir = rpty.sandboxInfo?.stateDir || null;
-      // Read-only ownership reference for fireSchedule's retire-first guard:
-      // teardown itself stays pty-host's (the destroy path below is skipped
-      // in this mode), but an exited predecessor must still be recognisable
-      // as the overlay owner before a scheduled auto-resume spawns a
-      // successor into the same deterministic orchestratorDir.
-      sandboxSeatbeltFiles = Array.isArray(rpty.sandboxInfo?.seatbeltFiles)
-        ? rpty.sandboxInfo.seatbeltFiles
-        : null;
-      // Network-isolation broker: port/token/armed/mode are plain data
-      // pty-host relays back (like docker etc. above), needed here for the
-      // running-session toggle's HTTP call. sandboxNetworkBrokerProc/Dir stay
-      // null in this mode -- pty-host owns and tears down its own broker
-      // child itself (see server/pty-host/ptyStore.js), same as gitBroker.
-      networkBrokerPort = rpty.sandboxInfo?.networkBrokerPort || null;
-      networkBrokerToken = rpty.sandboxInfo?.networkBrokerToken || null;
-      networkIsolateArmed = !!rpty.sandboxInfo?.networkIsolateArmed;
-      networkIsolateMode = rpty.sandboxInfo?.networkIsolateMode || null;
-      // sandboxGitBrokerProc/sandboxGitBrokerDir/sandboxCommitGuardDir stay
-      // null: pty-host itself owns and tears down whatever it built --
-      // git-broker's process/dir (plan5 2.1) and, since this branch's own
-      // commitGuardDir fix, the commit-message guard's runtime dir too (see
-      // server/pty-host/ptyStore.js) -- server本体 has no handle to any of
-      // it and must not try.
-      //
-      // Step3 (plan5): persist exactly the "launch input" fields pty-host's
-      // own list() can never return (it deliberately holds none of this --
-      // see ptyStore.js's header comment) so a restart can rebuild this
-      // session's `session` record via restorePtyHostSessions() instead of
-      // losing it. Written only on success -- an id that never reaches this
-      // point never spawned on pty-host's side, so there would be nothing to
-      // restore.
-      setPtyHostSessionMeta(id, {
-        cwd,
-        shell: !!shell,
-        app: sessionApp,
-        model: sessionModel,
-        permissionMode: sessionPermissionMode,
-        groupId,
-        groupRole,
-        customLabel: normalizeCustomLabel(customLabel),
-        isMetaAgent: !!isMetaAgent,
-        sandbox: useSandbox,
-        sandboxOpts: useSandbox ? (sandboxOpts || null) : null,
-        docker: sandboxDocker,
-        sandboxStateDir,
-        // Restores the running-session toggle's target across a server本体
-        // restart (pty-host itself, and its broker child, stay alive across
-        // that -- only this process's own `sessions` Map view is rebuilt). A
-        // pty-host-side crash is a different case: ptyStore.spawn() rebuilds
-        // the whole sandbox (including a fresh broker, new port/token) from
-        // this same meta's launch-input fields, exactly like gitBroker's
-        // "does not survive to be reused" fate -- see gitBrokerRegistry.js.
-        networkBrokerPort,
-        networkBrokerToken,
-        networkIsolateArmed,
-        networkIsolateMode,
-        reuseSandboxHome,
-        startedClaudeSessionId: claudeSessionId || null,
-        // Plan5 Step5: persisted, not recomputed on restore -- see this
-        // file's restorePtyHostSessions() and ptyHostClient.js's
-        // shardIndexForKey() header comment.
-        shardIndex: ptyHostShardIndex,
-        // Issue #119 Step6-1: everything below lets pty-host's own
-        // crash-recovery auto-resume (server/pty-host/index.js) call
-        // ptyStore.spawn() again with the exact same shape this call itself
-        // used -- command/env/the socket paths/orchestratorClaudeMdSrc/
-        // gitCommonDir/groupFilesDir/sandboxHomeCreatedBy are replayed
-        // verbatim (a fresh buildSandboxSpawn() run there rebuilds the
-        // sandbox -- including a fresh git-broker -- from these exactly as
-        // this launch itself did; a git-broker started by the crashed
-        // pty-host generation does NOT survive to be reused, see
-        // gitBrokerRegistry.js's reapOrphans()), while only the resume
-        // portion of `args` (mcpArgs holds everything else already decided
-        // above) gets rebuilt fresh from whatever's known at RESUME time.
-        mcpArgs,
-        env: ptyEnv,
-        command,
-        mcpSocketPath,
-        mcpToken,
-        notifySocketPath,
-        usageSocketPath,
-        metaSocketPath,
-        reviewerSocketPath,
-        orchestratorClaudeMdSrc,
-        gitCommonDir,
-        groupFilesDir: resolvedGroupFilesDir,
-        sandboxHomeCreatedBy,
-        // Step6-0's continuously-updated resume id (see buildSessionRecord's
-        // lastKnownResumeId field comment) starts here at the same value
-        // startedClaudeSessionId does -- the freshest accurate id known at
-        // this exact moment, before the pty has printed anything of its own.
-        latestClaudeSessionId: claudeSessionId || null,
-      });
-    } catch (err) {
-      // pty-host's own errors already carry the "Failed to build sandbox" /
-      // "Failed to spawn" prefixes INFRA_ERROR_PREFIXES expects (see
-      // server/pty-host/ptyStore.js); ptyHostClient.spawn() mints the same
-      // "Failed to spawn" prefix for the unreachable case. Forward verbatim.
-      return { sessionId: id, session: null, error: err.message };
+      // /tmp being mounted noexec makes Bun fail to unpack + dlopen its
+      // embedded libopentui.so, so opencode's TUI dies at startup (opencode
+      // #26136/#27580). Direct host launches switch BUN_TMPDIR to
+      // ~/.cache/opencode/tmp when the host TMPDIR is noexec. Sandboxed
+      // launches don't: the sandbox's /tmp is a fresh tmpfs that is always
+      // executable, and the host-side cache dir is not bound into bwrap (with
+      // a fresh HOME it would not even exist), so setting it there would
+      // break what it is meant to fix.
+      ...(shell || sessionApp !== 'opencode' || useSandbox ? {} : bunTmpdirEnv()),
+    },
+  });
+  } catch (err) {
+    // The sandbox (if any) was already built by this point -- clean up what
+    // buildSandboxSpawn created (brokers, guard/profile dirs). Otherwise a
+    // failed launch leaks a live broker process and its runtime dirs.
+    if (sandboxStateDir) { try { rmSync(sandboxStateDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (sandboxGitBrokerProc) { try { sandboxGitBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
+    if (sandboxGitBrokerDir) { try { rmSync(sandboxGitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (sandboxCommitGuardDir) { try { rmSync(sandboxCommitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (sandboxSeatbeltDir) { try { rmSync(sandboxSeatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (sandboxNetworkBrokerProc) { try { sandboxNetworkBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
+    if (sandboxNetworkBrokerDir) { try { rmSync(sandboxNetworkBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (Array.isArray(sandboxSeatbeltFiles)) {
+      // Same guard as destroySession(): a concurrent launch from the same
+      // orchestratorDir may already own these paths. (The failed session
+      // itself is not registered yet, so no self-exclusion is needed.)
+      releaseSeatbeltOverlay(
+        sandboxSeatbeltFiles,
+        [...sessions.values()].map((other) => other.sandboxSeatbeltFiles),
+      );
     }
-  } else {
-    if (sandboxRequested) {
-      // A fresh (wipe) sandbox is refused while another sandbox of the same
-      // project is still using the same persistent HOME -- deleting the host dir
-      // under a live bind mount would corrupt that session. The client disables
-      // the "new" option in the same situation (GET /api/sandbox/status), so
-      // this is the authoritative backstop.
-      if (cfg.persistentHome && !reuseSandboxHome) {
-        const targetPath = persistentHomeDir(cwd);
-        if (sandboxHomeConflict(targetPath, [...sessions.values()])) {
-          return {
-            sessionId: id,
-            session: null,
-            error: 'このプロジェクトのサンドボックスを利用中のセッションがあるため、新規作成（前回環境の破棄）できません。先にタブを閉じてください。',
-          };
-        }
-      }
-      // Group file exchange: every sandboxed group member gets its group's
-      // blob directory read-only at /ccserver-group-files.
-      let resolvedGroupFilesDir = groupFilesDir;
-      if (!resolvedGroupFilesDir && groupId) {
-        try {
-          resolvedGroupFilesDir = getGroupFilesDir(groupId);
-          ensureGroupFilesDir(groupId);
-        } catch { resolvedGroupFilesDir = null; }
-      }
-      try {
-        const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
-        command = spawn.command;
-        args = spawn.args;
-        sandboxDocker = !!spawn.docker;
-        gpgVaultActive = !!spawn.gpgVaultActive;
-        sandboxStateDir = spawn.stateDir || null;
-        sandboxGitBrokerProc = spawn.gitBrokerProc || null;
-        sandboxGitBrokerDir = spawn.gitBrokerDir || null;
-        sandboxCommitGuardDir = spawn.commitGuardDir || null;
-        sandboxSeatbeltDir = spawn.seatbeltDir || null;
-        sandboxSeatbeltFiles = spawn.seatbeltFiles || null;
-        networkBrokerPort = spawn.networkBrokerPort || null;
-        networkBrokerToken = spawn.networkBrokerToken || null;
-        networkIsolateArmed = !!spawn.networkIsolateArmed;
-        networkIsolateMode = spawn.networkIsolateMode || null;
-        sandboxNetworkBrokerProc = spawn.sandboxNetworkBrokerProc || null;
-        sandboxNetworkBrokerDir = spawn.sandboxNetworkBrokerDir || null;
-        useSandbox = true;
-      } catch (err) {
-        return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
-      }
-    } else if (forceSandbox) {
-      const { reason, hint } = forceSandboxUnavailableReason();
-      return {
-        sessionId: id,
-        session: null,
-        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. ${hint}`,
-      };
-    }
-
-    try {
-      ptyProcess = pty.spawn(command, args, {
-      name: 'xterm-256color',
-      cols,
-      rows,
-      cwd,
-      env: {
-        ...cleanEnv,
-        TERM: 'xterm-256color',
-        COLORTERM: 'truecolor',
-        FORCE_COLOR: '1',
-        // For claude sessions, keep it drawing to the main buffer instead of the
-        // alternate screen (DECSET 1049). The alt-screen has no scrollback, so
-        // xterm.js's scrollLines()/scroll buttons do nothing while it's active;
-        // disabling it lets scrollback accumulate again. DISABLE_MOUSE_CLICKS
-        // additionally hands the scroll wheel back to xterm.js. Only affects
-        // ccserver-launched claude; shells are left untouched.
-        ...(shell || sessionApp !== 'claude' ? {} : {
-          CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1',
-          CLAUDE_CODE_DISABLE_MOUSE_CLICKS: '1',
-        }),
-        // opencode is left with full mouse capture (its default): the TUI keeps
-        // the whole conversation in an internal scrollable area that the wheel
-        // scrolls natively, and its own drag-selection + copy-on-select writes
-        // to the browser clipboard via OSC 52 (handled client-side).
-        ...mcpEnv,
-        // /tmp being mounted noexec makes Bun fail to unpack + dlopen its
-        // embedded libopentui.so, so opencode's TUI dies at startup (opencode
-        // #26136/#27580). Direct host launches switch BUN_TMPDIR to
-        // ~/.cache/opencode/tmp when the host TMPDIR is noexec. Sandboxed
-        // launches don't: the sandbox's /tmp is a fresh tmpfs that is always
-        // executable, and the host-side cache dir is not bound into bwrap (with
-        // a fresh HOME it would not even exist), so setting it there would
-        // break what it is meant to fix.
-        ...(shell || sessionApp !== 'opencode' || useSandbox ? {} : bunTmpdirEnv()),
-      },
-    });
-    } catch (err) {
-      // The sandbox (if any) was already built by this point -- clean up what
-      // buildSandboxSpawn created (brokers, guard/profile dirs), mirroring
-      // pty-host's own spawn-failure path (see ptyStore.js). Otherwise a
-      // failed launch leaks a live broker process and its runtime dirs.
-      if (sandboxStateDir) { try { rmSync(sandboxStateDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      if (sandboxGitBrokerProc) { try { sandboxGitBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
-      if (sandboxGitBrokerDir) { try { rmSync(sandboxGitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      if (sandboxCommitGuardDir) { try { rmSync(sandboxCommitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      if (sandboxSeatbeltDir) { try { rmSync(sandboxSeatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      if (sandboxNetworkBrokerProc) { try { sandboxNetworkBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
-      if (sandboxNetworkBrokerDir) { try { rmSync(sandboxNetworkBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      if (Array.isArray(sandboxSeatbeltFiles)) {
-        // Same guard as destroySession(): a concurrent launch from the same
-        // orchestratorDir may already own these paths. (The failed session
-        // itself is not registered yet, so no self-exclusion is needed.)
-        releaseSeatbeltOverlay(
-          sandboxSeatbeltFiles,
-          [...sessions.values()].map((other) => other.sandboxSeatbeltFiles),
-        );
-      }
-      return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
-    }
+    return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
   }
 
   const session = buildSessionRecord(id, ptyProcess, {
@@ -1365,26 +1069,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     cols,
     rows,
     startedClaudeSessionId: claudeSessionId || null,
-    shardIndex: ptyHostShardIndex,
   });
-
-  if (usePtyHost) {
-    // Subscribe for this session's entire lifetime, independent of browser
-    // viewer count (a deliberate departure from plan5 5.2.3's original
-    // "subscribe on 0->1 viewers" sketch -- see this file's onData handler
-    // above: AutoYes auto-response, session-limit detection, and
-    // session.outputBuffer accumulation must keep running with zero viewers
-    // attached, exactly the scenario AutoYes exists for). onData/onExit are
-    // already wired above, so nothing here can be missed even if pty-host
-    // has already produced output by the time this resolves. Reuses
-    // ptyHostShardClient (the same client spawn() used above), not a fresh
-    // getPtyHostClient() call -- see this function's own comment on why.
-    try {
-      await ptyHostShardClient.subscribe(ptyProcess, 0);
-    } catch (err) {
-      console.warn(`[session] ${id}: initial pty-host subscribe failed (will retry on reconnect): ${err.message}`);
-    }
-  }
 
   return { sessionId: id, session };
 }
@@ -1530,30 +1215,6 @@ const MAX_SCHEDULE_AHEAD_MS = 48 * 60 * 60 * 1000; // 48h
 const LIMIT_DETECT_BUF_MAX_CHARS = 2048;
 const SESSION_LIMIT_RESUME_DELAY_MS = 60 * 1000; // fire 1 minute after reset
 const SESSION_LIMIT_RESUME_MESSAGE = 'セッション制限がリセットされました。作業を続けてください。';
-
-// Issue #119 Step6-0: claude's `claude --resume <id>` hint (~40-60 chars
-// including the uuid) is far shorter than the session-limit status line
-// above, but ANSI escapes can still interleave with it across redraws --
-// generously larger than the longest realistic hint while staying well
-// below LIMIT_DETECT_BUF_MAX_CHARS, since this signal needs nowhere near as
-// much context.
-const RESUME_ID_DETECT_BUF_MAX_CHARS = 512;
-// How long to hold a changed lastKnownResumeId in memory before writing it
-// to ptyHostSessionMeta.json (see scheduleResumeIdWriteback below). Chosen
-// as a starting point in the plan's suggested 5-10s range; claude is
-// expected to only reprint this hint on infrequent events (e.g.
-// compaction), so real write frequency is likely far below what even makes
-// this debounce necessary. Env-overridable (read fresh per call, like
-// ptyHostClient.js's shardCount()) both so an operator can tune it against
-// observed behavior without a code change, and so tests aren't stuck
-// waiting out a real 10s window.
-const DEFAULT_RESUME_ID_WRITE_DEBOUNCE_MS = 10_000;
-function resumeIdWriteDebounceMs() {
-  const raw = process.env.CCSERVER_RESUME_ID_DEBOUNCE_MS;
-  if (raw == null || String(raw).trim() === '') return DEFAULT_RESUME_ID_WRITE_DEBOUNCE_MS;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_RESUME_ID_WRITE_DEBOUNCE_MS;
-}
 
 // The server's IANA timezone (e.g. "Asia/Tokyo"). Claude Code prints its
 // rate-limit reset times in this zone, so scheduling is interpreted here too.
@@ -1723,10 +1384,9 @@ export function sandboxHomeInUsePath(homePath) {
 // session's egress policy updates without a restart. Fails soft per session
 // -- one dead/unreachable broker (session exiting mid-push, race with
 // teardown) must not stop the rest, and the file save itself already
-// succeeded regardless. Works in both spawn modes: port/token are plain data
-// on the session record either way (see buildSessionRecord), so the HTTP
-// call is made straight from this process even for a pty-host-hosted
-// session whose broker child lives in a different process.
+// succeeded regardless. port/token are plain data on the session record
+// (see buildSessionRecord), so the HTTP call is made straight from this
+// process.
 export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }) {
   const armed = [...sessions.values()].filter((s) => s.networkIsolateArmed && s.networkBrokerPort && s.networkBrokerToken);
   // Parallel, not sequential: each session's push is an independent HTTP
@@ -1753,17 +1413,6 @@ export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }
   return { ok, failed };
 }
 
-// Persists the 🌐 toggle's live enforce/open choice for a session (see
-// terminal.js's set_network_isolation) so a server本体 restart -- pty-host
-// and its broker child survive it -- rebuilds the session record with the
-// state the user last chose instead of falling back to the launch-time
-// networkIsolateMode still on disk (which would otherwise leave the UI's
-// security-boundary indicator showing a mode that doesn't match live
-// traffic until toggled again).
-export function persistSessionNetworkIsolateMode(id, mode) {
-  patchPtyHostSessionMeta(id, { networkIsolateMode: mode });
-}
-
 // Detach the schedule from a session that's going away, but keep it armed so it
 // auto-resumes the conversation at fire time.
 function detachScheduleFromSession(sessionId) {
@@ -1785,38 +1434,6 @@ function refreshScheduleOnExit(session) {
   s.sessionId = null; // the pty is gone; force the resume path at fire time
   session.scheduleId = null;
   persistSchedules();
-}
-
-// Issue #119 Step6-0: writes session.lastKnownResumeId to
-// ptyHostSessionMeta.json's latestClaudeSessionId right now, clearing any
-// armed debounce timer. Called both when the debounce window has actually
-// elapsed (scheduleResumeIdWriteback below) and from the onExit/disconnect
-// paths that must not let a pending value die in memory only.
-function flushResumeIdWriteback(session) {
-  if (session.resumeIdWriteTimer) {
-    clearTimeout(session.resumeIdWriteTimer);
-    session.resumeIdWriteTimer = null;
-  }
-  session.resumeIdLastWriteAt = Date.now();
-  patchPtyHostSessionMeta(session.id, { latestClaudeSessionId: session.lastKnownResumeId });
-}
-
-// Issue #119 Step6-0: debounces the ptyHostSessionMeta.json write-back for a
-// newly-detected lastKnownResumeId. If the last actual write was long enough
-// ago (resumeIdWriteDebounceMs()), write immediately; otherwise hold the
-// value in memory (already updated by the caller) and let an already-armed
-// timer -- or a freshly armed one -- pick up whatever the LATEST value is
-// once it fires, rather than writing on every single detected change.
-function scheduleResumeIdWriteback(session) {
-  const debounceMs = resumeIdWriteDebounceMs();
-  const elapsed = Date.now() - session.resumeIdLastWriteAt;
-  if (elapsed >= debounceMs) {
-    flushResumeIdWriteback(session);
-    return;
-  }
-  if (session.resumeIdWriteTimer) return; // already armed; will flush the latest value when it fires
-  session.resumeIdWriteTimer = setTimeout(() => flushResumeIdWriteback(session), debounceMs - elapsed);
-  session.resumeIdWriteTimer.unref?.();
 }
 
 function injectIntoLiveSession(session, text) {
@@ -1992,8 +1609,6 @@ async function fireSchedule(scheduleId) {
     for (const s of [...sessions.values()]) {
       if (s.exited && s.groupId === entry.groupId && s.groupRole === entry.groupRole
           && Array.isArray(s.sandboxSeatbeltFiles)) {
-        // Awaited: in pty-host mode the overlay unlink happens over there,
-        // so the successor must not spawn until the ack is back (#12).
         await retireSessionForReuse(s.id);
       }
     }
@@ -2409,570 +2024,79 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
   // --unshare-pid tree the kill above reaps), and remove the commit-message
   // guard's runtime dir (see startCommitGuard, sandbox.js -- just a JSON
   // config file, no process, unlike gitBroker there's nothing to kill).
-  //
-  // usePtyHost: skipped entirely -- pty-host's own `destroy` RPC handler
-  // already does all of it (plan5 2.1: it owns teardown for whatever it
-  // built). session.sandboxStateDir is still populated in this mode (see
-  // createSession -- needed for dockerAvailability()'s dockerTag lookup), so
-  // this guard is required, not just redundant-but-harmless: server本体 must
-  // not race pty-host to remove the same directory out from under it.
-  // session.sandboxGitBrokerProc/Dir/CommitGuardDir stay null in this mode,
-  // so those blocks would already no-op even without the guard.
-  if (!isPtyHostEnabled()) {
-    if (session.sandboxStateDir) {
-      try {
-        rmSync(session.sandboxStateDir, { recursive: true, force: true });
-      } catch {
-        // nothing to remove / still held — harmless
-      }
+  if (session.sandboxStateDir) {
+    try {
+      rmSync(session.sandboxStateDir, { recursive: true, force: true });
+    } catch {
+      // nothing to remove / still held — harmless
     }
+  }
 
-    if (session.sandboxGitBrokerProc) {
-      try {
-        session.sandboxGitBrokerProc.kill('SIGTERM');
-      } catch {
-        // already dead
-      }
+  if (session.sandboxGitBrokerProc) {
+    try {
+      session.sandboxGitBrokerProc.kill('SIGTERM');
+    } catch {
+      // already dead
     }
-    if (session.sandboxGitBrokerDir) {
-      try {
-        rmSync(session.sandboxGitBrokerDir, { recursive: true, force: true });
-      } catch {
-        // best effort
-      }
+  }
+  if (session.sandboxGitBrokerDir) {
+    try {
+      rmSync(session.sandboxGitBrokerDir, { recursive: true, force: true });
+    } catch {
+      // best effort
     }
-    if (session.sandboxCommitGuardDir) {
-      try {
-        rmSync(session.sandboxCommitGuardDir, { recursive: true, force: true });
-      } catch {
-        // best effort
-      }
+  }
+  if (session.sandboxCommitGuardDir) {
+    try {
+      rmSync(session.sandboxCommitGuardDir, { recursive: true, force: true });
+    } catch {
+      // best effort
     }
-    if (session.sandboxSeatbeltDir) {
-      try {
-        rmSync(session.sandboxSeatbeltDir, { recursive: true, force: true });
-      } catch {
-        // best effort
-      }
+  }
+  if (session.sandboxSeatbeltDir) {
+    try {
+      rmSync(session.sandboxSeatbeltDir, { recursive: true, force: true });
+    } catch {
+      // best effort
     }
-    if (session.sandboxNetworkBrokerProc) {
-      try {
-        session.sandboxNetworkBrokerProc.kill('SIGTERM');
-      } catch {
-        // already dead
-      }
+  }
+  if (session.sandboxNetworkBrokerProc) {
+    try {
+      session.sandboxNetworkBrokerProc.kill('SIGTERM');
+    } catch {
+      // already dead
     }
-    if (session.sandboxNetworkBrokerDir) {
-      try {
-        rmSync(session.sandboxNetworkBrokerDir, { recursive: true, force: true });
-      } catch {
-        // best effort
-      }
+  }
+  if (session.sandboxNetworkBrokerDir) {
+    try {
+      rmSync(session.sandboxNetworkBrokerDir, { recursive: true, force: true });
+    } catch {
+      // best effort
     }
-    // Orchestrator rule files materialized into the project dir by the
-    // seatbelt backend (NOT under seatbeltDir -- unlink each best-effort).
-    // A successor launched from the same deterministic orchestratorDir
-    // (restart / scheduled auto-resume) owns the same paths: only unlink
-    // files no other registered session still references, or the successor's
-    // overlay is deleted out from under it mid-session.
-    if (Array.isArray(session.sandboxSeatbeltFiles)) {
-      releaseSeatbeltOverlay(
-        session.sandboxSeatbeltFiles,
-        [...sessions.values()].filter((other) => other !== session).map((other) => other.sandboxSeatbeltFiles),
-      );
-    }
-  } else {
-    // Step3 (plan5): this session's restore metadata (see
-    // setPtyHostSessionMeta in createSession()'s usePtyHost branch) is only
-    // useful while the pty-host session it describes is still alive --
-    // destroySession() tearing it down here (or restorePtyHostSessions()
-    // finding it already gone at the next boot) both mean there is nothing
-    // left to reattach to.
-    deletePtyHostSessionMeta(id);
+  }
+  // Orchestrator rule files materialized into the project dir by the
+  // seatbelt backend (NOT under seatbeltDir -- unlink each best-effort).
+  // A successor launched from the same deterministic orchestratorDir
+  // (restart / scheduled auto-resume) owns the same paths: only unlink
+  // files no other registered session still references, or the successor's
+  // overlay is deleted out from under it mid-session.
+  if (Array.isArray(session.sandboxSeatbeltFiles)) {
+    releaseSeatbeltOverlay(
+      session.sandboxSeatbeltFiles,
+      [...sessions.values()].filter((other) => other !== session).map((other) => other.sandboxSeatbeltFiles),
+    );
   }
 
   sessions.delete(id);
 }
 
 // Retire-first for overlay reuse (#12): destroy the exited predecessor before
-// the caller spawns a successor into the same deterministic orchestratorDir,
-// and -- in pty-host mode -- wait for pty-host's destroy ack (overlay unlink
-// included) first. destroySession() alone is fire-and-forget there
-// (RemotePty kill/destroy send no-reply frames), so a successor spawned
-// immediately after would race the predecessor's unlink, and a UDS drop in
-// between would lose the destroy entirely while the successor (seeing
-// pre-existing overlay files) claims no ownership. Direct-spawn
-// destroySession() unlinks synchronously, so no wait is needed there.
+// the caller spawns a successor into the same deterministic orchestratorDir.
+// destroySession() unlinks the overlay synchronously, so no wait is needed.
 export async function retireSessionForReuse(id) {
   const session = sessions.get(id);
   if (!session) return;
-  if (isPtyHostEnabled()) {
-    try {
-      const shardIndex = session.shardIndex ?? shardIndexForKey(shardKeyForSession(session));
-      await getPtyHostClient(shardIndex).destroySession(id);
-    } catch { /* best effort -- fall through to local bookkeeping */ }
-  }
   destroySession(id, { keepSchedule: true, reason: 'retire-first' });
-}
-
-let ptyHostDestroyedHandlerArmed = false;
-
-// Registers pty-host's `destroyed` push-event handler exactly once
-// (idempotent -- server/index.js calls this unconditionally at boot; a no-op
-// when the feature flag is off, so it never opens the UDS socket in that
-// case). See plan5 5.2.3: pty-host can tear a session down on its own (its
-// own idle/exited timeout, or as a crash-recovery backstop once server本体's
-// connection drops and never comes back) without server本体 having called
-// destroySession() itself -- this is the only path that then cleans up the
-// local `sessions` Map entry for that case. When destroySession() got there
-// first (the common case), `sessions.get(sessionId)` is already gone and
-// this is a no-op.
-//
-// Plan5 Step5: registers against every currently-configured shard
-// (getAllPtyHostClients()), not just shard 0 -- a session destroyed on its
-// own by ANY instance must still be noticed. shardCount() is read once here,
-// at boot; it is not expected to change over this process's lifetime (see
-// ptyHostClient.js's shardCount() comment).
-export function initPtyHostDestroyedHandler() {
-  if (!isPtyHostEnabled()) return;
-  if (ptyHostDestroyedHandlerArmed) return;
-  ptyHostDestroyedHandlerArmed = true;
-  for (const client of getAllPtyHostClients()) {
-    client.onDestroyed((sessionId, reason) => {
-      const session = sessions.get(sessionId);
-      if (!session) return;
-      if (session.timeoutTimer) {
-        clearTimeout(session.timeoutTimer);
-        session.timeoutTimer = null;
-      }
-      if (session.idleTimer) {
-        clearTimeout(session.idleTimer);
-        session.idleTimer = null;
-      }
-      // Same as destroySession()'s teardown: a dead session must not keep this
-      // RESUME_INJECT_FALLBACK_MS safety-net timer armed (see fireSchedule()'s
-      // comment on it) -- it would no-op harmlessly once fired, but there is
-      // no reason to let it linger holding the event loop / referencing a
-      // session already gone from the sessions Map.
-      if (session.pendingInjectionTimer) {
-        clearTimeout(session.pendingInjectionTimer);
-        session.pendingInjectionTimer = null;
-      }
-      console.log(`[session] ${sessionId} destroyed by pty-host (reason=${reason || 'unknown'}, viewers=${session.sockets.size})`);
-      sessions.delete(sessionId);
-      // Same reasoning as destroySession()'s else-branch: pty-host tore this
-      // session down on its own, so there is nothing left to reattach to at the
-      // next restore.
-      deletePtyHostSessionMeta(sessionId);
-    });
-  }
-}
-
-// Test seam: re-arm initPtyHostDestroyedHandler() for a test that starts its
-// own in-process pty-host and needs the handler registered against a fresh
-// PtyHostClient (see ptyHostClient.js's resetPtyHostClientForTests()).
-export function resetPtyHostDestroyedHandlerForTests() {
-  ptyHostDestroyedHandlerArmed = false;
-}
-
-let ptyHostDisconnectedHandlerArmed = false;
-
-// Issue #143 problem 2: pairs with initPtyHostDestroyedHandler() above, but
-// reacts to an entire SHARD disappearing (see ptyHostClient.js's
-// onDisconnected() -- fired only when a shard's pty-host process actually
-// died, never for our own close() during gracefulShutdown()/test teardown)
-// rather than one session being torn down individually.
-//
-// Unlike the `destroyed` handler, this cannot rely on the ordinary
-// ptyProcess.onExit() path having already run: `exit`/`destroyed` are both
-// events pty-host sends over the very connection that just died, so neither
-// will EVER arrive for a session whose shard is gone. That means this
-// handler must itself do everything onExit would have -- including running
-// sessionExitListeners (groupManager.js's onSessionExit stops the dead
-// orchestrator's control broker / a dead worker's handoff channel and
-// auto-destroys an emptied group; skipping it here would leak those brokers
-// forever, exactly the kind of silently-broken-forever state this Issue is
-// about) -- not just the local sessions Map bookkeeping.
-//
-// Deliberately deletes from `sessions` immediately (unlike a normal pty
-// exit, which lingers exited:true behind SESSION_EXITED_TIMEOUT_MS so a
-// client can still read final scrollback) -- Issue #143's own complaint is
-// that a ghosted session keeps appearing in GET /api/sessions, and there is
-// no live pty left to reattach to even if a client did ask. ptyHostSessionMeta
-// is deliberately left untouched (see restorePtyHostSessions()'s
-// unreachableShards handling): the next restore, once this shard is back,
-// either reattaches a session that in fact survived or sweeps the entry via
-// the existing orphaned-metadata path -- guessing now would destroy
-// information Step6 (auto-resume) will want.
-export function initPtyHostDisconnectedHandler() {
-  if (!isPtyHostEnabled()) return;
-  if (ptyHostDisconnectedHandlerArmed) return;
-  ptyHostDisconnectedHandlerArmed = true;
-  for (const client of getAllPtyHostClients()) {
-    client.onDisconnected((sessionIds) => {
-      for (const sessionId of sessionIds) {
-        const session = sessions.get(sessionId);
-        if (!session) continue;
-        if (session.timeoutTimer) {
-          clearTimeout(session.timeoutTimer);
-          session.timeoutTimer = null;
-        }
-        if (session.idleTimer) {
-          clearTimeout(session.idleTimer);
-          session.idleTimer = null;
-        }
-        if (session.pendingInjectionTimer) {
-          clearTimeout(session.pendingInjectionTimer);
-          session.pendingInjectionTimer = null;
-        }
-        session.exited = true;
-        // session.claudeSessionId starts life as null (buildSessionRecord)
-        // and is otherwise refreshed only by a real pty exit (same
-        // extraction as buildSessionRecord's ptyProcess.onExit, above) --
-        // never while the session is merely running. Skipping this here
-        // would broadcast a null claudeSessionId below, and the frontend's
-        // 'exit' handler treats a falsy claudeSessionId as "nothing to
-        // resume" and WIPES the browser's stored resume key for this
-        // app/cwd, even though the conversation itself is still resumable
-        // (only this shard's connection died, not the underlying session).
-        if (!session.shell) {
-          session.claudeSessionId = extractResumeSessionId(
-            session.app,
-            session.outputBuffer.slice(-50).join('')
-          );
-        }
-        // Keep any pending scheduled prompt alive across this exit: refresh
-        // its resume id and detach it so it auto-resumes the conversation at
-        // fire time (same reason buildSessionRecord's ptyProcess.onExit
-        // calls this).
-        refreshScheduleOnExit(session);
-        // Issue #119 Step6-0: this shard's pty-host process is gone -- no
-        // more onData chunks will ever arrive for THIS session record to
-        // debounce against, so any value still only pending in memory must
-        // reach ptyHostSessionMeta.json now. This is the scenario the
-        // pending-flush contract exists for: pty-host itself may already be
-        // auto-resuming this exact session id from that very file (see
-        // server/pty-host/index.js) by the time this handler runs.
-        if (session.resumeIdWriteTimer) flushResumeIdWriteback(session);
-        for (const fn of sessionExitListeners) {
-          try {
-            fn(session);
-          } catch {
-            // a listener must never break this cleanup path
-          }
-        }
-        console.log(`[session] ${sessionId} marked exited: its pty-host shard disconnected (viewers=${session.sockets.size})`);
-        // exitCode/signal are genuinely unknown -- pty-host died mid-flight,
-        // no exit frame was ever sent -- so both ride as null. Same
-        // {type:'exit', ...} shape a real pty exit broadcasts (see
-        // buildSessionRecord's ptyProcess.onExit above) so the existing
-        // frontend handler needs no changes.
-        broadcast(session, {
-          type: 'exit',
-          exitCode: null,
-          signal: null,
-          claudeSessionId: session.claudeSessionId,
-        });
-        sessions.delete(sessionId);
-      }
-    });
-  }
-}
-
-// Test seam: re-arm initPtyHostDisconnectedHandler() for a test that starts
-// its own in-process pty-host and needs the handler registered against a
-// fresh PtyHostClient (see ptyHostClient.js's resetPtyHostClientForTests()).
-export function resetPtyHostDisconnectedHandlerForTests() {
-  ptyHostDisconnectedHandlerArmed = false;
-}
-
-// Shared by restorePtyHostSessions() (below, the whole-fleet boot-time
-// reconcile) and reconcileShardAfterReconnect() (Issue #119 Step6, a single
-// shard's post-crash reconcile): given one live() entry pty-host reports and
-// its matching restore metadata, reattaches + rebuilds this module's
-// `sessions` Map entry for it and resumes streaming its output. The caller
-// has already confirmed `live` isn't already exited. Returns true if the
-// session was restored, false if the attach itself failed (network blip
-// between list() and here -- the caller decides whether that's worth
-// retrying).
-async function reattachLiveSession(live, meta, client, shardIndex) {
-  // attach() can throw if pty-host has become unreachable since the list()
-  // call that found `live` (e.g. it was restarted mid-loop while restoring
-  // many sessions) -- caught per-session so one bad reattach doesn't abort
-  // the whole restore (leaving every subsequent live session unrestored) or
-  // skip whatever sweep the caller runs after this loop.
-  let rpty;
-  try {
-    rpty = await client.attach(live.id, {
-      cols: live.cols,
-      rows: live.rows,
-      pid: live.pid,
-      sandbox: {
-        active: live.sandbox?.active, docker: live.sandbox?.docker, stateDir: meta.sandboxStateDir,
-        networkBrokerPort: live.sandbox?.networkBrokerPort ?? null,
-        networkBrokerToken: live.sandbox?.networkBrokerToken ?? null,
-        networkIsolateArmed: !!live.sandbox?.networkIsolateArmed,
-        networkIsolateMode: live.sandbox?.networkIsolateMode ?? null,
-      },
-    });
-  } catch (err) {
-    console.warn(`[session] ${live.id}: restore attach failed, skipping (${err.message})`);
-    return false;
-  }
-
-  // A pty-host-side crash respawns each session with a brand-new broker
-  // (fresh port+token; the pre-crash one gets SIGTERM'd by
-  // NetworkBrokerRegistry.reapOrphans()) -- so the live values pty-host's
-  // list() just reported (above, threaded through as rpty.sandboxInfo) win
-  // over whatever this restore metadata still has on disk from before the
-  // crash. Without this, every 🌐 toggle and allow/deny-list save would
-  // silently fail against the dead old port for this session's whole
-  // remaining lifetime.
-  const liveNetworkBrokerPort = rpty.sandboxInfo?.networkBrokerPort ?? null;
-  const liveNetworkBrokerToken = rpty.sandboxInfo?.networkBrokerToken ?? null;
-  const liveNetworkIsolateArmed = !!rpty.sandboxInfo?.networkIsolateArmed;
-  const liveNetworkIsolateMode = rpty.sandboxInfo?.networkIsolateMode ?? null;
-
-  buildSessionRecord(live.id, rpty, {
-    ...meta,
-    cols: live.cols,
-    rows: live.rows,
-    // Reattaching, not launching: this session is by definition already
-    // past whatever TUI init burst it once had (see buildSessionRecord's
-    // header comment on `settled`).
-    settled: true,
-    // Absorbs restore-metadata entries written before Step5 existed (no
-    // shardIndex field at all): every such entry was necessarily created
-    // by the sole pre-Step5 instance, i.e. shard 0.
-    shardIndex: meta.shardIndex ?? shardIndex,
-    networkBrokerPort: liveNetworkBrokerPort,
-    networkBrokerToken: liveNetworkBrokerToken,
-    networkIsolateArmed: liveNetworkIsolateArmed,
-    networkIsolateMode: liveNetworkIsolateMode,
-  });
-
-  // Persist the live values back so a subsequent server本体 restart (without
-  // another pty-host crash in between) restores from the current broker
-  // instead of the stale one again.
-  if (liveNetworkBrokerPort !== (meta.networkBrokerPort ?? null) || liveNetworkBrokerToken !== (meta.networkBrokerToken ?? null)) {
-    patchPtyHostSessionMeta(live.id, {
-      networkBrokerPort: liveNetworkBrokerPort,
-      networkBrokerToken: liveNetworkBrokerToken,
-      networkIsolateArmed: liveNetworkIsolateArmed,
-      networkIsolateMode: liveNetworkIsolateMode,
-    });
-  }
-
-  // Replays the retained backlog through the exact same onData path a
-  // live session uses (buildSessionRecord wired it above) -- a
-  // still-pending permission prompt gets AutoYes'd exactly as it would
-  // on a live session, and outputBuffer/screenModel end up in the state
-  // a browser reconnecting expects. Same call shape as createSession()'s
-  // own post-spawn subscribe (sinceSeq 0 = full retained backlog).
-  try {
-    await client.subscribe(rpty, 0);
-  } catch (err) {
-    console.warn(`[session] ${live.id}: restore subscribe failed (will retry on reconnect): ${err.message}`);
-  }
-
-  return true;
-}
-
-// Plan5 Step3: rebuilds `sessions` Map entries for pty-host sessions that
-// survived a server本体 restart (pty-host is a separate process/systemd unit
-// -- see server/pty-host/'s header docs -- so its ptys keep running across a
-// server本体 crash or `systemctl restart ccserver` even though this Map does
-// not). A no-op when CCSERVER_PTY_HOST is unset.
-//
-// Call this BEFORE restoreGroups() (see server/index.js): a group's
-// memberSaved fallback only kicks in when sessionApi.getSession(sessionId)
-// finds nothing, so restoring live pty-host sessions into `sessions` first
-// lets a still-running group member be found as a live session instead of
-// being (wrongly) treated as gone.
-//
-// Matches pty-host's list() against this module's own restore metadata (see
-// ptyHostSessionMeta.js) by id, three-way:
-//   - both agree (and the pty hasn't exited) -> reattach + restore.
-//   - pty-host has it, metadata doesn't -> never restore from partial/guessed
-//     fields (see plan5 Step3: "無理に最小構成で復元しない"); leave it for
-//     pty-host's own idle/exited timeout to eventually reap.
-//   - metadata has it, pty-host doesn't (pty-host itself restarted/crashed,
-//     or the pty already exited) -> the metadata entry describes nothing
-//     restorable any more; drop it.
-// An already-exited-but-not-yet-reaped pty-host session (still inside its
-// post-exit grace window) is deliberately treated as the third case, not
-// restored: Step3 hands a live, attachable terminal back to the browser --
-// there's no running process to hand back for one that's already exited, and
-// replaying whether the group/schedule machinery should react to an exit
-// that happened in the PREVIOUS server本体 process is out of scope here (see
-// this file's gracefulShutdown()/destroySession() for how a live exit is
-// normally handled).
-//
-// Plan5 Step5 (partitioning): loops this whole three-way match once per
-// shard (getAllPtyHostClients()), attach()ing/subscribe()ing through that
-// SAME shard's client both times (the exact trap ptyHostClient.js's header
-// comment warns about -- see also createSession()'s ptyHostShardClient
-// reuse). liveById accumulates every shard's list() into one shared Map
-// before the final orphaned-metadata sweep runs, so an entry legitimately
-// living on shard 2 isn't mistaken for orphaned just because shard 0 was
-// scanned first.
-//
-// A single unreachable shard must NOT make the orphaned-metadata sweep wrong
-// for every OTHER shard: unlike the pre-Step5 single-instance version (which
-// could safely bail out of the whole function on one failure), here that
-// would mean one instance being briefly unreachable wipes out restore
-// metadata that legitimately lives on healthy shards' still-alive sessions.
-// So each unreachable shard's index is tracked, and the sweep skips any
-// metadata entry whose (possibly pre-Step5-missing, defaulted to 0) shardIndex
-// names an unreachable shard -- that entry is left alone to be resolved on a
-// future restore attempt once its shard comes back, rather than guessed at
-// now.
-export async function restorePtyHostSessions() {
-  if (!isPtyHostEnabled()) {
-    return { restored: 0, orphanedLive: 0, orphanedMeta: 0, alreadyExited: 0 };
-  }
-
-  const metaAll = loadPtyHostSessionMeta();
-  const liveById = new Map();
-  const unreachableShards = new Set();
-  let restored = 0;
-  let orphanedLive = 0;
-  let alreadyExited = 0;
-
-  const shardClients = getAllPtyHostClients();
-  for (let shardIndex = 0; shardIndex < shardClients.length; shardIndex++) {
-    const client = shardClients[shardIndex];
-    let liveList;
-    try {
-      liveList = await client.list();
-    } catch (err) {
-      console.error(`[session] restorePtyHostSessions: could not reach pty-host shard ${shardIndex} (${err.message}) -- skipping restore for this shard`);
-      unreachableShards.add(shardIndex);
-      continue;
-    }
-
-    for (const live of liveList) liveById.set(live.id, live);
-
-    for (const live of liveList) {
-      const meta = metaAll[live.id];
-      if (!meta) {
-        console.warn(`[session] pty-host session ${live.id} (shard ${shardIndex}) has no restore metadata -- leaving it to pty-host's own idle/exited timeout`);
-        orphanedLive++;
-        continue;
-      }
-      if (live.exited) {
-        deletePtyHostSessionMeta(live.id);
-        alreadyExited++;
-        continue;
-      }
-
-      if (await reattachLiveSession(live, meta, client, shardIndex)) restored++;
-    }
-  }
-
-  // A metadata entry whose id no shard's list() returned describes nothing
-  // restorable any more (its pty-host instance itself restarted/crashed
-  // between this entry's write and this boot) -- drop it rather than let it
-  // accumulate. Skipped for entries whose own shard was unreachable this
-  // round (see this function's header comment) -- those get another chance
-  // next restore instead of being guessed at now.
-  let orphanedMeta = 0;
-  for (const [id, meta] of Object.entries(metaAll)) {
-    if (liveById.has(id)) continue;
-    if (unreachableShards.has(meta.shardIndex ?? 0)) continue;
-    deletePtyHostSessionMeta(id);
-    orphanedMeta++;
-  }
-
-  return { restored, orphanedLive, orphanedMeta, alreadyExited };
-}
-
-let ptyHostReconnectedHandlerArmed = false;
-
-// Issue #119 Step6: without this, Step6's whole benefit is invisible from
-// the user's side. initPtyHostDisconnectedHandler (Issue #143) treats a
-// shard's PtyHostClient disconnecting as every session it held being lost --
-// correct when pty-host itself has no way to bring them back, but Step6
-// gives it exactly that way (see server/pty-host/index.js's own
-// auto-resume, keyed by the SAME session ids ptyHostSessionMeta.json already
-// names). Once that shard's client reconnects, pty-host may already be
-// running some of those same ids again; this reattaches this module's side
-// of the same reconciliation restorePtyHostSessions() does at boot, scoped
-// to just the one shard that came back (never a global rescan -- every OTHER
-// shard's sessions were never touched by this shard's crash, and re-running
-// the boot-time function verbatim would re-buildSessionRecord() every
-// currently-healthy session on every other shard too, silently replacing
-// their live records).
-// Known minor limitation, deliberately not handled here: unlike
-// restorePtyHostSessions(), this never sweeps metaAll for THIS shard's own
-// orphaned metadata (an entry whose auto-resume attempt failed on pty-host's
-// side, per autoResumeSessions' own try/catch in server/pty-host/index.js).
-// Such an entry lingers in ptyHostSessionMeta.json until the next full
-// server本体 restart's restorePtyHostSessions() sweep reaches it -- harmless
-// (it names nothing currently live, and is skipped safely at the next
-// reconcile too, since sessions.has()/metaAll lookups above just find no
-// match for it) but not actively cleaned up by a reconnect alone.
-async function reconcileShardAfterReconnect(shardIndex, client) {
-  const metaAll = loadPtyHostSessionMeta();
-  let liveList;
-  try {
-    liveList = await client.list();
-  } catch (err) {
-    // Already unreachable again by the time this ran -- its own next
-    // reconnect will retry this same reconcile.
-    console.warn(`[session] shard ${shardIndex} reconnected but is already unreachable again (${err.message})`);
-    return;
-  }
-
-  let restored = 0;
-  for (const live of liveList) {
-    // Defensive, should never actually trigger: every session this shard's
-    // disconnect handler held was already deleted from `sessions`, and no
-    // NEW session could have been created on this shard while it was
-    // unreachable (createSession()'s spawn() call would have failed
-    // outright) -- but never clobber an existing live record regardless.
-    if (sessions.has(live.id)) continue;
-    const meta = metaAll[live.id];
-    // pty-host has it, this module's metadata doesn't -- same as
-    // restorePtyHostSessions()'s orphanedLive case: never restore from
-    // guessed fields, leave it to pty-host's own idle/exited timeout.
-    if (!meta) continue;
-    if (live.exited) {
-      deletePtyHostSessionMeta(live.id);
-      continue;
-    }
-    if (await reattachLiveSession(live, meta, client, shardIndex)) restored++;
-  }
-  if (restored > 0) {
-    console.log(`[session] shard ${shardIndex} reconnected: reattached ${restored} session(s) pty-host auto-resumed while it was unreachable`);
-  }
-}
-
-// Registers, on every shard's client, a callback fired only on a RECONNECT
-// (never the first connect at boot -- see ptyHostClient.js's onReconnected)
-// that runs reconcileShardAfterReconnect() for that one shard. A no-op when
-// CCSERVER_PTY_HOST is unset; idempotent the same way
-// initPtyHostDestroyedHandler/initPtyHostDisconnectedHandler are.
-export function initPtyHostReconnectedHandler() {
-  if (!isPtyHostEnabled()) return;
-  if (ptyHostReconnectedHandlerArmed) return;
-  ptyHostReconnectedHandlerArmed = true;
-  const shardClients = getAllPtyHostClients();
-  for (let shardIndex = 0; shardIndex < shardClients.length; shardIndex++) {
-    const client = shardClients[shardIndex];
-    client.onReconnected(() => {
-      reconcileShardAfterReconnect(shardIndex, client).catch((err) => {
-        console.error(`[session] shard ${shardIndex} reconnect reconcile failed: ${err.message}`);
-      });
-    });
-  }
-}
-
-// Test seam: re-arm initPtyHostReconnectedHandler() for a test that starts
-// its own in-process pty-host and needs the handler registered against a
-// fresh PtyHostClient (see ptyHostClient.js's resetPtyHostClientForTests()).
-export function resetPtyHostReconnectedHandlerForTests() {
-  ptyHostReconnectedHandlerArmed = false;
 }
 
 export function destroyAllSessions() {
@@ -3002,52 +2126,12 @@ export function savedSessionPublic(session, claudeId) {
   };
 }
 
+// Kills every live pty, waits up to 3s for them to exit, writes resumable
+// sessions to .saved-sessions.json, then tears down all local bookkeeping.
 export function gracefulShutdown() {
-  // Independent of the pty-host/direct-spawn branch below: the relay isn't
-  // tied to any session's ptys, just this process's own listeners.
+  // The relay isn't tied to any session's ptys, just this process's own
+  // listeners.
   gpgVaultRelay.stop();
-  // Step4 (plan5): when pty-host is enabled (isPtyHostEnabled()), pty-host
-  // owns these ptys as a separate, independently-restarted systemd unit (see
-  // server/pty-host/index.js's header comment + Step0's PoC finding that a
-  // killed parent takes its ptys down with it) -- killing them here would
-  // defeat Step3's restore-on-restart (restorePtyHostSessions()) before it
-  // ever gets a chance to run: there would be nothing left for it to
-  // reattach to. Server本体 must only drop its own local bookkeeping and
-  // disconnect THIS process's UDS link, leaving the actual ptys running on
-  // pty-host for the next boot's restorePtyHostSessions() to find via
-  // list(). No .saved-sessions.json write either: that file only feeds the
-  // direct-spawn restore path below -- direct-spawn is Step7's permanent
-  // fallback mode, not code on its way out, but it still has nothing to do
-  // with THIS branch: pty-host sessions restore from ptyHostSessionMeta.json
-  // instead, which createSession() already keeps continuously up to date
-  // (see setPtyHostSessionMeta), so there is nothing new to persist here.
-  // destroyAllSessions()/destroySession() are deliberately not reused for
-  // this cleanup: both call
-  // session.ptyProcess.kill()/.destroy(), which for a RemotePty is an actual
-  // fire-and-forget kill/destroy RPC to pty-host (see ptyHostClient.js) --
-  // exactly the "pty dies with the server本体 restart" bug this step fixes.
-  if (isPtyHostEnabled()) {
-    for (const [id, session] of sessions) {
-      if (session.timeoutTimer) {
-        clearTimeout(session.timeoutTimer);
-        session.timeoutTimer = null;
-      }
-      if (session.idleTimer) {
-        clearTimeout(session.idleTimer);
-        session.idleTimer = null;
-      }
-      if (session.pendingInjectionTimer) {
-        clearTimeout(session.pendingInjectionTimer);
-        session.pendingInjectionTimer = null;
-      }
-      sessions.delete(id);
-    }
-    // Plan5 Step5: close every shard's client, not just shard 0 -- sessions
-    // may be spread across any of them.
-    for (const client of getAllPtyHostClients()) client.close();
-    return Promise.resolve();
-  }
-
   return new Promise((resolve) => {
     const pendingSessions = [];
 

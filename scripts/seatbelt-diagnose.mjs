@@ -19,7 +19,7 @@
 //   2. Prints the cwd-specific profile delta.
 //   3. Prints sandbox-exec one-liners to reproduce the launch outside the
 //      server (profile + env + a trivial shell command), plus environment
-//      sanity checks (/Users reachability, $SHELL, pty-host mode).
+//      sanity checks (/Users reachability, $SHELL).
 
 import { mkdirSync, readFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -98,7 +98,7 @@ Next steps, by hand:
 
 1) reproduce the failing launch outside the server with a trivial shell --
    if THIS exits 0 immediately, the problem is the profile/env; if it prints
-   OK, the problem is the server's spawn path (shell/dotfile/pty-host):
+   OK, the problem is the server's spawn path (shell/dotfile):
 
    sandbox-exec -f ${b.dest} /usr/bin/env \\
 ${b.env.map((e) => `     ${e}`).join(' \\\n')} \\
@@ -109,7 +109,6 @@ ${b.env.map((e) => `     ${e}`).join(' \\\n')} \\
 2) sanity checks:
    ls -ld /Users '${failCwd}'            # reachable from the server process?
    echo "$SHELL"; "$SHELL" -c 'echo ok'  # shell itself healthy?
-   echo "$CCSERVER_PTY_HOST"             # pty-host mode on?
 
 3) after a failing launch from the UI, grab the runtime dir the server
    minted for it (under \$CCSERVER_SANDBOX_SEATBELT_TMP, i.e. tmpdir, look

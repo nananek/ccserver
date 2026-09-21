@@ -24,8 +24,7 @@ import { authRoute } from './routes/auth.js';
 import { gpgVaultRoute } from './routes/gpgVault.js';
 import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
-import { gracefulShutdown, restoreSchedules, initPtyHostDestroyedHandler, initPtyHostDisconnectedHandler, initPtyHostReconnectedHandler, restorePtyHostSessions } from './ws/sessionManager.js';
-import { getPtyHostClient, isPtyHostEnabled, checkPtyHostReachable } from './ws/ptyHostClient.js';
+import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
@@ -239,66 +238,6 @@ try {
 
 const PORT = process.env.PORT || 3001;
 
-// pty-host分離は撤回済み(ptyHostClient.js's isPtyHostEnabled()のコメント参照)
-// -- isPtyHostEnabled()はCCSERVER_PTY_HOST未設定時デフォルトでfalseを返すため、
-// このブロックは明示的にCCSERVER_PTY_HOST=1等を設定したデプロイでしか実行され
-// ない。そのようなデプロイでのみ、起動時にpty-hostへの到達性を一度probeし、
-// 実際にいなければこのプロセスの寿命の間だけ直spawnにフォールバックする。
-// Overriding process.env.CCSERVER_PTY_HOST (rather than some separate
-// in-memory flag) is deliberate: isPtyHostEnabled() re-reads it fresh on
-// every call, so this one write is automatically honored by every pty-host
-// call site below -- this file's own initPtyHost*Handler calls just after,
-// and every usePtyHost check inside sessionManager.js -- with no extra
-// plumbing.
-//
-// Only probes shard 0 (getPtyHostClient()'s default): the scenario this
-// guards against is "pty-host was never set up on this host at all", which
-// is necessarily a shard-0-only deployment (CCSERVER_PTY_HOST_SHARDS is
-// itself opt-in, see ptyHostClient.js's shardCount()) -- a partitioned
-// deployment missing just one of several shards is already handled per-shard
-// by restorePtyHostSessions()/createSession()'s own unreachable-shard
-// handling further down, not by this all-or-nothing boot-time fallback.
-if (isPtyHostEnabled()) {
-  const ptyHostClient = getPtyHostClient();
-  if (await checkPtyHostReachable(ptyHostClient)) {
-    fastify.log.info('pty-host reachable at boot -- sessions will be created via pty-host');
-  } else {
-    fastify.log.warn(
-      'pty-host unreachable at boot -- falling back to direct pty spawn for this run. Start '
-      + 'ccserver-pty-host.service (see docs-site deployment/systemd.md) for terminal sessions '
-      + 'to survive a ccserver restart, or set CCSERVER_PTY_HOST=0 to silence this check.'
-    );
-    process.env.CCSERVER_PTY_HOST = '0';
-    // No other call site will ever touch this client again this run (every
-    // pty-host-related check below now reads isPtyHostEnabled() as false) --
-    // close it so it stops retrying in the background for no one, rather
-    // than reconnecting forever via its own internal backoff.
-    ptyHostClient.close();
-  }
-}
-
-// pty-host adapter (plan5 Step2): registers the `destroyed` push-event
-// handler that cleans up server本体's local sessions Map when pty-host tears
-// a session down on its own. A no-op (never opens the UDS socket) unless
-// pty-host is enabled AND reachable (isPtyHostEnabled() -- see the probe
-// just above, which can itself force this to false for the rest of this
-// run).
-initPtyHostDestroyedHandler();
-
-// Issue #143 problem 2: registers the disconnect handler that treats a
-// shard's pty-host process dying as every session it held being lost (see
-// sessionManager.js's initPtyHostDisconnectedHandler). Also a no-op unless
-// isPtyHostEnabled().
-initPtyHostDisconnectedHandler();
-
-// Issue #119 Step6: registers the reconnect handler that, once a shard comes
-// back after the disconnect above, reattaches whatever pty-host itself
-// already auto-resumed on that shard (see sessionManager.js's
-// initPtyHostReconnectedHandler) -- without this, Step6's auto-resume would
-// keep those sessions alive on pty-host's side invisibly, with server本体
-// never noticing. Also a no-op unless isPtyHostEnabled().
-initPtyHostReconnectedHandler();
-
 // ccserver-notify: restore the subscription registry, then host the
 // process-global MCP socket if the feature is enabled (Discord webhook or
 // subscriptions). Started before the server accepts connections: bwrap's
@@ -379,36 +318,15 @@ try {
 
 await fastify.listen({ port: PORT, host: '0.0.0.0' });
 
-// Reattach to pty-host sessions that survived this restart (plan5 Step3) --
-// pty-host is a separate process, so CCSERVER_PTY_HOST=1 sessions' ptys keep
-// running across a server本体 crash/restart even though the `sessions` Map
-// below started empty. A no-op when the flag is off. Must run before
-// restoreGroups() just below: a group's member is only treated as "gone,
-// offer a resume" when sessionApi.getSession() finds nothing, so a still-
-// running member needs to already be back in `sessions` by then.
-try {
-  const restoreInfo = await restorePtyHostSessions();
-  if (restoreInfo.restored) {
-    fastify.log.info(`Reattached ${restoreInfo.restored} pty-host session(s) from before restart`);
-  }
-  if (restoreInfo.orphanedLive) {
-    fastify.log.warn(`${restoreInfo.orphanedLive} pty-host session(s) had no restore metadata and were left running unmanaged`);
-  }
-} catch (err) {
-  fastify.log.error({ err }, 'Failed to restore pty-host sessions');
-}
-
 // Re-arm scheduled prompts persisted before the last shutdown/restart. Missed
 // ones (server was down at their time) fire shortly after startup; live ones
 // wait for their time. Sessions are auto-resumed lazily at fire time.
-// Combo groups are restored next: under a direct node-pty spawn (or a
-// non-graceful pty-host restart), every member's pty died with the old
-// process and only its .saved-sessions.json resume info is available; under
-// CCSERVER_PTY_HOST=1 a member that restorePtyHostSessions() just reattached
-// above is instead found live (see restoreGroups()/listGroupMembers() in
-// groupManager.js, which check sessionApi.getSession() before falling back
-// to the saved info). Either way this auto-resumes/re-creates MCP channels
-// as needed, and the UI can offer to re-open groups that still need it.
+// Combo groups are restored next: every member's pty died with the old
+// process, so only its .saved-sessions.json resume info is available (see
+// restoreGroups()/listGroupMembers() in groupManager.js, which check
+// sessionApi.getSession() before falling back to the saved info). This
+// auto-resumes/re-creates MCP channels as needed, and the UI can offer to
+// re-open groups that still need it.
 try {
   const groupInfo = restoreGroups();
   if (groupInfo?.restored) {

@@ -460,8 +460,6 @@ export async function groupsRoute(fastify, opts) {
       // scrollback + restore metadata for no benefit (issue: Linux
       // orchestrator-restart regression).
       if (s && Array.isArray(s.sandboxSeatbeltFiles)) {
-        // Awaited: in pty-host mode the overlay unlink happens over there,
-        // so the successor must not spawn until the ack is back (#12).
         await retireSessionForReuse(existing);
       }
     }

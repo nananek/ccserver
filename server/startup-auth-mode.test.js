@@ -8,7 +8,7 @@
 // confirm none/token/passkey actually gate (or don't gate) what index.js's
 // comments claim they do.
 //
-// Same "spawn the real entrypoint" approach as startup-pty-host-fallback.js/
+// Same "spawn the real entrypoint" approach as
 // startup-hidden-apps.test.js, but this file also needs to *talk* to the
 // booted server (real headers, real cookies) rather than just read its
 // logs -- so readiness is a real fetch loop against a free port, the same
@@ -63,12 +63,6 @@ function tempEnvPaths(dir) {
     CCSERVER_DB_PATH: join(dir, 'db.sqlite3'),
     CCSERVER_GROUPS_PATH: join(dir, 'groups.json'),
     CCSERVER_SAVED_SESSIONS_PATH: join(dir, 'sessions.json'),
-    // Explicit rather than relying on server/package.json's npm-test-only
-    // pin, so this file boots just as fast under a direct `node --test
-    // server/startup-auth-mode.test.js` -- Issue #119 Step7's boot-time
-    // pty-host probe otherwise burns its ~3s retry budget on every one of
-    // this file's several server boots for no reason relevant to auth.
-    CCSERVER_PTY_HOST: '0',
   };
 }
 
@@ -150,9 +144,8 @@ class Server {
 
 // Builds the child env from a clean slate: CCSERVER_AUTH_MODE/CCSERVER_TOKEN
 // come ONLY from `extraEnv`, never from whatever this test-runner process
-// itself happens to have set (unlike CCSERVER_PTY_HOST, neither has a
-// repo-wide npm-test pin today, but stripping first keeps every test's mode
-// exactly what it declares regardless of the ambient environment).
+// itself happens to have set -- stripping first keeps every test's mode
+// exactly what it declares regardless of the ambient environment.
 function childEnv(dir, extraEnv) {
   const base = { ...process.env };
   delete base.CCSERVER_AUTH_MODE;

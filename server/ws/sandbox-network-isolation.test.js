@@ -76,9 +76,20 @@ function runFilterScriptWithStubs(stubs) {
       writeFileSync(join(dir, name), '#!/bin/sh\nprintf \'FW %s\\n\' "$*"\n', { mode: 0o755 });
     }
     const script = buildBwrapNetworkFilterScript({ brokerPort: 54321 });
+    // PATH is scoped to ONLY the stub dir -- no real system bin dirs. The
+    // script's `command -v iptables`/`command -v nft` checks must find
+    // nothing but the stubs this test itself created; on a host that
+    // happens to have real iptables/nft installed (common -- this sandbox
+    // included), appending /usr/bin:/bin here would let a scenario meant to
+    // stub only ONE tool (or neither) fall through to the REAL binary
+    // instead, which then runs actual `iptables -P OUTPUT DROP` etc. against
+    // this process's real network namespace -- breaking real egress for the
+    // rest of the test run instead of exercising the fake stub. `command -v`
+    // is a shell builtin and the stubbed tools are invoked by absolute
+    // lookup via PATH alone, so the script needs nothing else on PATH.
     const out = execFileSync('/bin/sh', ['-c', script], {
       encoding: 'utf-8',
-      env: { ...process.env, PATH: `${dir}:/usr/bin:/bin` },
+      env: { ...process.env, PATH: dir },
     });
     return out.trim().split('\n').filter(Boolean);
   } finally {

@@ -389,7 +389,6 @@ test('darwin socket paths stay within the 104-byte sun_path limit', () => {
   const longest = [
     `${base}/ccserver-git-broker-00000000-0000-0000-0000-000000000000/broker.sock`,
     `${base}/ccserver-mcp-0123456789abcdef0123456789abcdef-control`,
-    `${base}/ccserver-pty-host.sock`,
     `${base}/ccserver-meta.sock`,
   ];
   for (const p of longest) {
