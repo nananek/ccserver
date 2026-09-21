@@ -314,6 +314,35 @@ test('legacy (pre-fix) vault: unlock and add-credential are refused with GPG_VAU
   assert.equal(isUnlocked(), true);
 });
 
+// L4 fix (vuln_scan report): unlockVault's later stages (decrypting the
+// stored key, then gpg --import / gpgconf --launch to set up the agent)
+// used to re-throw whatever raw error those steps produced, and
+// routes/gpgVault.js's unlock-verify relays that message close to verbatim
+// in its 401 response -- an execFileSync failure in particular can embed
+// the tmpfs GNUPGHOME path, full argv, and captured stderr. Corrupting the
+// stored fingerprint after a real, successful vault creation deterministically
+// fails AES-GCM auth (fingerprint doubles as the AAD for the stored key's
+// encryption -- see generateAndStoreVault/unlockVault), reaching the first
+// of the two now-generalized catch blocks without needing to break any
+// binaries.
+test('unlockVault: a decrypt-stage failure never leaks the raw crypto error in the thrown message', { skip: !TOOLS_AVAILABLE }, () => {
+  insertCredential('cred-l4');
+  const s1 = randomBytes(32);
+  generateAndStoreVault({ nameReal: 'x', nameEmail: 'x@example.invalid', credentialId: 'cred-l4', prfSecret: s1, prfSalt: randomBytes(32) });
+  lockVault();
+  getDb().prepare('UPDATE gpg_vault SET fingerprint = ?').run('0'.repeat(40));
+
+  assert.throws(
+    () => unlockVault({ credentialId: 'cred-l4', prfSecret: s1 }),
+    (err) => {
+      assert.equal(err.message, 'failed to decrypt the stored GPG key');
+      assert.doesNotMatch(err.message, /unsupported state|authenticate data|fingerprint|homedir|GNUPGHOME/i);
+      return true;
+    },
+  );
+  assert.equal(isUnlocked(), false);
+});
+
 test('lockVault is idempotent when already locked', { skip: !TOOLS_AVAILABLE }, () => {
   assert.equal(isUnlocked(), false);
   assert.doesNotThrow(() => lockVault());

@@ -489,7 +489,10 @@ export function unlockVault({ credentialId, prfSecret, rotation = null }) {
     );
   } catch (err) {
     vk.fill(0);
-    throw new Error(`failed to decrypt the stored GPG key: ${err.message}`);
+    // L4 fix: same reasoning as the outer catch below -- log the real
+    // (here low-risk, but still internal) crypto error server-side only.
+    console.warn(`[gpg-vault] stored key decrypt failed: ${err.message}`);
+    throw new Error('failed to decrypt the stored GPG key');
   }
 
   const homeDir = newTmpHomeDir('ccv-gpg-agent');
@@ -553,7 +556,15 @@ export function unlockVault({ credentialId, prfSecret, rotation = null }) {
     wipeHomeDir(homeDir);
     vk.fill(0);
     if (secretKeyBuf) secretKeyBuf.fill(0);
-    throw err;
+    // L4 fix (vuln_scan report): `err` here can be a raw execFileSync
+    // failure (gpg --import / gpgconf --launch), whose .message embeds the
+    // full argv and the tmpfs GNUPGHOME path, sometimes with captured
+    // stderr too -- routes/gpgVault.js's unlock-verify relays this
+    // function's error message close to verbatim in its 401 response, so
+    // that must never reach the client. Log the real error server-side;
+    // the caller only ever sees a generic reason.
+    console.warn(`[gpg-vault] unlock failed: ${err.message}`);
+    throw new Error('failed to unlock the GPG vault (agent setup failed)');
   }
 }
 
