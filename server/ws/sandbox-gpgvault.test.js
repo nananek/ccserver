@@ -367,21 +367,12 @@ test('F1: `gpg --export-secret-keys` through the relay yields nothing, while git
         sock.once('connect', () => console.error('DIAG raw connect via SYMLINK: connected'));
         sock.once('error', (e) => { clearTimeout(timer); console.error('DIAG raw connect via SYMLINK error:', e.message); resolve(); });
       });
-      process.env.CCV_TRACE_RELAY = '1';
-      for (let attempt = 1; attempt <= 3 && signed.status !== 0; attempt++) {
-        try {
-          const probe = await assuanRoundTrip(getRelaySocketPaths().agent, 'GETINFO version', 5000);
-          console.error(`DIAG attempt ${attempt}: relay probe ->`, JSON.stringify(probe));
-        } catch (e) {
-          console.error(`DIAG attempt ${attempt}: relay probe FAILED ->`, e.message);
-        }
-        await new Promise((r) => setTimeout(r, 300 * attempt));
-        console.error(`DIAG attempt ${attempt}: retrying gpg signing now`);
-        const retry = await run('gpg', ['--homedir', home, '--status-fd=2', '-bsau', vault.fingerprint], { input: 'tree 0\n' });
-        console.error(`DIAG attempt ${attempt}: retry status=`, retry.status, 'stderr=', retry.stderr);
-        signed = retry;
-      }
-      delete process.env.CCV_TRACE_RELAY;
+      const verbose = await run('gpg', [
+        '--homedir', home, '--status-fd=2', '--verbose', '--debug-level', 'guru', '--debug', 'ipc,extprog',
+        '-bsau', vault.fingerprint,
+      ], { input: 'tree 0\n' });
+      console.error('DIAG verbose/debug-ipc run status=', verbose.status);
+      console.error('DIAG verbose/debug-ipc stderr:\n', verbose.stderr);
     }
     assert.equal(signed.status, 0, `signing through the relay works: ${signed.stderr}`);
     assert.match(signed.stderr, /SIG_CREATED/);
