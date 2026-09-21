@@ -131,3 +131,26 @@ test('consumeChallengeFlowData: kind mismatch is rejected and still consumes the
   assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'gpg-vault-add-credential'), null);
   assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'gpg-vault-setup'), null);
 });
+
+// L1 (vuln_scan report): startChallengeFlow is reachable from the
+// unauthenticated authenticate-options endpoint, and used to grow `flows`
+// without any upper bound (only expired entries were ever swept) --
+// flooding it faster than the 5-minute TTL is an unauthenticated
+// memory-exhaustion DoS. MAX_FLOWS now caps it with FIFO eviction.
+test('L1: startChallengeFlow caps total live flows and evicts the oldest once full', () => {
+  const first = startChallengeFlow('authentication', 'first-challenge');
+  // MAX_FLOWS is 1000 (not exported -- this only needs to push comfortably
+  // past it, not hit the exact number).
+  for (let i = 0; i < 1005; i++) startChallengeFlow('authentication', `flood-${i}`);
+  assert.equal(
+    consumeChallengeFlow(requestWithFlowCookie(first), 'authentication'),
+    null,
+    'the oldest flow must have been evicted once the cap was exceeded',
+  );
+  const recent = startChallengeFlow('authentication', 'recent-challenge');
+  assert.equal(
+    consumeChallengeFlow(requestWithFlowCookie(recent), 'authentication'),
+    'recent-challenge',
+    'a recently-started flow must still be live',
+  );
+});

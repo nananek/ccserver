@@ -26,9 +26,29 @@ export const WEBAUTHN_USER_NAME = 'ccserver';
 
 const flows = new Map(); // flowId -> { challenge, kind, expiresAt, data }
 
+// L1 fix (vuln_scan report): startChallengeFlow is reachable from the
+// UNAUTHENTICATED authenticate-options endpoint (see UNAUTHENTICATED_AUTH_ROUTES
+// in server/index.js -- a WebAuthn ceremony has to start before there's any
+// session to check), and sweepExpired below only removes entries once their
+// own 5-minute TTL has passed. Flooding that endpoint faster than flows
+// naturally expire grows this Map without bound -- an unauthenticated memory-
+// exhaustion DoS. A generous cap (FIFO eviction of the oldest flow once full,
+// same pattern as federationPairing.js's enforcePendingCap) closes that
+// while staying far above any real concurrent-ceremony count this
+// single-operator app would ever see.
+const MAX_FLOWS = 1000;
+
 function sweepExpired(now) {
   for (const [flowId, flow] of flows) {
     if (flow.expiresAt <= now) flows.delete(flowId);
+  }
+}
+
+function evictOldestIfFull() {
+  while (flows.size >= MAX_FLOWS) {
+    const oldestKey = flows.keys().next().value; // Map iterates in insertion order
+    if (oldestKey === undefined) break;
+    flows.delete(oldestKey);
   }
 }
 
@@ -44,6 +64,7 @@ function sweepExpired(now) {
 export function startChallengeFlow(kind, challenge, data = null) {
   const now = Date.now();
   sweepExpired(now);
+  evictOldestIfFull();
   const flowId = randomBytes(32).toString('base64url');
   flows.set(flowId, { challenge, kind, expiresAt: now + FLOW_TTL_MS, data });
   return flowId;
