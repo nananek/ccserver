@@ -359,7 +359,16 @@ test('F1: `gpg --export-secret-keys` through the relay yields nothing, while git
     if (signed.status !== 0) {
       const os = await import('node:os');
       console.error('DIAG loadavg=', os.loadavg(), 'cpus=', os.cpus().length);
-      for (let attempt = 1; attempt <= 5 && signed.status !== 0; attempt++) {
+      console.error('DIAG symlink=', join(home, 'S.gpg-agent'), '-> ', getRelaySocketPaths().agent);
+      await new Promise((resolve, reject) => {
+        const sock = createConnection(join(home, 'S.gpg-agent'));
+        const timer = setTimeout(() => { sock.destroy(); console.error('DIAG raw connect via SYMLINK timed out'); resolve(); }, 3000);
+        sock.once('data', (d) => { clearTimeout(timer); console.error('DIAG raw connect via SYMLINK got data:', JSON.stringify(d.toString('latin1'))); sock.destroy(); resolve(); });
+        sock.once('connect', () => console.error('DIAG raw connect via SYMLINK: connected'));
+        sock.once('error', (e) => { clearTimeout(timer); console.error('DIAG raw connect via SYMLINK error:', e.message); resolve(); });
+      });
+      process.env.CCV_TRACE_RELAY = '1';
+      for (let attempt = 1; attempt <= 3 && signed.status !== 0; attempt++) {
         try {
           const probe = await assuanRoundTrip(getRelaySocketPaths().agent, 'GETINFO version', 5000);
           console.error(`DIAG attempt ${attempt}: relay probe ->`, JSON.stringify(probe));
@@ -367,10 +376,12 @@ test('F1: `gpg --export-secret-keys` through the relay yields nothing, while git
           console.error(`DIAG attempt ${attempt}: relay probe FAILED ->`, e.message);
         }
         await new Promise((r) => setTimeout(r, 300 * attempt));
+        console.error(`DIAG attempt ${attempt}: retrying gpg signing now`);
         const retry = await run('gpg', ['--homedir', home, '--status-fd=2', '-bsau', vault.fingerprint], { input: 'tree 0\n' });
         console.error(`DIAG attempt ${attempt}: retry status=`, retry.status, 'stderr=', retry.stderr);
         signed = retry;
       }
+      delete process.env.CCV_TRACE_RELAY;
     }
     assert.equal(signed.status, 0, `signing through the relay works: ${signed.stderr}`);
     assert.match(signed.stderr, /SIG_CREATED/);

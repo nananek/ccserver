@@ -153,6 +153,7 @@ export function ensureStarted() {
       // Resolved fresh on EVERY new connection -- this is the whole point:
       // a lock/unlock in between two connections is transparently picked up.
       const target = gpgVaultAgent.getSocketPath(relay.target);
+      if (process.env.CCV_TRACE_RELAY) console.error('CCV_TRACE_RELAY inbound connection, kind=', kind, 'target=', target);
       if (!target) {
         // Locked right now: refuse immediately rather than hang, mirroring
         // how a real "no such agent" failure looks to the client (gpg/ssh
@@ -161,6 +162,11 @@ export function ensureStarted() {
         return;
       }
       const outbound = createConnection(target);
+      if (process.env.CCV_TRACE_RELAY) {
+        outbound.on('connect', () => console.error('CCV_TRACE_RELAY outbound connected to', target));
+        outbound.on('error', (e) => console.error('CCV_TRACE_RELAY outbound error', e.message));
+        inbound.on('error', (e) => console.error('CCV_TRACE_RELAY inbound error', e.message));
+      }
       let cleaned = false;
       const cleanup = () => {
         if (cleaned) return;
