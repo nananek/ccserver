@@ -21,6 +21,7 @@ import {
   unlockVault,
   lockVault,
   getUnlockedAgentInfo,
+  getPublicIdentity,
   isLegacyVault,
   deleteVault,
   verifyEnrolledCredential,
@@ -139,6 +140,25 @@ test('full lifecycle: generate -> unlock -> sign -> ssh -> lock -> sockets gone'
   assert.equal(isUnlocked(), false);
   assert.equal(existsSync(agentInfo.sockets.agent), false, 'lock must remove the live socket');
   assert.throws(() => getUnlockedAgentInfo(), /locked/);
+});
+
+test('getPublicIdentity: null with no vault, then lock-independent fingerprint/nameReal/nameEmail once one exists (issue #185)', { skip: !TOOLS_AVAILABLE }, () => {
+  assert.equal(getPublicIdentity(), null, 'no vault yet -- null, not a throw');
+
+  insertCredential('cred-pubid');
+  const prfSecret = randomBytes(32);
+  const info = generateAndStoreVault({
+    nameReal: 'ccserver pubid test', nameEmail: 'ccserver-pubid-test@example.invalid',
+    credentialId: 'cred-pubid', prfSecret, prfSalt: randomBytes(32),
+  });
+
+  const unlockedIdentity = getPublicIdentity();
+  assert.deepEqual(unlockedIdentity, { fingerprint: info.fingerprint, nameReal: 'ccserver pubid test', nameEmail: 'ccserver-pubid-test@example.invalid' });
+
+  lockVault();
+  assert.equal(isUnlocked(), false);
+  // The whole point: same values while locked -- no throw, no homeDir/sockets.
+  assert.deepEqual(getPublicIdentity(), unlockedIdentity);
 });
 
 test('unlockVault with no vault set up throws GPG_VAULT_NOT_SET_UP', { skip: !TOOLS_AVAILABLE }, () => {

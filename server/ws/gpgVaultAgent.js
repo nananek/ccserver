@@ -583,18 +583,35 @@ export function lockVault() {
 }
 
 // Query surface for sandbox.js. Throws if locked -- callers must check
-// isUnlocked() first (sandbox.js's buildSandboxSpawn fails loudly before any
-// other per-launch side effect if gpgVault is requested while locked; see
-// plan section 4). nameReal/nameEmail are included so sandbox.js's
-// git-identity injection (user.name/user.email alongside user.signingkey)
-// can source them from here without a separate gpgVaultDb import -- both are
-// public columns (see db.js v8's migration comment), safe to read even
-// though the rest of this function's callers otherwise treat "unlocked" as
-// gating secret material.
+// isUnlocked() first. Used where the caller genuinely needs unlock-bound
+// state (state.homeDir/state.sockets, i.e. gpgVaultRelay.js's own copy-source
+// resolution); sandbox.js itself now uses getPublicIdentity() below instead
+// (issue #185: a launch must not hard-fail just because the vault happened
+// to be locked at that instant). nameReal/nameEmail are included so
+// callers' git-identity injection (user.name/user.email alongside
+// user.signingkey) can source them from here without a separate gpgVaultDb
+// import -- both are public columns (see db.js v8's migration comment), safe
+// to read even though the rest of this function's callers otherwise treat
+// "unlocked" as gating secret material.
 export function getUnlockedAgentInfo() {
   if (!state) throw new Error('the GPG vault is locked');
   const { nameReal, nameEmail } = gpgVaultDb.getVaultPublicInfo();
   return { homeDir: state.homeDir, sockets: state.sockets, fingerprint: state.fingerprint, nameReal, nameEmail };
+}
+
+// Lock-independent public identity: fingerprint/nameReal/nameEmail only --
+// never homeDir/sockets (those are per-unlock-generation and require
+// isUnlocked()). Safe to call regardless of lock state; returns null only
+// when no vault has ever been created. This is what sandbox.js's
+// buildSandboxSpawn uses for git-identity injection (user.signingkey/
+// user.name/user.email) so that requesting gpgVault:true while the vault is
+// locked no longer hard-fails the launch (issue #185) -- the values here are
+// identical whether the vault is locked or unlocked, since they come
+// straight from the DB row, not from the in-memory `state` this file guards.
+export function getPublicIdentity() {
+  if (!gpgVaultDb.vaultExists()) return null;
+  const { fingerprint, nameReal, nameEmail } = gpgVaultDb.getVaultPublicInfo();
+  return { fingerprint, nameReal, nameEmail };
 }
 
 // Existence-check helper for a bind path -- sandbox.js only ever binds

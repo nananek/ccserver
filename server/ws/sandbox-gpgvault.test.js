@@ -8,7 +8,7 @@
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -24,7 +24,7 @@ import {
   isUnlocked,
   getUnlockedAgentInfo,
 } from './gpgVaultAgent.js';
-import { getRelaySocketPaths, stop as stopGpgVaultRelay } from './gpgVaultRelay.js';
+import { getRelaySocketPaths, getRelayDir, ensureStarted as ensureGpgVaultRelayStarted, stop as stopGpgVaultRelay } from './gpgVaultRelay.js';
 
 const TOOLS_AVAILABLE = gpgVaultToolsAvailable();
 const IS_LINUX_BWRAP = process.platform !== 'darwin';
@@ -109,13 +109,48 @@ test('gpgVault:true while no vault has been set up throws before any broker star
   );
 });
 
-test('gpgVault:true while the vault is locked throws before any broker starts', { skip: !TOOLS_AVAILABLE }, async () => {
-  setUpUnlockedVault();
+// Issue #185: a vault that is merely LOCKED at the moment of launch must no
+// longer hard-fail the whole launch -- gpgVaultRelay.js already tolerates a
+// lock/unlock happening underneath an ALREADY-RUNNING sandbox (see the
+// self-heals test below), so gating the launch itself on isUnlocked() only
+// ever rejected a race that resolves moments later. The launch now proceeds
+// with a console.warn instead, and git identity (fingerprint/name/email) is
+// still injected correctly because it is lock-independent (getPublicIdentity()).
+test('gpgVault:true while the vault is locked launches anyway (warns instead of throwing, git identity still correct)', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
+  const vault = setUpUnlockedVault();
   lockVault();
-  await assert.rejects(
-    () => spawnFor({ docker: false, gitBroker: true, persistentHome: false }),
-    /currently locked/,
-  );
+
+  const warnLines = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => { warnLines.push(args.join(' ')); };
+  let spawn;
+  try {
+    spawn = await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } });
+  } finally {
+    console.warn = originalWarn;
+  }
+  try {
+    assert.ok(warnLines.some((line) => /currently locked/.test(line)), `expected a locked-vault warning, got: ${JSON.stringify(warnLines)}`);
+
+    // Git identity injected exactly as when unlocked (public info, not gated on lock state).
+    assert.equal(findSetenv(spawn.args, 'GIT_CONFIG_COUNT'), '5');
+    const gitConfig = {};
+    for (let i = 0; i < 5; i++) {
+      gitConfig[findSetenv(spawn.args, `GIT_CONFIG_KEY_${i}`)] = findSetenv(spawn.args, `GIT_CONFIG_VALUE_${i}`);
+    }
+    assert.equal(gitConfig['user.signingkey'], vault.fingerprint);
+    assert.equal(gitConfig['user.name'], 'ccserver sandbox test');
+    assert.equal(gitConfig['user.email'], 'ccserver-sandbox-test@example.invalid');
+
+    // GNUPGHOME/SSH_AUTH_SOCK still set up (relay sockets bound; the relay
+    // itself is what actually refuses gpg/ssh connections while locked, not
+    // the launch).
+    assert.equal(findSetenv(spawn.args, 'GNUPGHOME')?.endsWith('gnupg-vault'), true);
+    const sshAuthSock = findSetenv(spawn.args, 'SSH_AUTH_SOCK');
+    assert.ok(sshAuthSock && sshAuthSock.includes('gnupg-vault'));
+  } finally {
+    cleanupSpawn(spawn);
+  }
 });
 
 test('gpgVault:true while unlocked: binds public files+sockets, sets GNUPGHOME/SSH_AUTH_SOCK, injects git identity, and never exposes secret material', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
@@ -257,6 +292,20 @@ test('gpgVaultRelay: forwards live traffic to the CURRENT backend, refuses while
   unlockVault({ credentialId, prfSecret });
   const greetingB = await connectAndReadLine(relaySockets.agent);
   assert.match(greetingB, /^OK/, 'relay forwards to the NEW (generation B) gpg-agent after a re-unlock, with no restart of anything');
+});
+
+test('gpgVaultRelay.ensureStarted() while locked does not throw and leaves previously-copied public files in place (issue #185)', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
+  setUpUnlockedVault();
+  // First call, while unlocked, populates the relay dir's public-file copies.
+  cleanupSpawn(await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+  const pubringPath = join(getRelayDir(), 'pubring.kbx');
+  assert.ok(existsSync(pubringPath), 'precondition: the unlocked call copied the public files');
+  const before = readFileSync(pubringPath);
+
+  lockVault();
+  assert.doesNotThrow(() => ensureGpgVaultRelayStarted(), 'ensureStarted() must not throw while the vault is locked');
+  assert.ok(existsSync(pubringPath), 'locked ensureStarted() must not remove the previously copied public files');
+  assert.deepEqual(readFileSync(pubringPath), before, 'locked ensureStarted() must not touch the previously copied public files');
 });
 
 // ---------------------------------------------------------------------------

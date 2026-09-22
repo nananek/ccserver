@@ -1421,11 +1421,16 @@ const NO_NETWORK_BROKER_HANDLE = Object.freeze({
 //   networkBroker / networkBrokerHost - when set, injects HTTP(S)_PROXY env
 //             pointed at the broker (see buildIsolatedProxyEnv) before the
 //             sandbox's own extraEnv, so an operator override still wins.
-//   gpgVault - { homeDir, sockets, fingerprint, nameReal, nameEmail } from
-//             gpgVaultAgent.getUnlockedAgentInfo(), or null (plan:
-//             gpg-agent-vault). Resolved once by the caller (buildSandboxSpawn),
-//             not fetched in here -- mirrors gitBroker/commitGuard/
-//             networkBroker, which are also caller-resolved objects.
+//   gpgVault - { fingerprint, nameReal, nameEmail } from
+//             gpgVaultAgent.getPublicIdentity(), or null (plan:
+//             gpg-agent-vault). Lock-independent -- no homeDir/sockets, see
+//             getPublicIdentity()'s own comment (issue #185); the public
+//             pubring/trustdb/gpg.conf files below are bound from
+//             gpgVaultRelay's fixed relay dir instead of a per-launch
+//             homeDir for the same reason. Resolved once by the caller
+//             (buildSandboxSpawn), not fetched in here -- mirrors
+//             gitBroker/commitGuard/networkBroker, which are also
+//             caller-resolved objects.
 function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault = null, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, mcpToken = null, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null, networkBroker = null, networkBrokerHost = BWRAP_ISOLATION_GATEWAY }) {
   const args = [
     '--die-with-parent',
@@ -1705,14 +1710,18 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     const vault = gpgVault;
     const targetDir = docker ? join(HOME, '.gnupg-vault') : join(XDG_RUNTIME_DIR, 'gnupg-vault');
     args.push('--dir', targetDir);
-    // Public metadata files only, snapshotted from THIS launch's homeDir --
-    // safe to snapshot (unlike the sockets below) because unlockVault()
-    // always re-verifies the imported key's fingerprint against the vault's
-    // stored one (gpgVaultAgent.js), so this content is identical across
-    // every unlock generation of the same vault.
+    // Public metadata files, bound from gpgVaultRelay's fixed relay dir
+    // (same source macOS Seatbelt already uses -- see sandbox-seatbelt.js)
+    // rather than this launch's own homeDir: gpgVault is now lock-
+    // independent (issue #185, getPublicIdentity()) and so no longer carries
+    // a homeDir at all. Using --ro-bind-try (not --ro-bind) matters more
+    // than before: a vault that has never been unlocked yet has nothing in
+    // the relay dir, and the bind is simply skipped -- gpg then runs against
+    // an empty GNUPGHOME, which is harmless (no secret key material is ever
+    // placed there either way).
     for (const file of ['pubring.kbx', 'trustdb.gpg', 'gpg.conf']) {
-      const src = join(vault.homeDir, file);
-      if (existsSync(src)) args.push('--ro-bind-try', src, join(targetDir, file));
+      const src = join(gpgVaultRelay.getRelayDir(), file);
+      args.push('--ro-bind-try', src, join(targetDir, file));
     }
     // Sockets bind from gpgVaultRelay.js's FIXED, generation-independent
     // paths -- never vault.sockets (this launch's own ephemeral generation)
@@ -2253,22 +2262,37 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // broker starts (gitBroker/commitGuard/networkBroker below all leak a live
   // child process + runtime dir if a LATER step throws -- see their own
   // cleanup blocks -- so refusing here, first, needs none of that dance).
-  // A locked/missing vault must never silently degrade to "no GPG" the way a
+  // A missing/legacy vault must never silently degrade to "no GPG" the way a
   // missing rootlesskit tooling degrades network isolation -- this session
   // explicitly asked to sign/push with a specific key, and launching without
-  // it would be a silent downgrade of what the caller requested.
+  // it would be a silent downgrade of what the caller requested. These two
+  // are recoverable only by operator action (set up / recreate the vault),
+  // so they still hard-fail the launch.
+  if (gpgVault && !gpgVaultAgent.vaultExists()) {
+    throw new Error('gpgVault was requested but no GPG vault has been set up yet -- set one up from Settings first.');
+  }
+  if (gpgVault && gpgVaultAgent.isLegacyVault()) {
+    // Security audit F1.4: pre-fix vaults are disabled for good.
+    throw new Error(
+      'gpgVault was requested but the GPG vault was created before the security fix and has been disabled '
+      + '(its secret key may have leaked) -- delete and recreate it from Settings.',
+    );
+  }
+  // A vault that is merely LOCKED at this exact instant is NOT treated as
+  // "no GPG" either, but it is also not a launch-time hard failure any more
+  // (issue #185): gpgVaultRelay.js already tolerates lock/unlock cycles for
+  // an already-running sandbox (its sockets resolve the current agent fresh
+  // per connection), so gating the launch itself on isUnlocked() just
+  // rejects a race that resolves itself moments later. The launch proceeds
+  // with gpgVault still enabled; signing/SSH push will fail (relay refuses
+  // the connection, "agent unavailable" to gpg/ssh) until the vault is
+  // unlocked, and this is logged so a locked launch is never silently
+  // unnoticed.
   if (gpgVault && !gpgVaultAgent.isUnlocked()) {
-    let message;
-    if (!gpgVaultAgent.vaultExists()) {
-      message = 'gpgVault was requested but no GPG vault has been set up yet -- set one up from Settings first.';
-    } else if (gpgVaultAgent.isLegacyVault()) {
-      // Security audit F1.4: pre-fix vaults are disabled for good.
-      message = 'gpgVault was requested but the GPG vault was created before the security fix and has been disabled '
-        + '(its secret key may have leaked) -- delete and recreate it from Settings.';
-    } else {
-      message = 'gpgVault was requested but the GPG vault is currently locked -- unlock it from Settings before launching.';
-    }
-    throw new Error(message);
+    console.warn(
+      '[sandbox] gpgVault was requested but the vault is currently locked -- launching anyway; '
+      + 'signing/SSH push will fail until it is unlocked from Settings.',
+    );
   }
   // gpgVault uses its own target path (~/.gnupg-vault / XDG_RUNTIME_DIR/
   // gnupg-vault, see buildBwrapArgs) specifically so it cannot collide
@@ -2286,9 +2310,12 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // Resolved once here (like gitBroker/commitGuard/networkBroker below) and
   // passed down as a plain object -- null when not requested -- rather than
   // having buildBwrapArgs/buildSeatbeltLaunch each independently reach into
-  // gpgVaultAgent.js. The isUnlocked() check above guarantees this succeeds
+  // gpgVaultAgent.js. Lock-independent (issue #185): getPublicIdentity()
+  // only ever returns fingerprint/nameReal/nameEmail (never homeDir/
+  // sockets), which is why it is safe to call even while the vault above is
+  // locked -- the vaultExists() check above guarantees it returns non-null
   // when gpgVault is true.
-  const gpgVaultInfo = gpgVault ? gpgVaultAgent.getUnlockedAgentInfo() : null;
+  const gpgVaultInfo = gpgVault ? gpgVaultAgent.getPublicIdentity() : null;
   // Must exist before buildBwrapArgs/buildSeatbeltLaunch bind its FIXED
   // socket paths below (see gpgVaultRelay.js's header for why sandboxes bind
   // those instead of gpgVaultInfo.sockets directly). Idempotent/lazy: a

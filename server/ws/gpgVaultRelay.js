@@ -108,29 +108,38 @@ export function getAllRelaySocketPathsForDeny() {
   return ALL_KNOWN_BASENAMES.map((name) => join(dir, name));
 }
 
-// Idempotent (listeners start once; public files refresh on every call),
-// synchronous: called from buildSandboxSpawn (server/ws/sandbox.js) right
-// before it snapshots gpgVaultInfo, so the relay sockets and the public-file
-// copies are guaranteed to exist before
-// bwrap's --bind-try / seatbelt's profile-building runs later in the same
-// call. Only ever called while the vault is unlocked (buildSandboxSpawn
-// gates gpgVault:true launches on isUnlocked() first), so
-// getUnlockedAgentInfo() below is safe. Unlike git-broker's startGitBroker()
-// (which spawns a child process and busy-waits for it to come up), this only
-// opens local net.Server listeners -- synchronous enough in practice that no
-// readiness dance is needed.
+// Idempotent (listeners start once; public files refresh on every call while
+// unlocked), synchronous: called from buildSandboxSpawn (server/ws/sandbox.js)
+// right before it snapshots gpgVaultInfo, so the relay sockets and the
+// public-file copies are guaranteed to exist before bwrap's --bind-try /
+// seatbelt's profile-building runs later in the same call. May now be called
+// while the vault is LOCKED too (issue #185: buildSandboxSpawn no longer
+// gates gpgVault:true launches on isUnlocked() first) -- see the isUnlocked()
+// branch below for what that means for the public-file copy step. Unlike
+// git-broker's startGitBroker() (which spawns a child process and
+// busy-waits for it to come up), this only opens local net.Server listeners
+// -- synchronous enough in practice that no readiness dance is needed.
 export function ensureStarted() {
   ensureHostRuntimeDir();
   const dir = relayDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
 
-  // Public metadata files, refreshed on every call -- see header comment on
-  // why (vault delete + recreate changes the key).
-  const vault = gpgVaultAgent.getUnlockedAgentInfo();
-  for (const file of PUBLIC_FILES) {
-    const src = join(vault.homeDir, file);
-    if (existsSync(src)) {
-      try { copyFileSync(src, join(dir, file)); } catch { /* best effort; bwrap still binds the real per-launch file directly */ }
+  // Public metadata files, refreshed on every call while unlocked -- see
+  // header comment on why (vault delete + recreate changes the key). While
+  // locked, skip and keep whatever the relay dir already holds from the last
+  // unlocked refresh: the content is identical across unlock generations of
+  // ONE vault (only a delete+recreate changes it), and the next
+  // gpgVault:true launch that happens to run while unlocked will refresh it
+  // again via this same call. If the vault has never been unlocked at all,
+  // the relay dir simply has no public files yet -- callers bind them with
+  // --ro-bind-try / tolerate their absence, see sandbox.js.
+  if (gpgVaultAgent.isUnlocked()) {
+    const vault = gpgVaultAgent.getUnlockedAgentInfo();
+    for (const file of PUBLIC_FILES) {
+      const src = join(vault.homeDir, file);
+      if (existsSync(src)) {
+        try { copyFileSync(src, join(dir, file)); } catch { /* best effort; bwrap still binds the real per-launch file directly */ }
+      }
     }
   }
   if (servers) return;
