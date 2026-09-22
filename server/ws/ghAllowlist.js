@@ -68,7 +68,14 @@ import { normalizeGitUrl } from './gitAllowlist.js';
 const ALLOWED = {
   pr: new Set(['create', 'view', 'list', 'edit', 'comment', 'merge', 'close', 'reopen', 'ready', 'review', 'checks', 'diff', 'status', 'checkout']),
   issue: new Set(['create', 'view', 'list', 'edit', 'comment', 'close', 'reopen', 'status']),
-  release: new Set(['create', 'view', 'list', 'edit', 'delete', 'upload', 'download', 'delete-asset']),
+  // 'upload' deliberately NOT included: its whole point is uploading
+  // HOST-path files (`gh release upload <tag> <files>...`) as release assets,
+  // with no --body-file-shaped flag to gate -- there is no argument here
+  // that could ever be "a session-tree path" instead. Refused outright (H2
+  // follow-up, review on #179 P1 item 1) until a design exists that stages
+  // asset bytes through the sandbox rather than letting the host `gh` open
+  // an arbitrary host path by name.
+  release: new Set(['create', 'view', 'list', 'edit', 'delete', 'download', 'delete-asset']),
   workflow: new Set(['run', 'view', 'list', 'enable', 'disable']),
   run: new Set(['list', 'view', 'watch']),
   repo: new Set(['view']),
@@ -470,4 +477,182 @@ export function extractGhTextFields(argv) {
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Host file-argument boundary, independent of TEXT_FIELDS (H2 follow-up --
+// review on PR #179, P1 item 1). TEXT_FIELDS/extractGhTextFields above only
+// ever locates the flags it was told about (title/body/notes and their
+// -file counterparts); several OTHER gh flags/positionals ALSO name a HOST
+// path gh (unsandboxed, running on the host) opens directly, with no
+// title/body-shaped field for that table to ever notice:
+//   - `release create <tag> [<files>...]`: positional asset files/patterns.
+//   - `release download --dir/-D` / `--output/-O <path>`: host-side WRITE
+//     destinations (a related finding from the same review, tracked here
+//     rather than separately since it's the same class of boundary).
+//   - `workflow run -F/--field key=@path`: gh's own `@file` value syntax.
+//   - `--attach <path>` (pr/issue create/edit/comment): a host file read as
+//     an upload attachment.
+//   - `pr checkout --worktree`: a host-side WRITE destination for the new
+//     worktree.
+// (`release upload`'s entire purpose is uploading host-path files with no
+// gating flag to check at all -- see ALLOWED.release's comment -- so it's
+// refused outright, upstream of this module, rather than parsed here.)
+//
+// Deliberately NOT a generic flag-shape scanner: every subcommand below is
+// enumerated by name, its flags classified by hand against `gh <cmd>
+// --help`. parseKnownArgs fails an invocation closed on any flag it doesn't
+// recognize (see its own comment) rather than guess whether an unmodeled
+// flag is boolean or value-taking and let a future gh version's new
+// file-argument flag through unchecked.
+//
+// Called by git-broker.js's handleGhExec once classifyGhInvocation has
+// already allowed the subcommand -- this is a filesystem boundary, not a
+// content policy, so (like findBlockedGhText's file-arg-requires-stdin case)
+// it is enforced unconditionally, independent of commitMessageGuard config.
+// Returns {field, reason} for the first blocked shape found, or null.
+
+// Splits `rest` (argv.slice(2), everything after "<top> <sub>") into
+// positionals and flag-shaped tokens, consuming each known flag's value
+// token when it takes one. `knownFlags`: array of {short?, long?, value}.
+// Short tokens here are always exactly 2 chars or the attached "-Rvalue"
+// form: classifyGhInvocation's hasAmbiguousShortFlag has already refused
+// every other short-dash token (any short flag longer than 2 chars not
+// starting with "-R") upstream of this ever running, so there is no
+// "-Xvalue" attached-short-value form left to handle except -R's.
+//
+// `unknownFlag` is the first flag-shaped token matching neither a known
+// short nor long name -- callers must fail the WHOLE invocation closed on
+// this, not assume it takes no value: an unrecognized flag could itself be
+// another file-argument flag, or could swallow the very positional this is
+// trying to classify.
+function parseKnownArgs(rest, knownFlags) {
+  const shortMap = new Map();
+  const longMap = new Map();
+  for (const f of knownFlags) {
+    if (f.short) shortMap.set(f.short, f);
+    if (f.long) longMap.set(f.long, f);
+  }
+  const positionals = [];
+  let sawDashDash = false;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (sawDashDash) { positionals.push(a); continue; }
+    if (a === '--') { sawDashDash = true; continue; }
+    if (a === '-' || !a.startsWith('-')) { positionals.push(a); continue; }
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      const name = eq === -1 ? a : a.slice(0, eq);
+      const f = longMap.get(name);
+      if (!f) return { positionals, unknownFlag: a };
+      if (f.value && eq === -1) i += 1;
+      continue;
+    }
+    if (a.startsWith('-R') && a.length > 2) continue; // attached "-Rvalue"
+    const f = shortMap.get(a);
+    if (!f) return { positionals, unknownFlag: a };
+    if (f.value) i += 1;
+  }
+  return { positionals, unknownFlag: null };
+}
+
+const RELEASE_CREATE_FLAGS = [
+  { short: '-d', long: '--draft', value: false },
+  { long: '--discussion-category', value: true },
+  { long: '--generate-notes', value: false },
+  { long: '--latest', value: false },
+  { short: '-n', long: '--notes', value: true },
+  { short: '-F', long: '--notes-file', value: true },
+  { long: '--notes-from-tag', value: false },
+  { short: '-p', long: '--prerelease', value: false },
+  { short: '-R', long: '--repo', value: true },
+  { long: '--target', value: true },
+  { short: '-t', long: '--title', value: true },
+  { long: '--verify-tag', value: false },
+];
+
+// `gh release create <tag> [<files>...] [flags]`: anything positional past
+// the tag is an asset file/pattern gh uploads by opening it on the host.
+function findBlockedReleaseCreateArgs(argv) {
+  const { positionals, unknownFlag } = parseKnownArgs(argv.slice(2), RELEASE_CREATE_FLAGS);
+  if (unknownFlag) return { field: 'release-create', reason: 'unrecognized-flag' };
+  if (positionals.length > 1) return { field: 'release-create-assets', reason: 'release-assets-not-allowed' };
+  return null;
+}
+
+// `gh release download`'s -D/--dir and -O/--output name a host-side WRITE
+// destination outside the session tree; -O/--output is fine when its value
+// is exactly "-" (stdout, relayed back through execGh's own stdout capture
+// -- no host file involved).
+function findBlockedReleaseDownloadArgs(argv) {
+  const rest = argv.slice(2);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '-D' || a === '--dir' || a.startsWith('--dir=')) {
+      return { field: 'release-download-dir', reason: 'release-download-dir-not-allowed' };
+    }
+    if (a === '-O' || a === '--output') {
+      if (rest[i + 1] !== '-') return { field: 'release-download-output', reason: 'release-download-output-not-stdout' };
+    } else if (a.startsWith('--output=')) {
+      if (a.slice('--output='.length) !== '-') return { field: 'release-download-output', reason: 'release-download-output-not-stdout' };
+    }
+  }
+  return null;
+}
+
+// `gh workflow run -F/--field key=value` type-infers the value and, per gh's
+// own syntax, reads it from a HOST file when the value starts with "@" --
+// "@-" means stdin (fine, no host file), any other "@path" is the same
+// exfiltration shape as --body-file. -f/--raw-field is always a literal
+// string (no "@file" interpretation), so it's left alone.
+function findBlockedWorkflowRunArgs(argv) {
+  const rest = argv.slice(2);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    let raw;
+    if (a === '-F' || a === '--field') raw = rest[i + 1];
+    else if (a.startsWith('--field=')) raw = a.slice('--field='.length);
+    else continue;
+    if (raw === undefined) continue;
+    const eq = raw.indexOf('=');
+    const value = eq === -1 ? '' : raw.slice(eq + 1);
+    if (value.startsWith('@') && value.slice(1) !== '-') {
+      return { field: 'workflow-run-field', reason: 'workflow-field-file-not-allowed' };
+    }
+  }
+  return null;
+}
+
+// `--attach <path>` (pr/issue create/edit/comment): reads a host file to
+// upload as an attachment. No session-tree exception -- there's no
+// sandbox-side wrapper yet that stages attachment bytes safely (see the
+// review's suggested design), so it's refused outright for now.
+function findBlockedAttachArg(argv) {
+  if (argv.some((a) => a === '--attach' || a.startsWith('--attach='))) {
+    return { field: 'attach', reason: 'attach-not-allowed' };
+  }
+  return null;
+}
+
+// `gh pr checkout --worktree`: creates the new worktree at a host-side path
+// outside the session tree (unlike a plain checkout, which stays inside the
+// already-allow-listed repo clone).
+function findBlockedCheckoutWorktreeArg(argv) {
+  if (argv.some((a) => a === '--worktree' || a.startsWith('--worktree='))) {
+    return { field: 'checkout-worktree', reason: 'checkout-worktree-not-allowed' };
+  }
+  return null;
+}
+
+export function findBlockedGhFileArg(argv) {
+  const top = argv[0];
+  const sub = argv[1];
+  if (top === 'release' && sub === 'create') return findBlockedReleaseCreateArgs(argv);
+  if (top === 'release' && sub === 'download') return findBlockedReleaseDownloadArgs(argv);
+  if (top === 'workflow' && sub === 'run') return findBlockedWorkflowRunArgs(argv);
+  if ((top === 'pr' || top === 'issue') && (sub === 'create' || sub === 'edit' || sub === 'comment')) {
+    return findBlockedAttachArg(argv);
+  }
+  if (top === 'pr' && sub === 'checkout') return findBlockedCheckoutWorktreeArg(argv);
+  return null;
 }

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyGhInvocation, extractGhTextFields } from './ghAllowlist.js';
+import { classifyGhInvocation, extractGhTextFields, findBlockedGhFileArg } from './ghAllowlist.js';
 
 const ORIGIN = 'https://github.com/testowner/testrepo.git';
 const cwdOrigin = () => ORIGIN;
@@ -623,5 +623,105 @@ describe('extractGhTextFields (plan8 PR-body guard)', () => {
     assert.deepEqual(extractGhTextFields(['pr', 'review', '5', '-c', '-b', 'looks good']), [
       { field: 'body', kind: 'literal', value: 'looks good' },
     ]);
+  });
+});
+
+// findBlockedGhFileArg (H2 follow-up -- review on #179 P1 item 1): host
+// file-argument shapes TEXT_FIELDS/extractGhTextFields never notices at
+// all -- release create/upload/download's own positionals and write flags,
+// workflow run's -F @file, --attach, pr checkout --worktree.
+describe('findBlockedGhFileArg', () => {
+  test('release create: a single asset positional after the tag is blocked', () => {
+    const r = findBlockedGhFileArg(['release', 'create', 'v1', '/etc/passwd']);
+    assert.equal(r.reason, 'release-assets-not-allowed');
+  });
+
+  test('release create: several asset positionals (glob-expanded) are blocked', () => {
+    const r = findBlockedGhFileArg(['release', 'create', 'v1', 'dist/a.tar.gz', 'dist/b.tar.gz']);
+    assert.equal(r.reason, 'release-assets-not-allowed');
+  });
+
+  test('release create: tag alone, or tag + known value/boolean flags, is NOT blocked', () => {
+    assert.equal(findBlockedGhFileArg(['release', 'create', 'v1']), null);
+    assert.equal(findBlockedGhFileArg(['release', 'create', 'v1', '-n', 'notes', '-t', 'Title', '-d', '-p', '--generate-notes']), null);
+    // --flag=value attached form must be recognized too (no extra token consumed).
+    assert.equal(findBlockedGhFileArg(['release', 'create', 'v1', '--title=Title', '--target=main']), null);
+    // A repeated flag (gh keeps the last) must not be misread as a positional.
+    assert.equal(findBlockedGhFileArg(['release', 'create', 'v1', '-n', 'first', '-n', 'second']), null);
+  });
+
+  test('release create: a "-F/--notes-file" value still consumes its own next token (no false positive)', () => {
+    // -F takes a value; its value token must not be mistaken for an asset positional.
+    assert.equal(findBlockedGhFileArg(['release', 'create', 'v1', '-F', '-']), null);
+  });
+
+  test('release create: an unrecognized flag fails the WHOLE invocation closed, not just "ignored"', () => {
+    const r = findBlockedGhFileArg(['release', 'create', 'v1', '--some-new-gh-flag', 'x']);
+    assert.equal(r.reason, 'unrecognized-flag');
+  });
+
+  test('release create: everything after "--" is positional, including a lone asset', () => {
+    const r = findBlockedGhFileArg(['release', 'create', 'v1', '--', 'asset.tar.gz']);
+    assert.equal(r.reason, 'release-assets-not-allowed');
+  });
+
+  test('release download: --dir/-D is always blocked, --dir=value form too', () => {
+    assert.equal(findBlockedGhFileArg(['release', 'download', 'v1', '--dir', '/tmp/x']).reason, 'release-download-dir-not-allowed');
+    assert.equal(findBlockedGhFileArg(['release', 'download', 'v1', '-D', '/tmp/x']).reason, 'release-download-dir-not-allowed');
+    assert.equal(findBlockedGhFileArg(['release', 'download', 'v1', '--dir=/tmp/x']).reason, 'release-download-dir-not-allowed');
+  });
+
+  test('release download: --output/-O must be exactly "-", --output=value form too', () => {
+    assert.equal(findBlockedGhFileArg(['release', 'download', 'v1', '--output', '/tmp/x']).reason, 'release-download-output-not-stdout');
+    assert.equal(findBlockedGhFileArg(['release', 'download', 'v1', '-O', '/tmp/x']).reason, 'release-download-output-not-stdout');
+    assert.equal(findBlockedGhFileArg(['release', 'download', 'v1', '--output=/tmp/x']).reason, 'release-download-output-not-stdout');
+    assert.equal(findBlockedGhFileArg(['release', 'download', 'v1', '--output', '-']), null);
+    assert.equal(findBlockedGhFileArg(['release', 'download', 'v1', '--output=-']), null);
+  });
+
+  test('release download: with neither --dir nor --output is not blocked (downloads into cwd)', () => {
+    assert.equal(findBlockedGhFileArg(['release', 'download', 'v1', '-p', '*.tar.gz']), null);
+  });
+
+  test('workflow run: -F/--field key=@path is blocked; key=@- (stdin) and plain values are not', () => {
+    assert.equal(findBlockedGhFileArg(['workflow', 'run', 'deploy.yml', '-F', 'payload=@/etc/passwd']).reason, 'workflow-field-file-not-allowed');
+    assert.equal(findBlockedGhFileArg(['workflow', 'run', 'deploy.yml', '--field', 'payload=@/etc/passwd']).reason, 'workflow-field-file-not-allowed');
+    assert.equal(findBlockedGhFileArg(['workflow', 'run', 'deploy.yml', '--field=payload=@/etc/passwd']).reason, 'workflow-field-file-not-allowed');
+    assert.equal(findBlockedGhFileArg(['workflow', 'run', 'deploy.yml', '-F', 'payload=@-']), null);
+    assert.equal(findBlockedGhFileArg(['workflow', 'run', 'deploy.yml', '-F', 'payload=plain-string']), null);
+  });
+
+  test('workflow run: -f/--raw-field is always a literal (never file-interpreted), even with an "@" value', () => {
+    assert.equal(findBlockedGhFileArg(['workflow', 'run', 'deploy.yml', '-f', 'payload=@/etc/passwd']), null);
+    assert.equal(findBlockedGhFileArg(['workflow', 'run', 'deploy.yml', '--raw-field', 'payload=@/etc/passwd']), null);
+  });
+
+  test('--attach is blocked on pr/issue create/edit/comment, long and "=value" forms', () => {
+    assert.equal(findBlockedGhFileArg(['pr', 'create', '--title', 't', '--attach', '/etc/passwd']).reason, 'attach-not-allowed');
+    assert.equal(findBlockedGhFileArg(['pr', 'comment', '1', '--attach=/etc/passwd']).reason, 'attach-not-allowed');
+    assert.equal(findBlockedGhFileArg(['issue', 'edit', '1', '--attach', '/etc/passwd']).reason, 'attach-not-allowed');
+  });
+
+  test('pr checkout --worktree is blocked, long and "=value" forms', () => {
+    assert.equal(findBlockedGhFileArg(['pr', 'checkout', '1', '--worktree', '/tmp/x']).reason, 'checkout-worktree-not-allowed');
+    assert.equal(findBlockedGhFileArg(['pr', 'checkout', '1', '--worktree=/tmp/x']).reason, 'checkout-worktree-not-allowed');
+  });
+
+  test('a plain pr checkout (no --worktree) is not blocked', () => {
+    assert.equal(findBlockedGhFileArg(['pr', 'checkout', '1']), null);
+  });
+
+  test('subcommands this check does not apply to are left alone', () => {
+    assert.equal(findBlockedGhFileArg(['pr', 'view', '1']), null);
+    assert.equal(findBlockedGhFileArg(['issue', 'list']), null);
+    assert.equal(findBlockedGhFileArg(['release', 'view', 'v1']), null);
+  });
+});
+
+describe('ALLOWED: release upload is not on the safelist at all (H2 follow-up)', () => {
+  test('release upload is refused as subcommand-not-allowed, before any file-arg check runs', () => {
+    const r = classifyGhInvocation(['release', 'upload', 'v1', '/etc/passwd'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'subcommand-not-allowed');
   });
 });

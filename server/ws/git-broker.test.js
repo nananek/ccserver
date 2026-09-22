@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startGitBroker, ensureHostRuntimeDir } from './git-broker.js';
@@ -329,17 +329,17 @@ describe('gh-exec PR-body guard (plan8)', () => {
     assert.equal(r.field, 'body-file');
   });
 
-  test('pr edit --body-file <path> reads the blocked pattern from the repo cwd', async () => {
+  // H2 follow-up (review on #179 P1 items 2+3): a --body-file path argument
+  // is no longer read at all, in-tree or not -- see findBlockedGhText's
+  // comment for why (the containment check that used to run here had a
+  // symlink+".." mismatch and a check-then-reopen race). Only "-" (stdin) is
+  // accepted; any other value is refused before the content guard even runs.
+  test('pr edit --body-file <path> (not "-") is refused, even for a real in-tree file', async () => {
     writeFileSync(join(repoDir, 'pr-body.txt'), 'Claude-Session: https://claude.ai/code/session_frompath\n');
     const r = await request(guardedBroker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', 'pr-body.txt'] });
     assert.equal(r.ok, false);
-    assert.equal(r.reason, 'blocked-message');
+    assert.equal(r.reason, 'file-arg-requires-stdin');
     assert.equal(r.field, 'body-file');
-  });
-
-  test('an unreadable --body-file fails open (skips that field, does not deny the command)', async () => {
-    const r = await request(guardedBroker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', 'does-not-exist.txt'] });
-    assert.equal(r.ok, true);
   });
 
   test('startGitBroker without blockedPatterns (pre-plan8 call shape) never checks PR text', async () => {
@@ -356,51 +356,79 @@ describe('gh-exec PR-body guard (plan8)', () => {
   // host, not inside the sandbox), so it must never be able to point outside
   // the session's own project tree -- even when no content guard is
   // configured at all (the plain `broker`, exactly like these first two).
-  test('H2: an absolute --body-file outside the session tree is denied, even with no content guard', async () => {
+  //
+  // H2 follow-up (review on #179 P1 items 2+3): "outside the tree" is no
+  // longer the distinguishing question -- see findBlockedGhText's comment --
+  // any --body-file/-F value other than "-" is refused, so an absolute path,
+  // a "../" escape, and (below) an in-tree path all land on the same
+  // file-arg-requires-stdin reason now.
+  test('H2: an absolute --body-file is denied, even with no content guard', async () => {
     const outside = join(root, 'outside-secret.txt');
     writeFileSync(outside, 'top secret host file that must never reach gh\n');
     const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', outside] });
     assert.equal(r.ok, false);
-    assert.equal(r.reason, 'file-arg-out-of-tree');
+    assert.equal(r.reason, 'file-arg-requires-stdin');
     assert.equal(r.field, 'body-file');
   });
 
   test('H2: a relative --body-file that escapes via ../ is denied, even with no content guard', async () => {
     const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', '../outside-secret.txt'] });
     assert.equal(r.ok, false);
-    assert.equal(r.reason, 'file-arg-out-of-tree');
+    assert.equal(r.reason, 'file-arg-requires-stdin');
   });
 
-  test('H2: a --body-file inside the session tree still works normally', async () => {
+  test('H2: a --body-file naming a real in-tree file is ALSO denied (no host path is ever opened again)', async () => {
     writeFileSync(join(repoDir, 'inside-body.txt'), 'perfectly fine PR body\n');
     const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', 'inside-body.txt'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'file-arg-requires-stdin');
+  });
+
+  // A symlink-plus-".." shape that used to defeat the old lexical-normalize
+  // + realpath containment check (review P1 item 2: checked path and
+  // actually-opened path could diverge) is now just another non-"-" value --
+  // refused for the same reason as everything else above, without ever
+  // resolving or opening it.
+  test('H2: a --body-file combining a symlink with a trailing .. is denied without ever being opened', async () => {
+    const outsideDir = join(root, 'h2-symlink-outside');
+    mkdirSync(outsideDir, { recursive: true });
+    writeFileSync(join(outsideDir, 'secret.txt'), 'must never be read\n');
+    symlinkSync(join(root, 'h2-symlink-outside'), join(repoDir, 'h2-link'));
+    const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', 'h2-link/../secret.txt'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'file-arg-requires-stdin');
+  });
+
+  test('H2: --body-file - still reads from stdin normally (the only supported source)', async () => {
+    const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', '-'], stdin: Buffer.from('fine\n').toString('base64') });
     assert.equal(r.ok, true);
   });
 
   // H2 follow-up: the original fix only reached the four pr:* entries in
-  // TEXT_FIELDS, so the same out-of-tree host-file read sailed through
+  // TEXT_FIELDS, so the same host-file read sailed through
   // `gh issue comment --body-file` (and `gh release ... --notes-file`) with
   // no check at all -- see vuln_scan README H2.
-  test('H2: gh issue comment --body-file outside the session tree is denied', async () => {
+  test('H2: gh issue comment --body-file (not "-") is denied', async () => {
     const outside = join(root, 'outside-secret.txt');
     writeFileSync(outside, 'top secret host file that must never reach gh\n');
     const r = await request(broker, { op: 'gh-exec', argv: ['issue', 'comment', '2', '--body-file', outside] });
     assert.equal(r.ok, false);
-    assert.equal(r.reason, 'file-arg-out-of-tree');
+    assert.equal(r.reason, 'file-arg-requires-stdin');
     assert.equal(r.field, 'body-file');
   });
 
-  test('H2: gh release create --notes-file outside the session tree is denied', async () => {
+  test('H2: gh release create --notes-file (not "-") is denied', async () => {
     const r = await request(broker, { op: 'gh-exec', argv: ['release', 'create', 'v1', '--notes-file', '/etc/hostname'] });
     assert.equal(r.ok, false);
-    assert.equal(r.reason, 'file-arg-out-of-tree');
+    assert.equal(r.reason, 'file-arg-requires-stdin');
     assert.equal(r.field, 'notes-file');
   });
 
-  test('H2: gh issue comment --body-file inside the session tree still works', async () => {
+  test('H2: gh issue comment --body-file naming a real in-tree file is ALSO denied', async () => {
     writeFileSync(join(repoDir, 'issue-comment.txt'), 'perfectly fine issue comment\n');
     const r = await request(broker, { op: 'gh-exec', argv: ['issue', 'comment', '2', '--body-file', 'issue-comment.txt'] });
-    assert.equal(r.ok, true);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'file-arg-requires-stdin');
   });
 
   test('issue comment --body containing a Claude-Session: trailer is denied', async () => {
@@ -421,6 +449,85 @@ describe('gh-exec PR-body guard (plan8)', () => {
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'blocked-message');
     assert.equal(r.field, 'comment');
+  });
+
+  // H2 follow-up (review on #179 P1 item 1): file-shaped arguments TEXT_FIELDS
+  // never covered -- release upload/create assets, release download's write
+  // destination, workflow run's -F @file, --attach, and pr checkout
+  // --worktree -- see ghAllowlist.js's findBlockedGhFileArg.
+  test('H2: gh release upload is refused outright (no gating flag exists to check)', async () => {
+    const r = await request(broker, { op: 'gh-exec', argv: ['release', 'upload', 'v1', '/etc/hostname'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'subcommand-not-allowed');
+  });
+
+  test('H2: gh release create with an asset positional is denied', async () => {
+    const r = await request(broker, { op: 'gh-exec', argv: ['release', 'create', 'v1', '/etc/hostname'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'release-assets-not-allowed');
+  });
+
+  test('H2: gh release create with only a tag + notes (no assets) is still allowed', async () => {
+    const r = await request(broker, { op: 'gh-exec', argv: ['release', 'create', 'v1', '-n', 'notes'] });
+    assert.equal(r.ok, true);
+  });
+
+  test('H2: gh release create with an unrecognized flag fails closed', async () => {
+    const r = await request(broker, { op: 'gh-exec', argv: ['release', 'create', 'v1', '--some-future-gh-flag', 'x'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'unrecognized-flag');
+  });
+
+  test('H2: gh release download --dir is denied', async () => {
+    const r = await request(broker, { op: 'gh-exec', argv: ['release', 'download', 'v1', '--dir', '/tmp/ccserver-h2-evil'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'release-download-dir-not-allowed');
+  });
+
+  test('H2: gh release download --output <path> is denied, --output - is allowed', async () => {
+    const denied = await request(broker, { op: 'gh-exec', argv: ['release', 'download', 'v1', '--output', '/tmp/ccserver-h2-evil'] });
+    assert.equal(denied.ok, false);
+    assert.equal(denied.reason, 'release-download-output-not-stdout');
+    const allowed = await request(broker, { op: 'gh-exec', argv: ['release', 'download', 'v1', '--output', '-'] });
+    assert.equal(allowed.ok, true);
+  });
+
+  test('H2: gh workflow run -F key=@path is denied (reads a host file)', async () => {
+    const r = await request(broker, {
+      op: 'gh-exec',
+      argv: ['workflow', 'run', 'deploy.yml', '--repo', 'testowner/testrepo', '-F', 'payload=@/etc/hostname'],
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'workflow-field-file-not-allowed');
+  });
+
+  test('H2: gh workflow run -F key=@- (stdin) is allowed', async () => {
+    const r = await request(broker, {
+      op: 'gh-exec',
+      argv: ['workflow', 'run', 'deploy.yml', '--repo', 'testowner/testrepo', '-F', 'payload=@-'],
+      stdin: Buffer.from('{}').toString('base64'),
+    });
+    assert.equal(r.ok, true);
+  });
+
+  test('H2: gh workflow run -f key=@path (raw-field, always literal) is allowed', async () => {
+    const r = await request(broker, {
+      op: 'gh-exec',
+      argv: ['workflow', 'run', 'deploy.yml', '--repo', 'testowner/testrepo', '-f', 'payload=@/etc/hostname'],
+    });
+    assert.equal(r.ok, true);
+  });
+
+  test('H2: gh pr comment --attach is denied', async () => {
+    const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'comment', '1', '--attach', '/etc/hostname'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'attach-not-allowed');
+  });
+
+  test('H2: gh pr checkout --worktree is denied', async () => {
+    const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'checkout', '1', '--worktree', '/tmp/ccserver-h2-evil'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'checkout-worktree-not-allowed');
   });
 });
 

@@ -27,7 +27,7 @@
 //   executed, and only for repos already in the git allow-list.
 //     -> {"op":"gh-exec","argv":["pr","view","123"],"stdin":"<base64>"}
 //     <- {"ok":true,"exitCode":0,"stdout":"<base64>","stderr":"<base64>"}
-//     <- {"ok":false,"reason":"subcommand-not-allowed"|"ambiguous-flags"|"repo-unresolved"|"repo-must-be-explicit"|"not-allowlisted"|"blocked-message"|"bad-request"|"exec-failed"|"timeout"}
+//     <- {"ok":false,"reason":"subcommand-not-allowed"|"ambiguous-flags"|"repo-unresolved"|"repo-must-be-explicit"|"not-allowlisted"|"blocked-message"|"file-arg-requires-stdin"|"unrecognized-flag"|"release-assets-not-allowed"|"release-download-dir-not-allowed"|"release-download-output-not-stdout"|"workflow-field-file-not-allowed"|"attach-not-allowed"|"checkout-worktree-not-allowed"|"bad-request"|"exec-failed"|"timeout"}
 //
 // SSH allow/deny does NOT go through this socket — the allow-list isn't
 // secret, so it's ro-bound into the sandbox as a plain file and checked
@@ -47,15 +47,15 @@
 // commitMessageGuard.enabled); omitted entirely, this is a no-op, same as
 // before plan8.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { isAbsolute, join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeGitAllowlist, normalizeGitUrl, resolveOriginUrl } from './gitAllowlist.js';
-import { classifyGhInvocation, extractGhTextFields } from './ghAllowlist.js';
+import { classifyGhInvocation, extractGhTextFields, findBlockedGhFileArg } from './ghAllowlist.js';
 import { buildGuardConfig, compilePatterns, findBlockedMatch } from './commitGuard.js';
 
 const GH_EXEC_TIMEOUT_MS = 30_000;
@@ -205,48 +205,29 @@ function execGh(argv, cwd, stdinBuf) {
   });
 }
 
-// Confines a --body-file/-F path argument to ctx.cwd (the session's own
-// project tree, the exact same cwd execGh() below runs the real gh in).
-// gh runs on the HOST, reachable from well outside whatever the sandbox's
-// bind mounts let the agent see directly -- without this, a sandboxed agent
-// that can never read e.g. /etc/passwd itself could still point --body-file
-// at it (absolute, or relative with `../` escapes) and have the real gh read
-// it and hand the content to an allow-listed repo (H2 -- see vuln_scan p2).
-// Lexical containment catches every escape whether or not the target exists
-// yet; a second realpath containment pass catches a symlink planted inside
-// cwd that resolves outside it. Returns the resolved absolute path when it's
-// safely inside ctx.cwd, or null when it escapes.
-function resolveContainedGhFileArg(cwd, value) {
-  const cwdResolved = resolve(cwd);
-  const target = resolve(isAbsolute(value) ? value : join(cwd, value));
-  if (target !== cwdResolved && !target.startsWith(`${cwdResolved}/`)) return null;
-  let realCwd;
-  try {
-    realCwd = realpathSync(cwdResolved);
-  } catch {
-    return null;
-  }
-  let realTarget;
-  try {
-    realTarget = realpathSync(target);
-  } catch {
-    // Doesn't exist (yet) / unresolvable -- lexical containment above is all
-    // that can be checked; readFileSync below will fail on its own terms.
-    return target;
-  }
-  if (realTarget !== realCwd && !realTarget.startsWith(`${realCwd}/`)) return null;
-  return realTarget;
-}
-
 // Checks a gh invocation's title/body fields (see ghAllowlist.js's
-// extractGhTextFields): every 'file' field's path must resolve inside the
-// session tree (always enforced, regardless of commitMessageGuard config --
-// this is a filesystem boundary, not a content policy), and -- only when
-// commitMessageGuard patterns are configured -- every field's actual text
-// (literal, stdin, or file content) is checked against ctx.guardPatterns
-// (compiled once in runServer from the same config used for local commits,
-// see commitGuard.js). Returns {field, match, reason} for the first blocked
-// value found, or null.
+// extractGhTextFields): every 'file' field's value must be exactly "-"
+// (stdin) -- ANY other value is refused outright, always, regardless of
+// commitMessageGuard config (a filesystem boundary, not a content policy) --
+// and -- only when commitMessageGuard patterns are configured -- every
+// field's actual text (literal or stdin) is checked against
+// ctx.guardPatterns (compiled once in runServer from the same config used
+// for local commits, see commitGuard.js). Returns {field, match, reason}
+// for the first blocked value found, or null.
+//
+// H2 follow-up (review on PR #179, P1 items 2+3): the original fix let a
+// --body-file/-F value name any HOST path inside the session tree (checked
+// via a lexical-normalize + realpath containment pass), which turned out to
+// have two independent holes -- a symlink + trailing ".." combination where
+// the checked path and the path gh actually opens diverge, and a
+// check-then-reopen race where the session tree (fully agent-writable) can
+// swap the checked file for a symlink out of tree between the check and the
+// real `gh` invocation. Rather than harden that check further, the file-path
+// case is removed entirely: gh's own body/notes-file flags accept "-" for
+// stdin, so the sandboxed caller reads the file itself (inside the sandbox,
+// where the filesystem boundary is the kernel's, not a userspace check) and
+// pipes it in -- e.g. `cat body.md | gh pr comment 123 --body-file -`. No
+// host path is ever opened by gh on this field's behalf again.
 function findBlockedGhText(req, ctx) {
   const fields = extractGhTextFields(req.argv);
   if (!fields.length) return null;
@@ -268,20 +249,12 @@ function findBlockedGhText(req, ctx) {
     if (f.kind === 'literal') {
       if (!hasGuardPatterns) continue;
       text = f.value;
-    } else if (f.value === '-') {
+    } else if (f.kind === 'file') {
+      if (f.value !== '-') {
+        return { field: f.field, match: { source: 'host file paths are not accepted; use stdin' }, reason: 'file-arg-requires-stdin' };
+      }
       if (!hasGuardPatterns) continue;
       text = decodeStdin();
-    } else {
-      const contained = resolveContainedGhFileArg(ctx.cwd, f.value);
-      if (!contained) {
-        return { field: f.field, match: { source: 'path escapes the session tree' }, reason: 'file-arg-out-of-tree' };
-      }
-      if (!hasGuardPatterns) continue;
-      try {
-        text = readFileSync(contained, 'utf-8');
-      } catch {
-        continue; // fail open: unreadable body-file, skip this field only
-      }
     }
     const match = findBlockedMatch(text, ctx.guardPatterns);
     if (match) return { field: f.field, match };
@@ -307,6 +280,21 @@ async function handleGhExec(req, conn, ctx) {
     conn.end(`${JSON.stringify({ ok: false, reason: subReason })}\n`);
     return;
   }
+
+  // Host file-argument boundary (H2 follow-up, review on #179): flags/
+  // positionals outside TEXT_FIELDS that also name a host path (release
+  // create's asset positionals, release download's --dir/--output, workflow
+  // run's -F key=@file, --attach, pr checkout --worktree). Independent of
+  // the repo allow-list check below -- it's a filesystem boundary, not a
+  // repo-scoping decision -- so it runs regardless of which repo(s) this
+  // invocation targets.
+  const fileArgBlocked = findBlockedGhFileArg(req.argv);
+  if (fileArgBlocked) {
+    process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (${fileArgBlocked.reason})\n`);
+    conn.end(`${JSON.stringify({ ok: false, reason: fileArgBlocked.reason, field: fileArgBlocked.field })}\n`);
+    return;
+  }
+
   // ALL repo references found in argv (usually one; can be more -- see
   // ghAllowlist.js) must be allow-listed, not just the first/primary one.
   const denied = repos.find((r) => !ctx.allowSet.has(r));
