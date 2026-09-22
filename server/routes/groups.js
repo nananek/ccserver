@@ -196,6 +196,11 @@ export function orchestratorRestartSessionOpts({ group, app, model = null, sandb
     mcpSocketPath,
     mcpToken,
     orchestratorClaudeMdSrc,
+    // orchestratorDir is server-synthesized under the scratch tree (see
+    // ORCHESTRATOR_ROOT) -- the trusted in-process flag that skips the
+    // browseRoots cwd check (the group's PROJECT cwd was already validated
+    // against browseRoots at group creation).
+    scratchCwd: true,
   };
 }
 
@@ -224,7 +229,10 @@ export async function launchGroupFromSpec(body) {
   // object database (see worktree.js), so without this check a group could
   // still be created for -- and read git history from -- a project outside
   // browseRoots even though no individual session's cwd would ever expose it.
-  const { browseRoots } = loadSandboxConfig();
+  const { browseRoots, browseRootsInvalid } = loadSandboxConfig();
+  if (browseRootsInvalid) {
+    return { ok: false, code: 'validation', message: 'sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed working directories cannot be determined. Fix the config and reload.' };
+  }
   if (browseRoots.length > 0 && !isContained(resolve(cwd), browseRoots)) {
     return { ok: false, code: 'validation', message: `cwd is outside the allowed browseRoots (sandbox.config.json's "browseRoots"). Choose a directory under one of: ${browseRoots.join(', ')}` };
   }
@@ -383,6 +391,9 @@ export async function launchGroupFromSpec(body) {
     mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
     mcpToken: controlBroker ? (controlBroker.token || null) : null,
     orchestratorClaudeMdSrc,
+    // orchestratorDir is server-synthesized scratch space -- see
+    // orchestratorRestartSessionOpts's comment.
+    scratchCwd: true,
   });
   if (orchRes.error || !orchRes.session) {
     const raw = orchRes.error || 'unknown error';

@@ -453,13 +453,13 @@ test('createSession refuses a cwd outside browseRoots, for both shells and agent
 // browseRoots (issue #189) must not break combo/group launches: every
 // worker/orchestrator session's cwd is a server-synthesized scratch dir
 // under ~/.local/share/ccserver-sandbox (never the project directory
-// itself -- see groupManager.js's addMember), so createSession() exempts
-// that tree from the browseRoots cwd check (pathPolicy.js's
-// isCcserverScratchPath, unit-tested in pathPolicy.test.js). This
-// integration-tests the exemption through createSession() itself, against
-// the REAL scratch root (not overridable via env var), using a throwaway
-// subdirectory cleaned up afterward.
-test('createSession does not refuse a cwd under the ccserver scratch tree even when browseRoots points elsewhere', async () => {
+// itself -- see groupManager.js's addMember). That exemption is gated on the
+// TRUSTED scratchCwd parameter (only in-process callers that synthesize the
+// cwd pass it), never on the path alone -- see createSession's comment.
+// This integration-tests the exemption through createSession() itself,
+// against the REAL scratch root (not overridable via env var), using a
+// throwaway subdirectory cleaned up afterward.
+test('createSession accepts a scratch-tree cwd only via the trusted scratchCwd flag', async () => {
   const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
   const cfgPath = join(cfgDir, 'sandbox.config.json');
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
@@ -469,9 +469,19 @@ test('createSession does not refuse a cwd under the ccserver scratch tree even w
   const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    const res = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false });
+    // Client-style call (no flag): the path alone must NOT be exempt, or any
+    // REST/WS caller could point a session at the scratch tree (sandbox
+    // HOME credentials, GPG vault DB, federation keys) and have it rw-bound
+    // into the sandbox.
+    const client = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.equal(client.session, null, 'a client-supplied scratch cwd must be refused');
+    assert.match(client.error, /outside the allowed browseRoots/);
+
+    // Trusted in-process call (group worktree / orchestrator / reviewer):
+    // not refused by the cwd check, and still forced sandboxed.
+    const res = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false, scratchCwd: true });
     assert.doesNotMatch(res.error || '', /outside the allowed browseRoots/,
-      'a cwd under the ccserver scratch tree must not be refused by browseRoots');
+      'a server-synthesized scratch cwd must not be refused by browseRoots');
     if (sandboxAvailable()) {
       assert.ok(res.session, 'a scratch-tree cwd spawns when a sandbox backend exists');
       // Still forced sandboxed like any other shell under browseRoots.
@@ -488,6 +498,26 @@ test('createSession does not refuse a cwd under the ccserver scratch tree even w
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(scratchDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// Fail closed (issue #189 self-review): a present-but-unusable browseRoots
+// (e.g. a string instead of an array) must refuse launches, not silently
+// fall back to host-wide access.
+test('createSession refuses to launch when browseRoots is present but invalid', async () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: '/srv/repos' }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.equal(res.session, null);
+    assert.match(res.error, /"browseRoots" is invalid/);
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 
@@ -512,7 +542,9 @@ test('createSession refuses a cwd that is a scratch-internal symlink pointing ou
   const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    const res = await sessionManager.createSession({ cwd: escapeLink, cols: 80, rows: 24, shell: true, sandbox: false });
+    // scratchCwd:true simulates the trusted in-process callers: even THEY
+    // must not follow a scratch-internal symlink out of the tree.
+    const res = await sessionManager.createSession({ cwd: escapeLink, cols: 80, rows: 24, shell: true, sandbox: false, scratchCwd: true });
     assert.equal(res.session, null, 'a scratch symlink pointing outside must never launch a session');
     assert.match(res.error, /outside the allowed browseRoots/);
   } finally {

@@ -247,6 +247,24 @@ test('GET /dirs/home: initialBrowsePath is home() when home() itself is inside b
   });
 });
 
+// Fail closed (issue #189 self-review): a present-but-invalid browseRoots
+// disables the directory API (503) and is reported to the client, instead of
+// silently reverting to host-wide browsing.
+test('a present-but-invalid browseRoots fails /dirs and /dirs/home closed', async () => {
+  await withConfig({ browseRoots: '/srv/repos' }, async () => {
+    const home = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.equal(home.statusCode, 200);
+    assert.equal(home.json().browseRootsInvalid, true);
+
+    const list = await app.inject({ method: 'GET', url: '/api/dirs?path=/etc' });
+    assert.equal(list.statusCode, 503);
+    assert.match(list.json().error, /browseRoots/);
+
+    const mk = await app.inject({ method: 'POST', url: '/api/dirs', payload: { parent: '/tmp', name: 'x' } });
+    assert.equal(mk.statusCode, 503);
+  });
+});
+
 test('GET /dirs: a path outside browseRoots is refused with 403, inside is listed', async () => {
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-dirs-browseroot-'));
   const outside = mkdtempSync(join(tmpdir(), 'ccserver-dirs-outside-'));

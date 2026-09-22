@@ -42,6 +42,7 @@ import { initDb, dbPath } from './db.js';
 import { selectableAppIds, installedApps, loadSandboxConfig } from './ws/sandbox.js';
 import { isContained } from './pathPolicy.js';
 import { tasksPath } from './ws/vikunjaClient.js';
+import { keyPath as federationKeyPath } from './ws/federationIdentity.js';
 import { verifySessionCookie } from './authSessions.js';
 import { resolveAuthMode } from './authMode.js';
 import { lockVault, isLegacyVault } from './ws/gpgVaultAgent.js';
@@ -324,17 +325,40 @@ try {
 
 // browseRoots (issue #189): refuse to boot if ccserver's own internal state
 // files -- most importantly the SQLite DB, which holds the GPG Vault's
-// encrypted secret key material -- would fall inside the configured
-// browseRoots. Without this guard, an operator narrowing /api/files and
-// /api/dirs to browseRoots could still expose these files through those
-// very same endpoints if browseRoots happens to contain them (e.g. pointing
-// it at the repo root, where the .saved-*.json sidecars default to).
+// encrypted secret key material, and the federation mTLS private key --
+// would fall inside the configured browseRoots. Without this guard, an
+// operator narrowing /api/files and /api/dirs to browseRoots could still
+// expose these files through those very same endpoints if browseRoots
+// happens to contain them (e.g. pointing it at the repo root, where the
+// .saved-*.json sidecars default to, or at the sandbox tree, where the
+// federation key defaults to).
+//
+// Also refuses to boot on an unreadable/unparseable sandbox.config.json or a
+// present-but-invalid browseRoots: falling back to defaults would silently
+// downgrade a security setting (see loadSandboxConfig's configError /
+// browseRootsInvalid), and a running server that keeps re-reading a broken
+// config would fail open at runtime too.
 {
-  const { browseRoots, configPath } = loadSandboxConfig();
+  const { browseRoots, browseRootsInvalid, configError, configPath } = loadSandboxConfig();
+  if (configError) {
+    fastify.log.error(
+      `Refusing to start: sandbox.config.json (${configPath}) exists but could not be read/parsed: ${configError}. `
+      + 'Fix or remove the file (a missing file is fine -- every setting has a default), then restart.',
+    );
+    process.exit(1);
+  }
+  if (browseRootsInvalid) {
+    fastify.log.error(
+      `Refusing to start: sandbox.config.json (${configPath}) sets "browseRoots" to an unusable value `
+      + '(must be an array of directory paths). Refusing to fall back to host-wide access. Fix the setting, then restart.',
+    );
+    process.exit(1);
+  }
   if (browseRoots.length > 0) {
     const internalPaths = [
       ['ccserver.sqlite3 (CCSERVER_DB_PATH)', dbPath()],
       ['sandbox.config.json (CCSERVER_SANDBOX_CONFIG)', configPath],
+      ['federation instance key (CCSERVER_FEDERATION_HOME)', federationKeyPath()],
       ['.saved-groups.json (CCSERVER_GROUPS_PATH)', GROUPS_PATH],
       ['.saved-group-docs.json (CCSERVER_GROUP_DOCS_PATH)', GROUP_DOCS_PATH],
       ['.saved-group-files.json (CCSERVER_GROUP_FILES_PATH)', getGroupFilesManifestPath()],

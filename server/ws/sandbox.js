@@ -600,10 +600,26 @@ export function loadSandboxConfig() {
   const configPath = process.env.CCSERVER_SANDBOX_CONFIG
     || join(__dirname, '..', 'sandbox.config.json');
   let raw = {};
+  // A missing file is legitimate (every setting has a default). A file that
+  // exists but cannot be read/parsed is NOT: silently proceeding would run
+  // the server with every setting defaulted -- including a security setting
+  // the operator had set (browseRoots, forceSandbox). configError is
+  // surfaced to index.js (refuses to boot) and folded into
+  // browseRootsInvalid below (runtime enforcement fails closed).
+  let configError = null;
+  let configText = null;
   try {
-    raw = JSON.parse(readFileSync(configPath, 'utf-8'));
-  } catch {
-    raw = {};
+    configText = readFileSync(configPath, 'utf-8');
+  } catch (err) {
+    if (err.code !== 'ENOENT') configError = err.message;
+  }
+  if (configText !== null) {
+    try {
+      raw = JSON.parse(configText);
+    } catch (err) {
+      configError = err.message;
+      raw = {};
+    }
   }
   const docker = raw.docker !== false; // default on
   // Keep a persistent writable HOME per project (~/.local/share/ccserver-
@@ -773,6 +789,17 @@ export function loadSandboxConfig() {
   // /ws/terminal session cwds to these directories (and their subtrees).
   // [] (default) preserves the pre-#189 host-wide behavior.
   const browseRoots = normalizeBrowseRoots(raw.browseRoots);
+  // Present-but-unusable (non-array, or every entry dropped) must NOT
+  // silently collapse to [] ("unrestricted"): that would turn a typo like
+  // "browseRoots": "/srv/repos" into a host-wide downgrade. An unparseable
+  // config file is treated the same way (we cannot know what browseRoots
+  // said). An explicit [] stays valid -- it is the documented
+  // "unrestricted" spelling. Partial drops (e.g. ["/srv", 42]) still
+  // restrict by the valid entries, so they are fail-safe, not invalid.
+  const browseRootsPresent = raw.browseRoots !== undefined && raw.browseRoots !== null;
+  const browseRootsEmptyArray = Array.isArray(raw.browseRoots) && raw.browseRoots.length === 0;
+  const browseRootsInvalid = configError !== null
+    || (browseRootsPresent && !browseRootsEmptyArray && browseRoots.length === 0);
   // Whether an agent session (shell:false) may run unsandboxed while
   // browseRoots is set. Default false: browseRoots alone would otherwise
   // still leave an unsandboxed agent free to read/write anything the
@@ -791,7 +818,7 @@ export function loadSandboxConfig() {
   // cannot drift apart -- see that function's header comment.
   const network = normalizeNetworkSettings(raw.network);
   return {
-    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, hiddenApps, browseRoots, allowUnsandboxedAgents, network,
+    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, hiddenApps, browseRoots, browseRootsInvalid, configError, allowUnsandboxedAgents, network,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -2184,7 +2211,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 // tests simulate a host with/without the rootlesskit/slirp4netns/newuidmap
 // tooling, to exercise the enablement logic below hermetically -- see
 // sandbox-network-isolation.test.js.
-export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }, deps = {}) {
+export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null, scratchCwd = false }, deps = {}) {
   const { startNetworkBroker: startNetworkBrokerFn = startNetworkBroker, dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable } = deps || {};
   // Normalize the app id up front: a nullish `app` resolves to 'claude' in
   // resolveApp(), so every later `app === 'claude'` / `app === 'opencode'`
@@ -2199,12 +2226,17 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   if (resolve(cwd) === '/') {
     throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
   }
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots } = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots, browseRootsInvalid } = loadSandboxConfig();
   // Defense in depth behind sessionManager's browseRoots cwd check (issue
-  // #189): same reasoning as the '/' guard just above. Combo-group scratch
-  // cwds (worktrees / orchestratorDir) are exempt here too -- see
-  // isCcserverScratchPath's comment in pathPolicy.js.
-  if (browseRoots.length > 0 && !isCcserverScratchPath(resolve(cwd)) && !isContained(resolve(cwd), browseRoots)) {
+  // #189): same reasoning as the '/' guard just above. The scratch-tree
+  // exemption is gated on the trusted `scratchCwd` flag (set only by
+  // in-process callers that synthesize the cwd themselves -- see
+  // sessionManager.createSession's comment), never on the path alone, and is
+  // still realpath-checked via isCcserverScratchPath.
+  if (browseRootsInvalid) {
+    throw new Error('Cannot build a sandbox: sandbox.config.json\'s "browseRoots" is invalid, so the allowed working directories cannot be determined.');
+  }
+  if (browseRoots.length > 0 && !(scratchCwd === true && isCcserverScratchPath(resolve(cwd))) && !isContained(resolve(cwd), browseRoots)) {
     throw new Error('Cannot build a sandbox: working directory is outside the allowed browseRoots.');
   }
   const docker = cfgDocker && dockerSandboxAvailableFn();

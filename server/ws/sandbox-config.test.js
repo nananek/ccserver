@@ -429,7 +429,9 @@ test('network: a non-object "network" key collapses to defaults', () => {
 // containment logic lives in pathPolicy.test.js; this just covers parsing.
 test('browseRoots defaults to [] when the key is absent', () => {
   withConfig({}, () => {
-    assert.deepEqual(loadSandboxConfig().browseRoots, []);
+    const cfg = loadSandboxConfig();
+    assert.deepEqual(cfg.browseRoots, []);
+    assert.equal(cfg.browseRootsInvalid, false, 'absent is unrestricted, not invalid');
   });
 });
 
@@ -440,19 +442,61 @@ test('browseRoots resolves relative/home-relative entries and dedupes', () => {
   });
 });
 
-test('browseRoots falls back to [] for a non-array value', () => {
+// Fail closed (issue #189 self-review): a present-but-unusable browseRoots
+// must NOT silently collapse to [] ("unrestricted"). The normalized value is
+// still [] for back-compat of this accessor, but browseRootsInvalid marks it
+// so every enforcement point (and index.js's boot guard) refuses instead of
+// widening access.
+test('browseRoots flags a non-array value as invalid (never as unrestricted)', () => {
   withConfig({ browseRoots: '/srv/projects' }, () => {
-    assert.deepEqual(loadSandboxConfig().browseRoots, []);
+    const cfg = loadSandboxConfig();
+    assert.deepEqual(cfg.browseRoots, []);
+    assert.equal(cfg.browseRootsInvalid, true);
   });
   withConfig({ browseRoots: { root: '/srv/projects' } }, () => {
-    assert.deepEqual(loadSandboxConfig().browseRoots, []);
+    assert.equal(loadSandboxConfig().browseRootsInvalid, true);
+  });
+  withConfig({ browseRoots: [42, null, ''] }, () => {
+    const cfg = loadSandboxConfig();
+    assert.deepEqual(cfg.browseRoots, []);
+    assert.equal(cfg.browseRootsInvalid, true, 'every entry dropped means nothing to enforce');
+  });
+});
+
+test('browseRoots keeps an explicit [] valid (the documented unrestricted spelling)', () => {
+  withConfig({ browseRoots: [] }, () => {
+    const cfg = loadSandboxConfig();
+    assert.deepEqual(cfg.browseRoots, []);
+    assert.equal(cfg.browseRootsInvalid, false);
   });
 });
 
 test('browseRoots drops non-string / empty-string entries', () => {
   withConfig({ browseRoots: ['/srv/projects', 42, null, ''] }, () => {
-    assert.deepEqual(loadSandboxConfig().browseRoots, ['/srv/projects']);
+    const cfg = loadSandboxConfig();
+    assert.deepEqual(cfg.browseRoots, ['/srv/projects']);
+    assert.equal(cfg.browseRootsInvalid, false, 'partial drops still restrict by the valid entries');
   });
+});
+
+// A config file that exists but cannot be parsed is treated as invalid too:
+// silently running with every setting defaulted would drop browseRoots (and
+// forceSandbox) without a word.
+test('an unparseable sandbox.config.json sets configError and flags browseRootsInvalid', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-sandbox-cfg-bad-'));
+  const path = join(dir, 'sandbox.config.json');
+  writeFileSync(path, '{ "browseRoots": ["/srv/projects"], ');
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = path;
+  try {
+    const cfg = loadSandboxConfig();
+    assert.ok(cfg.configError, 'a parse error must be reported, not swallowed');
+    assert.equal(cfg.browseRootsInvalid, true, 'an unreadable policy must fail closed');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // allowUnsandboxedAgents: only meaningful alongside browseRoots (createSession

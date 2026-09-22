@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { filesRoute, previewKind, PREVIEW_EXTS, PREVIEW_MAX_BYTES, SNIFF_BYTES } from './files.js';
+import { filesRoute, openUploadTarget, previewKind, PREVIEW_EXTS, PREVIEW_MAX_BYTES, SNIFF_BYTES } from './files.js';
 import { PREVIEW_EXTS as CLIENT_PREVIEW_EXTS, isPreviewable } from '../../client/src/previewExts.js';
 
 // Characters that must not appear literally in this source file.
@@ -586,6 +586,43 @@ test('POST /files: an upload destination inside browseRoots still succeeds', asy
   });
 });
 
+// Fail closed (issue #189 self-review): a present-but-invalid browseRoots
+// must disable file access (503), never silently restore host-wide access.
+test('GET/POST /files: a present-but-invalid browseRoots fails closed with 503', async () => {
+  await withConfig({ browseRoots: '/srv/repos' }, async () => {
+    const get = await app.inject({ method: 'GET', url: '/api/files?path=/etc/passwd' });
+    assert.equal(get.statusCode, 503);
+    assert.match(get.json().error, /browseRoots/);
+
+    const preview = await app.inject({ method: 'GET', url: contentUrl('/etc/hostname') });
+    assert.equal(preview.statusCode, 503);
+
+    const boundary = '----Boundary' + randomUUID().replace(/-/g, '');
+    const payload = buildMultipart(boundary, [
+      { name: 'destination', data: '/tmp' },
+      { name: 'files', filename: 'x.txt', contentType: 'text/plain', data: Buffer.from('x') },
+    ]);
+    const post = await app.inject({
+      method: 'POST',
+      url: '/api/files',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload,
+    });
+    assert.equal(post.statusCode, 503);
+
+    // Destination-only body (no file part) must not report success either.
+    const boundary2 = '----Boundary' + randomUUID().replace(/-/g, '');
+    const payload2 = buildMultipart(boundary2, [{ name: 'destination', data: '/tmp' }]);
+    const post2 = await app.inject({
+      method: 'POST',
+      url: '/api/files',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary2}` },
+      payload: payload2,
+    });
+    assert.equal(post2.statusCode, 503);
+  });
+});
+
 // Regression (issue #189 self-review): a symlink planted at the target file
 // name used to be followed by writeFile(), so an upload of `notes.txt` into a
 // directory containing `notes.txt -> <anywhere>` wrote THROUGH the link --
@@ -615,4 +652,39 @@ test('POST /files: an upload target that is a symlink is refused and the link ta
     assert.equal(readFileSync(victim, 'utf-8'), 'ORIGINAL\n',
       'the symlink target outside browseRoots must not be overwritten');
   });
+});
+
+// Regression (issue #189 self-review): the destination DIRECTORY itself can
+// be swapped for an outside-pointing symlink while a slow multipart body is
+// still being read. openUploadTarget pins the directory with an fd first and
+// verifies containment through that fd, so the swap cannot move the write
+// outside browseRoots (on Linux; the non-Linux fallback re-checks the path
+// immediately before the open).
+test('openUploadTarget: a destination directory symlink pointing outside is rejected through the opened fd', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+  const outside = mkdtempSync(join(dir, 'outside-'));
+  symlinkSync(outside, join(allowed, 'linkdir'));
+
+  const res = await openUploadTarget(join(allowed, 'linkdir'), 'escaped.txt', [allowed]);
+  try {
+    assert.equal(res.outside, true, 'the real directory behind the link is outside browseRoots');
+    assert.equal(existsSync(join(outside, 'escaped.txt')), false, 'nothing may be created outside browseRoots');
+  } finally {
+    if (res.handle) await res.handle.close().catch(() => {});
+    if (res.dir) await res.dir.close().catch(() => {});
+  }
+});
+
+test('openUploadTarget: a real directory inside browseRoots still accepts the write', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+
+  const res = await openUploadTarget(allowed, 'ok.txt', [allowed]);
+  try {
+    assert.equal(res.outside, false);
+    await res.handle.writeFile(Buffer.from('hi'));
+  } finally {
+    await res.handle.close().catch(() => {});
+    if (res.dir) await res.dir.close().catch(() => {});
+  }
+  assert.equal(readFileSync(join(allowed, 'ok.txt'), 'utf-8'), 'hi');
 });

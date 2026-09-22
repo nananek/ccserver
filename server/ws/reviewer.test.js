@@ -249,6 +249,32 @@ test('snapshotDirtyChanges returns an empty patch for a clean tree', () => {
   assert.equal(reviewer.snapshotDirtyChanges(clean).trim(), '');
 });
 
+// browseRoots (issue #189): run_review's cwd is caller-supplied and the
+// review session runs in a scratch-exempt worktree, so a repo outside
+// browseRoots must be refused BEFORE any host-side git command touches it
+// (the check's early return is what keeps this test hermetic -- no worktree
+// is created and no session is launched).
+test('runReview refuses a repo outside browseRoots before any git/session work', async () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-reviewer-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-reviewer-allowed-'));
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = await reviewer.runReview({ cwd: repo, includeUncommitted: true });
+    assert.equal(res.ok, false);
+    assert.match(res.error, /outside the allowed browseRoots/);
+    // Nothing was recorded for a job that never started.
+    assert.equal(reviewer.listReviews({ cwd: repo }).reviews.length, 0);
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
 // --- validateRunReviewArgs ---------------------------------------------------
 
 test('validateRunReviewArgs requires an existing directory', () => {

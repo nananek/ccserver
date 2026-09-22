@@ -149,6 +149,11 @@ export function attachTerminalHandler(chan) {
           // Default reuse (keep the previous persistent HOME); only an
           // explicit false (client's "新規作成" dialog) wipes it.
           reuseSandboxHome: msg.reuseSandboxHome !== false,
+          // Trusted scratch-cwd exemption ONLY when the group-member branch
+          // above resolved cwd server-side (resolvedCwd); a standalone
+          // reconnect keeps using the client's msg.cwd and must pass the
+          // normal browseRoots containment check.
+          scratchCwd: resolvedCwd != null,
         });
         if (result.error) {
           chan.send(JSON.stringify({

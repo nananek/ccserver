@@ -135,10 +135,12 @@ export async function createDirectory({ parent, name, gitInit }, roots) {
   return { ok: true, data: { path: newPath } };
 }
 
+const BROWSE_ROOTS_INVALID_ERROR = 'sandbox.config.json "browseRoots" is invalid (must be an array of directory paths); directory access is disabled until it is fixed';
+
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
     const cfg = loadSandboxConfig();
-    const { defaultApp, forceSandbox, showUsage, hiddenApps, browseRoots } = cfg;
+    const { defaultApp, forceSandbox, showUsage, hiddenApps, browseRoots, browseRootsInvalid } = cfg;
     // hostname for the browser tab title ("<host> ccserver"): the same
     // resolution the notify footer uses, so the tab matches _from: <host>.
     // Extra field, so existing clients are unaffected.
@@ -169,11 +171,14 @@ export async function dirsRoute(fastify, opts) {
     const initialBrowsePath = browseRoots.length === 0 || isContained(resolve(home), browseRoots)
       ? home
       : browseRoots[0];
-    return { home, browseRoots, initialBrowsePath, defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: sandboxAvailable() };
+    return { home, browseRoots, browseRootsInvalid, initialBrowsePath, defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: sandboxAvailable() };
   });
 
   fastify.get('/dirs', async (request, reply) => {
-    const { browseRoots } = loadSandboxConfig();
+    const { browseRoots, browseRootsInvalid } = loadSandboxConfig();
+    if (browseRootsInvalid) {
+      return reply.code(503).send({ error: BROWSE_ROOTS_INVALID_ERROR });
+    }
     const res = await browseDirectory(request.query.path || '/', !!request.query.showHidden, browseRoots);
     if (!res.ok) {
       const status = res.code === 'not-found' ? 404 : res.code === 'forbidden' ? 403 : 500;
@@ -183,7 +188,10 @@ export async function dirsRoute(fastify, opts) {
   });
 
   fastify.post('/dirs', async (request, reply) => {
-    const { browseRoots } = loadSandboxConfig();
+    const { browseRoots, browseRootsInvalid } = loadSandboxConfig();
+    if (browseRootsInvalid) {
+      return reply.code(503).send({ error: BROWSE_ROOTS_INVALID_ERROR });
+    }
     const res = await createDirectory(request.body || {}, browseRoots);
     if (!res.ok) {
       const status = res.code === 'validation' ? 400

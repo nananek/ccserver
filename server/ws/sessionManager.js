@@ -595,7 +595,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
   return session;
 }
 
-export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, mcpToken = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
+export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, mcpToken = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null, scratchCwd = false }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
@@ -639,10 +639,33 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // Checked unconditionally (not just when sandboxRequested below): an
   // allowUnsandboxedAgents:true agent launch still runs directly on the
   // host filesystem, so this cwd check is the only restriction such a
-  // launch gets. Server-synthesized scratch cwds (combo worktrees /
-  // orchestrator dirs) are exempt -- see isCcserverScratchPath's comment.
+  // launch gets.
+  //
+  // The scratch-tree exemption is gated on the TRUSTED `scratchCwd` flag
+  // (an explicit parameter, never read from a client body -- same pattern as
+  // isReviewJob), NOT on the path alone: `cwd` is client-supplied on every
+  // external launch path (REST/WS/federation), so a path-based exemption let
+  // any client point a session at the scratch tree -- which holds the
+  // sandbox HOME credentials, the GPG vault DB and federation keys -- and
+  // have the whole tree rw-bound into the sandbox by buildBwrapArgs'
+  // `--bind <cwd> <cwd>`. Only the in-process callers that themselves
+  // synthesize the cwd (group worktrees/orchestrator dirs, review worktrees)
+  // pass scratchCwd:true. The path is still checked with
+  // isCcserverScratchPath (symlink-safe realpath) as defense in depth.
   const absCwd = resolve('/', cwd);
-  if (cfg.browseRoots.length > 0 && !isCcserverScratchPath(absCwd) && !isContained(absCwd, cfg.browseRoots)) {
+  const scratchExempt = scratchCwd === true && isCcserverScratchPath(absCwd);
+  // Fail closed on a present-but-unusable browseRoots (or an unparseable
+  // config): see loadSandboxConfig's browseRootsInvalid. Silently falling
+  // back to host-wide here would turn a config typo into a security
+  // downgrade.
+  if (cfg.browseRootsInvalid) {
+    return {
+      sessionId: id,
+      session: null,
+      error: 'Cannot launch: sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed working directories cannot be determined. Fix the config and reload.',
+    };
+  }
+  if (cfg.browseRoots.length > 0 && !scratchExempt && !isContained(absCwd, cfg.browseRoots)) {
     return {
       sessionId: id,
       session: null,
@@ -1006,7 +1029,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       } catch { resolvedGroupFilesDir = null; }
     }
     try {
-      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
+      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy, scratchCwd: scratchExempt });
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;
@@ -1705,6 +1728,11 @@ async function fireSchedule(scheduleId) {
     mcpToken,
     orchestratorClaudeMdSrc,
     gitCommonDir,
+    // Only the group-member branch above resolves cwd server-side
+    // (resolveMemberCwdForSession -> a worktree/orchestrator scratch dir);
+    // a standalone schedule's entry.cwd is client-originated and must keep
+    // passing the normal browseRoots containment check.
+    scratchCwd: !!(entry.groupId && entry.groupRole),
   });
   if (!res?.session) {
     // Same "explain every drop" policy as the mcpSocketPath/

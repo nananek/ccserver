@@ -965,6 +965,11 @@ export async function addMember(groupId, role, options = {}) {
     mcpSocketPath: channel.sockPath,
     mcpToken: channel.token || null,
     gitCommonDir,
+    // cwd came from resolveMemberLaunchCwd (server-synthesized worktree /
+    // project fallback) -- this is the trusted in-process flag that lets a
+    // scratch-tree cwd skip browseRoots containment. Never set from a
+    // client-supplied value (options.cwd is deliberately unread above).
+    scratchCwd: true,
   });
   if (res.error || !res.session) {
     stopBroker(channel);

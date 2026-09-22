@@ -65,9 +65,10 @@
 
 import { randomUUID } from 'node:crypto';
 import { execFileSync, execFile } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { isContained } from '../pathPolicy.js';
 import { getDb } from '../db.js';
 import { projectHashForCwd } from './projectHash.js';
 import { loadSandboxConfig, persistentHomeDir, deleteSandboxHome } from './sandbox.js';
@@ -777,6 +778,29 @@ export async function runReview(args = {}) {
   // and randomUUID() don't throw today, but nothing should have to keep being
   // true forever for the slot count to stay correct.
   try {
+    // browseRoots (issue #189): run_review's cwd is caller-supplied and the
+    // review session it launches runs in a server-synthesized worktree under
+    // the (scratch-exempt) review root -- so without this check, any session
+    // with reviewer MCP access could ask for a review of a repository
+    // OUTSIDE browseRoots and then read it through the resulting worktree.
+    // Must run before any host-side git command below (resolveDefaultBaseRef,
+    // worktree creation) touches the repo. realpath first so a symlinked
+    // path cannot smuggle an outside repo past the containment check.
+    const { browseRoots, browseRootsInvalid } = loadSandboxConfig();
+    if (browseRootsInvalid) {
+      return { ok: false, error: 'sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed review targets cannot be determined' };
+    }
+    if (browseRoots.length > 0) {
+      let realCwd;
+      try {
+        realCwd = realpathSync(cwd);
+      } catch {
+        return { ok: false, error: 'cwd must be an existing directory' };
+      }
+      if (!isContained(realCwd, browseRoots)) {
+        return { ok: false, error: 'cwd is outside the allowed browseRoots (sandbox.config.json\'s "browseRoots")' };
+      }
+    }
     const baseRef = v.value.baseRef || resolveDefaultBaseRef(cwd);
     const jobId = randomUUID();
 
@@ -832,7 +856,7 @@ export async function runReview(args = {}) {
       model,
       sandbox: true,
       requestedBy: `reviewer:${jobId}`,
-    }, { isReviewJob: true });
+    }, { isReviewJob: true, scratchCwd: true });
     if (!launch.ok) {
       markReviewFinished(jobId, { status: 'failed', resultSummary: launch.message, postedToPr: false });
       removeReviewWorktree(cwd, jobId);
