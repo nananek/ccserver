@@ -586,8 +586,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
 
   useEffect(() => {
     fetchDirs(currentPath);
-    localStorage.setItem(LAST_DIR_KEY, currentPath);
   }, [currentPath, fetchDirs]);
+
+  // Remembering the path is keyed on currentPath ONLY -- deliberately not on
+  // fetchDirs. fetchDirs' identity changes when /api/dirs/home resolves
+  // (initialBrowsePath), which re-runs the listing effect for the SAME path;
+  // folding the write in there re-wrote the (unchanged) path after that
+  // resolution and could clobber a concurrently-set value.
+  useEffect(() => {
+    localStorage.setItem(LAST_DIR_KEY, currentPath);
+  }, [currentPath]);
 
   const navigateTo = useCallback((path) => {
     setCurrentPath(path);
