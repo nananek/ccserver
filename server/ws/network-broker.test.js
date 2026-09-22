@@ -179,7 +179,7 @@ test('canonicalizeIPv4Literal: returns null for anything that is not this loose 
 
 test('M2: a denylisted IP cannot be reached via a non-canonical encoding (decimal/hex/octal/short)', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: [], deniedHosts: ['127.0.0.1'], mode: 'audit' });
+  const broker = await startNetworkBroker({ allowedHosts: [], deniedHosts: ['127.0.0.1'], mode: 'audit' });
   brokers.push(broker);
 
   for (const encoded of ['2130706433', '0x7f000001', '0177.0.0.1', '127.1']) {
@@ -193,7 +193,7 @@ test('M2: an allow-listed hostname that resolves to a denylisted address is refu
   // 'localhost' is allow-listed BY NAME (the string-based check alone would
   // pass it), but it resolves to 127.0.0.1/::1, and 127.0.0.1 is denylisted
   // -- the connect-time resolved-address re-check must still refuse it.
-  const broker = startNetworkBroker({ allowedHosts: ['localhost'], deniedHosts: ['127.0.0.1'] });
+  const broker = await startNetworkBroker({ allowedHosts: ['localhost'], deniedHosts: ['127.0.0.1'] });
   brokers.push(broker);
 
   const { statusLine } = await rawConnect(broker.port, `localhost:${targetPort}`, basicAuth(broker.token));
@@ -202,7 +202,7 @@ test('M2: an allow-listed hostname that resolves to a denylisted address is refu
 
 test('M2: an ordinary allow-listed hostname with no deny-list conflict still connects and relays data', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: ['localhost'] });
+  const broker = await startNetworkBroker({ allowedHosts: ['localhost'] });
   brokers.push(broker);
 
   const { statusLine, sock } = await rawConnect(broker.port, `localhost:${targetPort}`, basicAuth(broker.token));
