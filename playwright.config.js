@@ -25,7 +25,13 @@ export default defineConfig({
     // otherwise leave a .saved-groups.json (or ccserver.sqlite3 + WAL/SHM
     // sidecars) behind that the next run's restoreGroups() / migration state
     // resurrects as ghost groups or stale presets.
-    command: `npm run build --workspace=client && NODE_ENV=production PORT=${PORT} CCSERVER_GROUPS_PATH=$(mktemp -u /tmp/ccserver-e2e-groups.XXXXXX) CCSERVER_SAVED_SESSIONS_PATH=$(mktemp -u /tmp/ccserver-e2e-sessions.XXXXXX) CCSERVER_DB_PATH=$(mktemp -u /tmp/ccserver-e2e-db.XXXXXX) node server/index.js`,
+    // CCSERVER_HOST=127.0.0.1: this suite never sets CCSERVER_TOKEN/
+    // CCSERVER_AUTH_MODE, so AUTH_MODE resolves to 'none' -- and the H3 fix
+    // (server/index.js) now refuses to boot at all with none-mode on the
+    // server's 0.0.0.0 default bind. BASE_URL above is already localhost, so
+    // pinning loopback here costs nothing and matches every H3 test fixture
+    // (startup-auth-mode.test.js etc.) that hits this same guard.
+    command: `npm run build --workspace=client && NODE_ENV=production PORT=${PORT} CCSERVER_HOST=127.0.0.1 CCSERVER_GROUPS_PATH=$(mktemp -u /tmp/ccserver-e2e-groups.XXXXXX) CCSERVER_SAVED_SESSIONS_PATH=$(mktemp -u /tmp/ccserver-e2e-sessions.XXXXXX) CCSERVER_DB_PATH=$(mktemp -u /tmp/ccserver-e2e-db.XXXXXX) node server/index.js`,
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
