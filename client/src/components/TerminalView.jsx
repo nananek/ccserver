@@ -283,13 +283,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // shrank (someone joined from a narrower device).
   const viewerCountRef = useRef(null);
   const applyServerSizeRef = useRef(null);
-  // True while the WebSocket is down and ccserver is (or was) trying to
-  // reconnect -- drives the "DISCONNECTED" stamp overlay. The xterm message
-  // ws.onclose already writes is easy to miss once scrolled out of view or
-  // buried under fresh output, so this needs its own always-visible cue.
-  // Deliberately NOT set for an intentional close (process exit, taken over
-  // by another client) -- those already have their own, more specific
-  // messaging.
+  // True while this client has no live connection to the session --
+  // WebSocket down and ccserver (re)trying, or evicted because another
+  // client took over ('detached') -- drives the "DISCONNECTED" stamp
+  // overlay. The xterm message these paths also writeln is easy to miss
+  // once scrolled out of view or buried under fresh output, so this needs
+  // its own always-visible cue. Deliberately NOT set for a normal process
+  // exit -- that already has its own, more specific messaging and isn't a
+  // "disconnected" state.
   const [disconnected, setDisconnected] = useState(false);
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
@@ -1037,8 +1038,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           // eviction -- reconnect, get evicted, reconnect -- so honor it and
           // say why instead.
           case 'detached':
-            term.writeln('\r\n[Session taken over by another client]');
+            term.writeln('\r\n[DISCONNECTED]');
             intentionalCloseRef.current = true;
+            // No reconnect will follow (intentionalCloseRef), so this is
+            // the only place turning the stamp on for this path -- ws.onclose
+            // skips it once intentionalCloseRef is set.
+            setDisconnected(true);
             break;
           // Another device attached to or left this session. Announced
           // because it is the reason the screen size can move on its own.

@@ -2683,11 +2683,13 @@ body {
   overflow-y: hidden;
 }
 
-/* Stamp-style overlay shown while the WebSocket is down and reconnecting
-   (see the `disconnected` state in TerminalView.jsx). The reconnect message
-   xterm itself prints scrolls out of view or gets buried under fresh output,
-   so this needs no scroll position to notice -- pointer-events: none keeps
-   it from ever trapping a tap/click meant for the terminal underneath. */
+/* Stamp-style overlay shown while this client has no live connection to the
+   session -- WebSocket down and reconnecting, or evicted by another client
+   taking over (see the `disconnected` state in TerminalView.jsx). The plain
+   text message xterm itself prints scrolls out of view or gets buried under
+   fresh output, so this needs no scroll position to notice -- pointer-events:
+   none keeps it from ever trapping a tap/click meant for the terminal
+   underneath. */
 .disconnected-stamp {
   position: absolute;
   inset: 0;
