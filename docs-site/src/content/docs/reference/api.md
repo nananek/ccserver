@@ -72,14 +72,14 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 
 JSON メッセージでターミナル I/O とセッション管理 (アタッチ・予約プロンプト・自動承認) を中継。
 
-1 つのセッションには**複数のクライアントが同時に接続できます**。後から `attach` したクライアントが既存の接続を切ることはなく、`output` などのサーバー発メッセージは接続中の全クライアントへ配信されます。PTY のサイズは 1 つしか持てないため、接続中の全クライアントが申告した `cols`/`rows` の**最小値**が採用され、確定サイズが `size` で通知されます。
+既定では 1 セッションにつき同時接続は 1 クライアントまでです。後から `attach` したクライアントが既存の接続 (コード `4001`、`detached` メッセージ付き) を引き継ぎます。`CCSERVER_SESSION_SHARING=1` を設定すると**複数のクライアントが同時に接続できる**ようになります (オプトイン、[セッション共有ガイド](/ccserver/guides/session-sharing/)参照)。有効化すると、後から `attach` したクライアントが既存の接続を切ることはなくなり、`output` などのサーバー発メッセージは接続中の全クライアントへ配信されます。PTY のサイズは 1 つしか持てないため、接続中の全クライアントが申告した `cols`/`rows` の**最小値**が採用され、確定サイズが `size` で通知されます。
 
 | 方向 | type | フィールド | 説明 |
 |------|------|-----------|------|
 | → | `init` | `cwd`, `cols`, `rows`, `claudeSessionId?`, `shell?`, `sandbox?`, `sandboxOpts?`, `app?`, `resume?` | 新規セッションを起動 (`app`: `"claude"` (既定)、`"opencode"`、`"copilot"`、`shell: true` で素のシェル、`resume: true` で opencode/copilot の最終セッションに再開) |
-| → | `attach` | `sessionId`, `cols?`, `rows?` | 既存セッションに接続 (出力バッファを `replay` で再送)。既に他のクライアントが接続していても切断されず、共有になる |
+| → | `attach` | `sessionId`, `cols?`, `rows?` | 既存セッションに接続 (出力バッファを `replay` で再送)。既定では既存クライアントを引き継いで切断する。`CCSERVER_SESSION_SHARING=1` では切断せず共有になる |
 | → | `input` | `data` | キーボード入力 |
-| → | `resize` | `cols`, `rows` | 希望サイズの申告。共有中は最小値が採用されるため要求どおりとは限らず、確定サイズが `size` で返る |
+| → | `resize` | `cols`, `rows` | 希望サイズの申告。共有中 (`CCSERVER_SESSION_SHARING=1`) は最小値が採用されるため要求どおりとは限らず、確定サイズが `size` で返る |
 | → | `ping` | – | 疎通確認 (`pong` が返る) |
 | → | `set_auto_yes` / `get_auto_yes` | `enabled?` | 確認プロンプトの自動承認 ON/OFF・状態取得 |
 | → | `schedule_prompt` | `time` (`"HH:MM"`) か `at` (epoch ms), `text` | 予約プロンプトを設定 |

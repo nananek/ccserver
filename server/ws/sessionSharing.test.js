@@ -5,6 +5,11 @@
 // negotiation that comes with it -- one pty has one size, so it runs at the
 // smallest viewport among the attached clients.
 //
+// Sharing is opt-in (CCSERVER_SESSION_SHARING, off by default -- see
+// sessionSharingDisabled.test.js for the default eviction behavior this file
+// intentionally turns off below, set before sessionManager is imported since
+// it resolves the flag at module load).
+//
 // The size assertions read the size back through `stty size` inside the shell
 // itself, not just session.cols, so a change that updates the bookkeeping
 // without actually resizing the pty fails here.
@@ -77,6 +82,7 @@ before(async () => {
   process.env.XDG_RUNTIME_DIR = runtimeDir;
   process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
   process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT = join(runtimeDir, 'orchestrator-generated');
+  process.env.CCSERVER_SESSION_SHARING = '1';
   sessionManager = await import('./sessionManager.js');
   terminal = await import('./terminal.js');
 });
@@ -84,6 +90,21 @@ before(async () => {
 after(() => {
   sessionManager.destroyAllSessions();
   try { rmSync(runtimeDir, { recursive: true, force: true }); } catch { /* ignore */ }
+});
+
+test('resolveSessionSharingEnabled: off unless explicitly opted in', () => {
+  const { resolveSessionSharingEnabled } = sessionManager;
+
+  assert.equal(resolveSessionSharingEnabled({}), false, 'unset defaults to off');
+  assert.equal(resolveSessionSharingEnabled({ CCSERVER_SESSION_SHARING: '' }), false, 'empty is off');
+  for (const v of ['1', 'true', 'TRUE', 'on', 'yes']) {
+    assert.equal(resolveSessionSharingEnabled({ CCSERVER_SESSION_SHARING: v }), true, `${v} opts in`);
+  }
+  for (const v of ['0', 'false', 'off', 'no']) {
+    assert.equal(resolveSessionSharingEnabled({ CCSERVER_SESSION_SHARING: v }), false, `${v} stays off`);
+  }
+  assert.equal(resolveSessionSharingEnabled({ CCSERVER_SESSION_SHARING: 'sure' }), false,
+    'an unrecognized value must not silently opt in');
 });
 
 test('a second client joins the session instead of evicting the first', async () => {

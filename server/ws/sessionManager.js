@@ -76,6 +76,30 @@ export function resolveExitedTimeoutMs(env = process.env) {
 const SESSION_TIMEOUT_MS = resolveSessionTimeoutMs();
 const SESSION_EXITED_TIMEOUT_MS = resolveExitedTimeoutMs();
 
+// Session sharing (a second device attaching alongside the first instead of
+// evicting it, with the pty sized to the smallest of their viewports -- see
+// attachSocket/negotiateSize) is opt-in, off by default. A viewer that is
+// attached but not actually on screen -- a background browser tab, a stale
+// reconnect racing a visibility change -- can register a degenerate viewport
+// with no way for the client to notice or correct it: a hidden container can
+// measure 0px yet still yield a small non-zero size from the fit addon's own
+// floor, and because the pty runs at the SMALLEST of every attached viewport,
+// that one invisible client silently pins every real viewer's screen to a
+// tiny size until it fully disconnects. Until that is fixed at the source,
+// attaching a second client falls back to the pre-sharing behavior (evict the
+// incumbent) unless the operator opts in.
+export function resolveSessionSharingEnabled(env = process.env) {
+  const raw = env.CCSERVER_SESSION_SHARING;
+  if (raw == null) return false;
+  const s = String(raw).trim().toLowerCase();
+  if (['1', 'true', 'on', 'yes'].includes(s)) return true;
+  if (['0', 'false', 'off', 'no', ''].includes(s)) return false;
+  console.warn(`[session] ignoring invalid CCSERVER_SESSION_SHARING=${raw} (expected 1/0, true/false, on/off, yes/no); using false`);
+  return false;
+}
+
+const SESSION_SHARING_ENABLED = resolveSessionSharingEnabled();
+
 const sessions = new Map();
 
 // Persistent sandbox HOME paths currently being prepared by createSession().
@@ -298,10 +322,12 @@ function buildSessionRecord(id, ptyProcess, meta) {
     sandboxNetworkBrokerDir: meta.sandboxNetworkBrokerDir ?? null,
     reuseSandboxHome: meta.reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
     ptyProcess,
-    // Every attached viewer, mapped to the viewport it last reported. A
-    // session is shared: opening it from a second device adds a socket here
-    // instead of evicting the first (see attachSocket). The viewport values
-    // feed negotiateSize -- the pty is sized to the smallest of them.
+    // Every attached viewer, mapped to the viewport it last reported. With
+    // CCSERVER_SESSION_SHARING opted in, opening the session from a second
+    // device adds a socket here instead of evicting the first (see
+    // attachSocket), and the viewport values feed negotiateSize -- the pty is
+    // sized to the smallest of them. Off by default, this map holds at most
+    // one entry.
     sockets: new Map(),
     outputBuffer: [],
     bufferSize: 0,
@@ -1950,10 +1976,12 @@ function normalizeViewport(cols, rows) {
   return { cols: Math.trunc(c), rows: Math.trunc(r) };
 }
 
-// Attaching is additive: a second device joins the session instead of
-// evicting the first. (Before this, a new client closed the incumbent with
-// code 4001 and the incumbent's UI gave up reconnecting -- opening a session
-// from a phone kicked the desktop off it.)
+// Attaching is additive when session sharing is opted in (see
+// SESSION_SHARING_ENABLED above): a second device joins the session instead
+// of evicting the first. With sharing off (the default), this instead
+// restores ccserver's original behavior -- the new client closes any
+// incumbent with code 4001 and takes the session over alone, so a single
+// misbehaving/hidden viewport can never end up in the size negotiation.
 export function attachSocket(id, socket, viewport = null) {
   const session = sessions.get(id);
   if (!session) return false;
@@ -1961,6 +1989,15 @@ export function attachSocket(id, socket, viewport = null) {
   if (session.timeoutTimer) {
     clearTimeout(session.timeoutTimer);
     session.timeoutTimer = null;
+  }
+
+  if (!SESSION_SHARING_ENABLED) {
+    for (const existing of session.sockets.keys()) {
+      if (existing === socket) continue;
+      try { existing.send(JSON.stringify({ type: 'detached', reason: 'replaced' })); } catch { /* already gone */ }
+      try { existing.close(4001, 'Replaced by new client'); } catch { /* already gone */ }
+      session.sockets.delete(existing);
+    }
   }
 
   session.sockets.set(socket, normalizeViewport(viewport?.cols, viewport?.rows));

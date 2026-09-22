@@ -1018,14 +1018,17 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               pinToBottom();
             }
             break;
-          // Compatibility with a ccserver older than session sharing (most
-          // realistically reached over federation, where the peer instance
-          // upgrades on its own schedule): that server still evicts the
-          // incumbent on attach. Without this the reconnect logic would
-          // fight it -- reconnect, get evicted, reconnect -- so honor the
-          // eviction exactly as before and say why.
+          // The server evicted us because another client just attached to
+          // this session. This is the default path: session sharing
+          // (CCSERVER_SESSION_SHARING) is opt-in and off unless the operator
+          // enables it, and it's also what a ccserver older than session
+          // sharing does unconditionally (most realistically reached over
+          // federation, where the peer instance upgrades on its own
+          // schedule). Without this the reconnect logic would fight the
+          // eviction -- reconnect, get evicted, reconnect -- so honor it and
+          // say why instead.
           case 'detached':
-            term.writeln('\r\n[Session taken over by another client (server too old to share sessions)]');
+            term.writeln('\r\n[Session taken over by another client]');
             intentionalCloseRef.current = true;
             break;
           // Another device attached to or left this session. Announced
