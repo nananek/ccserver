@@ -62,6 +62,16 @@
 //      only, where a bare positional is meaningful) every bare
 //      owner/repo-shaped token, is therefore treated as its own required
 //      repo reference.
+//
+// A third, structural safeguard (Issue #180, added after PR #179's review
+// found `release create` was the only subcommand with it): every ALLOWED
+// subcommand's flags are checked against a hand-built known-flag table
+// (SUBCOMMAND_FLAGS below) and the WHOLE invocation is refused if any flag
+// isn't recognized. Without this, a gh subcommand already on ALLOWED could
+// gain a new flag in a future gh release that reads/writes a host path (as
+// actually happened with `--attach`) and it would sail through unrecognized
+// until this module's table is updated to catch up -- fail-closed here
+// means that drift window refuses instead of silently allowing.
 
 import { normalizeGitUrl } from './gitAllowlist.js';
 
@@ -147,6 +157,419 @@ function parseRepoFlags(argv) {
   }
   return values;
 }
+
+// Splits `rest` (argv.slice(2), everything after "<top> <sub>") into
+// positionals and flag-shaped tokens, consuming each known flag's value
+// token when it takes one. `knownFlags`: array of {short?, long?, value}.
+// Short tokens here are always exactly 2 chars or the attached "-Rvalue"
+// form: classifyGhInvocation's hasAmbiguousShortFlag has already refused
+// every other short-dash token (any short flag longer than 2 chars not
+// starting with "-R") upstream of this ever running, so there is no
+// "-Xvalue" attached-short-value form left to handle except -R's.
+//
+// `unknownFlag` is the first flag-shaped token matching neither a known
+// short nor long name -- callers must fail the WHOLE invocation closed on
+// this, not assume it takes no value: an unrecognized flag could itself be
+// another file-argument flag, or could swallow the very positional this is
+// trying to classify.
+function parseKnownArgs(rest, knownFlags) {
+  const shortMap = new Map();
+  const longMap = new Map();
+  for (const f of knownFlags) {
+    if (f.short) shortMap.set(f.short, f);
+    if (f.long) longMap.set(f.long, f);
+  }
+  const positionals = [];
+  let sawDashDash = false;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (sawDashDash) { positionals.push(a); continue; }
+    if (a === '--') { sawDashDash = true; continue; }
+    if (a === '-' || !a.startsWith('-')) { positionals.push(a); continue; }
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      const name = eq === -1 ? a : a.slice(0, eq);
+      const f = longMap.get(name);
+      if (!f) return { positionals, unknownFlag: a };
+      if (f.value && eq === -1) i += 1;
+      continue;
+    }
+    if (a.startsWith('-R') && a.length > 2) continue; // attached "-Rvalue"
+    const f = shortMap.get(a);
+    if (!f) return { positionals, unknownFlag: a };
+    if (f.value) i += 1;
+  }
+  return { positionals, unknownFlag: null };
+}
+
+// Per-subcommand known-flag tables for parseKnownArgs above (Issue #180 --
+// PR #179 review found that only `release create` had this fail-closed
+// treatment; a gh subcommand's flag surface silently drifting ahead of this
+// model, e.g. gh adding a new file-reading flag to an already-allowed
+// subcommand (`--attach` is a real precedent), would sail through
+// unrecognized instead of being refused). Every ALLOWED subcommand except
+// `release:create` (which already has its own table -- RELEASE_CREATE_FLAGS
+// below, wired through findBlockedReleaseCreateArgs instead of here) has an
+// entry here, built by hand against `gh <cmd> <sub> --help` output (gh
+// v2.x). An unrecognized flag fails the WHOLE invocation closed, exactly
+// like release create's existing behavior -- see classifyGhInvocation's use
+// of this table.
+//
+// `--help` and `-R/--repo` are common to (almost) every gh subcommand as
+// INHERITED FLAGS, so withCommon() appends them automatically. The one
+// exception is `repo view`, which has no -R/--repo of its own (it takes the
+// target repo as a bare OWNER/REPO positional instead, see
+// normalizeOwnerRepoOrUrl / bareRepoRefs above) -- withCommon(flags, {repo:
+// false}) omits REPO_FLAG for that entry.
+//
+// Flags already gated elsewhere by a more specific check (--attach,
+// --worktree, release download's --dir/--output, workflow run's -F/--field)
+// are still listed here as known/value-taking: omitting them would make
+// this table's generic 'unrecognized-flag' fire first and hide the more
+// specific existing reason (attach-not-allowed, checkout-worktree-not-allowed,
+// etc.) that findBlockedGhFileArg reports for them.
+//
+// NOTE: the same short flag can mean different things (or take no value)
+// on different subcommands -- e.g. `-c` is a value-taking --comment on `pr
+// close`/`issue close`/`issue reopen`/`pr reopen`, but a boolean --comment
+// on `pr review` (see extractGhTextFields's TEXT_FIELDS comment for the
+// same pitfall). Each subcommand has its own independent entry below, so
+// this is safe by construction -- just don't copy-paste a `-c` entry across
+// entries without checking that subcommand's own --help.
+const HELP_FLAG = { long: '--help', value: false };
+const REPO_FLAG = { short: '-R', long: '--repo', value: true };
+function withCommon(flags, { repo = true } = {}) {
+  return repo ? [...flags, HELP_FLAG, REPO_FLAG] : [...flags, HELP_FLAG];
+}
+
+const SUBCOMMAND_FLAGS = {
+  'issue:close': withCommon([
+    { short: '-c', long: '--comment', value: true },
+    { long: '--duplicate-of', value: true },
+    { short: '-r', long: '--reason', value: true },
+  ]),
+  'issue:comment': withCommon([
+    { long: '--attach', value: true },
+    { short: '-b', long: '--body', value: true },
+    { short: '-F', long: '--body-file', value: true },
+    { long: '--create-if-none', value: false },
+    { long: '--delete-last', value: false },
+    { long: '--edit-last', value: false },
+    { short: '-e', long: '--editor', value: false },
+    { short: '-w', long: '--web', value: false },
+    { long: '--yes', value: false },
+  ]),
+  'issue:create': withCommon([
+    { short: '-a', long: '--assignee', value: true },
+    { long: '--attach', value: true },
+    { long: '--blocked-by', value: true },
+    { long: '--blocking', value: true },
+    { short: '-b', long: '--body', value: true },
+    { short: '-F', long: '--body-file', value: true },
+    { short: '-e', long: '--editor', value: false },
+    { short: '-l', long: '--label', value: true },
+    { short: '-m', long: '--milestone', value: true },
+    { long: '--parent', value: true },
+    { short: '-p', long: '--project', value: true },
+    { long: '--recover', value: true },
+    { short: '-T', long: '--template', value: true },
+    { short: '-t', long: '--title', value: true },
+    { long: '--type', value: true },
+    { short: '-w', long: '--web', value: false },
+  ]),
+  'issue:edit': withCommon([
+    { long: '--add-assignee', value: true },
+    { long: '--add-blocked-by', value: true },
+    { long: '--add-blocking', value: true },
+    { long: '--add-label', value: true },
+    { long: '--add-project', value: true },
+    { long: '--add-sub-issue', value: true },
+    { long: '--attach', value: true },
+    { short: '-b', long: '--body', value: true },
+    { short: '-F', long: '--body-file', value: true },
+    { short: '-m', long: '--milestone', value: true },
+    { long: '--parent', value: true },
+    { long: '--remove-assignee', value: true },
+    { long: '--remove-blocked-by', value: true },
+    { long: '--remove-blocking', value: true },
+    { long: '--remove-label', value: true },
+    { long: '--remove-milestone', value: false },
+    { long: '--remove-parent', value: false },
+    { long: '--remove-project', value: true },
+    { long: '--remove-sub-issue', value: true },
+    { long: '--remove-type', value: false },
+    { short: '-t', long: '--title', value: true },
+    { long: '--type', value: true },
+  ]),
+  'issue:list': withCommon([
+    { long: '--app', value: true },
+    { short: '-a', long: '--assignee', value: true },
+    { short: '-A', long: '--author', value: true },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-l', long: '--label', value: true },
+    { short: '-L', long: '--limit', value: true },
+    { long: '--mention', value: true },
+    { short: '-m', long: '--milestone', value: true },
+    { short: '-S', long: '--search', value: true },
+    { short: '-s', long: '--state', value: true },
+    { short: '-t', long: '--template', value: true },
+    { long: '--type', value: true },
+    { short: '-w', long: '--web', value: false },
+  ]),
+  'issue:reopen': withCommon([
+    { short: '-c', long: '--comment', value: true },
+  ]),
+  'issue:status': withCommon([
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-t', long: '--template', value: true },
+  ]),
+  'issue:view': withCommon([
+    { short: '-c', long: '--comments', value: false },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-t', long: '--template', value: true },
+    { short: '-w', long: '--web', value: false },
+  ]),
+  'pr:checkout': withCommon([
+    { short: '-b', long: '--branch', value: true },
+    { long: '--detach', value: false },
+    { short: '-f', long: '--force', value: false },
+    { long: '--recurse-submodules', value: false },
+    { long: '--worktree', value: true },
+  ]),
+  'pr:checks': withCommon([
+    { long: '--fail-fast', value: false },
+    { short: '-i', long: '--interval', value: true },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { long: '--required', value: false },
+    { short: '-t', long: '--template', value: true },
+    { long: '--watch', value: false },
+    { short: '-w', long: '--web', value: false },
+  ]),
+  'pr:close': withCommon([
+    { short: '-c', long: '--comment', value: true },
+    { short: '-d', long: '--delete-branch', value: false },
+  ]),
+  'pr:comment': withCommon([
+    { long: '--attach', value: true },
+    { short: '-b', long: '--body', value: true },
+    { short: '-F', long: '--body-file', value: true },
+    { long: '--create-if-none', value: false },
+    { long: '--delete-last', value: false },
+    { long: '--edit-last', value: false },
+    { short: '-e', long: '--editor', value: false },
+    { short: '-w', long: '--web', value: false },
+    { long: '--yes', value: false },
+  ]),
+  'pr:create': withCommon([
+    { short: '-a', long: '--assignee', value: true },
+    { long: '--attach', value: true },
+    { short: '-B', long: '--base', value: true },
+    { short: '-b', long: '--body', value: true },
+    { short: '-F', long: '--body-file', value: true },
+    { short: '-d', long: '--draft', value: false },
+    { long: '--dry-run', value: false },
+    { short: '-e', long: '--editor', value: false },
+    { short: '-f', long: '--fill', value: false },
+    { long: '--fill-first', value: false },
+    { long: '--fill-verbose', value: false },
+    { short: '-H', long: '--head', value: true },
+    { short: '-l', long: '--label', value: true },
+    { short: '-m', long: '--milestone', value: true },
+    { long: '--no-maintainer-edit', value: false },
+    { short: '-p', long: '--project', value: true },
+    { long: '--recover', value: true },
+    { short: '-r', long: '--reviewer', value: true },
+    { short: '-T', long: '--template', value: true },
+    { short: '-t', long: '--title', value: true },
+    { short: '-w', long: '--web', value: false },
+  ]),
+  'pr:diff': withCommon([
+    { long: '--allow-escape-sequences', value: false },
+    { long: '--color', value: true },
+    { short: '-e', long: '--exclude', value: true },
+    { long: '--name-only', value: false },
+    { long: '--patch', value: false },
+    { short: '-w', long: '--web', value: false },
+  ]),
+  'pr:edit': withCommon([
+    { long: '--add-assignee', value: true },
+    { long: '--add-label', value: true },
+    { long: '--add-project', value: true },
+    { long: '--add-reviewer', value: true },
+    { long: '--attach', value: true },
+    { short: '-B', long: '--base', value: true },
+    { short: '-b', long: '--body', value: true },
+    { short: '-F', long: '--body-file', value: true },
+    { short: '-m', long: '--milestone', value: true },
+    { long: '--remove-assignee', value: true },
+    { long: '--remove-label', value: true },
+    { long: '--remove-milestone', value: false },
+    { long: '--remove-project', value: true },
+    { long: '--remove-reviewer', value: true },
+    { short: '-t', long: '--title', value: true },
+  ]),
+  'pr:list': withCommon([
+    { long: '--app', value: true },
+    { short: '-a', long: '--assignee', value: true },
+    { short: '-A', long: '--author', value: true },
+    { short: '-B', long: '--base', value: true },
+    { short: '-d', long: '--draft', value: false },
+    { short: '-H', long: '--head', value: true },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-l', long: '--label', value: true },
+    { short: '-L', long: '--limit', value: true },
+    { short: '-S', long: '--search', value: true },
+    { short: '-s', long: '--state', value: true },
+    { short: '-t', long: '--template', value: true },
+    { short: '-w', long: '--web', value: false },
+  ]),
+  'pr:merge': withCommon([
+    { long: '--admin', value: false },
+    { short: '-A', long: '--author-email', value: true },
+    { long: '--auto', value: false },
+    { short: '-b', long: '--body', value: true },
+    { short: '-F', long: '--body-file', value: true },
+    { short: '-d', long: '--delete-branch', value: false },
+    { long: '--disable-auto', value: false },
+    { long: '--match-head-commit', value: true },
+    { short: '-m', long: '--merge', value: false },
+    { short: '-r', long: '--rebase', value: false },
+    { short: '-s', long: '--squash', value: false },
+    { short: '-t', long: '--subject', value: true },
+  ]),
+  'pr:ready': withCommon([
+    { long: '--undo', value: false },
+  ]),
+  'pr:reopen': withCommon([
+    { short: '-c', long: '--comment', value: true },
+  ]),
+  'pr:review': withCommon([
+    { short: '-a', long: '--approve', value: false },
+    { short: '-b', long: '--body', value: true },
+    { short: '-F', long: '--body-file', value: true },
+    { short: '-c', long: '--comment', value: false },
+    { short: '-r', long: '--request-changes', value: false },
+  ]),
+  'pr:status': withCommon([
+    { short: '-c', long: '--conflict-status', value: false },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-t', long: '--template', value: true },
+  ]),
+  'pr:view': withCommon([
+    { short: '-c', long: '--comments', value: false },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-t', long: '--template', value: true },
+    { short: '-w', long: '--web', value: false },
+  ]),
+  'release:view': withCommon([
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-t', long: '--template', value: true },
+    { short: '-w', long: '--web', value: false },
+  ]),
+  'release:list': withCommon([
+    { long: '--exclude-drafts', value: false },
+    { long: '--exclude-pre-releases', value: false },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-L', long: '--limit', value: true },
+    { short: '-O', long: '--order', value: true },
+    { short: '-t', long: '--template', value: true },
+  ]),
+  'release:edit': withCommon([
+    { long: '--discussion-category', value: true },
+    { long: '--draft', value: false },
+    { long: '--latest', value: false },
+    { short: '-n', long: '--notes', value: true },
+    { short: '-F', long: '--notes-file', value: true },
+    { long: '--prerelease', value: false },
+    { long: '--tag', value: true },
+    { long: '--target', value: true },
+    { short: '-t', long: '--title', value: true },
+    { long: '--verify-tag', value: false },
+  ]),
+  'release:delete': withCommon([
+    { long: '--cleanup-tag', value: false },
+    { short: '-y', long: '--yes', value: false },
+  ]),
+  'release:download': withCommon([
+    { long: '--allow-escape-sequences', value: false },
+    { short: '-A', long: '--archive', value: true },
+    { long: '--clobber', value: false },
+    { short: '-D', long: '--dir', value: true },
+    { short: '-O', long: '--output', value: true },
+    { short: '-p', long: '--pattern', value: true },
+    { long: '--skip-existing', value: false },
+  ]),
+  'release:delete-asset': withCommon([
+    { short: '-y', long: '--yes', value: false },
+  ]),
+  'workflow:run': withCommon([
+    { short: '-F', long: '--field', value: true },
+    { long: '--json', value: false },
+    { short: '-f', long: '--raw-field', value: true },
+    { short: '-r', long: '--ref', value: true },
+  ]),
+  'workflow:view': withCommon([
+    { short: '-r', long: '--ref', value: true },
+    { short: '-w', long: '--web', value: false },
+    { short: '-y', long: '--yaml', value: false },
+  ]),
+  'workflow:list': withCommon([
+    { short: '-a', long: '--all', value: false },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-L', long: '--limit', value: true },
+    { short: '-t', long: '--template', value: true },
+  ]),
+  'workflow:enable': withCommon([]),
+  'workflow:disable': withCommon([]),
+  'run:list': withCommon([
+    { short: '-a', long: '--all', value: false },
+    { short: '-b', long: '--branch', value: true },
+    { short: '-c', long: '--commit', value: true },
+    { long: '--created', value: true },
+    { short: '-e', long: '--event', value: true },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-L', long: '--limit', value: true },
+    { short: '-s', long: '--status', value: true },
+    { short: '-t', long: '--template', value: true },
+    { short: '-u', long: '--user', value: true },
+    { short: '-w', long: '--workflow', value: true },
+  ]),
+  'run:view': withCommon([
+    { short: '-a', long: '--attempt', value: true },
+    { long: '--exit-status', value: false },
+    { short: '-j', long: '--job', value: true },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { long: '--log', value: false },
+    { long: '--log-failed', value: false },
+    { short: '-t', long: '--template', value: true },
+    { short: '-v', long: '--verbose', value: false },
+    { short: '-w', long: '--web', value: false },
+  ]),
+  'run:watch': withCommon([
+    { long: '--compact', value: false },
+    { long: '--exit-status', value: false },
+    { short: '-i', long: '--interval', value: true },
+  ]),
+  'repo:view': withCommon([
+    { short: '-b', long: '--branch', value: true },
+    { short: '-q', long: '--jq', value: true },
+    { long: '--json', value: true },
+    { short: '-t', long: '--template', value: true },
+    { short: '-w', long: '--web', value: false },
+  ], { repo: false }),
+};
 
 // A PR/issue/discussion URL (https://github.com/owner/repo/pull/123) points
 // at a repo just as much as a plain repo URL does, but has extra path
@@ -297,7 +720,8 @@ function classifyGhApi(argv) {
 //     allow-listed (usually one entry; can be more if e.g. both --repo and a
 //     URL positional are present).
 //   - reason: set when allowed is false ('subcommand-not-allowed',
-//     'ambiguous-flags', 'repo-unresolved', or 'repo-must-be-explicit').
+//     'ambiguous-flags', 'unrecognized-flag', 'repo-unresolved', or
+//     'repo-must-be-explicit').
 export function classifyGhInvocation(argv, resolveCwdOrigin) {
   const top = argv[0];
   const sub = argv[1];
@@ -317,6 +741,22 @@ export function classifyGhInvocation(argv, resolveCwdOrigin) {
   }
 
   const rest = argv.slice(2);
+
+  // Issue #180 (PR #179 review follow-up): fail closed on any flag this
+  // subcommand's SUBCOMMAND_FLAGS table doesn't know about, the same way
+  // release create already does via RELEASE_CREATE_FLAGS/findBlockedReleaseCreateArgs.
+  // Without this, a gh subcommand's flag surface drifting ahead of this
+  // module (a future gh version adding a new file-reading flag to an
+  // already-allowed subcommand -- see --attach's own history) would sail
+  // through unrecognized instead of being refused. release:create is the
+  // only ALLOWED entry with no table here -- it keeps its existing,
+  // separately-wired check.
+  const knownFlags = SUBCOMMAND_FLAGS[`${top}:${sub}`];
+  if (knownFlags) {
+    const { unknownFlag } = parseKnownArgs(rest, knownFlags);
+    if (unknownFlag) return { allowed: false, repos: [], reason: 'unrecognized-flag' };
+  }
+
   const repoFlagValues = parseRepoFlags(argv);
   const explicits = repoFlagValues.map((v) => normalizeOwnerRepoOrUrl(v));
   if (explicits.some((x) => !x)) return { allowed: false, repos: [], reason: 'repo-unresolved' };
@@ -511,50 +951,8 @@ export function extractGhTextFields(argv) {
 // content policy, so (like findBlockedGhText's file-arg-requires-stdin case)
 // it is enforced unconditionally, independent of commitMessageGuard config.
 // Returns {field, reason} for the first blocked shape found, or null.
-
-// Splits `rest` (argv.slice(2), everything after "<top> <sub>") into
-// positionals and flag-shaped tokens, consuming each known flag's value
-// token when it takes one. `knownFlags`: array of {short?, long?, value}.
-// Short tokens here are always exactly 2 chars or the attached "-Rvalue"
-// form: classifyGhInvocation's hasAmbiguousShortFlag has already refused
-// every other short-dash token (any short flag longer than 2 chars not
-// starting with "-R") upstream of this ever running, so there is no
-// "-Xvalue" attached-short-value form left to handle except -R's.
-//
-// `unknownFlag` is the first flag-shaped token matching neither a known
-// short nor long name -- callers must fail the WHOLE invocation closed on
-// this, not assume it takes no value: an unrecognized flag could itself be
-// another file-argument flag, or could swallow the very positional this is
-// trying to classify.
-function parseKnownArgs(rest, knownFlags) {
-  const shortMap = new Map();
-  const longMap = new Map();
-  for (const f of knownFlags) {
-    if (f.short) shortMap.set(f.short, f);
-    if (f.long) longMap.set(f.long, f);
-  }
-  const positionals = [];
-  let sawDashDash = false;
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (sawDashDash) { positionals.push(a); continue; }
-    if (a === '--') { sawDashDash = true; continue; }
-    if (a === '-' || !a.startsWith('-')) { positionals.push(a); continue; }
-    if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      const name = eq === -1 ? a : a.slice(0, eq);
-      const f = longMap.get(name);
-      if (!f) return { positionals, unknownFlag: a };
-      if (f.value && eq === -1) i += 1;
-      continue;
-    }
-    if (a.startsWith('-R') && a.length > 2) continue; // attached "-Rvalue"
-    const f = shortMap.get(a);
-    if (!f) return { positionals, unknownFlag: a };
-    if (f.value) i += 1;
-  }
-  return { positionals, unknownFlag: null };
-}
+// (parseKnownArgs itself now lives above, next to parseRepoFlags, since
+// classifyGhInvocation's SUBCOMMAND_FLAGS check needs it too.)
 
 const RELEASE_CREATE_FLAGS = [
   { short: '-d', long: '--draft', value: false },

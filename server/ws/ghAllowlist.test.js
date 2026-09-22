@@ -513,6 +513,65 @@ describe('classifyGhInvocation: workflow run/enable/disable require explicit rep
   });
 });
 
+// Issue #180 (PR #179 review follow-up): every ALLOWED subcommand except
+// release:create now fails closed on an unrecognized flag, the same way
+// release create already did via RELEASE_CREATE_FLAGS.
+describe('classifyGhInvocation: unrecognized-flag fail-closed (Issue #180)', () => {
+  test('SECURITY: the exact repro from the issue -- issue close --body-file is refused (gh has no such flag today, but the broker must not silently forward it if gh ever grows one)', () => {
+    const r = classifyGhInvocation(['issue', 'close', '2', '--body-file', '/etc/passwd'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'unrecognized-flag');
+  });
+
+  test('a made-up future flag is refused on a representative subcommand from each of pr/issue/release/workflow/run', () => {
+    for (const argv of [
+      ['pr', 'view', '1', '--some-future-flag', 'x'],
+      ['issue', 'list', '--some-future-flag'],
+      ['release', 'edit', 'v1', '--some-future-flag', 'x'],
+      ['workflow', 'view', '1', '--some-future-flag'],
+      ['run', 'list', '--some-future-flag', 'x'],
+      ['repo', 'view', '--some-future-flag', 'x'],
+    ]) {
+      const r = classifyGhInvocation(argv, cwdOrigin);
+      assert.equal(r.allowed, false, argv.join(' '));
+      assert.equal(r.reason, 'unrecognized-flag', argv.join(' '));
+    }
+  });
+
+  test('regression: known flags on representative subcommands are still allowed', () => {
+    assert.equal(classifyGhInvocation(['issue', 'comment', '5', '-b', 'hi', '--edit-last'], cwdOrigin).allowed, true);
+    assert.equal(classifyGhInvocation(['pr', 'create', '-t', 'T', '-b', 'B', '--draft', '-l', 'bug'], cwdOrigin).allowed, true);
+    assert.equal(classifyGhInvocation(['pr', 'merge', '1', '--squash', '--delete-branch'], cwdOrigin).allowed, true);
+    assert.equal(classifyGhInvocation(['release', 'edit', 'v1', '--title=T', '--prerelease'], cwdOrigin).allowed, true);
+    assert.equal(classifyGhInvocation(['workflow', 'run', 'deploy.yml', '--repo', 'testowner/testrepo', '-f', 'k=v', '--ref', 'main'], cwdOrigin).allowed, true);
+    assert.equal(classifyGhInvocation(['repo', 'view', 'testowner/testrepo', '--json', 'name'], cwdOrigin).allowed, true);
+  });
+
+  test('--help is a known (boolean) flag on every subcommand, including repo view which has no -R/--repo', () => {
+    assert.equal(classifyGhInvocation(['pr', 'view', '1', '--help'], cwdOrigin).allowed, true);
+    assert.equal(classifyGhInvocation(['repo', 'view', '--help'], cwdOrigin).allowed, true);
+  });
+
+  test('repo view has no -R/--repo of its own -- passing one is an unrecognized flag, not a repo reference', () => {
+    const r = classifyGhInvocation(['repo', 'view', '-R', 'testowner/testrepo'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'unrecognized-flag');
+  });
+
+  test('flags that findBlockedGhFileArg blocks more specifically (--attach, --worktree, workflow -F @file) still pass THIS check as known flags, so their more specific reason survives downstream', () => {
+    assert.equal(classifyGhInvocation(['pr', 'create', '-t', 'T', '--attach', '/etc/passwd'], cwdOrigin).allowed, true);
+    assert.equal(classifyGhInvocation(['pr', 'checkout', '1', '--worktree', '/tmp/x'], cwdOrigin).allowed, true);
+    assert.equal(classifyGhInvocation(['release', 'download', 'v1', '--dir', '/tmp/x'], cwdOrigin).allowed, true);
+    assert.equal(classifyGhInvocation(['workflow', 'run', 'deploy.yml', '--repo', 'testowner/testrepo', '-F', 'k=@/etc/passwd'], cwdOrigin).allowed, true);
+  });
+
+  test('gh api is unaffected -- routed to classifyGhApi before SUBCOMMAND_FLAGS is ever consulted (its own apiRejectsFlags still governs -f/--raw-field/--hostname/--method, see the "gh api (Actions read-only)" suite above)', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs', '-f', 'x=y'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'ambiguous-flags');
+  });
+});
+
 describe('extractGhTextFields (plan8 PR-body guard)', () => {
   test('pr create: -t/-b space-separated forms', () => {
     const r = extractGhTextFields(['pr', 'create', '-t', 'My title', '-b', 'My body']);
