@@ -2505,7 +2505,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
       stateDir: null,
       // Effective gpgVault flag for this launch (already resolved from
       // sandboxOpts + the config default above) -- sessionManager.js threads
-      // this into the session record so clients can show whether GPGボルト
+      // this into the session record so clients can show whether GPG Vault
       // is actually active for this specific session (server/ws/terminal.js's
       // `session` message / GET /api/sessions), not just requested.
       gpgVaultActive: gpgVault,

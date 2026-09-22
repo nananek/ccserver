@@ -1533,7 +1533,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               <span
                 className={`gpg-vault-indicator${badge.state === 'active' ? ' active' : ''}`}
                 title={badge.reason}
-                aria-label={`GPGボルト: ${badge.reason}`}
+                aria-label={`GPG Vault: ${badge.reason}`}
               >🔑</span>
             );
           })()}

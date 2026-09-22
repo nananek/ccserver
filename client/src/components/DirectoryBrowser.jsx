@@ -784,7 +784,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
             checked={authMode !== 'passkey' ? false : sandboxOpts.gpgVault}
             onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpgVault: e.target.checked })}
           />
-          GPGボルトで署名・SSH pushする
+          GPG Vaultで署名・SSH pushする
         </label>
         <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
           <input
@@ -1192,7 +1192,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                       checked={authMode !== 'passkey' ? false : sandboxOpts.gpgVault}
                       onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpgVault: e.target.checked })}
                     />
-                    GPGボルトで署名・SSH pushする (両ワーカー共通)
+                    GPG Vaultで署名・SSH pushする (両ワーカー共通)
                   </label>
                   <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
                     <input
@@ -1260,7 +1260,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                               [role]: { ...s[role], gpgVault: e.target.checked },
                             }))}
                           />
-                          {role} GPGボルト
+                          {role} GPG Vault
                         </label>
                         <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
                           <input
@@ -1361,7 +1361,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                             orchestrator: { ...s.orchestrator, gpgVault: e.target.checked },
                           }))}
                         />
-                        オーケストレーター GPGボルト
+                        オーケストレーター GPG Vault
                       </label>
                       <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
                         <input

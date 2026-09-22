@@ -144,7 +144,7 @@ export default function GeneralSection({
           checked={authMode !== 'passkey' ? false : !!sandboxDefaults.gpgVault}
           onChange={(e) => updateSandboxDefault('gpgVault', e.target.checked)}
         />
-        GPGボルトで署名・SSH pushする{authMode !== 'passkey' ? '（パスキーログイン限定）' : ''}
+        GPG Vaultで署名・SSH pushする{authMode !== 'passkey' ? '（パスキーログイン限定）' : ''}
       </label>
       <p className="settings-hint">
         サーバーが保持する専用のGPG鍵でコミット署名とSSH pushを行います。設定 &gt; GPG連携でVaultの作成・アンロックが必要です。

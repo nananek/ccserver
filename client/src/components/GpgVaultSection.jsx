@@ -10,7 +10,7 @@ import {
 // "GPG連携" section (SettingsView.jsx 左メニュー, plan: gpg-agent-vault).
 // パスキーログイン限定機能: サーバーが専用のGPG鍵を生成・暗号化保管し、
 // PRF対応パスキーでのライブ認証儀式でのみ復号 (アンロック) できる。
-// アンロック中はコミット署名・SSH push (サンドボックス起動時の「GPGボルトで
+// アンロック中はコミット署名・SSH push (サンドボックス起動時の「GPG Vaultで
 // 署名・SSH pushする」チェックボックス、GeneralSection.jsx/DirectoryBrowser.jsx)
 // に使え、GitHub登録用の公開鍵情報もここに表示する。
 //
@@ -178,8 +178,8 @@ export default function GpgVaultSection() {
   const handleDelete = useCallback(async () => {
     if (busy) return;
     const warning = status?.legacyDisabled
-      ? 'このGPGボルトを削除します。GitHubに登録した旧GPG鍵/SSH鍵は漏洩した可能性があるため、GitHub側からも必ず削除してください。続けますか?'
-      : 'このGPGボルトを削除します。鍵は復元できません (GitHubに登録した公開鍵も使えなくなります)。続けますか?';
+      ? 'このGPG Vaultを削除します。GitHubに登録した旧GPG鍵/SSH鍵は漏洩した可能性があるため、GitHub側からも必ず削除してください。続けますか?'
+      : 'このGPG Vaultを削除します。鍵は復元できません (GitHubに登録した公開鍵も使えなくなります)。続けますか?';
     if (!window.confirm(warning)) return;
     setBusy(true);
     setActionError(null);
@@ -200,7 +200,7 @@ export default function GpgVaultSection() {
       </div>
       {mode !== null && mode !== 'passkey' && (
         <p className="settings-empty">
-          GPGボルトはCCSERVER_AUTH_MODE=passkeyのときのみ利用できます(現在: {mode})。
+          GPG VaultはCCSERVER_AUTH_MODE=passkeyのときのみ利用できます(現在: {mode})。
         </p>
       )}
       {mode === 'passkey' && (
@@ -211,7 +211,7 @@ export default function GpgVaultSection() {
             <>
               {status.toolsAvailable === false && (
                 <p className="settings-error">
-                  このホストには gpg / gpgconf がインストールされていません。GPGボルトは利用できません。
+                  このホストには gpg / gpgconf がインストールされていません。GPG Vaultは利用できません。
                 </p>
               )}
               {actionError && <p className="settings-error">{actionError}</p>}
@@ -243,7 +243,7 @@ export default function GpgVaultSection() {
                     />
                   </div>
                   <button type="button" className="btn btn-secondary" onClick={handleSetup} disabled={busy || status.toolsAvailable === false}>
-                    {busy ? '作成中…' : 'GPGボルトを作成'}
+                    {busy ? '作成中…' : 'GPG Vaultを作成'}
                   </button>
                 </>
               )}
@@ -251,7 +251,7 @@ export default function GpgVaultSection() {
               {status.exists && status.legacyDisabled && (
                 <div className="settings-error">
                   <p>
-                    <strong>このGPGボルトは無効化されています。</strong>
+                    <strong>このGPG Vaultは無効化されています。</strong>
                     セキュリティ修正より前に作成されたため、サンドボックスから秘密鍵を持ち出せる状態にありました
                     (秘密鍵が漏洩した可能性があります)。アンロック・パスキー追加はできません。
                   </p>

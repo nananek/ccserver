@@ -25,13 +25,13 @@ if (unknown.length > 0) {
 
 initDb();
 if (!gpgVaultDb.vaultExists()) {
-  console.log('GPGボルトは存在しません。削除するものはありません。');
+  console.log('GPG Vaultは存在しません。削除するものはありません。');
   process.exit(0);
 }
 
 const info = gpgVaultDb.getVaultPublicInfo();
 const legacy = gpgVaultDb.isLegacyVault();
-console.log(`GPGボルト: ${info.nameReal} <${info.nameEmail}>`);
+console.log(`GPG Vault: ${info.nameReal} <${info.nameEmail}>`);
 console.log(`  fingerprint: ${info.fingerprint}`);
 console.log(`  SSH公開鍵:   ${info.sshPublicKey}`);
 console.log(`  登録パスキー数: ${gpgVaultDb.countCredentialWraps()}`);
@@ -49,4 +49,4 @@ if (!args.includes('--yes')) {
 
 gpgVaultDb.deleteVault();
 console.log('');
-console.log('GPGボルトを削除しました。サーバーを再起動し、設定画面からボルトを再作成してください。');
+console.log('GPG Vaultを削除しました。サーバーを再起動し、設定画面からボルトを再作成してください。');

@@ -182,7 +182,7 @@ export function attachTerminalHandler(chan) {
             isMetaAgent: !!session.isMetaAgent,
             // Effective gpgVault flag THIS session actually launched with
             // (server/ws/sandbox.js's resolved value, not just a requested
-            // override) -- lets the client show whether GPGボルト is really
+            // override) -- lets the client show whether GPG Vault is really
             // active for this specific session (gpgVaultBadge.js).
             gpgVaultActive: !!session.gpgVaultActive,
             // How many clients (this one included) are watching the session.

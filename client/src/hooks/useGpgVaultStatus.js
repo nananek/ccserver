@@ -41,7 +41,7 @@ export function useGpgVaultStatus() {
     }
   }, []);
 
-  // GPGボルトはpasskeyログイン限定機能 -- 他モードでは常にfalse/nullのまま
+  // GPG Vaultはpasskeyログイン限定機能 -- 他モードでは常にfalse/nullのまま
   // ポーリングもしない(GpgVaultSection.jsx既存の`mode !== 'passkey'`ガードと
   // 同じ判断)。
   useVisiblePolling(refresh, POLL_MS, mode === 'passkey');

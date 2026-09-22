@@ -25,9 +25,9 @@ broker への接続はセッション毎の乱数トークン (`CCSANDBOX_GIT_BR
 
 有効にすると、`~/.gnupg` と**ホストの生 gpg-agent / keyboxd ソケット**をサンドボックス内へ転送します。ホストの agent (鍵/トークンを保持) で署名するので、**docker 有効のままコミット署名が使えます**。ssh-agent 転送とは独立したフラグで、こちらだけ有効にしても ssh-agent は転送されません。
 
-## GPGボルト (署名 + SSH push、パスキーログイン限定)
+## GPG Vault (署名 + SSH push、パスキーログイン限定)
 
-上記の `gpg`/`sshAgent` とは**別物**の、新しい仕組みです。`gpg`/`sshAgent` は「ホストの、すでにアンロック済みの鍵をそのまま転送する」だけですが、GPGボルトは ccserver 自身が専用のGPG鍵ペアを生成し、**ログイン (パスキー認証) しない限り復号できない**形で暗号化して保管します。
+上記の `gpg`/`sshAgent` とは**別物**の、新しい仕組みです。`gpg`/`sshAgent` は「ホストの、すでにアンロック済みの鍵をそのまま転送する」だけですが、GPG Vaultは ccserver 自身が専用のGPG鍵ペアを生成し、**ログイン (パスキー認証) しない限り復号できない**形で暗号化して保管します。
 
 - 鍵はサーバー側で新規生成のみ (既存鍵のインポートは非対応)。秘密鍵はネットワーク/ブラウザを一切経由しません。
 - 暗号化方式は WebAuthn の PRF 拡張 (hmac-secret) のみで、フォールバックはありません。PRF対応のパスキー (Touch ID/Windows Hello の対応バージョン、対応FIDO2キー等) が最低1つ登録されている必要があります。対応状況はブラウザ/OS/認証器の組み合わせに依存し、古い環境では使えないことがあります。
@@ -54,7 +54,7 @@ broker への接続はセッション毎の乱数トークン (`CCSANDBOX_GIT_BR
   2. 「Vaultを削除」で削除します (登録済みパスキーでの本人確認を求められます)。ブラウザから操作できない場合はホストで `node server/cli/gpg-vault-reset.js --yes` を実行します (`--yes` なしだと削除対象の表示のみ)。
   3. 新しいボルトを作成し、新しい公開鍵を GitHub に登録し直します。
 - **PRF儀式が必要なのは「アンロック」操作のときだけです** — 実際のコミット署名やSSH pushは、アンロック済みの管理下gpg-agentとのローカルソケット通信で完結し、ブラウザは関与しません。アンロックの持続時間は既定でログインセッションの有効期限 (30日のスライディング) に連動し、短いアイドルタイマーでは自動ロックしません (無人稼働するAIエージェントセッションを途中で壊さないため)。`sandbox.config.json` の `gpgVaultLockPolicy.idleTimeoutMinutes` で、より厳格な固定タイムアウトをオプトインできます。
-- サンドボックス起動オプションの「GPGボルトで署名・SSH pushする」(`gpgVault`) を有効にした状態でVaultがロック中/未作成だと、**起動自体が明確なエラーで拒否されます** (黙って機能なしで起動することはありません)。稼働中にVaultがロックされた場合は、そのセッション内の以降の署名/SSH pushがエラーで失敗します (フォールバックが無い設計上の割り切りです)。
+- サンドボックス起動オプションの「GPG Vaultで署名・SSH pushする」(`gpgVault`) を有効にした状態でVaultがロック中/未作成だと、**起動自体が明確なエラーで拒否されます** (黙って機能なしで起動することはありません)。稼働中にVaultがロックされた場合は、そのセッション内の以降の署名/SSH pushがエラーで失敗します (フォールバックが無い設計上の割り切りです)。
 - `gpg`/`sshAgent` (ホスト鍵転送) と `gpgVault` を同時に有効にすると `gpgVault` が優先されます (警告ログが出ます)。
 - **署名系 (GPGコミット署名、および `gpg.format=ssh` での SSH コミット署名/`ssh-keygen -Y sign`) と SSH push は同じ鍵でもリスクが非対称です。** 署名はローカルの gpg-agent ソケット通信 (または ssh-keygen へのローカル呼び出し) だけで完結し、ネットワークに一切出ないため安全です。一方 SSH push は上記「git — SSH / ssh-agent 転送」の仕組み (`server/ws/sandbox-ssh-wrapper.cjs`) がそのまま使われており、これは `git-upload-pack`/`git-receive-pack`/`git-upload-archive` コマンドの host+path を照合する薄いラッパーに過ぎず、認証自体 (鍵の使用、かつ実際のリモートホストへのネットワーク接続) は素通しです。
 - **GitHub 側にこのボルトの SSH 公開鍵を登録する際は「Signing Key」としてのみ登録し、「Authentication Key」としては登録しないでください。** GitHub の鍵登録画面 (Settings > SSH and GPG keys > New SSH key) では用途を Authentication Key / Signing Key から選べます。Signing Key はコミット/タグの SSH 署名検証にのみ使われ、push 等の認証には使われないため安全です。Authentication Key として登録すると、サンドボックス内から上記ラッパーの範囲外 (`$CCSANDBOX_REAL_SSH` の直接呼び出し、`git-upload-pack` 等以外の素の ssh 用途など) を経由してそのアカウントの全リポジトリへの書き込みアクセスに到達でき、`gitBroker` の allow-list による制限が実質的に無意味になります。

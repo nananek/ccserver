@@ -272,7 +272,7 @@ export async function gpgVaultRoute(fastify, opts) {
         credentialId: stepUp.credentialId, prfSecret: stepUp.prfFirst,
         prfSalt: Buffer.from(flow.data.salt, 'base64url'),
       });
-      reportSecurityEvent('GPGボルトが作成されました', `fingerprint: ${vault.fingerprint}`);
+      reportSecurityEvent('GPG Vaultが作成されました', `fingerprint: ${vault.fingerprint}`);
       return { success: true, vault };
     } catch (err) {
       request.log.error({ err }, 'GPG vault setup failed');
@@ -383,7 +383,7 @@ export async function gpgVaultRoute(fastify, opts) {
           prfSalt: Buffer.from(flow.data.candidateSalt, 'base64url'),
         },
       });
-      reportSecurityEvent('GPGボルトにパスキーが追加されました', `credential: ${candidate.credentialId.slice(0, 12)}…`);
+      reportSecurityEvent('GPG Vaultにパスキーが追加されました', `credential: ${candidate.credentialId.slice(0, 12)}…`);
       return { success: true };
     } catch (err) {
       switch (err.code) {
@@ -443,7 +443,7 @@ export async function gpgVaultRoute(fastify, opts) {
     }
 
     gpgVaultAgent.deleteVault();
-    reportSecurityEvent('GPGボルトが削除されました', `fingerprint: ${info?.fingerprint ?? '?'}`);
+    reportSecurityEvent('GPG Vaultが削除されました', `fingerprint: ${info?.fingerprint ?? '?'}`);
     return { success: true, deletedFingerprint: info?.fingerprint ?? null };
   });
 }

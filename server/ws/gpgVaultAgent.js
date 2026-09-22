@@ -67,7 +67,7 @@ export function isLegacyVault() {
   return gpgVaultDb.isLegacyVault();
 }
 
-export const LEGACY_VAULT_MESSAGE = 'このGPGボルトは修正前 (セキュリティ監査 F1) に作成されたため、秘密鍵が漏洩した可能性があり無効化されています。'
+export const LEGACY_VAULT_MESSAGE = 'このGPG Vaultは修正前 (セキュリティ監査 F1) に作成されたため、秘密鍵が漏洩した可能性があり無効化されています。'
   + 'GitHubから旧鍵を削除し、ボルトを削除して再作成してください。';
 
 function assertNotLegacy() {

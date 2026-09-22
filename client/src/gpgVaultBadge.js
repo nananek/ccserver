@@ -14,10 +14,10 @@
 export function gpgVaultBadgeState(session, vaultStatus) {
   if (!vaultStatus?.exists) return null; // no vault at all: nothing to show
   if (!session?.gpgVaultActive) {
-    return { state: 'inactive', reason: 'このセッションはGPGボルトなしで起動されました' };
+    return { state: 'inactive', reason: 'このセッションはGPG Vaultなしで起動されました' };
   }
   if (!vaultStatus.unlocked) {
-    return { state: 'inactive', reason: 'GPGボルトは現在ロックされています(署名/SSH pushは失敗します)' };
+    return { state: 'inactive', reason: 'GPG Vaultは現在ロックされています(署名/SSH pushは失敗します)' };
   }
-  return { state: 'active', reason: 'GPGボルト有効 — コミット署名・SSH pushに使用できます' };
+  return { state: 'active', reason: 'GPG Vault有効 — コミット署名・SSH pushに使用できます' };
 }
