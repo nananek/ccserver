@@ -2683,6 +2683,35 @@ body {
   overflow-y: hidden;
 }
 
+/* Stamp-style overlay shown while the WebSocket is down and reconnecting
+   (see the `disconnected` state in TerminalView.jsx). The reconnect message
+   xterm itself prints scrolls out of view or gets buried under fresh output,
+   so this needs no scroll position to notice -- pointer-events: none keeps
+   it from ever trapping a tap/click meant for the terminal underneath. */
+.disconnected-stamp {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.disconnected-stamp span {
+  padding: 8px 22px;
+  border: 4px solid rgba(243, 139, 168, 0.6);
+  border-radius: 14px;
+  color: rgba(243, 139, 168, 0.6);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: clamp(18px, 6vw, 34px);
+  font-weight: 700;
+  letter-spacing: 3px;
+  white-space: nowrap;
+  transform: rotate(-30deg);
+  user-select: none;
+}
+
 /* Floating copy button after a long-press text selection on touch devices
    (see the long-press handling in TerminalView.jsx). Positioned inline via
    style={{ left, top }} at the touch point. */

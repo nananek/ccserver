@@ -283,6 +283,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // shrank (someone joined from a narrower device).
   const viewerCountRef = useRef(null);
   const applyServerSizeRef = useRef(null);
+  // True while the WebSocket is down and ccserver is (or was) trying to
+  // reconnect -- drives the "DISCONNECTED" stamp overlay. The xterm message
+  // ws.onclose already writes is easy to miss once scrolled out of view or
+  // buried under fresh output, so this needs its own always-visible cue.
+  // Deliberately NOT set for an intentional close (process exit, taken over
+  // by another client) -- those already have their own, more specific
+  // messaging.
+  const [disconnected, setDisconnected] = useState(false);
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
   const [showAutoYesLog, setShowAutoYesLog] = useState(false);
@@ -818,6 +826,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
 
       ws.onopen = () => {
         reconnectAttemptsRef.current = 0;
+        setDisconnected(false);
         const dims = fitAddon.proposeDimensions();
 
         if (sessionIdRef.current) {
@@ -1058,6 +1067,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         if (wsRef.current !== ws) return;
         if (intentionalCloseRef.current) return;
 
+        setDisconnected(true);
         if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
           const delay = Math.min(
             1000 * Math.pow(2, reconnectAttemptsRef.current),
@@ -1643,6 +1653,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           empty scrollbar (.tui-scroll) and pinToBottom keeps the viewport at
           the bottom. */}
       <div className={`terminal-container${app === 'opencode' ? ' tui-scroll' : ''}`} ref={terminalRef} />
+      {disconnected && (
+        <div className="disconnected-stamp" aria-hidden="true">
+          <span>DISCONNECTED</span>
+        </div>
+      )}
       {handles && (
         <>
           <div className="selection-handle" style={{ left: handles.start.relX, top: handles.start.relY }} />
