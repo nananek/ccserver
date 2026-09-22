@@ -249,11 +249,11 @@ test('launch_session caps sandboxOpts against the meta agent\'s own grant and at
   });
   assert.deepEqual(deps.calls.createdViaApi, [{
     cwd: '/srv/proj', app: 'opencode', model: null, sandbox: true,
-    sandboxOpts: { gpg: true, sshAgent: false },
+    sandboxOpts: { gpg: true, sshAgent: false, gpgVault: false },
     requestedBy: `meta-agent:${MY_SESSION_ID}`,
   }]);
   assert.equal(out.sessionId, 'new-session-1');
-  assert.deepEqual(out.sandboxOpts, { gpg: true, sshAgent: false }, 'result shows the EFFECTIVE grant');
+  assert.deepEqual(out.sandboxOpts, { gpg: true, sshAgent: false, gpgVault: false }, 'result shows the EFFECTIVE grant');
 });
 
 test('launch_session caps sandboxOpts.tools against the meta agent\'s own grant (regression: PR#114 review, capSandboxOpts used to drop tools)', async () => {
@@ -262,8 +262,8 @@ test('launch_session caps sandboxOpts.tools against the meta agent\'s own grant 
     cwd: '/srv/p',
     sandboxOpts: { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } },
   });
-  assert.deepEqual(deps.calls.createdViaApi[0].sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } });
-  assert.deepEqual(out.sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } }, 'result shows the EFFECTIVE grant');
+  assert.deepEqual(deps.calls.createdViaApi[0].sandboxOpts, { gpg: true, sshAgent: true, gpgVault: false, tools: { rtk: true, codeReviewGraph: false } });
+  assert.deepEqual(out.sandboxOpts, { gpg: true, sshAgent: true, gpgVault: false, tools: { rtk: true, codeReviewGraph: false } }, 'result shows the EFFECTIVE grant');
 });
 
 test('launch_session omits sandboxOpts entirely when none requested; failures unwrap', async () => {
@@ -317,9 +317,9 @@ test('launch_group caps the group flags and each worker spec\'s sandboxOpts', as
     sandboxOpts: { gpg: true, sshAgent: true },
   });
   const body = deps.calls.launchedGroups[0];
-  assert.deepEqual(body.sandboxOpts, { gpg: false, sshAgent: true });
-  assert.deepEqual(body.workers[0].sandboxOpts, { gpg: false, sshAgent: true }); // gpg downgraded
-  assert.deepEqual(body.workers[1].sandboxOpts, { gpg: false, sshAgent: false });
+  assert.deepEqual(body.sandboxOpts, { gpg: false, sshAgent: true, gpgVault: false });
+  assert.deepEqual(body.workers[0].sandboxOpts, { gpg: false, sshAgent: true, gpgVault: false }); // gpg downgraded
+  assert.deepEqual(body.workers[1].sandboxOpts, { gpg: false, sshAgent: false, gpgVault: false });
   assert.deepEqual(
     body.orchestrator,
     { app: 'opencode', model: 'm2', instructions: 'do things' },
@@ -343,8 +343,8 @@ test('launch_group caps sandboxOpts.tools on the group flags and each worker spe
     sandboxOpts: { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } },
   });
   const body = deps.calls.launchedGroups[0];
-  assert.deepEqual(body.sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } });
-  assert.deepEqual(body.workers[0].sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } });
+  assert.deepEqual(body.sandboxOpts, { gpg: true, sshAgent: true, gpgVault: false, tools: { rtk: true, codeReviewGraph: false } });
+  assert.deepEqual(body.workers[0].sandboxOpts, { gpg: true, sshAgent: true, gpgVault: false, tools: { rtk: true, codeReviewGraph: false } });
 });
 
 test('launch_from_preset expands a snapshot NOW and caps expanded grants', async () => {
@@ -367,7 +367,7 @@ test('launch_from_preset expands a snapshot NOW and caps expanded grants', async
   assert.equal(body.cwd, '/srv/combo');
   assert.deepEqual(body.orchestrator, { app: 'opencode', model: 'm1', instructions: 'be nice' });
   assert.equal(body.workers.length, 2);
-  assert.deepEqual(body.workers[0], { role: 'workerA', app: 'claude', model: 'fast', name: 'Al', sandboxOpts: { gpg: true, sshAgent: false } });
+  assert.deepEqual(body.workers[0], { role: 'workerA', app: 'claude', model: 'fast', name: 'Al', sandboxOpts: { gpg: true, sshAgent: false, gpgVault: false } });
   assert.deepEqual(body.workers[1], { role: 'workerB', app: 'codex' });
 
   const missing = await tools.launchFromPreset(deps, { presetId: 'ghost', cwd: '/srv/combo' });

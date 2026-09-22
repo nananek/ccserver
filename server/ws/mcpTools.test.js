@@ -540,7 +540,7 @@ test('openTab: omitted model falls back to the persisted role preference', async
     assert.equal(r1.error, undefined, r1.message || '');
     assert.equal(r1.model, 'gpt-5', 'effective model returned in the tool result');
     assert.equal(seenOpts.model, 'gpt-5');
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false }, 'persisted per-role sandbox flags survive open_tab');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false, gpgVault: false }, 'persisted per-role sandbox flags survive open_tab');
 
     // Explicit model null -> app default (overrides the persisted preference).
     const r2 = await tools.openTab(controlDeps(g), { role: 'workerA', model: null, cwd: `/srv/project-${g}` });
@@ -558,8 +558,8 @@ test('openTab: omitted model falls back to the persisted role preference', async
     // exactly the sandboxOpts it already had (see the dedicated openTab
     // cap/restart tests below), so this request does NOT take effect.
     const r4 = await tools.openTab(controlDeps(g), { role: 'workerA', sandboxOpts: { gpg: false, sshAgent: true }, cwd: `/srv/project-${g}` });
-    assert.deepEqual(r4.sandboxOpts, { gpg: true, sshAgent: false }, 'restart keeps the existing grant, the request is not honored');
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false });
+    assert.deepEqual(r4.sandboxOpts, { gpg: true, sshAgent: false, gpgVault: false }, 'restart keeps the existing grant, the request is not honored');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false, gpgVault: false });
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(g);
@@ -634,8 +634,8 @@ test('openTab: sandboxOpts cannot exceed what the orchestrator itself currently 
       role: 'workerC', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
     });
     assert.equal(res.error, undefined, res.message || '');
-    assert.deepEqual(res.sandboxOpts, { gpg: false, sshAgent: false }, 'downgraded to the orchestrator\'s own grant, not an error');
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: false }, 'the spawned session never actually gets the escalated flags');
+    assert.deepEqual(res.sandboxOpts, { gpg: false, sshAgent: false, gpgVault: false }, 'downgraded to the orchestrator\'s own grant, not an error');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: false, gpgVault: false }, 'the spawned session never actually gets the escalated flags');
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(g);
@@ -657,8 +657,8 @@ test('openTab: gpg/sshAgent are capped independently', async () => {
     const res = await tools.openTab(controlDeps(g), {
       role: 'workerC', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
     });
-    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: false }, 'gpg passes through, sshAgent alone is capped');
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false });
+    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: false, gpgVault: false }, 'gpg passes through, sshAgent alone is capped');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false, gpgVault: false });
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(g);
@@ -680,8 +680,8 @@ test('openTab: a request within the orchestrator\'s own grant passes through unc
     const res = await tools.openTab(controlDeps(g), {
       role: 'workerC', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
     });
-    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: true }, 'legitimate equal-privilege delegation is not blocked');
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: true });
+    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: true, gpgVault: false }, 'legitimate equal-privilege delegation is not blocked');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: true, gpgVault: false });
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(g);
@@ -734,8 +734,8 @@ test('openTab: restarting a registered member keeps its existing sandboxOpts eve
     const res = await tools.openTab(controlDeps(g), {
       role: 'workerA', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
     });
-    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: true }, 'restart is not downgraded by the orchestrator\'s lower grant');
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: true });
+    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: true, gpgVault: false }, 'restart is not downgraded by the orchestrator\'s lower grant');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: true, gpgVault: false });
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(g);
@@ -766,8 +766,8 @@ test('openTab: restarting a registered member ignores a request to escalate beyo
     const res = await tools.openTab(controlDeps(g), {
       role: 'workerA', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
     });
-    assert.deepEqual(res.sandboxOpts, { gpg: false, sshAgent: false });
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: false });
+    assert.deepEqual(res.sandboxOpts, { gpg: false, sshAgent: false, gpgVault: false });
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: false, gpgVault: false });
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(g);
@@ -797,8 +797,8 @@ test('openTab: a genuinely new member (never registered) is still capped even if
     const res = await tools.openTab(controlDeps(g), {
       role: 'workerA', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
     });
-    assert.deepEqual(res.sandboxOpts, { gpg: false, sshAgent: false }, 'closed-then-reopened role is a new member, capped by the orchestrator again');
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: false });
+    assert.deepEqual(res.sandboxOpts, { gpg: false, sshAgent: false, gpgVault: false }, 'closed-then-reopened role is a new member, capped by the orchestrator again');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: false, gpgVault: false });
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(g);
@@ -818,17 +818,25 @@ test('capSandboxOpts: a falsy requested value passes through unchanged', () => {
 
 test('capSandboxOpts: gpg/sshAgent are capped independently against the holder\'s own grant', () => {
   const res = tools.capSandboxOpts({ gpg: true, sshAgent: true }, { gpg: true, sshAgent: false });
-  assert.deepEqual(res, { gpg: true, sshAgent: false });
+  assert.deepEqual(res, { gpg: true, sshAgent: false, gpgVault: false });
+});
+
+// issue #182 follow-up: gpgVault must be capped the same as gpg/sshAgent --
+// a requester can never be granted it unless the cap holder holds it too.
+test('capSandboxOpts: gpgVault is capped the same way as gpg/sshAgent (issue #182 follow-up)', () => {
+  assert.deepEqual(tools.capSandboxOpts({ gpgVault: true }, { gpgVault: true }), { gpg: false, sshAgent: false, gpgVault: true });
+  assert.deepEqual(tools.capSandboxOpts({ gpgVault: true }, { gpgVault: false }), { gpg: false, sshAgent: false, gpgVault: false });
+  assert.deepEqual(tools.capSandboxOpts({ gpgVault: true }, null), { gpg: false, sshAgent: false, gpgVault: false });
 });
 
 test('capSandboxOpts: missing cap denies everything by default', () => {
   const res = tools.capSandboxOpts({ gpg: true, sshAgent: true }, null);
-  assert.deepEqual(res, { gpg: false, sshAgent: false });
+  assert.deepEqual(res, { gpg: false, sshAgent: false, gpgVault: false });
 });
 
 test('capSandboxOpts: requested.tools is omitted from the output entirely when not requested', () => {
   const res = tools.capSandboxOpts({ gpg: true, sshAgent: true }, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } });
-  assert.deepEqual(res, { gpg: true, sshAgent: true });
+  assert.deepEqual(res, { gpg: true, sshAgent: true, gpgVault: false });
   assert.equal('tools' in res, false, 'no tools key must appear when the caller never asked for tools');
 });
 
@@ -837,7 +845,7 @@ test('capSandboxOpts: tools cannot exceed what the cap holder itself currently h
     { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } },
     { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } },
   );
-  assert.deepEqual(res, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } });
+  assert.deepEqual(res, { gpg: true, sshAgent: true, gpgVault: false, tools: { rtk: true, codeReviewGraph: false } });
 });
 
 test('capSandboxOpts: a cap with no tools grant at all denies both tools flags', () => {
@@ -845,12 +853,12 @@ test('capSandboxOpts: a cap with no tools grant at all denies both tools flags',
     { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } },
     { gpg: true, sshAgent: true },
   );
-  assert.deepEqual(res, { gpg: true, sshAgent: true, tools: { rtk: false, codeReviewGraph: false } });
+  assert.deepEqual(res, { gpg: true, sshAgent: true, gpgVault: false, tools: { rtk: false, codeReviewGraph: false } });
 });
 
 test('capSandboxOpts: requested.tools of the wrong type is treated as absent (no tools key output)', () => {
   const res = tools.capSandboxOpts({ gpg: true, tools: 'nope' }, { gpg: true, tools: { rtk: true, codeReviewGraph: true } });
-  assert.deepEqual(res, { gpg: true, sshAgent: false });
+  assert.deepEqual(res, { gpg: true, sshAgent: false, gpgVault: false });
 });
 
 test('openTab: tools cannot exceed what the orchestrator itself currently holds (privilege escalation guard, mirrors gpg/sshAgent)', async () => {
@@ -871,8 +879,8 @@ test('openTab: tools cannot exceed what the orchestrator itself currently holds 
       sandboxOpts: { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } },
     });
     assert.equal(res.error, undefined, res.message || '');
-    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } });
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: false } }, 'the spawned session never actually gets the escalated codeReviewGraph tool');
+    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: true, gpgVault: false, tools: { rtk: true, codeReviewGraph: false } });
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: true, gpgVault: false, tools: { rtk: true, codeReviewGraph: false } }, 'the spawned session never actually gets the escalated codeReviewGraph tool');
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(g);
@@ -1177,7 +1185,7 @@ test('newSession: replaces a worker via addMember({}) and reports the fresh laun
     assert.equal(r.app, 'opencode', 'the role\'s persisted app preference is reused');
     assert.equal(r.model, 'gpt-5', 'the role\'s persisted model preference is reused');
     assert.equal(r.cwd, seenOpts.cwd, 'the reported cwd is the one actually launched');
-    assert.deepEqual(r.sandboxOpts, { gpg: false, sshAgent: true });
+    assert.deepEqual(r.sandboxOpts, { gpg: false, sshAgent: true, gpgVault: false });
 
     // Fresh CLI launch: NO resume option may reach createSession.
     assert.ok(!('resumeLast' in seenOpts), 'resumeLast must not be passed (fresh conversation)');

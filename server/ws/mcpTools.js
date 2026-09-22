@@ -215,6 +215,12 @@ export function capSandboxOpts(requested, cap) {
   const out = {
     gpg: !!requested.gpg && !!cap?.gpg,
     sshAgent: !!requested.sshAgent && !!cap?.sshAgent,
+    // Same deny-by-default capping as gpg/sshAgent above -- a worker/child
+    // launch can never be granted gpgVault unless the grant-holder (the
+    // orchestrator for open_tab, the meta agent for launch_session) itself
+    // currently holds it (issue #182 follow-up: this allowlist was missing
+    // gpgVault entirely, same gap as groupManager.normalizeSandboxOpts).
+    gpgVault: !!requested.gpgVault && !!cap?.gpgVault,
   };
   if (requested.tools && typeof requested.tools === 'object') {
     out.tools = {

@@ -580,7 +580,7 @@ test('getOrchestratorSandboxOpts: falls back to memberPrefs.orchestrator.sandbox
     orchestratorSandboxOpts: { gpg: true, sshAgent: true },
   });
   groupsToDestroy.push(gid);
-  assert.deepEqual(groupManager.getOrchestratorSandboxOpts(gid), { gpg: true, sshAgent: true });
+  assert.deepEqual(groupManager.getOrchestratorSandboxOpts(gid), { gpg: true, sshAgent: true, gpgVault: false });
 });
 
 test('getOrchestratorSandboxOpts: unknown groupId returns null', () => {
@@ -798,7 +798,7 @@ test('createGroup persists memberPrefs for all three roles; workers fall back to
   groupsToDestroy.push(gid);
 
   const prefs = groupManager.getMemberPrefs(gid);
-  assert.deepEqual(prefs.workerA, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } });
+  assert.deepEqual(prefs.workerA, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true, gpgVault: false } });
   assert.deepEqual(prefs.workerB, { name: null, app: 'claude', model: null, sandboxOpts: null });
   assert.deepEqual(prefs.orchestrator, { name: null, app: 'claude', model: 'gpt-5', sandboxOpts: null });
 
@@ -809,7 +809,28 @@ test('createGroup persists memberPrefs for all three roles; workers fall back to
   // The persisted file carries memberPrefs (survives a restart).
   const saved = JSON.parse(readFileSync(process.env.CCSERVER_GROUPS_PATH, 'utf-8'));
   const entry = saved.find((g) => g.id === gid);
-  assert.deepEqual(entry.memberPrefs.workerA, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } });
+  assert.deepEqual(entry.memberPrefs.workerA, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true, gpgVault: false } });
+});
+
+// Issue #182: normalizeSandboxOpts's allowlist copied only gpg/sshAgent(/tools),
+// silently dropping gpgVault -- every combo/group launch path funnels
+// sandboxOpts through this one function, so a per-role gpgVault:true request
+// from the client was thrown away here before sandbox.js ever saw it, and
+// sandbox.js's own `sandboxOpts?.gpgVault ?? cfgGpgVault` fallback then
+// silently launched without the vault (no error, no warning) -- exactly the
+// "silent downgrade of what the caller requested" sandbox.js's own gpgVault
+// gate comment says must never happen. Single (non-group) launches never go
+// through this function (routes/sessions.js passes body.sandboxOpts through
+// unmodified), so this is a group/combo-launch-only gap.
+test('normalizeSandboxOpts carries gpgVault through, same as gpg/sshAgent (issue #182)', () => {
+  assert.deepEqual(groupManager.normalizeSandboxOpts({ gpgVault: true }), { gpg: false, sshAgent: false, gpgVault: true });
+  assert.deepEqual(groupManager.normalizeSandboxOpts({ gpg: true, sshAgent: true, gpgVault: true }),
+    { gpg: true, sshAgent: true, gpgVault: true });
+  // Absent/falsy still normalizes to false, same as gpg/sshAgent -- never
+  // undefined, which sandbox.js would treat as "unspecified" and fall back
+  // to the server's global default instead of the caller's explicit false.
+  assert.equal(groupManager.normalizeSandboxOpts({ gpg: true }).gpgVault, false);
+  assert.equal(groupManager.normalizeSandboxOpts(null), null);
 });
 
 test('memberPrefs defaults: omitted worker sandboxOpts inherit the group flags, orchestrator has none', async () => {
@@ -856,7 +877,7 @@ test('restoreGroups rebuilds memberPrefs (with legacy orchestratorApp migration)
   assert.equal(prefs.orchestrator.app, 'opencode');
   // Workers have no app preference (legacy groups had none) but inherit the
   // group sandboxOpts fallback.
-  assert.deepEqual(prefs.workerA.sandboxOpts, { gpg: true, sshAgent: false });
+  assert.deepEqual(prefs.workerA.sandboxOpts, { gpg: true, sshAgent: false, gpgVault: false });
   assert.equal(groupManager.getGroup(gid).orchestratorApp, 'opencode');
 });
 
@@ -883,7 +904,7 @@ test('restoreGroups: persisted memberPrefs round-trip (model preserved)', async 
 
   groupManager.restoreGroups();
   const prefs = groupManager.getMemberPrefs(gid);
-  assert.deepEqual(prefs.workerA, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } });
+  assert.deepEqual(prefs.workerA, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true, gpgVault: false } });
   assert.deepEqual(prefs.workerB, { name: null, app: 'claude', model: null, sandboxOpts: null });
   assert.deepEqual(prefs.orchestrator, { name: null, app: 'claude', model: 'gpt-5', sandboxOpts: null });
 });
@@ -912,7 +933,7 @@ test('restoreGroups: open_tab-created extra roles keep their memberPrefs (worker
 
   groupManager.restoreGroups();
   const prefs = groupManager.getMemberPrefs(gid);
-  assert.deepEqual(prefs.workerC, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } },
+  assert.deepEqual(prefs.workerC, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true, gpgVault: false } },
     'a non-fixed-trio worker role must not lose its preference on restore');
   assert.ok('workerA' in prefs, 'the fixed trio is still normalized');
 });
@@ -945,14 +966,14 @@ test('addMember resolves options by precedence: explicit > memberPrefs > default
     const r2 = await groupManager.addMember(gid, 'workerA', { cwd: '/srv/proj' });
     assert.equal(seenOpts.app, 'opencode');
     assert.equal(seenOpts.model, 'gpt-5');
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false });
-    assert.deepEqual(r2.sandboxOpts, { gpg: true, sshAgent: false });
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false, gpgVault: false });
+    assert.deepEqual(r2.sandboxOpts, { gpg: true, sshAgent: false, gpgVault: false });
 
     // Explicit options beat the preference.
     const r3 = await groupManager.addMember(gid, 'workerA', { app: 'claude', model: 'claude-sonnet', cwd: '/srv/proj', sandboxOpts: { gpg: false, sshAgent: true } });
     assert.equal(seenOpts.app, 'claude');
     assert.equal(seenOpts.model, 'claude-sonnet');
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: true });
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: true, gpgVault: false });
 
     // Explicit model null means "app default" -- must override the preference.
     const r4 = await groupManager.addMember(gid, 'workerA', { model: null, cwd: '/srv/proj' });
@@ -966,7 +987,7 @@ test('addMember resolves options by precedence: explicit > memberPrefs > default
     const failing = { getSession: () => null, createSession: () => ({ error: 'boom' }), destroySession: () => {}, writeToSession: () => false };
     groupManager.setSessionApiForTests(failing);
     await groupManager.addMember(gid, 'workerA', { app: 'claude', model: 'claude-sonnet', cwd: '/srv/proj' });
-    assert.deepEqual(groupManager.getMemberPrefs(gid, 'workerA'), { name: null, app: 'claude', model: null, sandboxOpts: { gpg: false, sshAgent: true } }, 'failed spawn must leave the old preference untouched');
+    assert.deepEqual(groupManager.getMemberPrefs(gid, 'workerA'), { name: null, app: 'claude', model: null, sandboxOpts: { gpg: false, sshAgent: true, gpgVault: false } }, 'failed spawn must leave the old preference untouched');
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(gid);
@@ -985,7 +1006,7 @@ test('addMember stores the effective launch data as the role preference (atomic 
   try {
     const res = await groupManager.addMember(gid, 'workerA', { app: 'opencode', model: 'gpt-5', cwd: '/srv/proj', sandboxOpts: { gpg: true } });
     assert.equal(res.error, undefined);
-    assert.deepEqual(groupManager.getMemberPrefs(gid, 'workerA'), { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: true, sshAgent: false } });
+    assert.deepEqual(groupManager.getMemberPrefs(gid, 'workerA'), { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: true, sshAgent: false, gpgVault: false } });
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(gid);

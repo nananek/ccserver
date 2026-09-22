@@ -126,7 +126,14 @@ function normalizeDisplayName(name) {
 
 export function normalizeSandboxOpts(opts) {
   if (!opts || typeof opts !== 'object') return null;
-  const out = { gpg: !!opts.gpg, sshAgent: !!opts.sshAgent };
+  // gpgVault must be carried through like gpg/sshAgent -- it used to be
+  // missing from this allowlist, so every combo/group launch path (which all
+  // funnel sandboxOpts through this function) silently dropped a per-role
+  // gpgVault:true request. sandbox.js then fell back to the server's global
+  // default (usually false) with no error, even though sandbox.js's own gate
+  // is explicit that a requested-but-unavailable vault must fail loudly, not
+  // silently degrade to no GPG (see issue #182).
+  const out = { gpg: !!opts.gpg, sshAgent: !!opts.sshAgent, gpgVault: !!opts.gpgVault };
   // Opt-in tool provisioning (rtk / code-review-graph) -- carried only when the
   // caller provided it, so the common { gpg, sshAgent } shape is unchanged.
   if (opts.tools && typeof opts.tools === 'object') {
