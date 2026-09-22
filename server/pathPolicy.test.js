@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { normalizeBrowseRoots, isContained, resolveWithinRoots, isCcserverScratchPath } from './pathPolicy.js';
 
 test('normalizeBrowseRoots: non-array or missing collapses to []', () => {
@@ -129,4 +129,41 @@ test('isCcserverScratchPath: recognizes the scratch tree and its subdirectories,
   assert.equal(isCcserverScratchPath(join(homedir(), '.local', 'share', 'other-app')), false);
   assert.equal(isCcserverScratchPath('/srv/projects/app1'), false);
   assert.equal(isCcserverScratchPath('/'), false);
+});
+
+// Regression (issue #189 self-review): the exemption must not be fooled by a
+// symlink planted inside the scratch tree. `cwd` is client-supplied and any
+// sandboxed session can create such a link in its own rw-bound HOME, so a
+// purely lexical prefix check let `<scratch>/worktrees/escape -> /` through
+// -- skipping the browseRoots refusal AND making buildBwrapArgs' `--bind
+// <cwd> <cwd>` resolve its bind source to the host root (a live PoC could
+// read/write host files from the "sandboxed" shell).
+test('isCcserverScratchPath: a symlink inside the scratch tree pointing outside it is rejected', () => {
+  const scratchRoot = join(homedir(), '.local', 'share', 'ccserver-sandbox');
+  const outside = mkdtempSync(join(tmpdir(), 'ccserver-scratch-escape-'));
+  const escapeLink = join(scratchRoot, 'worktrees', `test-escape-${process.pid}-${Date.now()}`);
+  mkdirSync(dirname(escapeLink), { recursive: true });
+  try {
+    symlinkSync(outside, escapeLink);
+    assert.equal(isCcserverScratchPath(escapeLink), false,
+      'a scratch-internal symlink resolving outside the scratch tree must not be exempt');
+  } finally {
+    rmSync(escapeLink, { force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('isCcserverScratchPath: a symlink resolving to a real directory inside the scratch tree stays exempt', () => {
+  const scratchRoot = join(homedir(), '.local', 'share', 'ccserver-sandbox');
+  const realDir = join(scratchRoot, 'worktrees', `test-real-${process.pid}-${Date.now()}`);
+  const link = join(scratchRoot, 'worktrees', `test-link-${process.pid}-${Date.now()}`);
+  mkdirSync(realDir, { recursive: true });
+  try {
+    symlinkSync(realDir, link);
+    assert.equal(isCcserverScratchPath(link), true);
+    assert.equal(isCcserverScratchPath(join(link, 'sub', 'not-created-yet')), true);
+  } finally {
+    rmSync(link, { force: true });
+    rmSync(realDir, { recursive: true, force: true });
+  }
 });

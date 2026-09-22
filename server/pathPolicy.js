@@ -94,17 +94,30 @@ export function resolveWithinRoots(requestedPath, roots, fallback = '/') {
 // in its isolated CLAUDE.md-only scratch dir (routes/groups.js's
 // ORCHESTRATOR_ROOT, default `<this>/orchestrator`) -- NEVER the project
 // directory itself (see groupManager.js's addMember: "options.cwd ... is
-// intentionally never read here"). Neither path is ever client-chosen (both
-// are always `<root>/<projectHash>[/<role>]`), so bounding them by
-// browseRoots would make every combo/group launch impossible the moment
-// browseRoots is configured, since these dirs sit outside any
-// project-directory-shaped browseRoots entry an operator would realistically
-// set. This mirrors persistentHomeDir() (sandbox.js, the sandboxed $HOME)
-// already living under this same tree, unrestricted by browseRoots for the
-// same reason. Used ONLY for the session-launch cwd check
-// (sessionManager.js / sandbox.js's buildSandboxSpawn) -- it does NOT apply
-// to /api/files or /api/dirs, which stay fully bounded by browseRoots.
+// intentionally never read here"). Bounding them by browseRoots would make
+// every combo/group launch impossible the moment browseRoots is configured,
+// since these dirs sit outside any project-directory-shaped browseRoots
+// entry an operator would realistically set. This mirrors
+// persistentHomeDir() (sandbox.js, the sandboxed $HOME) already living under
+// this same tree, unrestricted by browseRoots for the same reason. Used ONLY
+// for the session-launch cwd check (sessionManager.js / sandbox.js's
+// buildSandboxSpawn) -- it does NOT apply to /api/files or /api/dirs, which
+// stay fully bounded by browseRoots.
+//
+// Unlike the combo cwds it exists for, `absPath` here IS ultimately
+// client-supplied (the `cwd` of a launch request), so the lexical check
+// alone is not enough: a symlink planted inside the scratch tree would
+// otherwise be exempted while pointing anywhere. That is not just a
+// browseRoots bypass -- buildBwrapArgs binds `--bind <cwd> <cwd>`, and the
+// kernel resolves the bind SOURCE through the symlink, so a link like
+// `<scratch>/worktrees/escape -> /` made the sandbox rw-bind the HOST ROOT
+// at that path (verified live: a shell launched with that cwd could read and
+// write host files through relative paths). Any sandboxed session can plant
+// such a link -- its persistent HOME is rw-bound under this same tree -- so
+// the exemption additionally requires the path's real location to be inside
+// the (real) scratch tree.
 const CCSERVER_SANDBOX_SCRATCH_ROOT = resolve(join(HOME, '.local', 'share', 'ccserver-sandbox'));
 export function isCcserverScratchPath(absPath) {
-  return absPath === CCSERVER_SANDBOX_SCRATCH_ROOT || absPath.startsWith(CCSERVER_SANDBOX_SCRATCH_ROOT + sep);
+  if (!withinRoots(absPath, [CCSERVER_SANDBOX_SCRATCH_ROOT])) return false;
+  return withinRoots(realOrNearest(absPath), [realOrSelf(CCSERVER_SANDBOX_SCRATCH_ROOT)]);
 }

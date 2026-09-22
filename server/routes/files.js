@@ -1,5 +1,5 @@
 import { createReadStream, constants } from 'node:fs';
-import { stat, writeFile, open } from 'node:fs/promises';
+import { stat, open } from 'node:fs/promises';
 import { basename, join, extname } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { loadSandboxConfig } from '../ws/sandbox.js';
@@ -204,9 +204,27 @@ export async function filesRoute(fastify, opts) {
         const targetPath = join(destination, name);
         try {
           const buf = await part.toBuffer();
-          await writeFile(targetPath, buf);
+          // O_NOFOLLOW: the containment check above only covers the
+          // destination DIRECTORY (and realpaths it, so a symlinked
+          // directory escaping browseRoots is already refused). A symlink at
+          // the target FILE itself -- e.g. a malicious repo's
+          // `notes.txt -> ~/.ssh/authorized_keys`, planted before the
+          // operator uploads a same-named file into that directory -- would
+          // otherwise be followed by a plain writeFile(), writing outside
+          // browseRoots. Refuse the link instead of silently overwriting
+          // whatever it points at.
+          let handle = null;
+          try {
+            handle = await open(targetPath, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW);
+            await handle.writeFile(buf);
+          } finally {
+            if (handle) await handle.close().catch(() => {});
+          }
           uploaded.push({ name, path: targetPath, size: buf.length });
         } catch (err) {
+          if (err.code === 'ELOOP') {
+            return reply.code(403).send({ error: `Refusing to write through a symlink: ${name}` });
+          }
           if (err.code === 'EACCES') {
             return reply.code(403).send({ error: `Permission denied: ${name}` });
           }

@@ -8,7 +8,7 @@ import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, chmodSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, symlinkSync, chmodSync, readdirSync, existsSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { execFileSync } from 'node:child_process';
@@ -583,5 +583,36 @@ test('POST /files: an upload destination inside browseRoots still succeeds', asy
     });
     assert.equal(res.statusCode, 200, res.body);
     assert.equal(existsSync(join(allowed, 'ok.txt')), true);
+  });
+});
+
+// Regression (issue #189 self-review): a symlink planted at the target file
+// name used to be followed by writeFile(), so an upload of `notes.txt` into a
+// directory containing `notes.txt -> <anywhere>` wrote THROUGH the link --
+// a write-outside-browseRoots primitive requiring no race (the read side
+// already rejects the same link via its realpath containment check).
+test('POST /files: an upload target that is a symlink is refused and the link target is untouched', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+  const outside = mkdtempSync(join(dir, 'outside-'));
+  const victim = join(outside, 'victim.txt');
+  writeFileSync(victim, 'ORIGINAL\n');
+  symlinkSync(victim, join(allowed, 'link.txt'));
+
+  await withConfig({ browseRoots: [allowed] }, async () => {
+    const boundary = '----Boundary' + randomUUID().replace(/-/g, '');
+    const payload = buildMultipart(boundary, [
+      { name: 'destination', data: allowed },
+      { name: 'files', filename: 'link.txt', contentType: 'text/plain', data: Buffer.from('PWNED\n') },
+    ]);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/files',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload,
+    });
+    assert.equal(res.statusCode, 403, res.body);
+    assert.match(res.json().error, /symlink/);
+    assert.equal(readFileSync(victim, 'utf-8'), 'ORIGINAL\n',
+      'the symlink target outside browseRoots must not be overwritten');
   });
 });
