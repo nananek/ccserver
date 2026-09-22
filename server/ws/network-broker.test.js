@@ -273,6 +273,24 @@ test('H1: admin-token stdin that never reaches EOF never starts the broker', asy
   }
 });
 
+test('H1: an asynchronous EPIPE while sending the admin token fails startup without crashing the parent', async () => {
+  const closeStdinBeforeReturning = (_command, _args, options) => {
+    const proc = spawnFn(process.execPath, [
+      '-e',
+      'require("node:fs").closeSync(0); setTimeout(() => process.exit(1), 500)',
+    ], options);
+    // Make the child close fd 0 before startNetworkBroker calls stdin.end().
+    // The resulting EPIPE is emitted asynchronously on proc.stdin; try/catch
+    // around .end() cannot handle it.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    return proc;
+  };
+  await assert.rejects(
+    () => startNetworkBroker({}, { spawnProcess: closeStdinBeforeReturning }),
+    /network broker failed to start: (?:write EPIPE|exited code=1)/,
+  );
+});
+
 test('networkBrokerProxyUrl embeds the token as Basic-auth userinfo', () => {
   const url = networkBrokerProxyUrl({ port: 12345, token: 'abc/def' });
   assert.equal(url, 'http://networkbroker:abc%2Fdef@127.0.0.1:12345');

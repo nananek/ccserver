@@ -1330,6 +1330,25 @@ test('sandboxHomeConflict: refuses a wipe while a live sandboxed session shares 
   }
 });
 
+test('SandboxHomeLaunchReservations closes the async launch window without blocking reuse launches', () => {
+  const reservations = new sessionManager.SandboxHomeLaunchReservations();
+  const home = '/tmp/ccserver-reservation-test-home';
+
+  assert.equal(reservations.reserve(home, { fresh: true }), true);
+  assert.equal(reservations.count(home), 1);
+  assert.equal(reservations.reserve(home, { fresh: true }), false, 'a second fresh launch cannot race the first wipe');
+
+  assert.equal(reservations.reserve(home, { fresh: false }), true, 'reuse launches may coexist');
+  assert.equal(reservations.count(home), 2);
+  reservations.release(home);
+  reservations.release(home);
+  assert.equal(reservations.count(home), 0);
+
+  const live = [{ exited: false, sandbox: true, cwd: '/srv/project' }];
+  const liveHome = persistentHomeDir('/srv/project');
+  assert.equal(reservations.reserve(liveHome, { fresh: true, liveSessions: live }), false, 'live sessions still block a fresh launch');
+});
+
 // sandboxHomeInUse is the endpoint-facing count built from the same rule;
 // with only shell (unsandboxed) sessions in the registry it must read 0 for
 // any cwd.

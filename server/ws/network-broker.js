@@ -495,7 +495,10 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState, a
 //   deniedHosts - absolute deny-list (sandbox.config.json's
 //           network.deniedHosts): same syntax as allowedHosts, but a match
 //           here always wins -- even in live 'open' state and in audit mode.
-export async function startNetworkBroker({ allowedHosts = [], deniedHosts = [], mode = 'enforce', state = 'enforce' }) {
+export async function startNetworkBroker(
+  { allowedHosts = [], deniedHosts = [], mode = 'enforce', state = 'enforce' },
+  { spawnProcess = spawn } = {},
+) {
   const dir = join(hostRuntimeDir(), `ccserver-network-broker-${randomUUID()}`);
   try {
     ensureHostRuntimeDir();
@@ -527,7 +530,7 @@ export async function startNetworkBroker({ allowedHosts = [], deniedHosts = [], 
   const token = randomBytes(24).toString('base64url');
   const adminToken = randomBytes(24).toString('base64url');
   const serveArgs = [__filename, '--serve', '--allowlist', allowlistPath, '--denylist', denylistPath, '--mode', mode, '--state', state, '--port-file', portFile];
-  const proc = spawn(process.execPath, serveArgs, {
+  const proc = spawnProcess(process.execPath, serveArgs, {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, CCSANDBOX_NETWORK_BROKER_TOKEN: token },
   });
@@ -537,6 +540,11 @@ export async function startNetworkBroker({ allowedHosts = [], deniedHosts = [], 
 
   let spawnError = null;
   proc.on('error', (err) => { spawnError = err; });
+  // Writable-stream failures are emitted on proc.stdin, not on the ChildProcess
+  // itself, and are asynchronous (so try/catch around .end() cannot catch an
+  // EPIPE). Treat them exactly like a spawn failure; otherwise an early child
+  // exit can crash the entire ccserver with an unhandled 'error' event.
+  proc.stdin.on('error', (err) => { spawnError ??= err; });
   proc.on('exit', (code, signal) => {
     if (code !== 0 && code !== null) {
       process.stderr.write(`[network-broker] broker (pid ${proc.pid}) exited code=${code} signal=${signal}\n`);
@@ -545,13 +553,12 @@ export async function startNetworkBroker({ allowedHosts = [], deniedHosts = [], 
     }
   });
 
-  // Best-effort: a write/EOF failure here just means the child's own
-  // readAdminTokenFromStdin sees a stdin error/early EOF and refuses to
-  // start on its own -- caught by the readiness wait below the same way a
-  // spawn failure is, no separate handling needed on this side.
+  // A synchronous write failure and an asynchronous stdin 'error' both feed
+  // spawnError, so the readiness wait below fails the launch and performs the
+  // normal child/runtime-dir cleanup.
   try {
     proc.stdin.end(adminToken);
-  } catch { /* surfaced via the child's own exit/stderr instead */ }
+  } catch (err) { spawnError ??= err; }
 
   // Async wait for the child to report its chosen port (H1 review: a
   // synchronous Atomics.wait busy-wait here would starve the event loop the
