@@ -575,10 +575,22 @@ test('darwin socket paths stay within the 104-byte sun_path limit', () => {
 });
 
 test('ensureHostRuntimeDir is a no-op outside the darwin /tmp fallback', () => {
-  // The verification branch only runs on darwin without XDG_RUNTIME_DIR
-  // (untestable on this Linux CI host): everywhere else the helper must be
-  // a pure passthrough that never throws.
+  // The verification branch only runs on darwin without XDG_RUNTIME_DIR.
+  // Everywhere -- including darwin with XDG set -- the helper must be a
+  // pure passthrough that never throws.
   const prev = process.env.XDG_RUNTIME_DIR;
+  const probe = mkdtempSync(join(tmpdir(), 'ccserver-xdg-probe-'));
+  process.env.XDG_RUNTIME_DIR = probe;
+  try {
+    assert.equal(ensureHostRuntimeDir(), probe);
+  } finally {
+    if (prev === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = prev;
+    try { rmSync(probe, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+  // The no-XDG default is platform-specific (darwin mkdirs the real /tmp
+  // base, so it is not asserted here); on Linux it must be /run/user/<uid>.
+  if (process.platform === 'darwin') return;
   delete process.env.XDG_RUNTIME_DIR;
   try {
     const base = ensureHostRuntimeDir();
