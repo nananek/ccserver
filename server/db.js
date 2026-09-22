@@ -12,7 +12,7 @@
 //     phases' best-effort operational-state writes, never for user-facing CRUD.
 
 import { DatabaseSync } from 'node:sqlite';
-import { chmodSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -27,10 +27,77 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let dbInstance = null;
 
-// Repo-root DB by default (next to .saved-groups.json et al), overridable for
-// tests / multi-instance hosts. Read on every getDb() call, never cached.
+// Host-level DB by default -- same ~/.local/share/ccserver-sandbox/ home
+// every other piece of persistent, non-per-checkout state already uses (see
+// legacyHomeIndexFile() below, worktree.js, sandbox.js's HOME root, etc.).
+// This DB holds host-singleton data (auth sessions, GPG vault secret key
+// material, paired instances) that must survive a `git clean`/reclone of
+// this checkout and must not collide when two checkouts share a parent dir
+// -- overridable for tests / multi-instance hosts. Read on every getDb()
+// call, never cached.
 export function dbPath() {
-  return process.env.CCSERVER_DB_PATH || join(__dirname, '..', '..', 'ccserver.sqlite3');
+  return process.env.CCSERVER_DB_PATH
+    || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'ccserver.sqlite3');
+}
+
+// Pre-fix default (up through #190): a directory-nesting bug in the '..'
+// count landed the DB one level ABOVE the repo instead of at its root --
+// server/db.js sits one directory shallower than the server/ws/*.js modules
+// the two '..'s were tuned for, so this resolves to the repo's *parent*
+// directory. migrateLegacyDbFile() relocates an existing file here to the
+// new default on first boot; kept forever since anyone's checkout may still
+// have one sitting there.
+function legacyDbPath() {
+  return join(__dirname, '..', '..', 'ccserver.sqlite3');
+}
+
+// One-time relocation of a DB left at the pre-fix default path (see
+// legacyDbPath() above) to the current default, so existing users don't
+// appear to lose auth sessions / the GPG vault / presets just because the
+// default moved. Never runs when CCSERVER_DB_PATH is set explicitly (an
+// explicit path means the pre-fix default was never in play), and never
+// overwrites a file already present at the new path. Moves the main file
+// plus any -wal/-shm sidecars still sitting next to it (an unclean shutdown
+// can leave uncommitted data in those); on partial failure it rolls back
+// whatever it already moved and throws, so a failed migration never leaves
+// data split across both locations or silently boots into a fresh, empty DB
+// while the real data sits un-migrated.
+// legacy is injectable (defaults to legacyDbPath()) purely as a test seam --
+// production callers always take the default.
+export function migrateLegacyDbFile(path, legacy = legacyDbPath()) {
+  if (process.env.CCSERVER_DB_PATH || path === ':memory:') return;
+  if (existsSync(path)) {
+    // Another checkout (or a prior run of this one) already populated the
+    // new, host-singleton default -- e.g. two checkouts on the same host
+    // now correctly share one DB. Flag an untouched legacy file rather than
+    // silently stranding it: its data is not merged in (that would risk
+    // clobbering the live DB) and stays exactly where it was.
+    if (existsSync(legacy)) {
+      console.warn(`[db] found ccserver.sqlite3 both at the old default location (${legacy}) and the new one (${path}); leaving the old one as-is. Set CCSERVER_DB_PATH to use it instead.`);
+    }
+    return;
+  }
+  if (!existsSync(legacy)) return;
+  mkdirSync(dirname(path), { recursive: true });
+  const moved = [];
+  try {
+    for (const suffix of ['', '-wal', '-shm']) {
+      const from = `${legacy}${suffix}`;
+      if (!existsSync(from)) continue;
+      renameSync(from, `${path}${suffix}`);
+      moved.push(suffix);
+    }
+  } catch (err) {
+    for (const suffix of moved) {
+      try { renameSync(`${path}${suffix}`, `${legacy}${suffix}`); } catch { /* best-effort rollback */ }
+    }
+    throw new Error(
+      `found an existing ccserver.sqlite3 at its old default location (${legacy}) but could not move it `
+      + `to the new default (${path}): ${err.message}. Move it there by hand, or set CCSERVER_DB_PATH to `
+      + 'keep using the old location.',
+    );
+  }
+  console.warn(`[db] moved ccserver.sqlite3 from its old default location (${legacy}) to ${path} (set CCSERVER_DB_PATH to override).`);
 }
 
 function applyPragmas(db) {
@@ -481,6 +548,7 @@ export function getDb() {
   }
   const path = dbPath();
   if (path !== ':memory:') {
+    migrateLegacyDbFile(path);
     try { mkdirSync(dirname(path), { recursive: true }); } catch { /* open will report */ }
   }
   const db = new DatabaseSync(path);

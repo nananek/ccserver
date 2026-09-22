@@ -1,10 +1,10 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync, chmodSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, rmSync, statSync, chmodSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { dbPath, getDb, initDb, closeDb, migrate, safeDb, MIGRATIONS } from './db.js';
+import { dbPath, migrateLegacyDbFile, getDb, initDb, closeDb, migrate, safeDb, MIGRATIONS } from './db.js';
 
 let tmpRoot;
 const savedEnv = process.env.CCSERVER_DB_PATH;
@@ -155,13 +155,80 @@ test('initDb() resolves the same singleton as getDb()', () => {
   assert.equal(getDb(), getDb(), 'both entry points share one instance per generation');
 });
 
-test('dbPath() defaults to the repo root and honors CCSERVER_DB_PATH', () => {
+test('dbPath() defaults under ~/.local/share/ccserver-sandbox and honors CCSERVER_DB_PATH', () => {
   const saved = process.env.CCSERVER_DB_PATH;
   try {
     delete process.env.CCSERVER_DB_PATH;
-    assert.ok(dbPath().endsWith(join('server', '..', 'ccserver.sqlite3')) || /[\\/]ccserver\.sqlite3$/.test(dbPath()), 'default is <repo>/ccserver.sqlite3');
+    assert.equal(dbPath(), join(homedir(), '.local', 'share', 'ccserver-sandbox', 'ccserver.sqlite3'));
     process.env.CCSERVER_DB_PATH = '/tmp/somewhere/x.sqlite3';
     assert.equal(dbPath(), '/tmp/somewhere/x.sqlite3');
+  } finally {
+    if (saved === undefined) delete process.env.CCSERVER_DB_PATH;
+    else process.env.CCSERVER_DB_PATH = saved;
+  }
+});
+
+// Pre-#190 default (a directory-nesting bug put the DB one level above the
+// repo instead of at ~/.local/share/ccserver-sandbox/): existing users must
+// not appear to lose their auth sessions / GPG vault / presets just because
+// the default moved.
+test('migrateLegacyDbFile() relocates a file left at the pre-fix default, including -wal/-shm sidecars', () => {
+  const saved = process.env.CCSERVER_DB_PATH;
+  delete process.env.CCSERVER_DB_PATH;
+  try {
+    const legacy = join(tmpRoot, 'legacy-parent-dir', 'ccserver.sqlite3');
+    const target = join(tmpRoot, 'new-default', 'nested', 'ccserver.sqlite3');
+    mkdirSync(dirname(legacy), { recursive: true });
+    writeFileSync(legacy, 'main');
+    writeFileSync(`${legacy}-wal`, 'wal');
+    writeFileSync(`${legacy}-shm`, 'shm');
+
+    migrateLegacyDbFile(target, legacy);
+
+    assert.equal(readFileSync(target, 'utf-8'), 'main');
+    assert.equal(readFileSync(`${target}-wal`, 'utf-8'), 'wal');
+    assert.equal(readFileSync(`${target}-shm`, 'utf-8'), 'shm');
+    assert.ok(!existsSync(legacy), 'old file must be gone, not copied');
+  } finally {
+    if (saved === undefined) delete process.env.CCSERVER_DB_PATH;
+    else process.env.CCSERVER_DB_PATH = saved;
+  }
+});
+
+test('migrateLegacyDbFile() never overwrites a file already at the new default', () => {
+  const saved = process.env.CCSERVER_DB_PATH;
+  delete process.env.CCSERVER_DB_PATH;
+  try {
+    const legacy = join(tmpRoot, 'legacy-2', 'ccserver.sqlite3');
+    const target = join(tmpRoot, 'existing-2', 'ccserver.sqlite3');
+    mkdirSync(dirname(legacy), { recursive: true });
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(legacy, 'old-data');
+    writeFileSync(target, 'current-data');
+
+    migrateLegacyDbFile(target, legacy);
+
+    assert.equal(readFileSync(target, 'utf-8'), 'current-data', 'must not clobber the live DB');
+    assert.ok(existsSync(legacy), 'legacy file is left in place, not deleted, when it is not migrated');
+  } finally {
+    if (saved === undefined) delete process.env.CCSERVER_DB_PATH;
+    else process.env.CCSERVER_DB_PATH = saved;
+  }
+});
+
+test('migrateLegacyDbFile() is a no-op when CCSERVER_DB_PATH is set explicitly', () => {
+  const saved = process.env.CCSERVER_DB_PATH;
+  try {
+    const legacy = join(tmpRoot, 'legacy-3', 'ccserver.sqlite3');
+    const target = join(tmpRoot, 'new-3', 'ccserver.sqlite3');
+    mkdirSync(dirname(legacy), { recursive: true });
+    writeFileSync(legacy, 'old-data');
+    process.env.CCSERVER_DB_PATH = target;
+
+    migrateLegacyDbFile(target, legacy);
+
+    assert.ok(!existsSync(target), 'an explicit path opts out of the pre-fix-default migration entirely');
+    assert.ok(existsSync(legacy));
   } finally {
     if (saved === undefined) delete process.env.CCSERVER_DB_PATH;
     else process.env.CCSERVER_DB_PATH = saved;
