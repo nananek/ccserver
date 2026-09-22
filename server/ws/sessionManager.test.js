@@ -14,9 +14,9 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn as spawnProcess } from 'node:child_process';
 import Fastify from 'fastify';
@@ -425,10 +425,22 @@ test('createSession refuses a cwd outside browseRoots, for both shells and agent
     assert.equal(agentOutside.session, null, 'an agent outside browseRoots must be refused');
     assert.match(agentOutside.error, /outside the allowed browseRoots/);
 
-    // Inside browseRoots, a plain shell still spawns normally.
+    // Inside browseRoots, a plain shell is not refused BY THE CWD CHECK --
+    // but browseRoots also forces every shell sandboxed with no opt-out, so
+    // on a host with no sandbox backend the same launch is refused for that
+    // reason instead (pinned by the "no sandbox backend" test below; CI
+    // runners have no bwrap). Either way the cwd check itself must not fire.
     const shellInside = await sessionManager.createSession({ cwd: allowed, cols: 80, rows: 24, shell: true, sandbox: false });
-    assert.ok(shellInside.session, 'a shell inside browseRoots must not be refused by the cwd check');
-    sessionManager.destroySession(shellInside.sessionId, { keepSchedule: false });
+    assert.doesNotMatch(shellInside.error || '', /outside the allowed browseRoots/,
+      'a shell inside browseRoots must not be refused by the cwd check');
+    if (sandboxAvailable()) {
+      assert.ok(shellInside.session, 'a shell inside browseRoots spawns normally when a backend exists');
+      assert.equal(shellInside.session.sandbox, true, 'browseRoots forces even a sandbox:false shell sandboxed');
+      sessionManager.destroySession(shellInside.sessionId, { keepSchedule: false });
+    } else {
+      assert.equal(shellInside.session, null);
+      assert.match(shellInside.error, /shell sessions must run sandboxed/);
+    }
   } finally {
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
@@ -458,17 +470,58 @@ test('createSession does not refuse a cwd under the ccserver scratch tree even w
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
     const res = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false });
-    assert.ok(res.session, 'a cwd under the ccserver scratch tree must not be refused by browseRoots');
-    assert.doesNotMatch(res.error || '', /browseRoots/);
-    // Still forced sandboxed like any other shell under browseRoots.
-    assert.equal(res.session.sandbox, true);
-    sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+    assert.doesNotMatch(res.error || '', /outside the allowed browseRoots/,
+      'a cwd under the ccserver scratch tree must not be refused by browseRoots');
+    if (sandboxAvailable()) {
+      assert.ok(res.session, 'a scratch-tree cwd spawns when a sandbox backend exists');
+      // Still forced sandboxed like any other shell under browseRoots.
+      assert.equal(res.session.sandbox, true);
+      sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+    } else {
+      // No backend: refused by the sandbox mandate, never by the cwd check.
+      assert.equal(res.session, null);
+      assert.match(res.error, /shell sessions must run sandboxed/);
+    }
   } finally {
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(scratchDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// Regression (issue #189 self-review): the scratch-tree exemption is
+// symlink-safe. A symlink planted inside the tree (any sandboxed session can
+// create one -- its HOME is rw-bound under the same tree) that points
+// outside must NOT be treated as an exempt scratch cwd: that would skip the
+// browseRoots refusal entirely, and buildBwrapArgs' `--bind <cwd> <cwd>`
+// would resolve the bind source through the link (a live PoC pointing at /
+// rw-bound the host root into the "sandboxed" shell). Refused here already
+// by the cwd check, so this asserts the refusal reason regardless of whether
+// a sandbox backend exists.
+test('createSession refuses a cwd that is a scratch-internal symlink pointing outside browseRoots', async () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
+  const outside = mkdtempSync(join(tmpdir(), 'ccserver-sess-outside-'));
+  const escapeLink = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'worktrees', `test-escape-${randomUUID()}`);
+  mkdirSync(dirname(escapeLink), { recursive: true });
+  symlinkSync(outside, escapeLink);
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = await sessionManager.createSession({ cwd: escapeLink, cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.equal(res.session, null, 'a scratch symlink pointing outside must never launch a session');
+    assert.match(res.error, /outside the allowed browseRoots/);
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(escapeLink, { force: true }); } catch { /* ignore */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(outside, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 
