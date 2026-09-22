@@ -83,10 +83,12 @@ function relayDir() {
 }
 
 // The relay directory itself -- on macOS this doubles as a drop-in GNUPGHOME
-// (see this file's header); on Linux/bwrap only the individual socket paths
-// below are used (public files are bound per-launch from the real homeDir
-// instead, since bwrap can assemble a target dir from multiple real
-// sources).
+// (see this file's header). On Linux/bwrap, sandbox.js's buildBwrapArgs
+// binds the public files (pubring.kbx/trustdb.gpg/gpg.conf) from here too
+// (issue #185: gpgVault is lock-independent now, so it no longer carries a
+// per-launch homeDir to bind those from) -- only the sockets are bound from
+// their own fixed paths (getRelaySocketPaths() below) rather than this dir
+// directly, since bwrap assembles the target dir from multiple real sources.
 export function getRelayDir() {
   return relayDir();
 }
