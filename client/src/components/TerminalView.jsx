@@ -248,6 +248,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const reconnectTimerRef = useRef(null);
   const reconnectAttemptsRef = useRef(0);
   const intentionalCloseRef = useRef(false);
+  // Set inside the connect effect once connect() exists, so the
+  // "DISCONNECTED" stamp's manual reconnect button can trigger it from
+  // outside that effect's closure.
+  const reconnectNowRef = useRef(null);
   const claudeResumeIdRef = useRef(claudeSessionId);
   const shellRef = useRef(shell);
   const sandboxRef = useRef(sandbox);
@@ -1038,7 +1042,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           // eviction -- reconnect, get evicted, reconnect -- so honor it and
           // say why instead.
           case 'detached':
-            term.writeln('\r\n[DISCONNECTED]');
+            term.writeln('\r\n[Session taken over by another client]');
             intentionalCloseRef.current = true;
             // No reconnect will follow (intentionalCloseRef), so this is
             // the only place turning the stamp on for this path -- ws.onclose
@@ -1094,6 +1098,21 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         // onclose will fire after this
       };
     }
+
+    // Manual retry for the "DISCONNECTED" stamp's reconnect button. Unlike
+    // every other caller of connect(), this one must clear
+    // intentionalCloseRef itself: a 'detached' eviction (or the "max
+    // reconnection attempts reached" giveup) sets it precisely to stop
+    // automatic reconnects, but an explicit click here is the user
+    // overriding that on purpose -- e.g. to take the session back from the
+    // client that just evicted them.
+    function reconnectNow() {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectAttemptsRef.current = 0;
+      intentionalCloseRef.current = false;
+      connect();
+    }
+    reconnectNowRef.current = reconnectNow;
 
     connect();
 
@@ -1659,8 +1678,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           the bottom. */}
       <div className={`terminal-container${app === 'opencode' ? ' tui-scroll' : ''}`} ref={terminalRef} />
       {disconnected && (
-        <div className="disconnected-stamp" aria-hidden="true">
-          <span>DISCONNECTED</span>
+        <div className="disconnected-stamp">
+          <span aria-hidden="true">DISCONNECTED</span>
+          <button
+            type="button"
+            className="disconnected-reconnect-btn"
+            onClick={() => reconnectNowRef.current?.()}
+          >
+            再接続
+          </button>
         </div>
       )}
       {handles && (

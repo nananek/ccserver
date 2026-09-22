@@ -2683,20 +2683,24 @@ body {
   overflow-y: hidden;
 }
 
-/* Stamp-style overlay shown while this client has no live connection to the
+/* Full-bleed scrim shown while this client has no live connection to the
    session -- WebSocket down and reconnecting, or evicted by another client
-   taking over (see the `disconnected` state in TerminalView.jsx). The plain
-   text message xterm itself prints scrolls out of view or gets buried under
-   fresh output, so this needs no scroll position to notice -- pointer-events:
-   none keeps it from ever trapping a tap/click meant for the terminal
-   underneath. */
+   taking over (see the `disconnected` state in TerminalView.jsx). Dims and
+   blocks interaction with the frozen terminal underneath (there's nothing
+   useful to type into a session you're not attached to) and hosts both the
+   always-visible "DISCONNECTED" stamp and a manual retry button on top of
+   it, so the plain text message xterm itself also prints -- easy to miss
+   once scrolled out of view or buried under fresh output -- always has a
+   visible, actionable counterpart. */
 .disconnected-stamp {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  pointer-events: none;
+  gap: 20px;
+  background: rgba(13, 13, 20, 0.75);
   z-index: 5;
 }
 
@@ -2712,6 +2716,23 @@ body {
   white-space: nowrap;
   transform: rotate(-30deg);
   user-select: none;
+}
+
+.disconnected-reconnect-btn {
+  padding: 8px 24px;
+  border: 1px solid var(--error);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--error);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.disconnected-reconnect-btn:hover {
+  background: var(--error);
+  color: var(--bg-primary);
 }
 
 /* Floating copy button after a long-press text selection on touch devices
