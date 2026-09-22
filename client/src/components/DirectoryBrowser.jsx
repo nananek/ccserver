@@ -124,6 +124,11 @@ function saveSandboxOpts(path, opts) {
 export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, initialPath, sandboxDefaults }) {
   const [currentPath, setCurrentPath] = useState(initialPath || localStorage.getItem(LAST_DIR_KEY) || '/');
   const [homeDir, setHomeDir] = useState(null);
+  // browseRoots (issue #189): the server's guaranteed-browsable start (the
+  // first allowed root when home() itself is outside them, home() otherwise).
+  // Used for the Home button and to recover when a remembered/restored path
+  // falls outside a newly-narrowed browseRoots (403 on fetch).
+  const [initialBrowsePath, setInitialBrowsePath] = useState(null);
   const [dirs, setDirs] = useState([]);
   const [files, setFiles] = useState([]);
   const [parentPath, setParentPath] = useState(null);
@@ -454,7 +459,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
       const res = await authFetch(`/api/dirs?${params}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
+        const err = new Error(body.error || `HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
       }
       const data = await res.json();
       setCurrentPath(data.current);
@@ -463,14 +470,28 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
       setFiles(data.files || []);
     } catch (err) {
       setError(err.message);
+      // A remembered path (localStorage) or restored tab can fall outside a
+      // newly-narrowed browseRoots: the listing 403s and the Up/Home buttons
+      // alone cannot recover from it. Jump to the server's allowed start
+      // once, rather than leaving the browser stuck on an empty error view.
+      if (err.status === 403 && initialBrowsePath && path !== initialBrowsePath) {
+        setCurrentPath(initialBrowsePath);
+      }
     } finally {
       setLoading(false);
     }
-  }, [showHidden]);
+  }, [showHidden, initialBrowsePath]);
 
   useEffect(() => {
     authFetch('/api/dirs/home').then(r => r.json()).then(data => {
       setHomeDir(data.home);
+      if (data.initialBrowsePath) setInitialBrowsePath(data.initialBrowsePath);
+      // Present-but-unusable browseRoots: the server refuses all directory
+      // and file access (503) until it is fixed -- say so instead of
+      // rendering an empty browser.
+      if (data.browseRootsInvalid) {
+        setError('sandbox.config.json の "browseRoots" が不正です (ディレクトリパスの配列で指定してください)。サーバー設定を修正するまでファイル閲覧は無効です。');
+      }
       if (!initialPath && !localStorage.getItem(LAST_DIR_KEY)) {
         // browseRoots (issue #189): when set, home() itself may sit outside
         // the allowed roots -- start browsing at initialBrowsePath instead
@@ -856,7 +877,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           <button className="btn btn-secondary" onClick={navigateUp} disabled={!parentPath}>
             Up
           </button>
-          <button className="btn btn-secondary" onClick={() => homeDir && navigateTo(homeDir)} disabled={!homeDir}>
+          {/* browseRoots (issue #189): home() may sit outside the allowed
+              roots, where navigating would just 403 -- prefer the server's
+              initialBrowsePath (== home() when unrestricted). */}
+          <button
+            className="btn btn-secondary"
+            onClick={() => { const target = initialBrowsePath || homeDir; if (target) navigateTo(target); }}
+            disabled={!(initialBrowsePath || homeDir)}
+          >
             Home
           </button>
           <button className="btn btn-secondary" onClick={() => { fetchDirs(currentPath); }} disabled={loading}>
