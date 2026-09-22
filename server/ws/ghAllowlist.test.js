@@ -560,11 +560,68 @@ describe('extractGhTextFields (plan8 PR-body guard)', () => {
 
   test('a subcommand not in TEXT_FIELDS yields no fields', () => {
     assert.deepEqual(extractGhTextFields(['pr', 'view', '1']), []);
-    assert.deepEqual(extractGhTextFields(['issue', 'create', '--body', 'x']), []);
+    assert.deepEqual(extractGhTextFields(['issue', 'view', '1']), []);
     assert.deepEqual(extractGhTextFields(['api', 'repos/o/r/actions/runs']), []);
   });
 
   test('a trailing flag with no following token contributes nothing', () => {
     assert.deepEqual(extractGhTextFields(['pr', 'create', '-b']), []);
+  });
+
+  // H2 regression: the containment pass in git-broker.js only ever sees the
+  // fields extractGhTextFields returns, so a subcommand missing from
+  // TEXT_FIELDS is a subcommand whose --body-file/--notes-file is never
+  // checked. These cover the issue:/release:/pr:merge/close/reopen entries
+  // that closed the H2 gap left by the original pr-only table.
+  test('issue create/edit: title/body/body-file are tagged', () => {
+    assert.deepEqual(extractGhTextFields(['issue', 'create', '-t', 'T', '-b', 'B']), [
+      { field: 'title', kind: 'literal', value: 'T' },
+      { field: 'body', kind: 'literal', value: 'B' },
+    ]);
+    assert.deepEqual(extractGhTextFields(['issue', 'edit', '1', '--body-file', 'body.md']), [
+      { field: 'body-file', kind: 'file', value: 'body.md' },
+    ]);
+  });
+
+  test('issue comment: -F/--body-file is a file source (H2 exfil vector)', () => {
+    assert.deepEqual(extractGhTextFields(['issue', 'comment', '2', '--body-file', '/etc/passwd']), [
+      { field: 'body-file', kind: 'file', value: '/etc/passwd' },
+    ]);
+  });
+
+  test('issue close/reopen: -c/--comment is a literal field', () => {
+    assert.deepEqual(extractGhTextFields(['issue', 'close', '2', '-c', 'done']), [
+      { field: 'comment', kind: 'literal', value: 'done' },
+    ]);
+    assert.deepEqual(extractGhTextFields(['issue', 'reopen', '2', '--comment=again']), [
+      { field: 'comment', kind: 'literal', value: 'again' },
+    ]);
+  });
+
+  test('release create/edit: -n/--notes literal and -F/--notes-file file are tagged', () => {
+    assert.deepEqual(extractGhTextFields(['release', 'create', 'v1', '-n', 'notes']), [
+      { field: 'notes', kind: 'literal', value: 'notes' },
+    ]);
+    assert.deepEqual(extractGhTextFields(['release', 'edit', 'v1', '--notes-file', '../x.md']), [
+      { field: 'notes-file', kind: 'file', value: '../x.md' },
+    ]);
+  });
+
+  test('pr merge: subject/body/body-file are tagged', () => {
+    assert.deepEqual(extractGhTextFields(['pr', 'merge', '1', '-t', 'S', '-b', 'B']), [
+      { field: 'subject', kind: 'literal', value: 'S' },
+      { field: 'body', kind: 'literal', value: 'B' },
+    ]);
+    assert.deepEqual(extractGhTextFields(['pr', 'merge', '1', '--body-file', 'body.md']), [
+      { field: 'body-file', kind: 'file', value: 'body.md' },
+    ]);
+  });
+
+  test('pr review: -c is a BOOLEAN flag, not a value flag, so it yields nothing', () => {
+    // `gh pr review --comment -b "..."`: -c takes no value. The old generic
+    // short-flag processing must not mistake it for close/reopen-style -c.
+    assert.deepEqual(extractGhTextFields(['pr', 'review', '5', '-c', '-b', 'looks good']), [
+      { field: 'body', kind: 'literal', value: 'looks good' },
+    ]);
   });
 });

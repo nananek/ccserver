@@ -376,6 +376,52 @@ describe('gh-exec PR-body guard (plan8)', () => {
     const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'edit', '1', '--body-file', 'inside-body.txt'] });
     assert.equal(r.ok, true);
   });
+
+  // H2 follow-up: the original fix only reached the four pr:* entries in
+  // TEXT_FIELDS, so the same out-of-tree host-file read sailed through
+  // `gh issue comment --body-file` (and `gh release ... --notes-file`) with
+  // no check at all -- see vuln_scan README H2.
+  test('H2: gh issue comment --body-file outside the session tree is denied', async () => {
+    const outside = join(root, 'outside-secret.txt');
+    writeFileSync(outside, 'top secret host file that must never reach gh\n');
+    const r = await request(broker, { op: 'gh-exec', argv: ['issue', 'comment', '2', '--body-file', outside] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'file-arg-out-of-tree');
+    assert.equal(r.field, 'body-file');
+  });
+
+  test('H2: gh release create --notes-file outside the session tree is denied', async () => {
+    const r = await request(broker, { op: 'gh-exec', argv: ['release', 'create', 'v1', '--notes-file', '/etc/hostname'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'file-arg-out-of-tree');
+    assert.equal(r.field, 'notes-file');
+  });
+
+  test('H2: gh issue comment --body-file inside the session tree still works', async () => {
+    writeFileSync(join(repoDir, 'issue-comment.txt'), 'perfectly fine issue comment\n');
+    const r = await request(broker, { op: 'gh-exec', argv: ['issue', 'comment', '2', '--body-file', 'issue-comment.txt'] });
+    assert.equal(r.ok, true);
+  });
+
+  test('issue comment --body containing a Claude-Session: trailer is denied', async () => {
+    const r = await request(guardedBroker, {
+      op: 'gh-exec',
+      argv: ['issue', 'comment', '2', '--body', 'Claude-Session: https://claude.ai/code/session_issue\n'],
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'blocked-message');
+    assert.equal(r.field, 'body');
+  });
+
+  test('issue close --comment containing a session URL is denied', async () => {
+    const r = await request(guardedBroker, {
+      op: 'gh-exec',
+      argv: ['issue', 'close', '2', '--comment', 'Closed from https://claude.ai/code/session_close'],
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'blocked-message');
+    assert.equal(r.field, 'comment');
+  });
 });
 
 // hostRuntimeDir (macOS Seatbelt support): XDG_RUNTIME_DIR wins when set;

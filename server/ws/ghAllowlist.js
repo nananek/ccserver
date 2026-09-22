@@ -346,22 +346,29 @@ export function classifyGhInvocation(argv, resolveCwdOrigin) {
 }
 
 // ---------------------------------------------------------------------------
-// PR title/body content guard (plan8, layered on top of the allow/deny
-// decision above -- see git-broker.js's findBlockedGhText). Once a gh
-// invocation is allow-listed, some `pr` subcommands carry free-form text
-// (title/body) that could itself smuggle a `Claude-Session:` trailer or
-// session URL into a shared PR -- the exact leak commitGuard.js already
-// blocks for local git commits, but gh's own title/body text never goes
-// through a git commit-msg hook. This section only locates WHERE that text
-// lives in argv (and, for --body-file, what kind of source it names); the
-// actual pattern match reuses commitGuard.js's compiled patterns, in
-// git-broker.js.
+// Message-text content/boundary guard (plan8 + H2, layered on top of the
+// allow/deny decision above -- see git-broker.js's findBlockedGhText). Once a
+// gh invocation is allow-listed, several subcommands carry free-form text
+// (title/body/notes/comment) that could itself smuggle a `Claude-Session:`
+// trailer or session URL into a shared PR/issue/release -- the exact leak
+// commitGuard.js already blocks for local git commits, but gh's own text
+// never goes through a git commit-msg hook. Separately, every file-valued
+// field (--body-file/-F, --notes-file/-F) names a HOST path gh reads outside
+// the sandbox, so git-broker.js always confines it to the session tree (H2).
+// This section only locates WHERE that text lives in argv (and, for file
+// fields, what kind of source it names); the pattern match reuses
+// commitGuard.js's compiled patterns, in git-broker.js.
 //
-// Scoped deliberately narrow: only the `pr` subcommands already on ALLOWED
-// above whose flags were confirmed against `gh <cmd> --help` (see git
-// history for the exact transcripts). Anything not listed here (e.g. `gh
-// issue create`'s --body) is simply not checked -- extending coverage means
-// adding another TEXT_FIELDS entry, not new parsing logic.
+// Scoped per `gh <cmd> --help`: only the subcommands already on ALLOWED above
+// whose flags were confirmed against their help output are listed. Anything
+// not listed here is simply not checked -- extending coverage means adding
+// another TEXT_FIELDS entry, not new parsing logic. H2's fix originally
+// covered only `pr:*`, which let every other free-form-text subcommand
+// (issue/release/close/reopen) carry an out-of-tree --body-file/--notes-file
+// straight through; the issue:/release:/pr:merge/close/reopen entries below
+// close that gap. NOTE the shared short flags are NOT uniform across
+// subcommands: `gh pr review -c` is a boolean --comment, whereas
+// close/reopen's `-c` takes a value -- hence the per-entry short/long pairs.
 const TEXT_FIELDS = {
   'pr:create': [
     { field: 'title', short: '-t', long: '--title' },
@@ -380,6 +387,47 @@ const TEXT_FIELDS = {
   'pr:review': [
     { field: 'body', short: '-b', long: '--body' },
     { field: 'body-file', short: '-F', long: '--body-file', file: true },
+  ],
+  'pr:merge': [
+    { field: 'subject', short: '-t', long: '--subject' },
+    { field: 'body', short: '-b', long: '--body' },
+    { field: 'body-file', short: '-F', long: '--body-file', file: true },
+  ],
+  'pr:close': [
+    { field: 'comment', short: '-c', long: '--comment' },
+  ],
+  'pr:reopen': [
+    { field: 'comment', short: '-c', long: '--comment' },
+  ],
+  'issue:create': [
+    { field: 'title', short: '-t', long: '--title' },
+    { field: 'body', short: '-b', long: '--body' },
+    { field: 'body-file', short: '-F', long: '--body-file', file: true },
+  ],
+  'issue:edit': [
+    { field: 'title', short: '-t', long: '--title' },
+    { field: 'body', short: '-b', long: '--body' },
+    { field: 'body-file', short: '-F', long: '--body-file', file: true },
+  ],
+  'issue:comment': [
+    { field: 'body', short: '-b', long: '--body' },
+    { field: 'body-file', short: '-F', long: '--body-file', file: true },
+  ],
+  'issue:close': [
+    { field: 'comment', short: '-c', long: '--comment' },
+  ],
+  'issue:reopen': [
+    { field: 'comment', short: '-c', long: '--comment' },
+  ],
+  'release:create': [
+    { field: 'title', short: '-t', long: '--title' },
+    { field: 'notes', short: '-n', long: '--notes' },
+    { field: 'notes-file', short: '-F', long: '--notes-file', file: true },
+  ],
+  'release:edit': [
+    { field: 'title', short: '-t', long: '--title' },
+    { field: 'notes', short: '-n', long: '--notes' },
+    { field: 'notes-file', short: '-F', long: '--notes-file', file: true },
   ],
 };
 
