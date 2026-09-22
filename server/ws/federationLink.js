@@ -40,6 +40,7 @@ import { federationConfig, derivePairingToken } from './federationConfig.js';
 import { resolvedHostname } from './notify.js';
 import { attachTerminalHandler } from './terminal.js';
 import { hostname as osHostname } from 'node:os';
+import { loadSandboxConfig } from './sandbox.js';
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const FEDERATION_KEEPALIVE_MS = 30_000;
@@ -216,7 +217,11 @@ async function rpcGroupsDestroy(params) {
 
 async function rpcDirsList(params) {
   const { dirsMod } = await loadRouteDeps();
-  const res = await dirsMod.browseDirectory(params?.path || '/', !!params?.showHidden);
+  // browseRoots (issue #189) applies to federation-relayed directory
+  // browsing too -- a remote peer must not see more of this host than a
+  // local /api/dirs caller would.
+  const { browseRoots } = loadSandboxConfig();
+  const res = await dirsMod.browseDirectory(params?.path || '/', !!params?.showHidden, browseRoots);
   if (!res.ok) return { ok: false, error: res.message };
   return { ok: true, listing: res.data };
 }

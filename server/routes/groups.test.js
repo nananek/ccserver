@@ -5,7 +5,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { orchestratorRestartSessionOpts, orchestratorDirForCwd, groupExistsForCwd, orchestratorRestartFailureStatus, launchFailureCode, workerLaunchFailureCode } from './groups.js';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { orchestratorRestartSessionOpts, orchestratorDirForCwd, groupExistsForCwd, orchestratorRestartFailureStatus, launchFailureCode, workerLaunchFailureCode, launchGroupFromSpec } from './groups.js';
 import { isInfrastructureError } from '../ws/sessionManager.js';
 import { sandboxUnavailableReason } from '../ws/sandbox.js';
 
@@ -51,10 +54,19 @@ test('isInfrastructureError: infra failures surface as 500, request rejections s
   assert.equal(isInfrastructureError('Failed to build sandbox: bwrap not found'), true);
   assert.equal(isInfrastructureError('Failed to spawn "claude": spawn ENOENT'), true);
   assert.equal(isInfrastructureError('Cannot launch: sandbox.config.json sets "forceSandbox": true, but bwrap is not available on this host. Install bwrap (bubblewrap) or disable forceSandbox.'), true);
+  // browseRoots (issue #189): a sandbox mandated by browseRoots (shell, or
+  // agent without allowUnsandboxedAgents) that cannot be built is the same
+  // class of infra fault as forceSandbox above -- one representative shape
+  // is enough (both mustSandboxShell/mustSandboxAgent share this prefix).
+  assert.equal(isInfrastructureError('Cannot launch: sandbox.config.json sets "browseRoots" is set (shell sessions must run sandboxed), but bwrap is not available on this host. Install bwrap (bubblewrap), set "allowUnsandboxedAgents": true to allow unsandboxed agent launches (cwd stays restricted to browseRoots), or unset browseRoots.'), true);
   // Request-as-given rejections must keep mapping to 400.
   assert.equal(isInfrastructureError('Cannot launch: copilot is hidden on this server (sandbox.config.json\'s "hiddenApps"). Remove it from hiddenApps to allow launches.'), false);
   assert.equal(isInfrastructureError('Cannot launch: codex is not installed on this server (searched /usr/bin).'), false);
   assert.equal(isInfrastructureError('Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.'), false);
+  // browseRoots' cwd-containment refusal is a request-as-given rejection
+  // (like the cwd='/' one above), not an infra fault -- it must NOT share
+  // the "sets \"browseRoots\"" prefix used by the sandbox-mandate refusal.
+  assert.equal(isInfrastructureError('Cannot launch: working directory is outside the allowed browseRoots (sandbox.config.json\'s "browseRoots"). Choose a directory under one of: /srv/projects'), false);
   // Defensive: the restart route passes `res.error || 'unknown error'`.
   assert.equal(isInfrastructureError('unknown error'), false);
   assert.equal(isInfrastructureError(null), false);
@@ -334,4 +346,35 @@ test('normalizeWorkers: workers explicitly null falls back to the legacy adapter
   const res = normalizeWorkers({ workers: null, workerA: { app: 'claude' } });
   assert.deepEqual(res.workers.map((w) => w.role), ['workerA', 'workerB']);
   assert.deepEqual(res.workers[0].spec, { app: 'claude' });
+});
+
+// browseRoots (issue #189): launchGroupFromSpec's own project cwd must be
+// validated against browseRoots -- worker/orchestrator sessions never use
+// this cwd directly (they always land in a server-synthesized scratch dir,
+// see pathPolicy.js's isCcserverScratchPath, exempted from
+// createSession's own browseRoots check), but every worker's git worktree
+// shares this project's object database, so without this check a group
+// could still be created for a project outside browseRoots. Checked before
+// sandboxAvailable()/duplicate-group, so this returns without needing real
+// sandbox/broker infrastructure.
+test('launchGroupFromSpec refuses a cwd outside browseRoots before touching the sandbox', async () => {
+  const outside = mkdtempSync(join(tmpdir(), 'ccserver-groups-outside-'));
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-groups-allowed-'));
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-groups-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ browseRoots: [allowed] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = await launchGroupFromSpec({ cwd: outside, workerA: { app: 'claude' }, workerB: { app: 'claude' } });
+    assert.equal(res.ok, false);
+    assert.equal(res.code, 'validation');
+    assert.match(res.message, /outside the allowed browseRoots/);
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    rmSync(outside, { recursive: true, force: true });
+    rmSync(allowed, { recursive: true, force: true });
+    rmSync(cfgDir, { recursive: true, force: true });
+  }
 });

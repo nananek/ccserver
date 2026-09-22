@@ -2,14 +2,18 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch } from '../auth.js';
 import { useVisiblePolling } from '../hooks/useVisiblePolling.js';
 
-// Global banner for meta-agent destructive-operation approvals (ccserver-meta).
-// Polls GET /api/approvals?status=pending every few seconds and lets the user
-// approve/reject each request via POST /api/approvals/:id/decision. Rendered
-// at the App level (above the tab bar) so it is visible from every tab.
+// Global banner for server-initiated destructive-operation approvals (see
+// ws/approvals.js). Polls GET /api/approvals?status=pending every few seconds
+// and lets the user approve/reject each request via
+// POST /api/approvals/:id/decision. Rendered at the App level (above the tab
+// bar) so it is visible from every tab.
 //
-// The backend may not exist yet (feature rolled out server-side separately):
-// any non-OK response or fetch error is treated as "nothing pending" instead
-// of surfacing errors, mirroring how App.jsx handles older-server endpoints.
+// No current caller requests an approval (issue #189 removed the sole
+// consumer, the privileged meta-agent MCP toolset) -- this stays wired up as
+// generic infrastructure for a future feature that needs the same
+// human-in-the-loop gate, so any non-OK response or fetch error is treated
+// as "nothing pending" instead of surfacing errors, mirroring how App.jsx
+// handles older-server endpoints.
 
 const POLL_MS = 4000;
 // Must match the server's fixed approval timeout (plan §3.1-6): unanswered
@@ -118,7 +122,7 @@ export default function ApprovalBanner() {
   return (
     <div className="approval-banner-stack" role="alert">
       <div className="approval-banner-title">
-        メタエージェントが承認を待っています（5分以内に応答がない操作は拒否されます）
+        操作の承認を待っています（5分以内に応答がない操作は拒否されます）
       </div>
       {approvals.map((a) => {
         const remaining = formatRemaining(a.createdAt, now);

@@ -237,7 +237,7 @@ function osc52Response(text) {
   return `\x1b]52;c;${btoa(bin)}\x07`;
 }
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, isMetaAgent = false, customLabel = null, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, customLabel = null, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -256,8 +256,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const appRef = useRef(app);
   const modelRef = useRef(model);
   // commandcode permission mode ('standard' | 'auto-accept' | 'yolo'): must
-  // ride along on EVERY init like isMetaAgent -- dropping it on the
-  // SESSION_NOT_FOUND re-init would resurrect a yolo session as standard.
+  // ride along on EVERY init -- dropping it on the SESSION_NOT_FOUND re-init
+  // would resurrect a yolo session as standard.
   const permissionModeRef = useRef(permissionMode);
   const resumeRef = useRef(resume);
   // Set once per tab (a terminal tab never switches between local/remote
@@ -266,13 +266,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // only for consistency with the other launch-setting refs above.
   const remoteInstanceIdRef = useRef(remoteInstanceId);
   const remoteInstanceLabelRef = useRef(remoteInstanceLabel);
-  // Meta-agent flag: must ride along on EVERY init (first connect AND the
-  // SESSION_NOT_FOUND re-init) -- dropping it there would resurrect a dead
-  // meta agent as a silently unprivileged session.
-  const isMetaAgentRef = useRef(isMetaAgent);
-  // What the last init requested (true/false), so the 'session' response can
-  // be checked for a silent downgrade; null once consumed.
-  const requestedMetaRef = useRef(null);
   // Size the server confirmed for the (possibly shared) pty. With a second
   // device attached the pty runs at the smallest viewport among the clients,
   // so our own fit() result is only a *request* -- this is what actually
@@ -766,7 +759,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         app: appRef.current,
         model: shellRef.current ? null : modelRef.current,
         permissionMode: shellRef.current ? 'standard' : (permissionModeRef.current || 'standard'),
-        isMetaAgent: !!isMetaAgentRef.current,
         // Group membership is carried into a re-launch so the server can
         // re-create the member's MCP channel and register it to the role.
         groupId: groupId || null,
@@ -848,7 +840,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           } else if (!shellRef.current && (appRef.current === 'opencode' || appRef.current === 'copilot' || appRef.current === 'codex' || appRef.current === 'commandcode') && resumeRef.current) {
             initMsg.resume = true;
           }
-          requestedMetaRef.current = !!initMsg.isMetaAgent;
           ws.send(JSON.stringify(initMsg));
         }
       };
@@ -893,14 +884,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             // divider marks where the replayed output starts.
             if (msg.isReconnect) {
               term.writeln('\r\n\x1b[2m--- 再接続: 直近の出力を再表示します ---\x1b[0m');
-            }
-            // Silent-downgrade guard: the init asked for the meta MCP but the
-            // server did not grant it (feature disabled / broker not running).
-            if (requestedMetaRef.current != null) {
-              if (requestedMetaRef.current && msg.isMetaAgent !== true) {
-                term.writeln('\r\n[警告: ccserver-meta は注入されませんでした (metaAgentMcp 無効またはブローカー未起動)]');
-              }
-              requestedMetaRef.current = null;
             }
             // Attaching to a session another device is already on shrinks
             // the screen to that device's size, which looks like a bug
@@ -1005,7 +988,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                   initMsg.resume = true;
                 }
               }
-              requestedMetaRef.current = !!initMsg.isMetaAgent;
               ws.send(JSON.stringify(initMsg));
             } else {
               // Any other error (e.g. SPAWN_FAILED — the target app isn't

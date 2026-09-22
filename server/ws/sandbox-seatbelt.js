@@ -633,8 +633,8 @@ function expandAgainstHome(p, hostHome) {
 //                    buildBwrapArgs ro-binds the wrapper over): denied for
 //                    process-exec while the git broker is on, so gh is
 //                    reachable only via the PATH shim
-//   controlSockDenies - host control-plane unix-socket path (meta broker,
-//                    from sandbox.js): denied for network-outbound connect()
+//   controlSockDenies - host control-plane unix-socket paths (from
+//                    sandbox.js) denied for network-outbound connect()
 //                    -- file-write* pins cannot stop connect(), and the
 //                    socket lives inside the broad tmp write rules on darwin
 //   hostRuntimeDir - git-broker.js's hostRuntimeDir() (the short /tmp base on
@@ -1145,7 +1145,7 @@ export function buildSeatbeltLaunch({
 
     const readLiterals = [];
     const writeLiterals = [];
-    const sockPaths = [sockets.mcp, sockets.notify, sockets.usage, sockets.meta, sockets.reviewer]
+    const sockPaths = [sockets.mcp, sockets.notify, sockets.usage, sockets.reviewer]
       .filter(Boolean);
     if (gitBroker) sockPaths.push(gitBroker.sockPath);
     // A forwarded ssh-agent socket needs an explicit rule: connect() is a

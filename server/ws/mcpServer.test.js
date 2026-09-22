@@ -9,12 +9,12 @@
 // z.object({...}) silently STRIPS any key that isn't in its shape. Every
 // sandboxOpts schema here used to be `{ gpg, sshAgent }` only, so even after
 // capSandboxOpts/normalizeSandboxOpts learned about tools, a real MCP call
-// (open_tab / launch_session / launch_group) would have its
-// sandboxOpts.tools silently vanish before capSandboxOpts ever ran -- these
-// tests exercise that exact parse step, not just the capping logic.
+// (open_tab) would have its sandboxOpts.tools silently vanish before
+// capSandboxOpts ever ran -- these tests exercise that exact parse step, not
+// just the capping logic.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildControlMcpServer, buildMetaMcpServer, sandboxOptsSchema } from './mcpServer.js';
+import { buildControlMcpServer, sandboxOptsSchema } from './mcpServer.js';
 
 const TOOLS_PAYLOAD = { gpg: true, sshAgent: true, tools: { rtk: true, codeReviewGraph: true } };
 
@@ -34,9 +34,9 @@ test('sandboxOptsSchema still omits an unrequested tools key (no key invented ou
 // the ACTUAL zod object each tool was registered with -- the same object the
 // SDK runs safeParseAsync against for a real tools/call request (see
 // mcp.js's callTool). This is the most direct way to prove the wire-level
-// bug is fixed without standing up a full socket transport for the meta
-// agent's MCP server (mcpBroker.test.js already covers that for the group
-// control server's open_tab over a real UDS).
+// bug is fixed without standing up a full socket transport (mcpBroker.test.js
+// already covers that for the group control server's open_tab over a real
+// UDS).
 function inputSchemaFor(server, toolName) {
   const tool = server._registeredTools[toolName];
   assert.ok(tool, `${toolName} must be registered`);
@@ -52,26 +52,4 @@ test('open_tab (control server) input schema preserves sandboxOpts.tools', async
   });
   assert.ok(res.success, res.error?.message);
   assert.deepEqual(res.data.sandboxOpts, TOOLS_PAYLOAD);
-});
-
-test('launch_session (meta server) input schema preserves sandboxOpts.tools', async () => {
-  const server = buildMetaMcpServer({});
-  const res = await inputSchemaFor(server, 'launch_session').safeParseAsync({
-    cwd: '/srv/project',
-    sandboxOpts: TOOLS_PAYLOAD,
-  });
-  assert.ok(res.success, res.error?.message);
-  assert.deepEqual(res.data.sandboxOpts, TOOLS_PAYLOAD);
-});
-
-test('launch_group (meta server) input schema preserves sandboxOpts.tools at both the group level and per-worker', async () => {
-  const server = buildMetaMcpServer({});
-  const res = await inputSchemaFor(server, 'launch_group').safeParseAsync({
-    cwd: '/srv/project',
-    workers: [{ role: 'workerA', sandboxOpts: TOOLS_PAYLOAD }],
-    sandboxOpts: TOOLS_PAYLOAD,
-  });
-  assert.ok(res.success, res.error?.message);
-  assert.deepEqual(res.data.sandboxOpts, TOOLS_PAYLOAD);
-  assert.deepEqual(res.data.workers[0].sandboxOpts, TOOLS_PAYLOAD);
 });

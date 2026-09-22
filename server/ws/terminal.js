@@ -139,11 +139,6 @@ export function attachTerminalHandler(chan) {
           // absent/invalid -- createSession normalizes it; other apps and
           // shells never emit a flag from it).
           permissionMode: typeof msg.permissionMode === 'string' ? msg.permissionMode : 'standard',
-          // Meta-agent launch from the browser UI (same flag REST
-          // POST /api/sessions already accepts). The server still gates the
-          // actual MCP injection on metaAgentMcp + broker state, so a stale
-          // client can never conjure privileges by sending this.
-          isMetaAgent: !!msg.isMetaAgent,
           resumeLast: !!msg.resume,
           groupId,
           groupRole,
@@ -176,10 +171,6 @@ export function attachTerminalHandler(chan) {
             cols: session.cols,
             rows: session.rows,
             isReconnect: false,
-            // Echo whether the meta MCP was really injected so the client
-            // can surface a silent downgrade (flag requested but the broker
-            // is off) instead of leaving it invisible.
-            isMetaAgent: !!session.isMetaAgent,
             // Effective gpgVault flag THIS session actually launched with
             // (server/ws/sandbox.js's resolved value, not just a requested
             // override) -- lets the client show whether GPG Vault is really
@@ -243,7 +234,6 @@ export function attachTerminalHandler(chan) {
             cols: session.cols,
             rows: session.rows,
             isReconnect: true,
-            isMetaAgent: !!session.isMetaAgent,
             gpgVaultActive: !!session.gpgVaultActive,
             viewers: session.sockets.size,
           })

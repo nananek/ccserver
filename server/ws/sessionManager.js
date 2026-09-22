@@ -2,7 +2,7 @@ import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync, statSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
@@ -12,11 +12,11 @@ import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
-import { shouldInjectMetaAgent, metaAgentEnabled, getMetaSockPath, metaBrokerRunning, ensureMetaAgentDir } from './metaAgent.js';
 import { shouldInjectReviewer, reviewerEnabled, getReviewerSockPath, reviewerBrokerRunning } from './reviewer.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
 import { bunTmpdirEnv } from './bunTmpdir.js';
 import { buildSessionEnv } from './sessionEnv.js';
+import { isContained, isCcserverScratchPath } from '../pathPolicy.js';
 import {
   isValidApp,
   appLaunchArgs,
@@ -36,8 +36,8 @@ import {
 } from '../timeoutEnv.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
-const SCHEDULES_PATH = join(__dirname, '..', '..', '.scheduled-prompts.json');
+export const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
+export const SCHEDULES_PATH = join(__dirname, '..', '..', '.scheduled-prompts.json');
 
 const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 const IDLE_TIMEOUT_MS = 3000;
@@ -254,7 +254,12 @@ function extractResumeId(session) {
 // Prefixes marking a createSession() failure as a server-side infrastructure
 // fault rather than a rejection of the request as given. Exported so HTTP
 // layers (routes/groups.js) classify without re-typing the strings.
-export const INFRA_ERROR_PREFIXES = ['Failed to build sandbox', 'Failed to spawn', 'Cannot launch: sandbox.config.json sets "forceSandbox"'];
+// "...sets \"browseRoots\"" covers the mustSandboxShell/mustSandboxAgent
+// refusal above (sandbox mandatory but unbuildable) -- an infra fault like
+// forceSandbox's, not a request-shape rejection like the separate
+// cwd-outside-browseRoots refusal (which intentionally does NOT start with
+// any of these prefixes, since it IS a rejection of the request as given).
+export const INFRA_ERROR_PREFIXES = ['Failed to build sandbox', 'Failed to spawn', 'Cannot launch: sandbox.config.json sets "forceSandbox"', 'Cannot launch: sandbox.config.json sets "browseRoots"'];
 
 /**
  * Whether a createSession() error message reports infrastructure failure
@@ -293,10 +298,6 @@ function buildSessionRecord(id, ptyProcess, meta) {
     // forwarded nearly as-is across trust boundaries (REST, MCP, federation),
     // so a display string must not ride along with them.
     customLabel: normalizeCustomLabel(meta.customLabel),
-    // True only for sessions launched with the explicit isMetaAgent flag (the
-    // privileged self-management agent). Display/debug bookkeeping -- the
-    // authorization boundary is the meta broker socket, not this flag.
-    isMetaAgent: !!meta.isMetaAgent,
     sandbox: !!meta.sandbox,
     sandboxOpts: meta.sandbox ? (meta.sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
     docker: !!meta.docker, // whether THIS session's sandbox launched with docker (see dockerAvailability)
@@ -594,25 +595,13 @@ function buildSessionRecord(id, ptyProcess, meta) {
   return session;
 }
 
-export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, mcpToken = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
+export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, mcpToken = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
   // (defaultApp, hiddenApps, forceSandbox, persistentHome) via separate
   // loadSandboxConfig() calls below.
   const cfg = loadSandboxConfig();
-
-  // Invariant: meta-agent sessions (isMetaAgent:true, groupId-less) always
-  // run in the fixed project-outside directory ~/.local/share/ccserver-
-  // sandbox/meta-agent, regardless of the client-supplied cwd. This is a
-  // safety force, NOT an authorization boundary -- even when metaAgentMcp is
-  // off or the broker is not running we still force the cwd so a privileged
-  // flag can never land the session inside a project (prompt-injection
-  // material / bwrap rw-bind). Shells are included (no real caller sends
-  // shell+isMetaAgent, but tests use it to verify with a real pty).
-  if (isMetaAgent && !groupId) {
-    cwd = ensureMetaAgentDir();
-  }
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
   // output at all) when launched with the filesystem root as cwd -- refuse
@@ -645,13 +634,29 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     };
   }
 
+  // browseRoots (issue #189): when set, every session's cwd must fall
+  // inside one of these directories -- agent or shell, sandboxed or not.
+  // Checked unconditionally (not just when sandboxRequested below): an
+  // allowUnsandboxedAgents:true agent launch still runs directly on the
+  // host filesystem, so this cwd check is the only restriction such a
+  // launch gets. Server-synthesized scratch cwds (combo worktrees /
+  // orchestrator dirs) are exempt -- see isCcserverScratchPath's comment.
+  const absCwd = resolve('/', cwd);
+  if (cfg.browseRoots.length > 0 && !isCcserverScratchPath(absCwd) && !isContained(absCwd, cfg.browseRoots)) {
+    return {
+      sessionId: id,
+      session: null,
+      error: `Cannot launch: working directory is outside the allowed browseRoots (sandbox.config.json's "browseRoots"). Choose a directory under one of: ${cfg.browseRoots.join(', ')}`,
+    };
+  }
+
   // Which agent CLI this session runs. Shell sessions have no app.
   const sessionApp = shell ? null : (isValidApp(app) ? app : cfg.defaultApp);
 
   // Self-review (issue #105): sandbox.config.json's hiddenApps removes an app
   // from every launch picker client-side, but every picker ultimately funnels
   // its choice through this same createSession() (single launches, combo
-  // workers/orchestrator, worker/launch-preset expansion, meta-agent). Without
+  // workers/orchestrator, worker/launch-preset expansion). Without
   // a check here, hiding an app is purely cosmetic -- any client that sends
   // `app` directly (a hand-crafted WS/API call, a stale MCP preset, a worker
   // preset saved before the app was hidden) would still start a real session
@@ -754,27 +759,12 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   });
   const usageSocketPath = useUsage ? getUsageSockPath() : null;
 
-  // ccserver-meta injection (see metaAgent.js): ONLY for sessions explicitly
-  // launched with isMetaAgent:true (the single privileged self-management
-  // agent -- never auto-injected into group members, shells, or anything
-  // else), when the feature is enabled in the config AND the broker is
-  // actually listening. The per-connection identity rides to the bridge as
-  // CCSERVER_META_IDENTITY and becomes this connection's identity frame
-  // (self-target guards / attribution inside the meta tools).
-  const useMeta = !groupId && metaBrokerRunning() && shouldInjectMetaAgent({
-    shell: !!shell,
-    app: sessionApp,
-    isMetaAgent: !!isMetaAgent,
-    metaAgentEnabled: metaAgentEnabled(),
-  });
-  const metaSocketPath = useMeta ? getMetaSockPath() : null;
-
   // ccserver-reviewer injection (see reviewer.js): unlike notify, ANY session
   // -- worker or standalone -- gets it (issue #102 consensus point 4: "callable
   // regardless of whether a group exists"). Shells, copilot and commandcode
   // are excluded outright (see shouldInjectReviewer); the feature is off by default
   // (sandbox.config.json's reviewerMcp) and requires the broker to actually be
-  // listening, same gating as notify/usage/meta.
+  // listening, same gating as notify/usage.
   //
   // isReviewJob (true ONLY for the one session runReview() itself launches
   // for a given job, see reviewer.js) bypasses reviewerEnabled() specifically
@@ -797,7 +787,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   const reviewerSocketPath = useReviewer ? getReviewerSockPath() : null;
   // Per-connection identity for finish_review's caller verification (see
   // reviewer.js's finishReview): only the sessionId matters here, unlike
-  // notify/meta's richer identity objects.
+  // notify's richer identity object.
   const reviewerIdentity = useReviewer ? { sessionId: id } : null;
 
   // Server-only variables (NODE_ENV, PORT, CCSERVER_*, forwarded ssh-agent)
@@ -830,7 +820,17 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // 'sandbox') or errors out (the config is then never used), so 'host' is
   // only ever reached when the session genuinely runs unsandboxed.
   const forceSandbox = cfg.forceSandbox;
-  const sandboxRequested = (forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable();
+  // browseRoots (issue #189): shells get no opt-out (a bare unsandboxed
+  // shell at an arbitrary browseRoots-confined cwd is still full host access
+  // via `cd`) -- this is the exact gap the issue reported. Agents can opt
+  // out via allowUnsandboxedAgents, since cwd containment (checked above)
+  // already bounds where an agent CLI itself reads/writes by convention,
+  // unlike an interactive shell.
+  const browseRootsRestricted = cfg.browseRoots.length > 0;
+  const mustSandboxShell = shell && browseRootsRestricted;
+  const mustSandboxAgent = !shell && browseRootsRestricted && !cfg.allowUnsandboxedAgents;
+  const sandboxMandatory = forceSandbox || mustSandboxShell || mustSandboxAgent;
+  const sandboxRequested = (sandboxMandatory || sandbox) && process.platform !== 'win32' && sandboxAvailable();
 
   // Non-sandboxed host spawns exec on the host, not in the sandbox: a bare
   // `command` resolved against SANDBOX_PATH may not resolve on the server
@@ -909,7 +909,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // provisioner); seatbelt sandboxes never get the binary, so injecting the
   // MCP server there would fail every session.
   const crgInjectable = sandboxRequested && !seatbeltSandbox && tools.codeReviewGraph;
-  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer || crgInjectable)) {
+  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useReviewer || crgInjectable)) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       // ccserver (the group broker) only when the session has a group socket:
       // standalone notify sessions must not get a broken ccserver entry (its
@@ -928,18 +928,6 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       usage: useUsage ? {
         mode: mcpBridgeMode,
         sockPath: usageSocketPath,
-      } : undefined,
-      meta: useMeta ? {
-        mode: mcpBridgeMode,
-        sockPath: metaSocketPath,
-        identity: {
-          sessionId: id,
-          groupId,
-          groupRole,
-          cwd,
-          projectName: projectName ?? basename(cwd),
-          app: sessionApp,
-        },
       } : undefined,
       reviewer: useReviewer ? {
         mode: mcpBridgeMode,
@@ -1018,7 +1006,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       } catch { resolvedGroupFilesDir = null; }
     }
     try {
-      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
+      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;
@@ -1045,12 +1033,31 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       // a successfully-built HOME between reservation and registration.
       sandboxHomeLaunchReservations.release(reservedSandboxHomePath);
     }
-  } else if (forceSandbox) {
+  } else if (sandboxMandatory) {
+    // groups.test.js pins the exact forceSandbox message byte-for-byte
+    // (isInfrastructureError / orchestratorRestartFailureStatus), so the
+    // forceSandbox branch keeps its original wording (reason + hint)
+    // unchanged; the browseRoots-caused branches build their own message
+    // from `reason` alone (hint's bwrap/disable-forceSandbox phrasing
+    // doesn't fit them) and register their own INFRA_ERROR_PREFIXES entry
+    // below.
     const { reason, hint } = forceSandboxUnavailableReason();
+    if (forceSandbox) {
+      return {
+        sessionId: id,
+        session: null,
+        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. ${hint}`,
+      };
+    }
+    const causedBy = mustSandboxShell
+      ? '"browseRoots" is set (shell sessions must run sandboxed)'
+      : '"browseRoots" is set and "allowUnsandboxedAgents" is not true';
     return {
       sessionId: id,
       session: null,
-      error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. ${hint}`,
+      error: `Cannot launch: sandbox.config.json sets ${causedBy}, but ${reason}. `
+        + `Install bwrap (bubblewrap), set "allowUnsandboxedAgents": true to allow unsandboxed `
+        + `agent launches (cwd stays restricted to browseRoots), or unset browseRoots.`,
     };
   }
 
@@ -1113,7 +1120,6 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     groupId,
     groupRole,
     customLabel,
-    isMetaAgent,
     sandbox: useSandbox,
     sandboxOpts,
     docker: sandboxDocker,
@@ -1859,27 +1865,10 @@ export function listSessions() {
       permissionMode: normalizePermissionMode(session.permissionMode),
       groupId: session.groupId || null,
       groupRole: session.groupRole || null,
-      isMetaAgent: !!session.isMetaAgent,
       customLabel: session.customLabel || null,
     });
   }
   return result;
-}
-
-// Privileged-consumer facade (see ws/metaAgent.js): the meta agent's tools
-// legitimately read/destroy ANY session, so this facade spans all of them --
-// unlike groupManager's per-group sessionApi. Kept to the minimum surface the
-// meta tools need; createSession goes through routes/sessions.js's shared
-// launch function instead, so REST and MCP launches can never drift.
-const sessionManagerApi = {
-  listSessions,
-  getSession,
-  destroySession,
-  sandboxHomeInUsePath,
-};
-
-export function getSessionManagerApi() {
-  return sessionManagerApi;
 }
 
 // Send one message to every viewer attached to a session. A viewer whose

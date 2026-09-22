@@ -7,8 +7,8 @@ import { useVisiblePolling } from '../hooks/useVisiblePolling.js';
 // through /ws/remote-terminal (see App.jsx's onOpenRemoteTerminal /
 // TerminalView.jsx's remoteInstanceId prop). Deliberately a separate,
 // self-contained view rather than merging into DirectoryBrowser.jsx: that
-// component's local launch UI (combo presets, meta-agent mode, sandbox
-// option matrix) is already large, and a remote peer's launch surface is
+// component's local launch UI (combo presets, sandbox option matrix) is
+// already large, and a remote peer's launch surface is
 // intentionally much smaller (Phase 1 only proxies the plain REST shape --
 // see server/routes/federation.js) -- keeping them apart avoids threading
 // "is this remote?" through DirectoryBrowser's every code path for Phase 1's

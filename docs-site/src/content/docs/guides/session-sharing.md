@@ -89,7 +89,6 @@ journalctl --user -u ccserver | grep '\[session\]'
 | `shutdown` | サーバー停止 (`systemctl restart` を含む) |
 | `group-replace` / `group-remove-member` / `group-destroy` | [コンボ起動](/ccserver/guides/combo-launch/)のグループ操作 |
 | `reviewer` | [コードレビュー](/ccserver/guides/reviewer/)ジョブの後片付け |
-| `meta-agent` | [メタエージェント](/ccserver/guides/meta-agent/)の `close_session` |
 | `federation` | [拠点間ペアリング](/ccserver/guides/federation/)経由の終了要求 |
 
 `shutdown` が並んでいる場合はサーバー自身が再起動しています。`systemctl status ccserver` の `NRestarts` と `journalctl -u ccserver | grep Started` で、手動再起動かクラッシュ由来かを切り分けられます。

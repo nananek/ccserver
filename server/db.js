@@ -189,10 +189,13 @@ export const MIGRATIONS = [
   },
   {
     // v4: server-initiated destructive-action approvals (see ws/approvals.js).
-    // A meta-agent MCP tool that wants to close a session / destroy a group /
-    // delete a sandbox inserts a 'pending' row and blocks on an in-memory
-    // waiter until the browser decides via POST /api/approvals/:id/decision
-    // or the fixed 5-minute timeout expires it (timeout == rejected, fail-safe).
+    // A caller that wants to close a session / destroy a group / delete a
+    // sandbox inserts a 'pending' row and blocks on an in-memory waiter until
+    // the browser decides via POST /api/approvals/:id/decision or the fixed
+    // 5-minute timeout expires it (timeout == rejected, fail-safe). No
+    // current caller uses this (issue #189 removed the sole consumer, the
+    // privileged meta-agent MCP toolset); kept as generic infrastructure for
+    // a future feature that needs the same human-in-the-loop gate.
     version: 4,
     up(db) {
       db.exec(`

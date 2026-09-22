@@ -5,17 +5,24 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadSandboxConfig, installedApps, sandboxAvailable, sandboxToolsAvailable } from '../ws/sandbox.js';
 import { opencodeGoAvailable } from '../opencodeUsage.js';
-import { metaAgentEnabled, metaAgentDir } from '../ws/metaAgent.js';
 import { resolvedHostname } from '../ws/notify.js';
+import { resolveWithinRoots, isContained } from '../pathPolicy.js';
 
 const execFileAsync = promisify(execFile);
 
-// Directory listing shared by GET /api/dirs and the meta agent's
-// browse_directory tool (plan section 4.3): one implementation so the HTTP
-// surface and the MCP surface can never disagree. Returns
-// { ok:true, data } or { ok:false, code:'not-found'|'forbidden', message }.
-export async function browseDirectory(requestedPath = '/', showHidden = false) {
-  const absPath = resolve('/', requestedPath || '/');
+// Directory listing shared by GET /api/dirs and (previously) the meta
+// agent's browse_directory tool: one implementation so every consumer can
+// never disagree. Returns { ok:true, data } or
+// { ok:false, code:'not-found'|'forbidden', message }.
+// `roots` (browseRoots, issue #189) is a required argument rather than an
+// optional one defaulting to [] -- every caller must say explicitly whether
+// it is passing a restriction, so a caller cannot silently end up
+// unrestricted by forgetting the argument.
+export async function browseDirectory(requestedPath, showHidden, roots) {
+  const { ok, path: absPath } = resolveWithinRoots(requestedPath || '/', roots);
+  if (!ok) {
+    return { ok: false, code: 'forbidden', message: 'Path is outside the allowed browseRoots' };
+  }
   try {
     const entries = await readdir(absPath, { withFileTypes: true });
 
@@ -54,7 +61,12 @@ export async function browseDirectory(requestedPath = '/', showHidden = false) {
       ok: true,
       data: {
         current: absPath,
-        parent: absPath === '/' ? null : resolve(absPath, '..'),
+        // Never expose a parent outside the allowed roots (issue #189):
+        // the browser would render a clickable ".." that 403s. roots=[]
+        // (unrestricted) keeps the original "/" boundary.
+        parent: (roots.length > 0 && roots.includes(absPath)) || absPath === '/'
+          ? null
+          : resolve(absPath, '..'),
         dirs,
         files,
       },
@@ -70,11 +82,12 @@ export async function browseDirectory(requestedPath = '/', showHidden = false) {
   }
 }
 
-// Directory creation shared by POST /api/dirs and the meta agent's
-// create_directory tool. Returns { ok:true, data } or
+// Directory creation shared by POST /api/dirs and (previously) the meta
+// agent's create_directory tool. Returns { ok:true, data } or
 // { ok:false, code, message } with codes 'validation' | 'conflict' |
 // 'forbidden' | 'not-found' | 'git-init-failed' | 'internal'.
-export async function createDirectory({ parent, name, gitInit }) {
+// `roots` -- see browseDirectory's comment above.
+export async function createDirectory({ parent, name, gitInit }, roots) {
   if (!parent || !name) {
     return { ok: false, code: 'validation', message: 'parent and name are required' };
   }
@@ -83,7 +96,10 @@ export async function createDirectory({ parent, name, gitInit }) {
     return { ok: false, code: 'validation', message: 'Invalid folder name' };
   }
 
-  const absParent = resolve('/', parent);
+  const { ok, path: absParent } = resolveWithinRoots(parent, roots, parent);
+  if (!ok) {
+    return { ok: false, code: 'forbidden', message: 'Parent directory is outside the allowed browseRoots' };
+  }
   const newPath = join(absParent, name);
 
   try {
@@ -122,7 +138,7 @@ export async function createDirectory({ parent, name, gitInit }) {
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
     const cfg = loadSandboxConfig();
-    const { defaultApp, forceSandbox, showUsage, hiddenApps } = cfg;
+    const { defaultApp, forceSandbox, showUsage, hiddenApps, browseRoots } = cfg;
     // hostname for the browser tab title ("<host> ccserver"): the same
     // resolution the notify footer uses, so the tab matches _from: <host>.
     // Extra field, so existing clients are unaffected.
@@ -137,9 +153,6 @@ export async function dirsRoute(fastify, opts) {
     // hiddenApps (issue #105): apps the operator hasn't contracted for --
     // every launch picker removes them entirely, unlike availableApps=false
     // (not installed), which still shows greyed out with a tooltip.
-    // metaAgentEnabled: the launch modal's メタエージェント mode is disabled
-    // (with an explanation) unless the privileged ccserver-meta feature is
-    // explicitly opted into via sandbox.config.json. Extra field as well.
     // sandboxAvailable: whether a sandbox backend is usable on this host
     // (bwrap on Linux, sandbox-exec on macOS). The
     // launch modal disables the sandbox choice (and combo mode, which always
@@ -148,11 +161,20 @@ export async function dirsRoute(fastify, opts) {
     // host can actually provision -- false on macOS (seatbelt has no
     // provisioner wiring). The launch / settings UIs render an unavailable
     // toggle disabled with an explanation, like availableApps for CLIs.
-    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir(), sandboxAvailable: sandboxAvailable() };
+    // browseRoots / initialBrowsePath (issue #189): [] means unrestricted
+    // (home() is still the right browsing start). When set, the directory
+    // browser must start under one of these roots -- home() itself may sit
+    // outside them, so initialBrowsePath falls back to the first root.
+    const home = homedir();
+    const initialBrowsePath = browseRoots.length === 0 || isContained(resolve(home), browseRoots)
+      ? home
+      : browseRoots[0];
+    return { home, browseRoots, initialBrowsePath, defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: sandboxAvailable() };
   });
 
   fastify.get('/dirs', async (request, reply) => {
-    const res = await browseDirectory(request.query.path || '/', !!request.query.showHidden);
+    const { browseRoots } = loadSandboxConfig();
+    const res = await browseDirectory(request.query.path || '/', !!request.query.showHidden, browseRoots);
     if (!res.ok) {
       const status = res.code === 'not-found' ? 404 : res.code === 'forbidden' ? 403 : 500;
       return reply.code(status).send({ error: res.message });
@@ -161,7 +183,8 @@ export async function dirsRoute(fastify, opts) {
   });
 
   fastify.post('/dirs', async (request, reply) => {
-    const res = await createDirectory(request.body || {});
+    const { browseRoots } = loadSandboxConfig();
+    const res = await createDirectory(request.body || {}, browseRoots);
     if (!res.ok) {
       const status = res.code === 'validation' ? 400
         : res.code === 'conflict' ? 409

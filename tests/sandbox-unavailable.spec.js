@@ -16,8 +16,6 @@ const HOME_RESPONSE = {
   showUsage: true,
   availableApps: { claude: true, opencode: true, copilot: true, codex: true },
   hiddenApps: [],
-  metaAgentEnabled: false,
-  metaAgentDir: null,
   sandboxAvailable: false,
 };
 
@@ -140,12 +138,11 @@ test('double-click launch is also blocked when no launch can succeed', async ({ 
 });
 
 test('forceSandbox without a backend disables the launch buttons', async ({ page }) => {
-  await stubDirsHome(page, { ...HOME_RESPONSE, forceSandbox: true, metaAgentEnabled: true });
+  await stubDirsHome(page, { ...HOME_RESPONSE, forceSandbox: true });
   await page.goto('/');
-  // Toolbar quick-launch, Terminal, and meta buttons: nothing can succeed.
+  // Toolbar quick-launch and Terminal buttons: nothing can succeed.
   await expect(page.locator('.open-split-main')).toBeDisabled();
   await expect(page.locator('.toolbar-launch-group .launch-btn', { hasText: 'Terminal' })).toBeDisabled();
-  await expect(page.locator('.meta-launch-btn')).toBeDisabled();
   // In-modal single-launch button too.
   await page.getByRole('button', { name: '起動方法を選択' }).click();
   await expect(page.locator('.resume-dialog .btn-primary', { hasText: '起動' })).toBeDisabled();

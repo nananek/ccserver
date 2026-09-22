@@ -6,11 +6,10 @@
 // byte pipe with no protocol logic.
 //
 // Which broker this reaches is decided by argv + which host socket was bound
-// in (see mcpBroker.js / notify.js / usageMcp.js / metaAgent.js / reviewer.js):
+// in (see mcpBroker.js / notify.js / usageMcp.js / reviewer.js):
 //   plain      -> CCSANDBOX_MCP_SOCK  (the group's control / handoff socket)
 //   'notify'   -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
 //   'usage'    -> CCSANDBOX_USAGE_MCP_SOCK (the process-global usage socket)
-//   'meta'     -> CCSANDBOX_META_MCP_SOCK (the process-global meta-agent socket)
 //   'reviewer' -> CCSANDBOX_REVIEWER_MCP_SOCK (the process-global reviewer socket)
 // The wrapper itself is role-agnostic.
 //
@@ -19,13 +18,11 @@
 // MCP bytes -- so the server can attribute this connection's notifications
 // (see mcpBroker.js). The identity comes from the CCSERVER_NOTIFY_IDENTITY
 // env set by mcpConfig.js; absent or unparseable it sends an empty object
-// (host-only attribution). Meta mode writes the same kind of frame from
-// CCSERVER_META_IDENTITY: the per-connection sessionId/groupId there power
-// the meta tools' self-target guards and approval attribution. Reviewer mode
-// writes the same kind of frame from CCSERVER_REVIEWER_IDENTITY: the
-// per-connection sessionId there is how finish_review verifies the caller IS
-// the review job it claims to be (see reviewer.js). Usage mode carries no
-// identity at all (get_usage answers the same regardless of caller).
+// (host-only attribution). Reviewer mode writes the same kind of frame from
+// CCSERVER_REVIEWER_IDENTITY: the per-connection sessionId there is how
+// finish_review verifies the caller IS the review job it claims to be (see
+// reviewer.js). Usage mode carries no identity at all (get_usage answers the
+// same regardless of caller).
 //
 // Plain mode (the group control / handoff socket) writes a frame too when
 // CCSANDBOX_MCP_TOKEN is set: `{"ccserver": {"token": "<T>"}}`. The broker
@@ -38,20 +35,18 @@ const net = require('net');
 const mode = process.argv[2];
 const IDENTITY_ENV = {
   notify: 'CCSERVER_NOTIFY_IDENTITY',
-  meta: 'CCSERVER_META_IDENTITY',
   reviewer: 'CCSERVER_REVIEWER_IDENTITY',
 };
 const wantsIdentityFrame = !!IDENTITY_ENV[mode];
 // Plain mode: the group control / handoff socket. Its first frame carries the
 // connection token (CCSANDBOX_MCP_TOKEN), which the broker checks before
-// building an McpServer. notify/meta/reviewer already send a frame of their
-// own; usage sends none and is not token-gated.
+// building an McpServer. notify/reviewer already send a frame of their own;
+// usage sends none and is not token-gated.
 const plainToken = (!mode && process.env.CCSANDBOX_MCP_TOKEN) || null;
 const wantsFirstFrame = wantsIdentityFrame || !!plainToken;
 const MODE_SOCK_ENV = {
   notify: 'CCSANDBOX_NOTIFY_MCP_SOCK',
   usage: 'CCSANDBOX_USAGE_MCP_SOCK',
-  meta: 'CCSANDBOX_META_MCP_SOCK',
   reviewer: 'CCSANDBOX_REVIEWER_MCP_SOCK',
 };
 const sockPath = process.env[MODE_SOCK_ENV[mode] || 'CCSANDBOX_MCP_SOCK'];

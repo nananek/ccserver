@@ -15,7 +15,7 @@
 // chars, and a per-channel random UUID pushed control/handoff paths over it.
 //
 // Issue #143 problem 1: every socket this module hosts (group control/handoff
-// via sockPathFor(), and the process-global notify/usage/meta/reviewer
+// via sockPathFor(), and the process-global notify/usage/reviewer
 // sockets passed in explicitly by their own modules) lives alone inside its
 // own dedicated directory (`<name>.d/sock`), and listenMcp() below binds a
 // FRESH one into every sandbox as a directory (see sandbox.js's
@@ -33,7 +33,7 @@ import { createServer } from 'node:net';
 import { rmSync, rmdirSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildMetaMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
+import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
 import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 
 // Darwin-aware via git-broker.js (macOS has no /run/user): the same
@@ -344,27 +344,9 @@ export async function startUsageBroker({ usageApi, sockPath }) {
   });
 }
 
-// The process-global meta-agent broker (ccserver-meta, see metaAgent.js). One
-// per server process, NOT group-scoped -- this is the single PRIVILEGED
-// socket through which the meta agent manages every group/session/sandbox.
-// The per-connection identity frame (CCSERVER_META_IDENTITY via the bridge,
-// same mechanism as notify) carries the caller's own sessionId/groupId for
-// the tools' self-target guards; the trust boundary itself is that exactly
-// one sandbox ever binds this socket.
-export async function startMetaBroker({ metaDeps, sockPath }) {
-  return listenMcp({
-    sockPath,
-    tag: 'meta',
-    // Per-connection deps: the identity frame differs per accepted socket, so
-    // the server is built with a connection-specific deps object (the shared
-    // metaDeps carry only process-global managers).
-    buildServer: (identity, connectionIsAlive) => buildMetaMcpServer({ ...metaDeps, identity, connectionIsAlive }),
-  });
-}
-
 // The process-global reviewer broker (ccserver-reviewer, see reviewer.js).
 // One per server process. NOT group-scoped, but DOES carry a per-connection
-// identity frame (CCSERVER_REVIEWER_IDENTITY, same mechanism as notify/meta)
+// identity frame (CCSERVER_REVIEWER_IDENTITY, same mechanism as notify)
 // -- unlike run_review/list_reviews/get_review (whose attribution, if any,
 // rides in run_review's own `requestedBy` argument), finish_review needs to
 // verify the CALLER is the very session the job launched, and the identity

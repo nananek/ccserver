@@ -1,9 +1,9 @@
 import { test, expect } from '@playwright/test';
 
 // Duplicate-launch guard (issue #132): opening a directory that already has a
-// live (non-shell, non-meta-agent) session must warn before spawning a
-// second one, since two agent processes racing over the same cwd is exactly
-// the footgun this feature exists to catch.
+// live (non-shell) session must warn before spawning a second one, since two
+// agent processes racing over the same cwd is exactly the footgun this
+// feature exists to catch.
 //
 // The check hits GET /api/sessions before anything is actually launched, so
 // it's exercised here entirely by stubbing that endpoint -- no real
@@ -50,7 +50,6 @@ function stubDuplicateSession(page, cwd, overrides = {}) {
           permissionMode: 'standard',
           groupId: null,
           groupRole: null,
-          isMetaAgent: false,
           customLabel: null,
           ...overrides,
         }],

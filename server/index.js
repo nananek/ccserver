@@ -4,7 +4,7 @@ import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { dirsRoute } from './routes/dirs.js';
 import { sessionsRoute } from './routes/sessions.js';
 import { filesRoute } from './routes/files.js';
@@ -25,11 +25,11 @@ import { authRoute } from './routes/auth.js';
 import { gpgVaultRoute } from './routes/gpgVault.js';
 import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
-import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
-import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
-import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
+import { gracefulShutdown, restoreSchedules, SAVED_SESSIONS_PATH, SCHEDULES_PATH } from './ws/sessionManager.js';
+import { restoreGroups, detectOrphanWorktrees, GROUPS_PATH, GROUP_DOCS_PATH } from './ws/groupManager.js';
+import { getGroupFilesManifestPath } from './ws/groupFiles.js';
+import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled, notifyPath } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
-import { ensureMetaAgentBroker, stopMetaAgentBroker, metaAgentEnabled } from './ws/metaAgent.js';
 import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/reviewer.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
 import { ensureFederationServer, stopFederationServer, federationEnabled } from './ws/federationServer.js';
@@ -39,7 +39,9 @@ import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
 import { warmOpencodeUsage } from './opencodeUsage.js';
 import { initDb, dbPath } from './db.js';
-import { selectableAppIds, installedApps } from './ws/sandbox.js';
+import { selectableAppIds, installedApps, loadSandboxConfig } from './ws/sandbox.js';
+import { isContained } from './pathPolicy.js';
+import { tasksPath } from './ws/vikunjaClient.js';
 import { verifySessionCookie } from './authSessions.js';
 import { resolveAuthMode } from './authMode.js';
 import { lockVault, isLegacyVault } from './ws/gpgVaultAgent.js';
@@ -277,7 +279,6 @@ if (process.env.NODE_ENV === 'production') {
 const cleanup = () => {
   stopNotifyBroker();
   stopUsageBroker();
-  stopMetaAgentBroker();
   stopReviewerBroker();
   stopFederationServer();
   // GPG vault (plan: gpg-agent-vault): the in-memory Vault Key is this
@@ -293,7 +294,7 @@ process.on('SIGTERM', cleanup);
 process.on('SIGINT', cleanup);
 
 // Refuse to boot only if sandbox.config.json's hiddenApps (issue #105) has
-// hidden every agent CLI actually installed on this host: every one of the 5
+// hidden every agent CLI actually installed on this host: every one of the 4
 // launch screens would silently offer nothing to start. A host with nothing
 // installed at all (shell-only use, CI) never had a boot-time check before
 // this feature and must keep booting -- that's a separate, pre-existing
@@ -319,6 +320,40 @@ try {
 } catch (err) {
   fastify.log.error({ err }, 'Refusing to start: failed to determine selectable agent CLIs');
   process.exit(1);
+}
+
+// browseRoots (issue #189): refuse to boot if ccserver's own internal state
+// files -- most importantly the SQLite DB, which holds the GPG Vault's
+// encrypted secret key material -- would fall inside the configured
+// browseRoots. Without this guard, an operator narrowing /api/files and
+// /api/dirs to browseRoots could still expose these files through those
+// very same endpoints if browseRoots happens to contain them (e.g. pointing
+// it at the repo root, where the .saved-*.json sidecars default to).
+{
+  const { browseRoots, configPath } = loadSandboxConfig();
+  if (browseRoots.length > 0) {
+    const internalPaths = [
+      ['ccserver.sqlite3 (CCSERVER_DB_PATH)', dbPath()],
+      ['sandbox.config.json (CCSERVER_SANDBOX_CONFIG)', configPath],
+      ['.saved-groups.json (CCSERVER_GROUPS_PATH)', GROUPS_PATH],
+      ['.saved-group-docs.json (CCSERVER_GROUP_DOCS_PATH)', GROUP_DOCS_PATH],
+      ['.saved-group-files.json (CCSERVER_GROUP_FILES_PATH)', getGroupFilesManifestPath()],
+      ['.saved-notifications.json (CCSERVER_NOTIFY_PATH)', notifyPath()],
+      ['.saved-sessions.json (CCSERVER_SAVED_SESSIONS_PATH)', SAVED_SESSIONS_PATH],
+      ['.scheduled-prompts.json', SCHEDULES_PATH],
+      ['.saved-vikunja-tasks.json (CCSERVER_VIKUNJA_TASKS_PATH)', tasksPath()],
+    ];
+    const exposed = internalPaths.filter(([, p]) => isContained(resolve(p), browseRoots));
+    if (exposed.length > 0) {
+      fastify.log.error(
+        'Refusing to start: "browseRoots" is set, but the following ccserver-internal state files fall '
+        + 'inside it and would become browsable/downloadable via /api/files, /api/dirs: '
+        + exposed.map(([label, p]) => `${label} = ${p}`).join(', ')
+        + '. Move them outside browseRoots via their env var override (shown in parens above), or narrow browseRoots to exclude them.'
+      );
+      process.exit(1);
+    }
+  }
 }
 
 const PORT = process.env.PORT || 3001;
@@ -350,23 +385,10 @@ try {
   fastify.log.error({ err }, 'Failed to start ccserver-usage broker');
 }
 
-// ccserver-meta: host the privileged meta-agent MCP socket when explicitly
-// enabled (metaAgentMcp in sandbox.config.json). Same bind-before-listen
-// ordering requirement: the meta agent's sandbox snapshots this socket at
-// launch, so it must exist before any isMetaAgent session can be created.
-try {
-  if (metaAgentEnabled()) {
-    await ensureMetaAgentBroker();
-    fastify.log.info('ccserver-meta MCP broker started');
-  }
-} catch (err) {
-  fastify.log.error({ err }, 'Failed to start ccserver-meta broker');
-}
-
 // ccserver-reviewer: host the process-global run_review/list_reviews/
 // get_review MCP socket when explicitly enabled (reviewerMcp in
 // sandbox.config.json). Same bind-before-listen ordering requirement as
-// notify/usage/meta above.
+// notify/usage above.
 try {
   if (reviewerEnabled()) {
     await ensureReviewerBroker();
@@ -380,7 +402,7 @@ try {
 // CCSERVER_FEDERATION_PORT, separate from the Fastify port above -- see
 // ws/federationServer.js's header comment. Opt-in via the env var; a failure
 // here (missing openssl, port already in use) disables federation for this
-// run rather than refusing to boot, matching the notify/usage/meta brokers.
+// run rather than refusing to boot, matching the notify/usage brokers.
 try {
   if (federationEnabled()) {
     await ensureFederationServer({ log: fastify.log });

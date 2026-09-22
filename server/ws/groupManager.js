@@ -52,14 +52,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Groups survive a server restart via this file (groupId, member roles,
 // orchestrator dir/app/instructions -- see persistGroups). Overridable for
 // tests, which must never touch the real repo-root state file.
-const GROUPS_PATH = process.env.CCSERVER_GROUPS_PATH || join(__dirname, '..', '..', '.saved-groups.json');
+export const GROUPS_PATH = process.env.CCSERVER_GROUPS_PATH || join(__dirname, '..', '..', '.saved-groups.json');
 // Group-scoped published documents (publish_doc/fetch_doc/list_docs, see
 // section 7 of the plan), kept in their own file rather than folded into
 // GROUPS_PATH: persistGroups() is called far more often (every member
 // registration / pref change) than documents are published, and mixing the
 // two would mean re-serializing every doc's content on each of those
 // unrelated writes.
-const GROUP_DOCS_PATH = process.env.CCSERVER_GROUP_DOCS_PATH || join(__dirname, '..', '..', '.saved-group-docs.json');
+export const GROUP_DOCS_PATH = process.env.CCSERVER_GROUP_DOCS_PATH || join(__dirname, '..', '..', '.saved-group-docs.json');
 const GROUP_FILES_PATH = process.env.CCSERVER_GROUP_FILES_PATH || join(__dirname, '..', '..', '.saved-group-files.json');
 
 // Orchestrator CLAUDE.md/AGENTS.md source: a repo-tracked template, read
@@ -450,11 +450,11 @@ export function listGroups() {
   }));
 }
 
-// Public per-group summary for the meta agent's get_group tool (and any other
-// privileged consumer): the same fields the GET /api/groups/:id route returns,
-// MINUS the internals that facade deliberately withholds (orchestratorDir /
-// allowedCwds -- host paths and scope internals an LLM-facing tool must not
-// reach; see getGroupManagerApi's comment). null when the group is gone.
+// Public per-group summary for a privileged consumer: the same fields the
+// GET /api/groups/:id route returns, MINUS the internals that facade
+// deliberately withholds (orchestratorDir / allowedCwds -- host paths and
+// scope internals an LLM-facing tool must not reach; see
+// getGroupManagerApi's comment). null when the group is gone.
 export function getGroupSummary(groupId) {
   const group = groups.get(groupId);
   if (!group) return null;
@@ -1830,14 +1830,6 @@ const groupManagerApi = {
   publishGroupFilesFromUpload,
   commitStagedUploads,
   getGroupFilesDirForGroup,
-  // Meta-agent extensions (see ws/metaAgent.js): the meta broker is a
-  // process-global PRIVILEGED socket, so its facade legitimately spans every
-  // group -- unlike the per-group control server above, which must never see
-  // beyond its own groupId. getGroupSummary (not raw getGroup) keeps
-  // orchestratorDir/allowedCwds out of LLM reach even here.
-  listGroups,
-  getGroupSummary,
-  destroyGroup,
 };
 
 // Test seam: returns the exact facade the broker servers receive. Unit tests

@@ -28,7 +28,8 @@ cp server/sandbox.config.example.json server/sandbox.config.json
   "opencodeGoUsage": true,
   "hiddenApps": [],
   "usageMcp": false,
-  "metaAgentMcp": false,
+  "browseRoots": [],
+  "allowUnsandboxedAgents": false,
   "reviewerMcp": false,
   "notify": {
     "discordWebhook": "",
@@ -58,9 +59,10 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (コンボのロール別選択は別途ブラウザの `localStorage` に記憶され、copilot はそもそも選択不可)。 |
 | `showUsage` | `true` | タブバー右端の Usage ボタンを表示するか。`false` で非表示。**claude/codex のどちらもサーバーに無く、Go タブも利用不可の場合は設定に関わらず自動的に非表示**になります (利用可能なソースが 1 つだけならボタンは表示され、ポップオーバーはそのソースのみ表示)。 |
 | `opencodeGoUsage` | `true` | Usage ポップオーバーの OpenCode Go タブを有効化するか。opencode CLI の有無とは独立 (Go 契約にバイナリは不要)。`false` でタブを強制非表示にし、キーの読み取りも外部リクエストもしません。`true` (既定) でも Go キーが無い間は自動で隠れ、キーがあるのに未契約 (403) の場合はタブ内にその旨を表示します。環境変数 `CCSERVER_OPENCODE_GO_USAGE` (`0/false/off/no` か `1/true/on/yes`) がこのファイルより優先されます。 |
-| `hiddenApps` | `[]` | 起動ピッカーから完全に除外するエージェント CLI (`"claude"`・`"opencode"`・`"copilot"`・`"codex"` の配列)。契約していない (=使わせたくない) CLI をサーバーにインストールされているかどうかに関わらず隠すための設定です。単発起動モーダル・コンボ起動のロール別選択・Worker プリセット管理・メタエージェント起動・Usage ボタンのアプリタブ、5画面すべてに適用されます。**未インストールのため grey out されて表示され続けるものとは別の挙動**で、`hiddenApps` に入れたアプリは常に完全に除去されます (grey out のまま残すモードはありません)。不明な値は無視されます。この設定によってこのホストに実際にインストール済みのアプリが1つも選択できなくなる場合、サーバーは起動を拒否します (何も起動できない UI をサイレントに立ち上げないため)。ピッカーからの除外は UI 上の利便性に過ぎず、実際の防御は `createSession()` 側にもあります: WS/REST を直接叩く、あるいは Worker/Launch プリセットやメタエージェントの MCP ツール (`launch_group`/`launch_from_preset` 等) 経由であっても、隠されたアプリでの新規セッション作成 (予約プロンプトの自動再開を含む) はサーバー側で拒否されます。 |
+| `hiddenApps` | `[]` | 起動ピッカーから完全に除外するエージェント CLI (`"claude"`・`"opencode"`・`"copilot"`・`"codex"` の配列)。契約していない (=使わせたくない) CLI をサーバーにインストールされているかどうかに関わらず隠すための設定です。単発起動モーダル・コンボ起動のロール別選択・Worker プリセット管理・Usage ボタンのアプリタブ、4画面すべてに適用されます。**未インストールのため grey out されて表示され続けるものとは別の挙動**で、`hiddenApps` に入れたアプリは常に完全に除去されます (grey out のまま残すモードはありません)。不明な値は無視されます。この設定によってこのホストに実際にインストール済みのアプリが1つも選択できなくなる場合、サーバーは起動を拒否します (何も起動できない UI をサイレントに立ち上げないため)。ピッカーからの除外は UI 上の利便性に過ぎず、実際の防御は `createSession()` 側にもあります: WS/REST を直接叩く、あるいは Worker/Launch プリセット経由であっても、隠されたアプリでの新規セッション作成 (予約プロンプトの自動再開を含む) はサーバー側で拒否されます。 |
 | `usageMcp` | `false` | Claude セッションへ `ccserver-usage` MCP (`get_usage` ツール) を注入するか。安全のため既定はオフで、`true` の明示時だけ有効です。`showUsage` とは独立しています。 |
-| `metaAgentMcp` | `false` | メタエージェント用 MCP (`ccserver-meta`) を有効化するか。`true` の明示時のみ、メタエージェントとして起動されたセッションへ注入されます ([メタエージェント](/ccserver/guides/meta-agent/) 参照)。全サーバーを操作できる特権ツールのため既定はオフです。 |
+| `browseRoots` | `[]` | `/api/files`・`/api/dirs`・`/ws/terminal` のアクセス範囲をこれらのディレクトリ (とそのサブツリー) 配下に制限する許可ルートの配列。`[]` (既定) は従来どおりホスト全域アクセス可能。設定すると: ファイルのダウンロード/プレビュー/アップロード先とディレクトリ閲覧/作成がこの配下に制限され、シェルセッションは常時サンドボックス強制 (オプトアウト不可) になり、エージェントセッションも既定でサンドボックス強制されます (`allowUnsandboxedAgents` 参照)。起動時に、`ccserver.sqlite3` や `sandbox.config.json` 自身などの内部状態ファイルがこの配下に入っていないか検証し、入っている場合は起動を拒否します。`~` はホームディレクトリに展開されます。**コンボ起動 (グループ) について**: ワーカー/オーケストレーターの実際のセッション cwd は常に `~/.local/share/ccserver-sandbox/{worktrees,orchestrator}/...` というサーバー内部の固定スクラッチ領域になり (プロジェクトディレクトリ自体ではありません)、この領域は browseRoots のチェック対象外です。ただしコンボ起動作成時 (`POST /api/groups`) のプロジェクト cwd 自体は browseRoots 配下でなければ拒否されるため、browseRoots 外のプロジェクトに対してコンボグループを作成すること自体はできません。 |
+| `allowUnsandboxedAgents` | `false` | `browseRoots` 設定時、エージェントセッション (shell ではない起動) がサンドボックスなしで起動することを明示的に許可するか。`true` にしても cwd は引き続き `browseRoots` 配下に制限されます。シェルセッションにはこのオプトアウトはありません。 |
 | `reviewerMcp` | `false` | コードレビュー用 MCP (`ccserver-reviewer`、`run_review`/`list_reviews`/`get_review`/`finish_review` ツール) を有効化するか。`true` の明示時、shell と copilot を除く全セッション (コンボのワーカーも含む、グループの有無は不問) へ注入されます。ローカルの任意 ref/ブランチ/PR/未コミット差分に対して使い捨ての git worktree 上でヘッドレスセッションを起動し `/code-review` を実行するため、既定はオフです。レビュージョブ自身のセッションには、このフラグの値に関わらず (ライブ編集で無効化された場合の完了検知破綻を防ぐため) `finish_review` を呼ぶための MCP が強制的に注入されます ([コードレビュー](/ccserver/guides/reviewer/) 参照)。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |

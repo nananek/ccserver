@@ -46,7 +46,7 @@ after(() => {
 });
 
 // Newline-delimited JSON-RPC client over the UDS (MCP stdio framing).
-// `target` is a bare sockPath string (notify/usage/meta/reviewer) or a broker
+// `target` is a bare sockPath string (notify/usage/reviewer) or a broker
 // handle { sockPath, token } (control/handoff): a token means the bridge's
 // first frame `{"ccserver":{"token":...}}` is sent on connect, exactly as
 // sandbox-mcp-wrapper.cjs does, so the connection passes the broker's gate.
@@ -478,7 +478,7 @@ test('stopBroker destroys established connections', async () => {
 });
 
 // Self-review regression: stopBroker's removeDir option must default to
-// false. notify/usage/meta/reviewer's stopXBroker() calls this bare (no
+// false. notify/usage/reviewer's stopXBroker() calls this bare (no
 // removeDir) from server本体's SIGTERM cleanup, and another still-running
 // sandboxed session may hold a bind mount to this exact directory. If
 // stopBroker reclaimed the directory by default, the next startup's

@@ -22,6 +22,7 @@ ccserver/
 │   ├── authSessions.js             # passkey モードのセッション Cookie 管理 (Issue #141)
 │   ├── loginTokens.js              # SSH 発行ワンタイムログイントークンの生成/ハッシュ (Issue #141)
 │   ├── webauthnChallenges.js       # WebAuthn 登録/認証チャレンジ管理 + rpID/origin 解決 (Issue #141)
+│   ├── pathPolicy.js               # browseRoots (issue #189) のパス正規化/containment 判定 (files.js/dirs.js/sessionManager.js/sandbox.js 共有)
 │   ├── usage.js                    # `claude --ax-screen-reader` を叩いて /usage をパース・キャッシュ
 │   ├── codexUsage.js               # `codex app-server` に JSON-RPC で account/rateLimits/read を投げてキャッシュ
 │   ├── sandbox.config.example.json
@@ -31,7 +32,7 @@ ccserver/
 │   ├── routes/
 │   │   ├── dirs.js                 # GET/POST /api/dirs, GET /api/dirs/home
 │   │   ├── sessions.js             # GET/POST/DELETE /api/sessions (POST は単発セッション新規起動)
-│   │   ├── approvals.js            # GET /api/approvals, POST /api/approvals/:id/decision (メタエージェント承認)
+│   │   ├── approvals.js            # GET /api/approvals, POST /api/approvals/:id/decision (破壊的操作の承認フロー)
 │   │   ├── projects.js             # GET /api/projects, PUT /api/projects/:id/label
 │   │   ├── launchPresets.js        # GET/POST/PUT/DELETE /api/launch-presets (コンボ起動プリセット)
 │   │   ├── files.js                # GET/POST /api/files (アップロード/ダウンロード), GET /api/files/content (プレビュー)
@@ -45,12 +46,10 @@ ccserver/
 │       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook/Vikunja 配送 + MCP ソケット
 │       ├── vikunjaClient.js        # notify.js から呼ばれる Vikunja タスク作成/更新クライアント
 │       ├── usageMcp.js             # ccserver-usage: get_usage MCP ツール (server/usage.js の getUsage を直接呼ぶ)
-│       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify / ccserver-usage / ccserver-meta / ccserver-reviewer、sandbox/host 両モード)
-│       ├── mcpServer.js            # control / handoff / notify / usage / meta / reviewer 各 MCP サーバー (SocketTransport 含む)
-│       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify/usage/meta/reviewer はプロセス毎 1 つ)
+│       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify / ccserver-usage / ccserver-reviewer、sandbox/host 両モード)
+│       ├── mcpServer.js            # control / handoff / notify / usage / reviewer 各 MCP サーバー (SocketTransport 含む)
+│       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify/usage/reviewer はプロセス毎 1 つ)
 │       ├── mcpTools.js             # control/handoff ツールの実装 (deps 注入)
-│       ├── metaTools.js            # メタエージェント用ツールの実装 (ワイヤ引数を信頼する、mcpTools とは別の信頼境界ファイル)
-│       ├── metaAgent.js            # ccserver-meta: metaAgentMcp ゲーティング + プロセスグローバル MCP ソケット
 │       ├── reviewer.js             # ccserver-reviewer: run_review/list_reviews/get_review/finish_review、使い捨て worktree + SQLite (pr_reviews) 管理
 │       ├── screenModel.js          # read_output 用の軽量仮想画面 (ANSI 解釈 + 変化検知)
 │       ├── sandbox.js              # bwrap + rootless docker サンドボックス構築
@@ -78,7 +77,7 @@ ccserver/
         │   ├── DirectoryBrowser.jsx
         │   ├── TerminalView.jsx    # 遅延ロード (初期バンドル削減)
         │   ├── widgets/UsageWidget.jsx  # 右サイドバーの使用量表示
-        │   ├── ApprovalBanner.jsx  # メタエージェント承認待ちグローバルバナー (ポーリング)
+        │   ├── ApprovalBanner.jsx  # 破壊的操作の承認待ちグローバルバナー (ポーリング)
         │   ├── AuthGate.jsx        # passkey モードのログイン画面ゲート (Issue #141)
         │   ├── LoginView.jsx       # ワンタイムトークン入力 + パスキー認証 (Issue #141)
         │   └── PasskeysSection.jsx # SettingsView のパスキー登録セクション (Issue #141)

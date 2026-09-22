@@ -64,15 +64,6 @@ const GH_EXEC_MAX_BYTES = 10 * 1024 * 1024;
 const __filename = fileURLToPath(import.meta.url);
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
-// Canonical control-plane socket filenames (single source of truth): the
-// seatbelt profile's network-outbound deny pin must keep matching
-// metaAgent.js's socket path -- a rename there would silently void the pin
-// (metaAgent.js imports this from here, so a rename updates the pin
-// automatically). Meta uses a dedicated `.d/sock` directory (Issue #143
-// problem 1: directory bind survives a server restart, see mcpBroker.js), so
-// its pin is a directory + 'sock', not a single filename.
-export const META_SOCK_NAME = 'ccserver-meta.sock';
-export const META_SOCKET_DIR_NAME = 'ccserver-meta.d';
 // Host runtime dir for broker sockets and other per-launch state.
 // XDG_RUNTIME_DIR wins when set; otherwise Linux uses /run/user/<uid> while
 // macOS -- which has no /run -- falls back to a short /tmp base. NOT the

@@ -76,7 +76,7 @@ export default function SessionList({
                   onClick={() => { onSelectTab(tab.id); }}
                 >
                   <span className="session-menu-item-top">
-                    <TabIcon type={tab.type} app={tab.app} shell={tab.shell} isMetaAgent={!!tab.isMetaAgent} />
+                    <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
                     <span className="session-menu-label">{displayLabel}</span>
                     {tab.remote && (
                       <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
@@ -174,7 +174,7 @@ export default function SessionList({
                 onClick={() => { onOpenSession(s); }}
               >
                 <span className="session-menu-item-top">
-                  <TabIcon type="terminal" app={s.app} shell={!!s.shell} isMetaAgent={!!s.isMetaAgent} />
+                  <TabIcon type="terminal" app={s.app} shell={!!s.shell} />
                   <span className="session-menu-label">{s.customLabel || baseName(s.cwd) || s.id.slice(0, 8)}</span>
                   {s.sandbox
                     ? <span className="session-badge sandbox">sandbox</span>

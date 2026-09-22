@@ -1,10 +1,18 @@
 import { createReadStream, constants } from 'node:fs';
 import { stat, writeFile, open } from 'node:fs/promises';
-import { resolve, basename, join, extname } from 'node:path';
+import { basename, join, extname } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { loadSandboxConfig } from '../ws/sandbox.js';
+import { resolveWithinRoots } from '../pathPolicy.js';
 
+// browseRoots (issue #189): resolves the same way resolve('/', requestedPath
+// || '/') always did (relative paths anchored at /, '..' collapsed -- see
+// files.test.js's host-wide-policy pin) but also reports whether the result
+// falls inside the configured browseRoots. [] (default) is unrestricted, so
+// this is a no-op change until an operator opts in.
 function safePath(requestedPath) {
-  return resolve('/', requestedPath || '/');
+  const { browseRoots } = loadSandboxConfig();
+  return resolveWithinRoots(requestedPath, browseRoots); // { ok, path }
 }
 
 // Inline preview cap. The file browser's viewer only needs the head of a huge
@@ -55,7 +63,10 @@ async function readHead(handle, limit) {
 export async function filesRoute(fastify, opts) {
   // Download
   fastify.get('/files', async (request, reply) => {
-    const filePath = safePath(request.query.path);
+    const { ok, path: filePath } = safePath(request.query.path);
+    if (!ok) {
+      return reply.code(403).send({ error: 'Path is outside the allowed browseRoots' });
+    }
 
     try {
       const st = await stat(filePath);
@@ -87,7 +98,10 @@ export async function filesRoute(fastify, opts) {
     if (typeof requested !== 'string' || requested === '') {
       return reply.code(400).send({ error: 'path is required' });
     }
-    const filePath = safePath(requested);
+    const { ok, path: filePath } = safePath(requested);
+    if (!ok) {
+      return reply.code(403).send({ error: 'Path is outside the allowed browseRoots' });
+    }
     const kind = previewKind(filePath);
     if (!kind) {
       return reply.code(415).send({ error: 'Unsupported file type' });
@@ -155,15 +169,26 @@ export async function filesRoute(fastify, opts) {
   fastify.post('/files', async (request, reply) => {
     const parts = request.parts();
     let destination = null;
+    let destinationBlocked = false;
     const uploaded = [];
 
     for await (const part of parts) {
       if (part.type === 'field' && part.fieldname === 'destination') {
-        destination = safePath(part.value);
+        const { ok, path } = safePath(part.value);
+        if (ok) {
+          destination = path;
+        } else {
+          destinationBlocked = true;
+        }
         continue;
       }
 
       if (part.type === 'file') {
+        if (destinationBlocked) {
+          // Consume and discard to avoid stream errors
+          await part.toBuffer();
+          return reply.code(403).send({ error: 'Destination is outside the allowed browseRoots' });
+        }
         if (!destination) {
           // Consume and discard to avoid stream errors
           await part.toBuffer();

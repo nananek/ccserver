@@ -123,7 +123,6 @@ export default function App() {
   // installed here (availableApps). Usage is only meaningful when claude
   // exists, so a missing claude hides the button regardless of showUsage.
   const [usagePrefs, setUsagePrefs] = useState({ showUsage: true, availableApps: null, hiddenApps: [], toolsAvailable: null });
-  const [metaAgentDir, setMetaAgentDir] = useState(null);
 
   useEffect(() => {
     applyThemeCss(themeId);
@@ -151,23 +150,20 @@ export default function App() {
           // null/absent = older server -> the settings toggles stay enabled.
           toolsAvailable: (data.toolsAvailable && typeof data.toolsAvailable === 'object') ? data.toolsAvailable : null,
         });
-        if (data.metaAgentDir) setMetaAgentDir(data.metaAgentDir);
       })
       .catch(() => {});
   }, []);
 
-  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, permissionMode = 'standard', resume = false, reuseSandboxHome = true, isMetaAgent = false } = {}) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, permissionMode = 'standard', resume = false, reuseSandboxHome = true } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
-    // Meta-agent tabs carry a ⌘ prefix (plus their own tab icon): the
-    // privileged session must be recognizable at a glance in the tab bar.
-    const label = shell ? `$ ${dirName}` : isMetaAgent ? `⌘ ${dirName}` : dirName;
+    const label = shell ? `$ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, permissionMode, resume, reuseSandboxHome, isMetaAgent, exited: false },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, permissionMode, resume, reuseSandboxHome, exited: false },
     ]);
     setActiveTabId(id);
-    if (!isMetaAgent) setLastDir(dirPath);
+    setLastDir(dirPath);
   }, []);
 
   // Remote (federated) counterpart of openTerminalTab: same tab shape, plus
@@ -197,23 +193,18 @@ export default function App() {
   // The post-sandbox-dialog open flow: claude's resume prompt (if a saved
   // conversation exists), else a plain tab open. Carries the chosen
   // reuseSandboxHome through so a resumed conversation keeps the same HOME.
-  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, permissionMode = 'standard', resume = false, skipResumePrompt = false, reuseSandboxHome = true, isMetaAgent = false } = {}) => {
+  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, permissionMode = 'standard', resume = false, skipResumePrompt = false, reuseSandboxHome = true } = {}) => {
     // Only claude sessions carry a resumable conversation id (opencode resumes
-    // the last session of the project itself via -c). Meta-agent opens skip
-    // the prompt and always start fresh: the user just confirmed a privileged
-    // launch, and resuming whatever worker conversation last ran in this
-    // directory would graft ccserver-meta onto a context written without it.
-    // Conscious returns to a specific meta session still work (sidebar
-    // re-open, SESSION_NOT_FOUND re-init) -- those keep claudeSessionId.
-    if (!skipResumePrompt && !isMetaAgent && app === 'claude') {
+    // the last session of the project itself via -c).
+    if (!skipResumePrompt && app === 'claude') {
       const savedSessionId = localStorage.getItem(`ccserver-resume:claude:${dirPath}`);
       if (savedSessionId) {
         pendingOpenRef.current = dirPath;
-        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app, model, permissionMode, reuseSandboxHome, isMetaAgent });
+        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app, model, permissionMode, reuseSandboxHome });
         return;
       }
     }
-    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, permissionMode, resume, reuseSandboxHome, isMetaAgent });
+    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, permissionMode, resume, reuseSandboxHome });
   }, [openTerminalTab]);
 
   // Sandboxed agent launch: before opening, ask the server whether a previous
@@ -238,36 +229,32 @@ export default function App() {
     continueOpen(dirPath, opts);
   }, [continueOpen]);
 
-  // Before actually launching, warn when a live (non-shell, non-meta-agent)
-  // session already runs in this exact directory -- e.g. it was opened from
-  // another browser tab/window/device this tab's own `tabs` state knows
-  // nothing about (see issue #132). Meta-agent opens keep their own
-  // fixed-directory reuse dialog (via proceedOpen's sandbox-status step) and
-  // skip this check.
+  // Before actually launching, warn when a live (non-shell) session already
+  // runs in this exact directory -- e.g. it was opened from another browser
+  // tab/window/device this tab's own `tabs` state knows nothing about (see
+  // issue #132).
   const handleOpen = useCallback(async (dirPath, opts = {}) => {
-    if (!opts.isMetaAgent) {
-      try {
-        // A fresh fetch, not the `serverSessions` state: that's only kept
-        // current while the session sidebar/menu is open (see
-        // fetchServerSessions below), so it can be stale or empty here.
-        const res = await authFetch('/api/sessions');
-        const data = res.ok ? await res.json() : null;
-        // groupId != null excluded: combo-group members are only ever meant
-        // to be reached through the group's own sub-tab UI (same rule
-        // fetchServerSessions applies below) -- surfacing one here would let
-        // "既存セッションを開く" attach a bare terminal tab directly to a
-        // live group worker/orchestrator, and later closing that tab would
-        // terminate it out from under the still-running group.
-        const dup = (data?.sessions || []).find((s) => !s.shell && !s.isMetaAgent && s.groupId == null && s.cwd === dirPath);
-        if (dup) {
-          pendingOpenRef.current = dirPath;
-          setDuplicateSessionPrompt({ cwd: dirPath, opts, session: dup });
-          return;
-        }
-      } catch {
-        // server unreachable (offline, DNS, etc.): proceed without the
-        // duplicate check rather than blocking the launch entirely.
+    try {
+      // A fresh fetch, not the `serverSessions` state: that's only kept
+      // current while the session sidebar/menu is open (see
+      // fetchServerSessions below), so it can be stale or empty here.
+      const res = await authFetch('/api/sessions');
+      const data = res.ok ? await res.json() : null;
+      // groupId != null excluded: combo-group members are only ever meant
+      // to be reached through the group's own sub-tab UI (same rule
+      // fetchServerSessions applies below) -- surfacing one here would let
+      // "既存セッションを開く" attach a bare terminal tab directly to a
+      // live group worker/orchestrator, and later closing that tab would
+      // terminate it out from under the still-running group.
+      const dup = (data?.sessions || []).find((s) => !s.shell && s.groupId == null && s.cwd === dirPath);
+      if (dup) {
+        pendingOpenRef.current = dirPath;
+        setDuplicateSessionPrompt({ cwd: dirPath, opts, session: dup });
+        return;
       }
+    } catch {
+      // server unreachable (offline, DNS, etc.): proceed without the
+      // duplicate check rather than blocking the launch entirely.
     }
     await proceedOpen(dirPath, opts);
   }, [proceedOpen]);
@@ -298,23 +285,6 @@ export default function App() {
   const handleOpenShell = useCallback((dirPath) => {
     openTerminalTab(dirPath, { shell: true });
   }, [openTerminalTab]);
-
-  // Meta-agent opens always use the fixed server-side directory
-  // (~/.local/share/ccserver-sandbox/meta-agent). The UI never asks the
-  // user to pick a project dir for it; the app/model/sandbox come from the
-  // dedicated dialog and the sandbox's reuse dialog (for the fixed dir) still
-  // applies via handleOpen.
-  const handleOpenMeta = useCallback(async ({ app, model, sandbox, metaAgentDir: dirFromCaller }) => {
-    const dir = dirFromCaller || metaAgentDir;
-    if (!dir) {
-      window.alert('メタエージェントのディレクトリを取得できませんでした。ページを再読込してください。');
-      return;
-    }
-    // Meta has no per-dir sandboxOpts (project-bound); pass null and let the
-    // global sandboxDefault decide. The reuse dialog for the fixed dir is
-    // still handled by handleOpen.
-    await handleOpen(dir, { sandbox: !!sandbox, sandboxOpts: null, app, model, isMetaAgent: true });
-  }, [metaAgentDir, handleOpen]);
 
   // Combo launch: ask the server to spawn 2 workers + 1 orchestrator as one
   // group, then add a single group tab for all three (each member attaches
@@ -422,9 +392,6 @@ export default function App() {
       permissionMode: session.permissionMode || 'standard',
       sandbox: !!session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
-      // Needed by the SESSION_NOT_FOUND re-init path (TerminalView) so a
-      // re-launched meta agent keeps its privilege request.
-      isMetaAgent: !!session.isMetaAgent,
       // opencode/copilot/codex/commandcode re-launches resume the last session of
       // the project (-c / --continue / resume --last), so a continued
       // conversation survives the dead pty like claude's does.
@@ -457,7 +424,7 @@ export default function App() {
 
   const handleResume = useCallback(() => {
     if (resumePrompt) {
-      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, permissionMode: resumePrompt.permissionMode || 'standard', reuseSandboxHome: resumePrompt.reuseSandboxHome !== false, isMetaAgent: !!resumePrompt.isMetaAgent });
+      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, permissionMode: resumePrompt.permissionMode || 'standard', reuseSandboxHome: resumePrompt.reuseSandboxHome !== false });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -466,7 +433,7 @@ export default function App() {
   const handleNewSession = useCallback(() => {
     if (resumePrompt) {
       localStorage.removeItem(`ccserver-resume:claude:${resumePrompt.cwd}`);
-      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, permissionMode: resumePrompt.permissionMode || 'standard', reuseSandboxHome: resumePrompt.reuseSandboxHome !== false, isMetaAgent: !!resumePrompt.isMetaAgent });
+      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, permissionMode: resumePrompt.permissionMode || 'standard', reuseSandboxHome: resumePrompt.reuseSandboxHome !== false });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -901,7 +868,7 @@ export default function App() {
   return (
     <GpgVaultStatusProvider>
     <div className="app">
-      {/* Meta-agent approval requests (ccserver-meta): global banner above
+      {/* Pending destructive-operation approval requests: global banner above
           the tab bar so it is visible no matter which tab is active. */}
       <ApprovalBanner />
       {/* Cross-instance federation pairing requests (plan Phase 1): same
@@ -952,7 +919,7 @@ export default function App() {
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
-              <TabIcon type={tab.type} app={tab.app} shell={tab.shell} isMetaAgent={!!tab.isMetaAgent} />
+              <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
               {tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
             </span>
             {tab.type !== 'browser' && tab.type !== 'remote' && tab.type !== 'settings' && (
@@ -1019,7 +986,7 @@ export default function App() {
       )}
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} initialPath={lastDir} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} sandboxDefaults={sandboxDefaults} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} initialPath={lastDir} sandboxDefaults={sandboxDefaults} />
         </div>
         <div style={{ display: activeTabId === 'remote' ? 'flex' : 'none', height: '100%', flexDirection: 'column', overflow: 'auto' }}>
           <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} />
@@ -1064,7 +1031,6 @@ export default function App() {
                   model={tab.model || null}
                   permissionMode={tab.permissionMode || 'standard'}
                   resume={!!tab.resume}
-                  isMetaAgent={!!tab.isMetaAgent}
                   customLabel={resolveTabLabel(tab)}
                   notify={notify}
                   notifyEnabled={notifyEnabled}

@@ -1,9 +1,9 @@
 // Server-initiated destructive-action approvals (DB v4, plan section 3).
 //
-// A meta-agent MCP tool (close_session / destroy_group / delete_sandbox)
+// A caller that wants to close_session / destroy_group / delete_sandbox
 // must never destroy a running agent on its own say-so: it inserts a
-// 'pending' row here and BLOCKS the tool call on an in-memory waiter until
-// the browser decides via POST /api/approvals/:id/decision. The shape is the
+// 'pending' row here and BLOCKS the call on an in-memory waiter until the
+// browser decides via POST /api/approvals/:id/decision. The shape is the
 // groupManager pushHandoff/takeHandoff "make the caller wait, resolve later"
 // pattern simplified to 1:1 -- one approval id has exactly one waiter, so
 // there is no queue and no re-queue/supersede machinery.
@@ -14,7 +14,11 @@
 // with the old process) are expired by expireStalePendingApprovals().
 //
 // requestedBy is attribution only (shown in the dialog) -- never an
-// authorization input. The trust boundary is the meta broker socket itself.
+// authorization input; the caller's own trust boundary (whatever that is)
+// gates whether it may request an approval at all. No current caller uses
+// this (issue #189 removed the sole consumer, the privileged meta-agent MCP
+// toolset); kept as generic infrastructure for a future feature that needs
+// the same human-in-the-loop gate.
 
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db.js';

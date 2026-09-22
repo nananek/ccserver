@@ -7,9 +7,31 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { dirsRoute } from './dirs.js';
+
+// browseRoots (issue #189): points loadSandboxConfig() at a temp config for
+// the duration of `fn`, same pattern as sandbox-config.test.js's withConfig.
+function withConfig(json, fn) {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-dirs-cfg-'));
+  const path = join(cfgDir, 'sandbox.config.json');
+  return (async () => {
+    try {
+      writeFileSync(path, JSON.stringify(json));
+      const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+      process.env.CCSERVER_SANDBOX_CONFIG = path;
+      try {
+        return await fn();
+      } finally {
+        if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+        else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+      }
+    } finally {
+      rmSync(cfgDir, { recursive: true, force: true });
+    }
+  })();
+}
 
 let runtimeDir;
 let app;
@@ -92,38 +114,6 @@ test('POST /dirs keeps the directory but reports failure when git init cannot ru
   }
 });
 
-// GET /dirs/home exposes the meta-agent feature flag so the launch modal can
-// disable (and explain) its メタエージェント mode. The value must follow
-// sandbox.config.json's "metaAgentMcp" live (loadSandboxConfig re-reads on
-// every call), and a missing file / missing key means false.
-test('GET /dirs/home exposes metaAgentEnabled following sandbox.config.json', async () => {
-  const cfg = join(runtimeDir, 'sandbox.config.json');
-  const savedConfigEnv = process.env.CCSERVER_SANDBOX_CONFIG;
-  process.env.CCSERVER_SANDBOX_CONFIG = cfg;
-  try {
-    // No config file at all -> default off.
-    let res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
-    assert.equal(res.json().metaAgentEnabled, false);
-
-    writeFileSync(cfg, JSON.stringify({ metaAgentMcp: true }));
-    res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
-    assert.equal(res.json().metaAgentEnabled, true);
-
-    writeFileSync(cfg, JSON.stringify({ metaAgentMcp: false }));
-    res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
-    assert.equal(res.json().metaAgentEnabled, false);
-
-    // Key absent -> off (same as the pre-feature config shape).
-    writeFileSync(cfg, JSON.stringify({ docker: true }));
-    res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
-    assert.equal(res.json().metaAgentEnabled, false);
-  } finally {
-    if (savedConfigEnv === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
-    else process.env.CCSERVER_SANDBOX_CONFIG = savedConfigEnv;
-    try { rmSync(cfg, { force: true }); } catch {}
-  }
-});
-
 // GET /dirs/home exposes toolsAvailable so the launch / settings UIs can
 // render the rtk / code-review-graph toggles disabled-with-a-note instead of
 // offering a checkbox the server silently drops (macOS seatbelt has no
@@ -197,7 +187,7 @@ test('GET /dirs/home exposes sandboxAvailable as a boolean', async () => {
 
 // GET /dirs/home also exposes hiddenApps (issue #105) so every launch picker
 // can remove those apps entirely, regardless of install status. Same
-// live-following-sandbox.config.json contract as metaAgentEnabled above.
+// live-following-sandbox.config.json contract as sandboxAvailable above.
 test('GET /dirs/home exposes hiddenApps following sandbox.config.json', async () => {
   const cfg = join(runtimeDir, 'sandbox.config.json');
   const savedConfigEnv = process.env.CCSERVER_SANDBOX_CONFIG;
@@ -220,5 +210,100 @@ test('GET /dirs/home exposes hiddenApps following sandbox.config.json', async ()
     if (savedConfigEnv === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = savedConfigEnv;
     try { rmSync(cfg, { force: true }); } catch {}
+  }
+});
+
+// ---------------------------------------------------------------------------
+// browseRoots (issue #189). browseRoots unset (the default) is exercised by
+// every test above -- this section is additive, covering the restricted
+// case.
+
+test('GET /dirs/home exposes browseRoots ([] by default) and initialBrowsePath', async () => {
+  let res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+  let body = res.json();
+  assert.deepEqual(body.browseRoots, []);
+  assert.equal(body.initialBrowsePath, body.home);
+
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-dirs-browseroot-'));
+  try {
+    await withConfig({ browseRoots: [allowed] }, async () => {
+      res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+      body = res.json();
+      assert.deepEqual(body.browseRoots, [allowed]);
+      // home() (a temp-independent OS path) will not normally sit inside a
+      // freshly minted browseRoots temp dir, so initialBrowsePath falls back
+      // to the first configured root instead of home.
+      assert.equal(body.initialBrowsePath, allowed);
+    });
+  } finally {
+    rmSync(allowed, { recursive: true, force: true });
+  }
+});
+
+test('GET /dirs/home: initialBrowsePath is home() when home() itself is inside browseRoots', async () => {
+  await withConfig({ browseRoots: [homedir()] }, async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.equal(res.json().initialBrowsePath, homedir());
+  });
+});
+
+test('GET /dirs: a path outside browseRoots is refused with 403, inside is listed', async () => {
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-dirs-browseroot-'));
+  const outside = mkdtempSync(join(tmpdir(), 'ccserver-dirs-outside-'));
+  mkdirSync(join(allowed, 'sub'));
+  try {
+    await withConfig({ browseRoots: [allowed] }, async () => {
+      const ok = await app.inject({ method: 'GET', url: `/api/dirs?path=${encodeURIComponent(allowed)}` });
+      assert.equal(ok.statusCode, 200);
+      assert.ok(ok.json().dirs.some((d) => d.name === 'sub'));
+
+      const blocked = await app.inject({ method: 'GET', url: `/api/dirs?path=${encodeURIComponent(outside)}` });
+      assert.equal(blocked.statusCode, 403);
+      assert.match(blocked.json().error, /browseRoots/);
+    });
+  } finally {
+    rmSync(allowed, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('GET /dirs: parent is null at the browseRoots boundary instead of exposing the outside path', async () => {
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-dirs-browseroot-'));
+  try {
+    await withConfig({ browseRoots: [allowed] }, async () => {
+      const res = await app.inject({ method: 'GET', url: `/api/dirs?path=${encodeURIComponent(allowed)}` });
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.json().parent, null, 'must not leak the real parent outside browseRoots');
+    });
+  } finally {
+    rmSync(allowed, { recursive: true, force: true });
+  }
+});
+
+test('POST /dirs: a parent outside browseRoots is refused with 403, inside still creates', async () => {
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-dirs-browseroot-'));
+  const outside = mkdtempSync(join(tmpdir(), 'ccserver-dirs-outside-'));
+  try {
+    await withConfig({ browseRoots: [allowed] }, async () => {
+      const blocked = await app.inject({
+        method: 'POST',
+        url: '/api/dirs',
+        payload: { parent: outside, name: 'nope' },
+      });
+      assert.equal(blocked.statusCode, 403);
+      assert.match(blocked.json().error, /browseRoots/);
+      assert.equal(existsSync(join(outside, 'nope')), false);
+
+      const ok = await app.inject({
+        method: 'POST',
+        url: '/api/dirs',
+        payload: { parent: allowed, name: 'yep' },
+      });
+      assert.equal(ok.statusCode, 200);
+      assert.ok(existsSync(join(allowed, 'yep')));
+    });
+  } finally {
+    rmSync(allowed, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });

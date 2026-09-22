@@ -27,7 +27,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, META_SOCKET_DIR_NAME } from './git-broker.js';
+import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
 import * as gpgVaultAgent from './gpgVaultAgent.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
@@ -35,6 +35,7 @@ import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeyc
 import { startNetworkBroker, buildIsolatedProxyEnv, normalizeNetworkSettings } from './network-broker.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
+import { normalizeBrowseRoots, isContained, isCcserverScratchPath } from '../pathPolicy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -102,13 +103,11 @@ const SANDBOX_COMMIT_GUARD_CONFIG_PATH = '/ccserver-sandbox-commit-guard.json';
 // second fixed path the same wrapper reaches when invoked with the 'notify'
 // argument. The process-global usage socket (ccserver-usage, see
 // usageMcp.js) is bound at a third fixed path, reached with the 'usage'
-// argument. The process-global meta-agent socket (ccserver-meta, see
-// metaAgent.js) is bound at a fourth fixed path, reached with the 'meta'
 // argument. The process-global reviewer socket (ccserver-reviewer, see
-// reviewer.js) is bound at a fifth fixed path, reached with the 'reviewer'
+// reviewer.js) is bound at a fourth fixed path, reached with the 'reviewer'
 // argument.
 //
-// Issue #143 problem 1: each of these five now names a file inside its own
+// Issue #143 problem 1: each of these four now names a file inside its own
 // dedicated `.d` directory rather than sitting directly under sandbox root.
 // buildBwrapArgs binds dirname(hostSocketPath) onto dirname(this constant) --
 // a DIRECTORY bind, immune to the host socket file being replaced underneath
@@ -120,7 +119,6 @@ const SANDBOX_COMMIT_GUARD_CONFIG_PATH = '/ccserver-sandbox-commit-guard.json';
 const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.d/sock';
 const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.d/sock';
 const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.d/sock';
-const SANDBOX_META_SOCK_PATH = '/ccserver-sandbox-meta.d/sock';
 const SANDBOX_REVIEWER_SOCK_PATH = '/ccserver-sandbox-reviewer.d/sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
@@ -757,13 +755,8 @@ export function loadSandboxConfig() {
   // The Usage MCP is exposed to every Claude session, so keep it opt-in
   // independently of the UI's showUsage setting.
   const usageMcp = raw.usageMcp === true;
-  // ccserver-meta (see metaAgent.js): the privileged self-management MCP for
-  // the single isMetaAgent session. Opt-in like usageMcp -- but with a much
-  // stronger reason: this toolset spans every project/group/session/sandbox,
-  // and its destructive tools kill real running work.
-  const metaAgentMcp = raw.metaAgentMcp === true;
   // ccserver-reviewer (see reviewer.js): launches disposable headless review
-  // sessions on request. Opt-in like usageMcp/metaAgentMcp -- it spawns real
+  // sessions on request. Opt-in like usageMcp -- it spawns real
   // sandboxed sessions (resource-consuming) on any caller's say-so, so it
   // must not exist unless explicitly enabled.
   const reviewerMcp = raw.reviewerMcp === true;
@@ -776,6 +769,18 @@ export function loadSandboxConfig() {
   const hiddenApps = Array.isArray(raw.hiddenApps)
     ? [...new Set(raw.hiddenApps.filter((a) => APP_IDS.includes(a)))]
     : [];
+  // browseRoots (issue #189): restricts /api/files, /api/dirs and
+  // /ws/terminal session cwds to these directories (and their subtrees).
+  // [] (default) preserves the pre-#189 host-wide behavior.
+  const browseRoots = normalizeBrowseRoots(raw.browseRoots);
+  // Whether an agent session (shell:false) may run unsandboxed while
+  // browseRoots is set. Default false: browseRoots alone would otherwise
+  // still leave an unsandboxed agent free to read/write anything the
+  // ccserver process can reach, since only its cwd (not its filesystem
+  // access) is constrained without a sandbox. Shell sessions have no such
+  // opt-out (see createSession) -- issue #189 explicitly rejected one for
+  // them.
+  const allowUnsandboxedAgents = raw.allowUnsandboxedAgents === true;
   // Network isolation (see network-broker.js): isolate is the master
   // switch for the whole feature (false by default: no broker, open egress,
   // no live toggle on either backend). initialState never decides whether
@@ -786,7 +791,7 @@ export function loadSandboxConfig() {
   // cannot drift apart -- see that function's header comment.
   const network = normalizeNetworkSettings(raw.network);
   return {
-    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps, network,
+    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, hiddenApps, browseRoots, allowUnsandboxedAgents, network,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -1431,7 +1436,7 @@ const NO_NETWORK_BROKER_HANDLE = Object.freeze({
 //             (buildSandboxSpawn), not fetched in here -- mirrors
 //             gitBroker/commitGuard/networkBroker, which are also
 //             caller-resolved objects.
-function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault = null, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, mcpToken = null, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null, networkBroker = null, networkBrokerHost = BWRAP_ISOLATION_GATEWAY }) {
+function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault = null, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, mcpToken = null, notifySocketPath, usageSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null, networkBroker = null, networkBrokerHost = BWRAP_ISOLATION_GATEWAY }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1569,33 +1574,22 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     args.push('--setenv', 'CCSANDBOX_USAGE_MCP_SOCK', SANDBOX_USAGE_SOCK_PATH);
   }
 
-  // ccserver-meta: same wrapper once more, reached with the 'meta' argv so it
-  // reads CCSANDBOX_META_MCP_SOCK (bound here). Only ever set for the single
-  // isMetaAgent session (see sessionManager) -- this socket is the privilege
-  // boundary for server-wide self-management, so nothing else may bind it.
-  // Directory bind, same reasoning as the sockets above.
-  if (metaSocketPath) {
-    args.push('--bind-try', dirname(metaSocketPath), dirname(SANDBOX_META_SOCK_PATH));
-    args.push('--setenv', 'CCSANDBOX_META_MCP_SOCK', SANDBOX_META_SOCK_PATH);
-  }
-
   // ccserver-reviewer: same wrapper once more, reached with the 'reviewer'
-  // argv so it reads CCSANDBOX_REVIEWER_MCP_SOCK (bound here). Unlike meta,
-  // this one is available to any session (see reviewer.js's
-  // shouldInjectReviewer) -- the trust boundary is the run_review job itself
-  // only ever touching a disposable worktree it created, never the caller's
-  // own cwd. Directory bind, same reasoning as the sockets above.
+  // argv so it reads CCSANDBOX_REVIEWER_MCP_SOCK (bound here). This one is
+  // available to any session (see reviewer.js's shouldInjectReviewer) -- the
+  // trust boundary is the run_review job itself only ever touching a
+  // disposable worktree it created, never the caller's own cwd. Directory
+  // bind, same reasoning as the sockets above.
   if (reviewerSocketPath) {
     args.push('--bind-try', dirname(reviewerSocketPath), dirname(SANDBOX_REVIEWER_SOCK_PATH));
     args.push('--setenv', 'CCSANDBOX_REVIEWER_MCP_SOCK', SANDBOX_REVIEWER_SOCK_PATH);
   }
 
   // The bridge wrapper is shared by the group socket, the notify socket, the
-  // usage socket, the meta socket and the reviewer socket (bound once -- a
-  // combo orchestrator may have several of these at once) and its node
-  // shebang lives at SANDBOX_NODE_PATH (ro-bound with the git-broker branch
-  // below).
-  if (mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath || reviewerSocketPath) {
+  // usage socket and the reviewer socket (bound once -- a combo orchestrator
+  // may have several of these at once) and its node shebang lives at
+  // SANDBOX_NODE_PATH (ro-bound with the git-broker branch below).
+  if (mcpSocketPath || notifySocketPath || usageSocketPath || reviewerSocketPath) {
     args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
   }
 
@@ -1761,7 +1755,7 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
   // is also a Node script (#!/usr/bin/env node), so it needs node too. The
   // commit-msg hook (below) is the same kind of Node script bound at a fixed
   // shebang path, so it needs this bind as well.
-  if (gitBroker || commitGuard || mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath || reviewerSocketPath || app === 'commandcode') {
+  if (gitBroker || commitGuard || mcpSocketPath || notifySocketPath || usageSocketPath || reviewerSocketPath || app === 'commandcode') {
     const nodeBin = realpathSync(process.execPath);
     args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
   }
@@ -2044,21 +2038,6 @@ function seatbeltGhPaths() {
   )];
 }
 
-export function seatbeltControlSockPaths(metaSocketPath) {
-  // Host control-plane unix socket under hostRuntimeDir() (short /tmp base
-  // on darwin, inside the sandbox's tmp write rules): the meta socket is the
-  // privileged meta toolset's channel, so it is network-outbound deny-pinned
-  // for every seatbelt session except the meta-agent session itself (its
-  // socket is its control channel). Filename comes from git-broker.js (leaf
-  // module, no cycle) -- the same constant metaAgent.js builds its socket
-  // path from, so a rename updates the pin automatically.
-  const base = hostRuntimeDir();
-  const paths = [];
-  const meta = join(base, META_SOCKET_DIR_NAME, 'sock');
-  if (metaSocketPath !== meta) paths.push(meta);
-  return paths;
-}
-
 // Minimal sandbox: just enough to launch an agent CLI in an isolated
 // filesystem, with NO docker, gpg, ssh, or extra binds. bwrap creates its own
 // user namespace (--unshare-user) and network stays shared with the host (so
@@ -2104,9 +2083,6 @@ export function buildMinimalSeatbeltSpawn({ cwd, targetCommand, app = 'claude' }
     nodeBin: realpathSync(process.execPath),
     scripts: seatbeltScripts(), ssh: seatbeltSsh(),
     gitBroker: null, commitGuard: null,
-    // Usage-capture CLIs have no business reaching the host control plane
-    // either (same escape via the meta broker).
-    controlSockDenies: seatbeltControlSockPaths(null),
     // Deny-write the whole host runtime dir tree so a capture cannot
     // rename/rmdir it out from under live sessions' control plane.
     hostRuntimeDir: hostRuntimeDir(),
@@ -2148,7 +2124,6 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
     mcpSocketPath: null,
     notifySocketPath: null,
     usageSocketPath: null,
-    metaSocketPath: null,
     reviewerSocketPath: null,
     // The /usage capture is a throwaway read: it must not create (or depend
     // on) a persistent per-project HOME.
@@ -2183,10 +2158,6 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //   usageSocketPath - host path of the process-global ccserver-usage socket
 //                 to bind into the sandbox at a fixed path. null when the
 //                 session gets no usage MCP injection.
-//   metaSocketPath - host path of the process-global ccserver-meta socket to
-//                 bind into the sandbox at a fixed path. Only set for the
-//                 single isMetaAgent session (see metaAgent.js); null
-//                 otherwise.
 //   reviewerSocketPath - host path of the process-global ccserver-reviewer
 //                 socket to bind into the sandbox at a fixed path. null when
 //                 the session gets no reviewer MCP injection.
@@ -2206,14 +2177,14 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 cwd when cwd is a git worktree whose real .git lives
 //                 elsewhere. null for regular sessions and non-worktree cwds.
 //   sandboxHomeCreatedBy - optional attribution stored on the sandbox HOME's
-//                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
-//                 Display only; never an authorization input.
+//                 bookkeeping row ('user' | ...). Display only; never an
+//                 authorization input.
 // `deps.startNetworkBroker` lets tests inject a fake broker starter (no real
 // child process/rootlesskit needed), and `deps.dockerSandboxAvailable` lets
 // tests simulate a host with/without the rootlesskit/slirp4netns/newuidmap
 // tooling, to exercise the enablement logic below hermetically -- see
 // sandbox-network-isolation.test.js.
-export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }, deps = {}) {
+export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }, deps = {}) {
   const { startNetworkBroker: startNetworkBrokerFn = startNetworkBroker, dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable } = deps || {};
   // Normalize the app id up front: a nullish `app` resolves to 'claude' in
   // resolveApp(), so every later `app === 'claude'` / `app === 'opencode'`
@@ -2228,7 +2199,14 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   if (resolve(cwd) === '/') {
     throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
   }
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, network: netCfg, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots } = loadSandboxConfig();
+  // Defense in depth behind sessionManager's browseRoots cwd check (issue
+  // #189): same reasoning as the '/' guard just above. Combo-group scratch
+  // cwds (worktrees / orchestratorDir) are exempt here too -- see
+  // isCcserverScratchPath's comment in pathPolicy.js.
+  if (browseRoots.length > 0 && !isCcserverScratchPath(resolve(cwd)) && !isContained(resolve(cwd), browseRoots)) {
+    throw new Error('Cannot build a sandbox: working directory is outside the allowed browseRoots.');
+  }
   const docker = cfgDocker && dockerSandboxAvailableFn();
   // Network isolation (see network-broker.js): server-config-only, no
   // per-launch client override -- the client has no isolation toggle, so
@@ -2477,12 +2455,6 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
         // opencode sessions resolve host auth/state via XDG (see
         // buildSeatbeltLaunch); other apps keep the sandbox HOME.
         app,
-        // The meta broker lives under hostRuntimeDir() (short /tmp base on
-        // darwin) -- inside the sandbox's tmp write rules. Its socket is the
-        // privileged meta toolset's channel, so it is network-outbound
-        // deny-pinned. The pin is skipped only for the meta-agent session
-        // itself (metaSocketPath is set only there).
-        controlSockDenies: seatbeltControlSockPaths(metaSocketPath),
         // The runtime dir (short /tmp base on darwin) holds every session's
         // control-plane sockets; deny-write the whole tree so this sandbox
         // cannot rename/rmdir it and break other sessions (only its own
@@ -2492,7 +2464,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
         commitGuard: commitGuard ? { configPath: commitGuard.configPath } : null,
         sockets: {
           mcp: mcpSocketPath, notify: notifySocketPath, usage: usageSocketPath,
-          meta: metaSocketPath, reviewer: reviewerSocketPath,
+          reviewer: reviewerSocketPath,
         },
         mcpToken,
         extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, gpgVault: gpgVaultInfo, claudeDir: installDir,
@@ -2572,7 +2544,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   let bwrapArgs;
   let innerCmd;
   try {
-    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker || needBwrapIsolation, gpg, gpgVault: gpgVaultInfo, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools, networkBroker });
+    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker || needBwrapIsolation, gpg, gpgVault: gpgVaultInfo, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools, networkBroker });
     // command-code's launcher is a Node script. Run it explicitly via the
     // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
     // otherwise require /usr/bin/node to be present inside the sandbox's PATH.

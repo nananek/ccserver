@@ -252,70 +252,9 @@ test('codex gets per-process MCP config overrides without writing config.toml', 
   assert.deepEqual(env, { CCSANDBOX_NOTIFY_MCP_SOCK: '/run/user/1000/ccserver-notify.sock' });
 });
 
-// ccserver-meta injection (see metaAgent.js): the optional `{ meta }`
-// descriptor adds the privileged meta server, same mode/sockPath shape as
-// notify (plus an identity for the self-target guards / approval attribution).
-// Only ever passed for the single isMetaAgent session by sessionManager, but
-// buildMcpConfigArgsAndEnv itself just assembles what it's given.
-
-const metaIdentity = {
-  sessionId: 'meta-01234567-89ab',
-  groupId: null,
-  groupRole: null,
-  cwd: '/srv/proj',
-  projectName: 'proj',
-  app: 'claude',
-};
-
-test('claude + meta(sandbox): ccserver-meta registered via the bridge with the meta argv', () => {
-  const { args, env } = buildMcpConfigArgsAndEnv('claude', {
-    meta: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-meta.sock', identity: metaIdentity },
-  });
-  const cfg = JSON.parse(args[1]);
-  assert.deepEqual(cfg.mcpServers['ccserver-meta'], {
-    type: 'stdio',
-    command: '/ccserver-sandbox-mcp-bridge',
-    args: ['meta'],
-  });
-  assert.equal(env.CCSANDBOX_META_MCP_SOCK, '/run/user/1000/ccserver-meta.sock');
-  assert.equal(env.CCSERVER_META_IDENTITY, JSON.stringify(metaIdentity));
-});
-
-test('claude + meta(host): node <bridge script> meta on the host', () => {
-  const { args } = buildMcpConfigArgsAndEnv('claude', {
-    meta: { mode: 'host', sockPath: '/run/user/1000/ccserver-meta.sock' },
-  });
-  const m = JSON.parse(args[1]).mcpServers['ccserver-meta'];
-  assert.equal(m.command, process.execPath);
-  assert.ok(m.args[0].endsWith('sandbox-mcp-wrapper.cjs'));
-  assert.equal(m.args[1], 'meta');
-});
-
-test('opencode + codex assemble ccserver-meta too (the meta agent may run either)', () => {
-  const oc = buildMcpConfigArgsAndEnv('opencode', {
-    meta: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-meta.sock' },
-  });
-  const ocCfg = JSON.parse(oc.env.OPENCODE_CONFIG_CONTENT);
-  assert.deepEqual(ocCfg.mcp['ccserver-meta'].command, ['/ccserver-sandbox-mcp-bridge', 'meta']);
-  assert.equal(oc.env.CCSANDBOX_META_MCP_SOCK, '/run/user/1000/ccserver-meta.sock');
-
-  const cx = buildMcpConfigArgsAndEnv('codex', {
-    meta: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-meta.sock' },
-  });
-  assert.ok(cx.args.some((a) => a.includes('mcp_servers.ccserver-meta=')));
-  assert.equal(cx.env.CCSANDBOX_META_MCP_SOCK, '/run/user/1000/ccserver-meta.sock');
-});
-
-test('no meta descriptor -> unchanged registrations', () => {
-  const { args, env } = buildMcpConfigArgsAndEnv('claude');
-  const cfg = JSON.parse(args[1]);
-  assert.equal(cfg.mcpServers['ccserver-meta'], undefined);
-  assert.equal(env.CCSANDBOX_META_MCP_SOCK, undefined);
-});
-
 // ccserver-reviewer injection (see reviewer.js): the optional `{ reviewer }`
-// descriptor, same mode/sockPath/identity shape as meta -- but unlike meta's
-// richer identity, reviewer's only ever carries `{ sessionId }` (see
+// descriptor, same mode/sockPath/identity shape as notify -- but unlike
+// notify's richer identity, reviewer's only ever carries `{ sessionId }` (see
 // sessionManager.js), used by finish_review to verify its caller is the
 // review job's own session.
 

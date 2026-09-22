@@ -14,8 +14,8 @@
 // the same bridge wrapper as the other process-global servers (see
 // mcpConfig.js / sandbox-mcp-wrapper.cjs).
 // Opt-in via sandbox.config.json's "reviewerMcp" (default false, like
-// usageMcp/metaAgentMcp) -- this spawns real sandboxed sessions on any
-// caller's say-so, so it must not exist by accident.
+// usageMcp) -- this spawns real sandboxed sessions on any caller's say-so,
+// so it must not exist by accident.
 //
 // Worktree design (deliberately NOT worktree.js's resolveMemberWorktree,
 // see the issue-#102 plan): that resolver is role-scoped (one slot per
@@ -42,10 +42,10 @@
 // straight into the DB.
 //
 // This module imports sessionManager.js and routes/sessions.js LAZILY
-// (dynamic import inside runReview/the completion watcher), mirroring
-// metaAgent.js: the static import graph stays acyclic (sessionManager.js
-// statically imports this module's injection-decision exports below, so
-// this module must never statically import sessionManager.js back).
+// (dynamic import inside runReview/the completion watcher) so the static
+// import graph stays acyclic (sessionManager.js statically imports this
+// module's injection-decision exports below, so this module must never
+// statically import sessionManager.js back).
 //
 // Completion detection (issue #103 follow-up): the review session ITSELF
 // calling the `finish_review` MCP tool is the AUTHORITATIVE way a job
@@ -116,7 +116,7 @@ export function getReviewerSockPath() {
 }
 
 // Whether the reviewer feature is on at all: an explicit opt-in flag in
-// sandbox.config.json (default false), like usageMcp/metaAgentMcp.
+// sandbox.config.json (default false), like usageMcp.
 export function reviewerEnabled() {
   return loadSandboxConfig().reviewerMcp === true;
 }

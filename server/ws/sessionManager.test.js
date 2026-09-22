@@ -15,14 +15,13 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn as spawnProcess } from 'node:child_process';
 import Fastify from 'fastify';
 import { sessionsRoute } from '../routes/sessions.js';
 import { persistentHomeDir, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
-import { metaAgentDir } from './metaAgent.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { getLatestSessionLimitReset } from '../sessionLimitState.js';
 
@@ -345,7 +344,7 @@ test('createSession refuses an uninstalled agent with a clear error', async () =
 });
 
 // Self-review (issue #105): sandbox.config.json's hiddenApps must not be
-// purely cosmetic. Every launch picker (single, combo, meta-agent, worker/
+// purely cosmetic. Every launch picker (single, combo, worker/
 // launch-preset expansion) funnels its choice through createSession -- if
 // this function doesn't itself refuse a hidden app, any direct WS/API call
 // (or a preset saved before the app was hidden) can still start a real
@@ -402,6 +401,139 @@ test('createSession refuses a hidden agent even when it is not installed on this
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// browseRoots (issue #189): when configured, every session's cwd must fall
+// inside one of these directories -- checked unconditionally, before
+// sessionApp is even resolved, so it applies equally to shells and agents.
+test('createSession refuses a cwd outside browseRoots, for both shells and agents', async () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
+  const outside = mkdtempSync(join(tmpdir(), 'ccserver-sess-outside-'));
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const shellOutside = await sessionManager.createSession({ cwd: outside, cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.equal(shellOutside.session, null, 'a shell outside browseRoots must be refused');
+    assert.match(shellOutside.error, /outside the allowed browseRoots/);
+    assert.match(shellOutside.error, /browseRoots/, 'the error names the config key responsible');
+
+    const agentOutside = await sessionManager.createSession({ cwd: outside, cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
+    assert.equal(agentOutside.session, null, 'an agent outside browseRoots must be refused');
+    assert.match(agentOutside.error, /outside the allowed browseRoots/);
+
+    // Inside browseRoots, a plain shell still spawns normally.
+    const shellInside = await sessionManager.createSession({ cwd: allowed, cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.ok(shellInside.session, 'a shell inside browseRoots must not be refused by the cwd check');
+    sessionManager.destroySession(shellInside.sessionId, { keepSchedule: false });
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(outside, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// browseRoots (issue #189) must not break combo/group launches: every
+// worker/orchestrator session's cwd is a server-synthesized scratch dir
+// under ~/.local/share/ccserver-sandbox (never the project directory
+// itself -- see groupManager.js's addMember), so createSession() exempts
+// that tree from the browseRoots cwd check (pathPolicy.js's
+// isCcserverScratchPath, unit-tested in pathPolicy.test.js). This
+// integration-tests the exemption through createSession() itself, against
+// the REAL scratch root (not overridable via env var), using a throwaway
+// subdirectory cleaned up afterward.
+test('createSession does not refuse a cwd under the ccserver scratch tree even when browseRoots points elsewhere', async () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
+  const scratchDir = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'worktrees', `test-${randomUUID()}`);
+  mkdirSync(scratchDir, { recursive: true });
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.ok(res.session, 'a cwd under the ccserver scratch tree must not be refused by browseRoots');
+    assert.doesNotMatch(res.error || '', /browseRoots/);
+    // Still forced sandboxed like any other shell under browseRoots.
+    assert.equal(res.session.sandbox, true);
+    sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(scratchDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// browseRoots forces every shell sandboxed with no client opt-out (issue
+// #189's core complaint: a plain unsandboxed shell defeats browseRoots via
+// `cd`). When the sandbox backend itself is unavailable, the launch must be
+// refused -- never silently downgraded to an unsandboxed shell -- with a
+// message naming browseRoots specifically (not forceSandbox's wording).
+// Skipped wherever a real backend (or forceSandbox) is present, mirroring
+// the "explicit sandbox request without bwrap" test above.
+test('createSession refuses an unsandboxed shell when browseRoots is set and no sandbox backend is available', { skip: sandboxAvailable() || loadSandboxConfig().forceSandbox }, async () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = await sessionManager.createSession({ cwd: allowed, cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.equal(res.session, null, 'a shell must never fall back to unsandboxed when browseRoots mandates sandboxing');
+    assert.match(res.error, /^Cannot launch: sandbox\.config\.json sets "browseRoots"/);
+    assert.match(res.error, /shell sessions must run sandboxed/);
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// allowUnsandboxedAgents:true is the one opt-out from browseRoots' sandbox
+// mandate, and only for agents (never shells, see the test above). Exercised
+// against a hidden (but nominally "installed" via CCSERVER_CLAUDE_BIN) app
+// the same way the hiddenApps tests above fake an install, so the launch
+// reaches the sandbox-mandate branch without needing bwrap or a real CLI.
+test('createSession refuses an unsandboxed agent when browseRoots is set and allowUnsandboxedAgents is not true, but allows it when true', { skip: sandboxAvailable() || loadSandboxConfig().forceSandbox }, async () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = process.execPath;
+  try {
+    writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed], allowUnsandboxedAgents: false }));
+    process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+    const blocked = await sessionManager.createSession({ cwd: allowed, cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
+    assert.equal(blocked.session, null, 'an agent must be refused, not silently unsandboxed, when allowUnsandboxedAgents is not true');
+    assert.match(blocked.error, /^Cannot launch: sandbox\.config\.json sets "browseRoots"/);
+    assert.match(blocked.error, /allowUnsandboxedAgents/);
+
+    writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed], allowUnsandboxedAgents: true }));
+    const bad = await sessionManager.createSession({ cwd: allowed, cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
+    // No sandbox backend here (test is skipped otherwise), so this either
+    // spawns unsandboxed (allowed) or fails on host PATH resolution -- either
+    // way it must NOT be refused for the browseRoots/allowUnsandboxedAgents
+    // reason any more.
+    if (!bad.session) assert.doesNotMatch(bad.error, /allowUnsandboxedAgents/);
+    else sessionManager.destroySession(bad.sessionId, { keepSchedule: false });
+  } finally {
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 
@@ -1253,12 +1385,11 @@ test('createSession isReviewJob bypasses a disabled reviewerMcp flag for the rev
 // arrive from a network caller: reviewer.js's runReview sets it on a direct,
 // in-process call to createSessionViaApi (see reviewer.js's loadSessionDeps),
 // but POST /api/sessions is the SAME createSessionViaApi wired up to accept
-// an arbitrary request body from anyone holding CCSERVER_TOKEN. Unlike
-// isMetaAgent (harmless if a plain HTTP client sets it -- see
-// createSessionViaApi's comment), isReviewJob has a real effect, so
-// routes/sessions.js's POST handler must strip it from request.body before
-// it ever reaches createSession. This exercises that boundary specifically
-// (the test above only covers the safe, trusted, in-process call shape).
+// an arbitrary request body from anyone holding CCSERVER_TOKEN. isReviewJob
+// has a real effect, so routes/sessions.js's POST handler must strip it from
+// request.body before it ever reaches createSession. This exercises that
+// boundary specifically (the test above only covers the safe, trusted,
+// in-process call shape).
 test('POST /api/sessions ignores a client-supplied isReviewJob -- reviewerMcp stays off for it', async () => {
   const binDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-agent-'));
   const fakeBin = join(binDir, 'fake-claude');
@@ -1664,63 +1795,10 @@ test('onData session-limit detection: a redraw of the same reset time does not r
   }
 });
 
-// Meta-agent cwd invariant (see ws/metaAgent.js / createSession): sessions
-// launched with isMetaAgent:true and no groupId ALWAYS run in the fixed
-// project-outside meta-agent dir -- a client-supplied project cwd must never
-// reach the privileged session (prompt-injection material / bwrap rw-bind).
-// Flag-less launches keep the requested cwd; group members are excluded from
-// the force (their cwd is resolved server-side from the group).
-test('meta-agent launches are forced into the fixed meta-agent dir; plain and group launches are not', async () => {
-  const projectDir = mkdtempSync(join(tmpdir(), 'ccserver-meta-cwd-'));
-  const spawned = [];
-  try {
-    const flagged = await sessionManager.createSession({
-      cwd: projectDir, cols: 80, rows: 24, shell: true, sandbox: false, isMetaAgent: true,
-    });
-    assert.ok(flagged.session, 'meta-flagged shell should spawn');
-    spawned.push(flagged.sessionId);
-    assert.equal(flagged.session.cwd, metaAgentDir(), 'isMetaAgent forces the fixed dir');
-    assert.notEqual(flagged.session.cwd, projectDir, 'the client-supplied cwd is never used');
-
-    const plain = await sessionManager.createSession({
-      cwd: projectDir, cols: 80, rows: 24, shell: true, sandbox: false,
-    });
-    assert.ok(plain.session, 'plain shell should spawn');
-    spawned.push(plain.sessionId);
-    assert.equal(plain.session.cwd, projectDir, 'flag-less launches keep the requested cwd');
-
-    const member = await sessionManager.createSession({
-      cwd: projectDir, cols: 80, rows: 24, shell: true, sandbox: false,
-      groupId: `g-meta-invariant-${randomUUID()}`, groupRole: 'workerA', isMetaAgent: true,
-    });
-    assert.ok(member.session, 'group-member shell should spawn');
-    spawned.push(member.sessionId);
-    assert.equal(member.session.cwd, projectDir, 'group members are resolved from the group, not forced');
-
-    assert.equal(sessionManager.listSessions().find((s) => s.id === flagged.sessionId).isMetaAgent, true);
-  } finally {
-    for (const id of spawned) sessionManager.destroySession(id, { keepSchedule: false });
-    rmSync(projectDir, { recursive: true, force: true });
-  }
-});
-
-// REST contract (shared with the meta agent's launch_session tool): a meta
-// launch needs no client cwd at all (the server forces the fixed dir), while
-// a normal launch without an existing directory is still refused.
-test('createSessionViaApi: isMetaAgent:true needs no cwd; normal launches still require one', async () => {
+// REST contract: a launch without an existing cwd is refused.
+test('createSessionViaApi: a launch without an existing cwd is refused', async () => {
   const { createSessionViaApi } = await import('../routes/sessions.js');
-  let sessionId = null;
-  try {
-    const meta = await createSessionViaApi({ isMetaAgent: true, shell: true });
-    assert.equal(meta.ok, true, 'meta launch must not require a client cwd');
-    sessionId = meta.body.sessionId;
-    assert.equal(meta.body.cwd, metaAgentDir(), 'the API reports the forced fixed dir');
-    assert.equal(meta.body.isMetaAgent, true);
-
-    const bad = await createSessionViaApi({});
-    assert.equal(bad.ok, false);
-    assert.equal(bad.code, 'validation', 'a normal launch without cwd stays refused');
-  } finally {
-    if (sessionId) sessionManager.destroySession(sessionId, { keepSchedule: false });
-  }
+  const bad = await createSessionViaApi({});
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'validation', 'a launch without cwd is refused');
 });

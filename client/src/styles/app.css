@@ -1731,7 +1731,7 @@ body {
   color: #f38ba8;
 }
 
-/* Meta-agent approval banners (ccserver-meta): a normal-flow stack rendered
+/* Destructive-operation approval banners: a normal-flow stack rendered
    by App.jsx above the tab bar, so it pushes content down instead of covering
    anything and is visible from every tab. Yellow accents mark "waiting for a
    human decision"; unanswered requests are auto-rejected after 5 minutes. */
@@ -2186,8 +2186,7 @@ body {
 
 .launch-btn,
 .open-split-main,
-.open-split-caret,
-.meta-launch-btn {
+.open-split-caret {
   padding: 6px 10px;
   font-size: 12px;
   line-height: 1;
@@ -2219,14 +2218,6 @@ body {
   padding-left: 8px;
   padding-right: 8px;
   border-left: 1px solid rgba(0, 0, 0, 0.25);
-}
-
-.meta-launch-btn {
-  white-space: nowrap;
-}
-
-.meta-launch-btn .meta-label {
-  display: inline;
 }
 
 .open-menu-item {
@@ -2342,9 +2333,10 @@ body {
   font-weight: 600;
 }
 
-/* Disabled メタエージェント mode button: reuses .open-menu-item-disabled, but
-   that rule loses to .launch-mode-btn's own cursor (same specificity, later
-   in file), so the not-allowed cursor needs reinforcing here. */
+/* Disabled launch-mode button (e.g. コンボ起動 when unavailable): reuses
+   .open-menu-item-disabled, but that rule loses to .launch-mode-btn's own
+   cursor (same specificity, later in file), so the not-allowed cursor needs
+   reinforcing here. */
 .launch-mode-btn.open-menu-item-disabled {
   cursor: not-allowed;
   opacity: 0.5;
@@ -3790,8 +3782,7 @@ body {
     width: 100%;
   }
 
-  .toolbar-launch-group .launch-btn,
-  .toolbar-launch-group .meta-launch-btn {
+  .toolbar-launch-group .launch-btn {
     width: 100%;
     justify-content: center;
     text-align: center;
@@ -3856,11 +3847,6 @@ body {
   }
 }
 
-@media (max-width: 400px) {
-  .meta-launch-btn .meta-label {
-    display: none;
-  }
-}
 
 /* ── Tab bar trailing controls (Widgets toggle) ───────────────────── */
 .tab-bar-spacer {

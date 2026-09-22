@@ -35,10 +35,8 @@ import {
   subtreeRegex,
   subtrees,
 } from './sandbox-seatbelt.js';
-import { forceSandboxUnavailableReason, sandboxBackend, sandboxUnavailableReason, seatbeltControlSockPaths } from './sandbox.js';
-import { META_SOCKET_DIR_NAME, hostRuntimeDir } from './git-broker.js';
+import { forceSandboxUnavailableReason, sandboxBackend, sandboxUnavailableReason } from './sandbox.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
-import { getMetaSockPath } from './metaAgent.js';
 
 const HOME = homedir();
 
@@ -1192,12 +1190,12 @@ test('buildSeatbeltProfileText compiles balanced with every optional clause popu
     reAllowReadRegexes: ['^/tmp/base/ccserver-seatbelt-abc(/.*)?$'],
     denyWriteRegexes: ['^/home/u/\\.ssh(/.*)?$', '^/home/u/\\.gitconfig$'],
     denyExecLiterals: ['/opt/homebrew/bin/gh', '/tmp/we"ird/gh'],
-    denyNetOutboundLiterals: ['/tmp/rt/ccserver-control.sock', '/tmp/rt/meta/meta.sock'],
+    denyNetOutboundLiterals: ['/tmp/rt/ccserver-control.sock', '/tmp/rt/other/other.sock'],
   });
   assertParenBalanced(text);
   // Spot-check the clauses actually co-exist (not silently dropped).
   assert.ok(text.includes('(deny process-exec (literal "/opt/homebrew/bin/gh") (literal "/tmp/we\\"ird/gh"))'));
-  assert.ok(text.includes('(remote unix-socket (path-literal "/tmp/rt/meta/meta.sock"))'));
+  assert.ok(text.includes('(remote unix-socket (path-literal "/tmp/rt/other/other.sock"))'));
   assert.ok(text.includes('(allow sysctl-read (sysctl-name'));
 });
 
@@ -1217,8 +1215,8 @@ test('buildSeatbeltLaunch: a fully-loaded launch produces a paren-balanced profi
     authSock: join(sockDir, '1password-agent.sock'),
     orchestratorClaudeMdSrc: orch,
     ghPaths: ['/opt/homebrew/bin/gh', '/usr/local/bin/gh'],
-    controlSockDenies: [join(sockDir, 'ccserver-control.sock'), join(sockDir, 'meta', 'meta.sock')],
-    sockets: { mcp: join(sockDir, 'mcp.sock'), notify: join(sockDir, 'notify.sock'), meta: join(sockDir, 'meta', 'meta.sock') },
+    controlSockDenies: [join(sockDir, 'ccserver-control.sock'), join(sockDir, 'other', 'other.sock')],
+    sockets: { mcp: join(sockDir, 'mcp.sock'), notify: join(sockDir, 'notify.sock'), reviewer: join(sockDir, 'reviewer.sock') },
     extraBinds: [{ src: '/srv/shared', mode: 'rw' }, { src: '~/.ssh', mode: 'ro' }],
   }));
   trackDir(sb.dir);
@@ -1406,24 +1404,6 @@ test('control-socket pins cover both /tmp spellings even when the dir is absent'
   }
 });
 
-test('control-plane pin paths track the producers (rename-safe)', () => {
-  // The network-outbound deny is only as good as its path: if meta renames
-  // its socket, the pin must follow. It builds from git-broker.js's shared
-  // constants, and so does the pin list.
-  const prevXdg = process.env.XDG_RUNTIME_DIR;
-  delete process.env.XDG_RUNTIME_DIR;
-  try {
-    assert.equal(getMetaSockPath(), join(hostRuntimeDir(), META_SOCKET_DIR_NAME, 'sock'));
-    const pins = seatbeltControlSockPaths(null);
-    assert.ok(pins.includes(getMetaSockPath()), 'meta socket pinned');
-    const metaPins = seatbeltControlSockPaths(getMetaSockPath());
-    assert.ok(!metaPins.includes(getMetaSockPath()), 'meta session keeps its channel');
-  } finally {
-    if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
-    else process.env.XDG_RUNTIME_DIR = prevXdg;
-  }
-});
-
 test('commit-guard config and broker allowlist are write-pinned', () => {
   // The in-sandbox commit-msg hook re-reads its config on every commit;
   // bwrap ro-binds it, so seatbelt must deny-write it (and the allowlist).
@@ -1469,35 +1449,36 @@ test('B: pathVariantsDeep resolves the symlink spelling through missing componen
   // resolves the nearest existing ancestor (tmpRoot -> its realpath, which on
   // macOS is the /private/... form and on Linux is identical) must still
   // appear, no matter how many components are missing.
-  const deep = join(tmpRoot, 'ccserver-runtime-999', 'ccserver-meta.d', 'sock');
+  const deep = join(tmpRoot, 'ccserver-runtime-999', 'ccserver-other.d', 'sock');
   const got = pathVariantsDeep(deep);
   assert.ok(got.includes(deep), 'raw spelling kept');
   assert.ok(
-    got.includes(join(real, 'ccserver-runtime-999', 'ccserver-meta.d', 'sock')),
+    got.includes(join(real, 'ccserver-runtime-999', 'ccserver-other.d', 'sock')),
     'ancestor-resolved spelling synthesized',
   );
 });
 
-test('B: the 2-level meta socket is net-pinned in BOTH spellings when the runtime dir is absent', () => {
+test('B: a 2-level control socket is net-pinned in BOTH spellings when the runtime dir is absent', () => {
   // The bug: pathVariants() on a non-existent 2-level path returned only the
-  // raw spelling, so the meta broker stayed reachable via the symlink-resolved
-  // spelling Seatbelt actually mediates (e.g. /tmp -> /private/tmp on macOS).
+  // raw spelling, so a process-global broker stayed reachable via the
+  // symlink-resolved spelling Seatbelt actually mediates (e.g. /tmp ->
+  // /private/tmp on macOS).
   const base = tmpdir();
   const absentBase = join(base, `ccserver-rt-absent-${randomUUID()}`);
-  const metaSock = join(absentBase, 'ccserver-meta.d', 'sock');
+  const otherSock = join(absentBase, 'ccserver-other.d', 'sock');
   // The spelling pathVariantsDeep synthesizes: nearest existing ancestor
-  // (tmpdir) resolved. Identical to metaSock on Linux, the /private form on macOS.
-  const priv = metaSock.replace(base, realpathSync(base));
+  // (tmpdir) resolved. Identical to otherSock on Linux, the /private form on macOS.
+  const priv = otherSock.replace(base, realpathSync(base));
   const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
   process.env.CCSERVER_SANDBOX_SEATBELT_TMP = tmpRoot; // keep the launch dir out of absentBase
   try {
-    const sb = buildSeatbeltLaunch(baseOpts({ controlSockDenies: [metaSock] }));
+    const sb = buildSeatbeltLaunch(baseOpts({ controlSockDenies: [otherSock] }));
     trackDir(sb.dir);
     const text = readFileSync(sb.profilePath, 'utf-8');
-    assert.ok(text.includes(`(path-literal "${metaSock}")`), 'raw spelling net-pinned');
+    assert.ok(text.includes(`(path-literal "${otherSock}")`), 'raw spelling net-pinned');
     assert.ok(text.includes(`(path-literal "${priv}")`), 'ancestor-resolved spelling net-pinned');
     // ...and the socket file itself stays write-denied in both spellings.
-    assert.equal(finalWriteVerdict(text, metaSock), 'deny');
+    assert.equal(finalWriteVerdict(text, otherSock), 'deny');
     assert.equal(finalWriteVerdict(text, priv), 'deny');
   } finally {
     if (prev === undefined) delete process.env.CCSERVER_SANDBOX_SEATBELT_TMP;

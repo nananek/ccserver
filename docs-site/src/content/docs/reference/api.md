@@ -18,7 +18,7 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | メソッド | パス | 説明 |
 |---|---|---|
 | GET | `/api/dirs?path=<path>&showHidden=1` | 指定パスのサブディレクトリ/ファイル一覧 |
-| GET | `/api/dirs/home` | `{ home, defaultApp, availableApps, metaAgentEnabled, metaAgentDir }` — サーバーのホームディレクトリ、既定起動アプリ、検出済みCLI (`claude`/`opencode`/`copilot`/`codex`)、メタエージェント有効フラグと固定ディレクトリ |
+| GET | `/api/dirs/home` | `{ home, browseRoots, initialBrowsePath, defaultApp, availableApps }` — サーバーのホームディレクトリ、許可ルート一覧 ([browseRoots](/ccserver/sandbox/configuration/) 参照、`[]` は無制限)、ブラウジング開始パス、既定起動アプリ、検出済みCLI (`claude`/`opencode`/`copilot`/`codex`) |
 | POST | `/api/dirs` | `{ parent, name }` でフォルダ作成 |
 | GET | `/api/sessions` | 実行中セッションの一覧 |
 | DELETE | `/api/sessions/:id` | セッションを終了する (予約プロンプトも解除) |
@@ -29,13 +29,13 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | GET | `/api/usage?force=1` | Claude Code `/usage` のキャッシュ済みスナップショット (`force=1` で即時再取得) |
 | GET / POST | `/api/worker-presets` | Worker プリセット一覧取得 / 作成 (`{ name, role, app, model }`、`model` は null 可) |
 | PUT / DELETE | `/api/worker-presets/:id` | プリセットの全置換更新 / 削除。role 重複は 409 |
-| GET / POST | `/api/launch-presets` | コンボ起動プリセット一覧 / 作成 (`{ name, workers: [1–7 x { role, app, model?, name?, sandboxOpts? }], orchestratorApp?, orchestratorModel?, instructions? }`)。管理 UI は無く、メタエージェントの MCP ツールと対になる REST |
+| GET / POST | `/api/launch-presets` | コンボ起動プリセット一覧 / 作成 (`{ name, workers: [1–7 x { role, app, model?, name?, sandboxOpts? }], orchestratorApp?, orchestratorModel?, instructions? }`) |
 | PUT / DELETE | `/api/launch-presets/:id` | コンボ起動プリセットの全置換更新 (workers スナップショットごと置換) / 削除。preset 名重複は 409 |
 | GET | `/api/projects` | プロジェクト一覧 (サンドボックス永続 HOME の所属プロジェクト行。`{ id, cwd, pathHash, label, gitRemote, lastSeenAt }`) |
-| PUT | `/api/projects/:id/label` | プロジェクト表示ラベル変更 (`{ label }`、null でクリア)。メタエージェントの `update_project_label` と同じストア経由 |
-| POST | `/api/sessions` | 単発セッションをサーバー側で新規起動 (`{ cwd, app?, model?, shell?, sandbox?, sandboxOpts?, resume?, isMetaAgent? }` — `isMetaAgent: true` のとき `cwd` は省略可かつ無視され、固定ディレクトリ `~/.local/share/ccserver-sandbox/meta-agent` で起動)。メタエージェントの `launch_session` と同一実装 (`isMetaAgent: true` は `metaAgentMcp: true` のときのみ意味を持つ) |
+| PUT | `/api/projects/:id/label` | プロジェクト表示ラベル変更 (`{ label }`、null でクリア) |
+| POST | `/api/sessions` | 単発セッションをサーバー側で新規起動 (`{ cwd, app?, model?, shell?, sandbox?, sandboxOpts?, resume? }`) |
 | POST | `/api/groups` | コンボ起動。従来の `workerA`/`workerB`/`orchestrator` に加え、canonical な `workers: [{ name?, role, app?, model?, sandboxOpts? }]` (1–7 人、role 一意) を受け付ける。プリセットはクライアントがスナップショットへ展開して送る。copilot はどちらの経路でも 400 拒否 |
-| GET | `/api/approvals?status=pending` | メタエージェントの承認待ち破壊的操作一覧 ([メタエージェント](/ccserver/guides/meta-agent/) 参照)。ブラウザのグローバルバナーが数秒間隔でポーリング |
+| GET | `/api/approvals?status=pending` | 承認待ち破壊的操作一覧。ブラウザのグローバルバナーが数秒間隔でポーリング |
 | POST | `/api/approvals/:id/decision` | `{ decision: 'approved' \| 'rejected' }` で承認待ち操作を承認/却下する。5 分未応答のリクエストはサーバー側で expired (拒否扱い) になる |
 | GET | `/api/federation/identity` | `{ enabled, fingerprint?, keyPermissionsSafe? }` — このインスタンス自身の federation 有効/無効と証明書 fingerprint |
 | GET | `/api/federation/instances` | ペアリング済みインスタンス一覧 (全ステータス)。呼び出しのたびに未確定 (pending) 行を相手へ問い合わせて解決を試みる |
@@ -84,7 +84,7 @@ JSON メッセージでターミナル I/O とセッション管理 (アタッ�
 | → | `set_auto_yes` / `get_auto_yes` | `enabled?` | 確認プロンプトの自動承認 ON/OFF・状態取得 |
 | → | `schedule_prompt` | `time` (`"HH:MM"`) か `at` (epoch ms), `text` | 予約プロンプトを設定 |
 | → | `cancel_schedule` / `get_schedule` | – | 予約の解除・現在状態の取得 |
-| ← | `session` | `sessionId`, `cwd`, `cols`, `rows`, `isReconnect`, `isMetaAgent`, `viewers` | スポーン/接続完了 (`viewers`: 自分を含む接続クライアント数) |
+| ← | `session` | `sessionId`, `cwd`, `cols`, `rows`, `isReconnect`, `viewers` | スポーン/接続完了 (`viewers`: 自分を含む接続クライアント数) |
 | ← | `size` | `cols`, `rows` | PTY の確定サイズ。自分の `resize` への応答、および他クライアントの接続・切断で最小値が変わった時に全クライアントへ配信 |
 | ← | `viewers` | `count` | 接続クライアント数の変化 (接続・切断時) |
 | ← | `output` | `data` | ターミナル出力 |

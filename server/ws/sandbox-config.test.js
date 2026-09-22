@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { loadSandboxConfig, installedApps, selectableAppIds, APP_IDS } from './sandbox.js';
 
 // loadSandboxConfig reads the file at CCSERVER_SANDBOX_CONFIG (else the
@@ -420,5 +420,52 @@ test('network: a non-object "network" key collapses to defaults', () => {
   });
   withConfig({ network: ['nope'] }, () => {
     assert.deepEqual(loadSandboxConfig().network, { isolate: false, initialState: 'enforce', mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+  });
+});
+
+// browseRoots (issue #189): restricts /api/files, /api/dirs and /ws/terminal
+// session cwds to these directories. [] (default) means unrestricted --
+// preserving the pre-#189 host-wide behavior -- so most of the actual
+// containment logic lives in pathPolicy.test.js; this just covers parsing.
+test('browseRoots defaults to [] when the key is absent', () => {
+  withConfig({}, () => {
+    assert.deepEqual(loadSandboxConfig().browseRoots, []);
+  });
+});
+
+test('browseRoots resolves relative/home-relative entries and dedupes', () => {
+  withConfig({ browseRoots: ['/srv/projects', '/srv/projects/', '~/repos'] }, () => {
+    const { browseRoots } = loadSandboxConfig();
+    assert.deepEqual(browseRoots, ['/srv/projects', join(homedir(), 'repos')]);
+  });
+});
+
+test('browseRoots falls back to [] for a non-array value', () => {
+  withConfig({ browseRoots: '/srv/projects' }, () => {
+    assert.deepEqual(loadSandboxConfig().browseRoots, []);
+  });
+  withConfig({ browseRoots: { root: '/srv/projects' } }, () => {
+    assert.deepEqual(loadSandboxConfig().browseRoots, []);
+  });
+});
+
+test('browseRoots drops non-string / empty-string entries', () => {
+  withConfig({ browseRoots: ['/srv/projects', 42, null, ''] }, () => {
+    assert.deepEqual(loadSandboxConfig().browseRoots, ['/srv/projects']);
+  });
+});
+
+// allowUnsandboxedAgents: only meaningful alongside browseRoots (createSession
+// gates on it there), but the parse itself is independent -- same
+// strict-boolean pattern as forceSandbox.
+test('allowUnsandboxedAgents defaults to false and is true only for an explicit true value', () => {
+  withConfig({}, () => {
+    assert.equal(loadSandboxConfig().allowUnsandboxedAgents, false);
+  });
+  withConfig({ allowUnsandboxedAgents: 'true' }, () => {
+    assert.equal(loadSandboxConfig().allowUnsandboxedAgents, false);
+  });
+  withConfig({ allowUnsandboxedAgents: true }, () => {
+    assert.equal(loadSandboxConfig().allowUnsandboxedAgents, true);
   });
 });

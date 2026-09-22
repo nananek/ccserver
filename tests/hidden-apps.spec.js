@@ -3,18 +3,15 @@ import { test, expect } from '@playwright/test';
 // hiddenApps (sandbox.config.json, issue #105): agent CLI ids the operator
 // hasn't contracted for. Unlike an app the server just can't find (still
 // shown greyed out with a "サーバーに未インストール" tooltip), a hidden app
-// must be removed ENTIRELY -- no partial/greyed hide mode -- from all 5
+// must be removed ENTIRELY -- no partial/greyed hide mode -- from all 4
 // launch surfaces: the single-launch modal, the combo role pickers (workerA/
-// workerB/orchestrator), the worker preset management dialog, the
-// meta-agent launch dialog, and the Usage widget's app tabs.
+// workerB/orchestrator), the worker preset management dialog, and the
+// Usage widget's app tabs.
 //
-// /api/dirs/home is fully stubbed (metaAgentEnabled included) so this suite
-// is independent of what's actually installed/configured on the machine
-// running it -- same pattern as meta-agent-launch.spec.js, whose comment
-// explains why: the e2e webServer is shared across the whole run, so a
-// per-test sandbox.config.json flip isn't possible there.
-
-const META_AGENT_DIR_STUB = '/home/tester/.local/share/ccserver-sandbox/meta-agent';
+// /api/dirs/home is fully stubbed so this suite is independent of what's
+// actually installed/configured on the machine running it: the e2e
+// webServer is shared across the whole run, so a per-test
+// sandbox.config.json flip isn't possible there.
 
 const HOME_RESPONSE = {
   home: '/home/tester',
@@ -24,8 +21,6 @@ const HOME_RESPONSE = {
   showUsage: true,
   availableApps: { claude: true, opencode: true, copilot: true, codex: true },
   hiddenApps: ['copilot', 'codex'],
-  metaAgentEnabled: true,
-  metaAgentDir: META_AGENT_DIR_STUB,
 };
 
 async function stubDirsHome(page, body = HOME_RESPONSE) {
@@ -115,46 +110,6 @@ test('worker preset management dialog drops codex from the app picker', async ({
   await expect(dialog.locator('.open-menu-app-btn', { hasText: 'Claude Code' })).toHaveCount(1);
   await expect(dialog.locator('.open-menu-app-btn', { hasText: 'opencode' })).toHaveCount(1);
   await expect(dialog.locator('.open-menu-app-btn', { hasText: 'OpenAI Codex' })).toHaveCount(0);
-});
-
-test('meta-agent launch dialog drops codex from the app picker', async ({ page }) => {
-  await stubDirsHome(page);
-  await page.goto('/');
-  const metaBtn = page.locator('.meta-launch-btn');
-  await expect(metaBtn).toBeEnabled();
-  await metaBtn.click();
-  const dialog = page.locator('.resume-dialog', { hasText: 'メタエージェントを起動' });
-  await expect(dialog).toBeVisible();
-  await expect(dialog.locator('.open-menu-item', { hasText: 'Claude Code' })).toHaveCount(1);
-  await expect(dialog.locator('.open-menu-item', { hasText: 'opencode' })).toHaveCount(1);
-  await expect(dialog.locator('.open-menu-item', { hasText: 'OpenAI Codex' })).toHaveCount(0);
-});
-
-test('meta-agent launch is disabled (not silently sent) when the remembered app was hidden after the fact', async ({ page }) => {
-  // Second self-review pass edge case: MetaLaunchDialog persists its app pick
-  // under its own localStorage key (independent of the single-launch
-  // ccserver-app-default key) and reloads it on every dialog open with no
-  // hiddenApps awareness at all. If the operator hides an app the user had
-  // previously chosen here, the picker correctly renders no checked button,
-  // but without a launch-time guard 統括エージェントを起動 would still
-  // silently launch that hidden app -- the same picker-vs-launch-value
-  // mismatch class the コンボ起動 guard above protects against.
-  await page.addInitScript(() => {
-    localStorage.setItem('ccserver-meta-app', 'codex');
-  });
-  // HOME_RESPONSE already hides codex (hiddenApps: ['copilot', 'codex']).
-  await stubDirsHome(page);
-  await page.goto('/');
-  const metaBtn = page.locator('.meta-launch-btn');
-  await expect(metaBtn).toBeEnabled();
-  await metaBtn.click();
-  const dialog = page.locator('.resume-dialog', { hasText: 'メタエージェントを起動' });
-  await expect(dialog).toBeVisible();
-  // No picker button shows as selected -- the remembered 'codex' pick isn't
-  // even offered any more.
-  await expect(dialog.locator('.open-menu-check:has-text("✓")')).toHaveCount(0);
-  const launchBtn = dialog.locator('.btn-primary', { hasText: 'メタエージェントを起動' });
-  await expect(launchBtn).toBeDisabled();
 });
 
 test('Usage widget drops the codex tab entirely when codex is hidden', async ({ page }) => {

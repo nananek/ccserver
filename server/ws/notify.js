@@ -39,7 +39,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // .saved-sessions.json). Read at each use (like loadSandboxConfig's env
 // override) so tests can point it at a temp file without touching the real
 // repo-root state file.
-function notifyPath() {
+export function notifyPath() {
   return process.env.CCSERVER_NOTIFY_PATH || join(__dirname, '..', '..', '.saved-notifications.json');
 }
 

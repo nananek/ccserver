@@ -4,8 +4,7 @@
 // sandbox.config.json's hiddenApps (issue #105). Shared by every
 // picker/predicate that needs this definition (App.jsx's UsageWidget
 // visibility, UsageWidget's own tab picker, DirectoryBrowser's launch
-// pickers, MetaLaunchDialog's app picker) so "installed AND not hidden"
-// can't drift between them.
+// pickers) so "installed AND not hidden" can't drift between them.
 export function isAppSelectable(app, availableApps, hiddenApps) {
   if (hiddenApps && hiddenApps.includes(app)) return false;
   return !availableApps || availableApps[app] !== false;

@@ -32,12 +32,11 @@
 // pairing.propose from a revoked row), so it stays refused on every
 // subsequent attempt exactly like before.
 //
-// Dynamic imports of routes/sessions.js, routes/groups.js and routes/dirs.js
-// mirror metaAgent.js's ensureMetaAgentBroker(): server/ws/ modules never
-// statically import server/routes/ modules in this codebase (the dependency
-// runs the other way for every other feature) -- see metaAgent.js's header
-// comment for the acyclic-import-graph rationale this follows. (That import
-// now lives in federationLink.js, alongside the RPC_METHODS table itself.)
+// Dynamic imports of routes/sessions.js, routes/groups.js and routes/dirs.js:
+// server/ws/ modules never statically import server/routes/ modules in this
+// codebase (the dependency runs the other way for every other feature). (That
+// import now lives in federationLink.js, alongside the RPC_METHODS table
+// itself.)
 
 import { createServer as createTlsServer } from 'node:tls';
 import { ensureIdentity, peerCertInfo } from './federationIdentity.js';

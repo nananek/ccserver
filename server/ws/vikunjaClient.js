@@ -65,7 +65,7 @@ import { loadSandboxConfig } from './sandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-function tasksPath() {
+export function tasksPath() {
   return process.env.CCSERVER_VIKUNJA_TASKS_PATH || join(__dirname, '..', '..', '.saved-vikunja-tasks.json');
 }
 
