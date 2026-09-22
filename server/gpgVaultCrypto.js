@@ -5,7 +5,8 @@
 //
 // Key hierarchy (see server/ws/gpgVaultAgent.js for how these are used):
 //
-//   prf_salt_C (32B random per credential, rotated on every unlock)
+//   prf_salt_C (32B random per credential; NOT rotated per unlock --
+//     rotation is disabled, see rotationFor in routes/gpgVault.js / M4)
 //     --[live WebAuthn PRF ceremony against credential C]--> prfSecret (32B)
 //     --[HKDF-SHA256(ikm=prfSecret, salt=empty, info=...credentialId)]--> wrappingKey_C
 //     --[AES-256-GCM(wrappingKey_C)]--> wraps/unwraps VK (32B random, made once)
@@ -24,10 +25,13 @@ import { randomBytes, hkdfSync, createCipheriv, createDecipheriv } from 'node:cr
 // constant sha256("ccserver-gpg-vault-prf-salt-v1"): with one fixed salt the
 // PRF output of a credential never changed, so one leaked output (XSS + a
 // single tap) was a permanent unlock key. Each credential's wrap now has its
-// own salt, and every unlock re-wraps under a NEW salt (PRF `second`), so a
-// captured output stops working after the owner's next unlock. Wraps with no
-// salt (the old constant) only exist in pre-fix vaults, which are disabled
-// outright (gpgVaultDb.isLegacyVault()).
+// own salt, so one credential's leaked output never decrypts another
+// credential's wrap. The F6 rotation half -- re-wrapping under a NEW salt on
+// every unlock so a captured output expires -- was later disabled
+// (vuln_scan M4, see rotationFor in routes/gpgVault.js), so a captured
+// output no longer expires automatically. Wraps with no salt (the old
+// constant) only exist in pre-fix vaults, which are disabled outright
+// (gpgVaultDb.isLegacyVault()).
 export function generatePrfSalt() {
   return randomBytes(32);
 }

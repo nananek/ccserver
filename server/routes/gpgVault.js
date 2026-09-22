@@ -95,28 +95,22 @@ async function prfAuthenticationOptions(request, allowCredentials, prf) {
 
 // Options for an ENROLLED-credential ceremony (unlock / add-credential's
 // authorizer / delete): each enrolled credential is asked for PRF over its
-// own stored salt (`first`), and -- when `rotate` -- over a freshly chosen
-// next salt (`second`) so the wrap can be rotated in the same tap. Returns
-// { options, nextSalts } where nextSalts (credentialId -> base64url salt)
-// must be kept server-side in the flow.
-async function enrolledPrfOptions(request, { rotate }) {
+// own stored salt (`first`). No `second` salt is ever requested: PRF salt
+// rotation was disabled (see rotationFor below / vuln_scan M4), so asking
+// the client to evaluate a second salt would only hand it another
+// opportunity to report an unverifiable value the server never uses.
+async function enrolledPrfOptions(request) {
   const creds = gpgVaultDb.listUnlockableCredentials();
   const evalByCredential = {};
-  const nextSalts = {};
   for (const { credentialId, prfSalt } of creds) {
-    const entry = { first: b64u(prfSalt) };
-    if (rotate) {
-      nextSalts[credentialId] = b64u(generatePrfSalt());
-      entry.second = nextSalts[credentialId];
-    }
-    evalByCredential[credentialId] = entry;
+    evalByCredential[credentialId] = { first: b64u(prfSalt) };
   }
   const options = await prfAuthenticationOptions(
     request,
     creds.map(({ credentialId }) => ({ id: credentialId })),
     { evalByCredential },
   );
-  return { options, nextSalts };
+  return { options };
 }
 
 function parsePrfResult(value) {
@@ -197,13 +191,24 @@ function rejectLegacy(reply) {
   return reply.code(423).send({ error: gpgVaultAgent.LEGACY_VAULT_MESSAGE, code: 'GPG_VAULT_LEGACY_DISABLED' });
 }
 
-// The rotation input for one verified enrolled-credential assertion, or null
-// when the authenticator did not return PRF `second` (older browsers): the
-// unlock still succeeds, only the salt stays as is.
+// Rotation input for a verified enrolled-credential assertion -- always
+// null: PRF salt rotation is DISABLED.
+//
+// Why (vuln_scan M4, decision 2026-09-22): the old design re-wrapped the
+// vault key under the client-reported PRF `second` value. WebAuthn PRF
+// results are NOT covered by the assertion signature, so that value is
+// unverifiable server-side: a client that completed one unlock ceremony
+// could (a) re-wrap under a value the owner's authenticator can never
+// reproduce -- permanently locking the owner out (recovery = delete and
+// recreate the vault) -- and (b) break the F6 guarantee that a captured
+// PRF output stops being an unlock key. The trade-off of disabling
+// rotation is that a captured PRF output no longer expires automatically
+// (the F6 protection is withdrawn; see credentials.md). unlockVault() /
+// addCredentialWithAuthorizer() already treat a null rotation as a no-op
+// that keeps the previous wrap in place (rotateWrap), so this single
+// choke point disables rotation on every ceremony path.
 function rotationFor(stepUp, nextSalts) {
-  const nextSalt = nextSalts?.[stepUp.credentialId];
-  if (!nextSalt || !stepUp.prfSecond) return null;
-  return { nextSalt: Buffer.from(nextSalt, 'base64url'), nextPrfSecret: stepUp.prfSecond };
+  return null;
 }
 
 export async function gpgVaultRoute(fastify, opts) {
@@ -287,8 +292,8 @@ export async function gpgVaultRoute(fastify, opts) {
     if (!gpgVaultDb.vaultExists()) return reply.code(404).send({ error: 'no GPG vault has been set up yet' });
     if (gpgVaultDb.isLegacyVault()) return rejectLegacy(reply);
     if (gpgVaultAgent.isUnlocked()) return { alreadyUnlocked: true };
-    const { options, nextSalts } = await enrolledPrfOptions(request, { rotate: true });
-    startFlow(request, reply, 'gpg-vault-unlock', options.challenge, { nextSalts });
+    const { options } = await enrolledPrfOptions(request);
+    startFlow(request, reply, 'gpg-vault-unlock', options.challenge, null);
     return options;
   });
 
@@ -303,7 +308,7 @@ export async function gpgVaultRoute(fastify, opts) {
     try {
       const vault = gpgVaultAgent.unlockVault({
         credentialId: stepUp.credentialId, prfSecret: stepUp.prfFirst,
-        rotation: rotationFor(stepUp, flow.data?.nextSalts),
+        rotation: rotationFor(stepUp),
       });
       return { success: true, vault };
     } catch (err) {
@@ -342,7 +347,7 @@ export async function gpgVaultRoute(fastify, opts) {
         code: 'GPG_VAULT_NO_CANDIDATE',
       });
     }
-    const { options: authorizer, nextSalts } = await enrolledPrfOptions(request, { rotate: true });
+    const { options: authorizer } = await enrolledPrfOptions(request);
     const candidateSalt = b64u(generatePrfSalt());
     const candidate = await prfAuthenticationOptions(
       request,
@@ -350,7 +355,6 @@ export async function gpgVaultRoute(fastify, opts) {
       { eval: { first: candidateSalt } },
     );
     startFlow(request, reply, 'gpg-vault-add-credential', authorizer.challenge, {
-      nextSalts,
       candidateChallenge: candidate.challenge,
       candidateSalt,
     });
@@ -376,7 +380,7 @@ export async function gpgVaultRoute(fastify, opts) {
       gpgVaultAgent.addCredentialWithAuthorizer({
         authorizer: {
           credentialId: authorizer.credentialId, prfSecret: authorizer.prfFirst,
-          rotation: rotationFor(authorizer, flow.data.nextSalts),
+          rotation: rotationFor(authorizer),
         },
         candidate: {
           credentialId: candidate.credentialId, prfSecret: candidate.prfFirst,
@@ -411,7 +415,7 @@ export async function gpgVaultRoute(fastify, opts) {
     if (!requirePasskeyMode(reply)) return;
     if (!gpgVaultDb.vaultExists()) return reply.code(404).send({ error: 'no GPG vault has been set up yet' });
     if (gpgVaultDb.isLegacyVault()) return { legacy: true, stepUpRequired: true };
-    const { options } = await enrolledPrfOptions(request, { rotate: false });
+    const { options } = await enrolledPrfOptions(request);
     startFlow(request, reply, 'gpg-vault-delete', options.challenge, null);
     return options;
   });

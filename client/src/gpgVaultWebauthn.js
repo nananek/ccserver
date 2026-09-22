@@ -16,10 +16,13 @@
 // -- every ceremony that needs a live PRF evaluation, as opposed to ordinary
 // login (routes/auth.js), which never touches PRF at all.
 //
-// Security audit F6: the server now sends per-credential salts
-// (prf.evalByCredential) and, for unlock, a second salt to rotate to
-// (`second`). Both inputs are converted here, and `second`'s result is
-// passed back when the authenticator provides it.
+// Security audit F6: the server sends per-credential salts
+// (prf.evalByCredential) so the authenticator evaluates PRF over each
+// credential's own salt. A `second` salt (next-salt rotation) used to be
+// requested for unlock; that rotation is disabled (vuln_scan M4, see
+// rotationFor in routes/gpgVault.js), so the server no longer sends it --
+// this helper still handles a `second` input/result if one ever appears
+// again, purely as a passthrough.
 
 import { base64URLStringToBuffer, bufferToBase64URLString } from '@simplewebauthn/browser';
 

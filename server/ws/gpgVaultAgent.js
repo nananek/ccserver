@@ -117,6 +117,16 @@ function wrapVaultKey(vk, credentialId, prfSecret) {
 // `second`), so the PRF output just used stops being an unlock key. Best
 // effort: a failed/raced rotation leaves the previous, still-valid wrap in
 // place. Returns true iff rotated.
+//
+// DISABLED by policy (vuln_scan M4, 2026-09-22): the next salt's PRF output
+// is client-reported and not covered by the WebAuthn assertion signature,
+// so the old design let a ceremony-completing client re-wrap under an
+// arbitrary value (permanent owner lockout / F6 bypass). routes/gpgVault.js's
+// rotationFor() now always returns null, so every caller passes rotation =
+// null and this function is a no-op. Kept (rather than deleted) because
+// unlockVault/addCredentialWithAuthorizer are already written to treat a
+// null rotation as "keep the previous wrap", and as a ready-made, tested
+// mechanism should a verifiable rotation design ever replace it.
 function rotateWrap(vk, wrapRow, rotation) {
   if (!rotation || !rotation.nextPrfSecret || !rotation.nextSalt) return false;
   const credentialId = wrapRow.credential_id;
@@ -467,7 +477,10 @@ export function deleteVault() {
 //
 // `rotation` ({ nextSalt, nextPrfSecret }, optional): after a successful
 // unlock, re-wrap this credential's copy of VK under the next PRF salt
-// (security audit F6). Returns the public info plus `rotated`.
+// (security audit F6). Currently always null from the routes layer -- PRF
+// salt rotation is disabled by policy (vuln_scan M4, see rotationFor in
+// routes/gpgVault.js) -- so `rotated` is always false and the previous
+// wrap is kept as is. Returns the public info plus `rotated`.
 export function unlockVault({ credentialId, prfSecret, rotation = null }) {
   if (!gpgVaultDb.vaultExists()) {
     const err = new Error('no GPG vault has been set up yet');

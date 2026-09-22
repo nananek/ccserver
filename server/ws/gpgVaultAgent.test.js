@@ -255,9 +255,13 @@ test('addCredentialWithAuthorizer: an already-enrolled candidate is never overwr
   assert.doesNotThrow(() => unlockVault({ credentialId: 'cred-i2', prfSecret: s2 }), 'original owner still unlocks');
 });
 
-// Security audit F6: a PRF output that has been used once stops working
-// after the next unlock re-wraps under a new salt.
-test('unlockVault with rotation: the previous PRF output no longer unlocks, the next one does', { skip: !TOOLS_AVAILABLE }, () => {
+// The rotation MECHANISM (security audit F6) is kept in unlockVault but is
+// currently dormant: PRF salt rotation is disabled by policy (vuln_scan M4,
+// see rotationFor in routes/gpgVault.js), which always passes rotation =
+// null. This test pins the mechanism's contract so a future verifiable
+// rotation design can re-enable it without regressing the re-wrap/expiry
+// behavior it promises.
+test('unlockVault rotation mechanism (dormant): the previous PRF output no longer unlocks, the next one does', { skip: !TOOLS_AVAILABLE }, () => {
   insertCredential('cred-r');
   const s1 = randomBytes(32);
   const salt1 = randomBytes(32);

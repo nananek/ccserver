@@ -431,9 +431,11 @@ export const MIGRATIONS = [
         -- gpgVaultDb.isLegacyVault().
         ALTER TABLE gpg_vault ADD COLUMN format_version INTEGER NOT NULL DEFAULT 1;
 
-        -- F6: per-credential random PRF salt, rotated on every unlock. NULL
-        -- only ever occurs on pre-fix wraps (every post-fix wrap is created
-        -- with a salt), and a NULL salt also marks the vault as legacy.
+        -- F6: per-credential random PRF salt. NOT rotated per unlock
+        -- (rotation disabled by the M4 decision, see routes/gpgVault.js).
+        -- NULL only ever occurs on pre-fix wraps (every post-fix wrap is
+        -- created with a salt), and a NULL salt also marks the vault as
+        -- legacy.
         ALTER TABLE gpg_vault_credentials ADD COLUMN prf_salt BLOB;
       `);
     },

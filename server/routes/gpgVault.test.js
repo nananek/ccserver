@@ -319,51 +319,61 @@ test('POST /api/gpg-vault/setup-options: 409 once a vault already exists', { ski
 });
 
 // ---------------------------------------------------------------------------
-// F6: PRF salt rotation.
+// PRF salt rotation is DISABLED (vuln_scan M4, decision 2026-09-22).
 
-test('F6: every unlock rotates the salt -- a PRF output captured from one unlock is dead after the next', { skip: !TOOLS_AVAILABLE }, async () => {
+test('rotation disabled: unlock keeps the same salt and wrap, rotated=false', { skip: !TOOLS_AVAILABLE }, async () => {
   const cred = await registerCredential();
   await setUpVault(cred);
   await post('/api/gpg-vault/lock');
   const saltBefore = Buffer.from(wrapRow(cred).prf_salt);
 
-  // Owner unlocks; an attacker (XSS + one tap) captures this PRF output.
   const first = await unlock(cred);
   assert.equal(first.res.statusCode, 200, first.res.body);
-  assert.equal(first.res.json().vault.rotated, true);
-  const captured = Buffer.from(first.response.clientExtensionResults.prf.results.first, 'base64url');
-  const saltAfter = Buffer.from(wrapRow(cred).prf_salt);
-  assert.notDeepEqual(saltAfter, saltBefore, 'salt rotated');
-  assert.equal(saltAfter.toString('base64url'), first.options.extensions.prf.evalByCredential[cred.id].second);
+  assert.equal(first.res.json().vault.rotated, false);
+  assert.deepEqual(Buffer.from(wrapRow(cred).prf_salt), saltBefore, 'salt unchanged');
+
+  // The same PRF output keeps unlocking afterwards (no expiry).
   await post('/api/gpg-vault/lock');
-
-  // Replaying the captured output against the rotated wrap fails closed.
-  const replay = await unlock(cred, { prfFirst: captured });
-  assert.equal(replay.res.statusCode, 401);
-  assert.equal(isUnlocked(), false);
-
-  // The honest authenticator (over the NEW salt) still unlocks.
-  const honest = await unlock(cred);
-  assert.equal(honest.res.statusCode, 200, honest.res.body);
+  const again = await unlock(cred);
+  assert.equal(again.res.statusCode, 200, again.res.body);
 });
 
-test('F6: an authenticator that returns no PRF `second` still unlocks; the salt just stays', { skip: !TOOLS_AVAILABLE }, async () => {
+test('unlock-options no longer requests a second (next-salt) PRF evaluation', { skip: !TOOLS_AVAILABLE }, async () => {
+  const cred = await registerCredential();
+  await setUpVault(cred);
+  await post('/api/gpg-vault/lock');
+  const optsRes = await post('/api/gpg-vault/unlock-options');
+  assert.equal(optsRes.statusCode, 200, optsRes.body);
+  const entry = optsRes.json().extensions?.prf?.evalByCredential?.[cred.id];
+  assert.ok(entry?.first, 'first (current salt) requested');
+  assert.equal(entry.second, undefined, 'no second salt requested (rotation disabled)');
+});
+
+test('M4: a fabricated PRF `second` cannot re-wrap the vault key (no permanent lockout)', { skip: !TOOLS_AVAILABLE }, async () => {
   const cred = await registerCredential();
   await setUpVault(cred);
   await post('/api/gpg-vault/lock');
   const saltBefore = Buffer.from(wrapRow(cred).prf_salt);
-  const optsRes = await post('/api/gpg-vault/unlock-options');
-  const options = optsRes.json();
-  const salts = saltsFor(options, cred);
-  cred.counter += 1;
-  const response = createAuthenticationResponse({
-    rpID: RP_HOST, origin: ORIGIN, challenge: options.challenge, credentialId: cred.credentialId,
-    privateKey: cred.privateKey, counter: cred.counter, prfResultFirst: simulatePrf(cred.prfSecret, salts.first),
-  });
-  const res = await post('/api/gpg-vault/unlock-verify', { flowId: flowIdFrom(optsRes), payload: { response } });
-  assert.equal(res.statusCode, 200, res.body);
-  assert.equal(res.json().vault.rotated, false);
-  assert.deepEqual(Buffer.from(wrapRow(cred).prf_salt), saltBefore);
+  const wrapBefore = Buffer.from(wrapRow(cred).wrapped_key);
+
+  // The client lies about a `second` value: previously this re-wrapped the
+  // vault key under the forged value, so the owner's authenticator could
+  // never unlock again (vuln_scan p8 PoC).
+  const forgedSecond = randomBytes(32);
+  const first = await unlock(cred, { prfSecond: forgedSecond });
+  assert.equal(first.res.statusCode, 200, first.res.body);
+  assert.equal(first.res.json().vault.rotated, false);
+  assert.deepEqual(Buffer.from(wrapRow(cred).prf_salt), saltBefore, 'salt not replaced');
+  assert.deepEqual(Buffer.from(wrapRow(cred).wrapped_key), wrapBefore, 'wrap not re-wrapped');
+
+  // No lockout: the honest authenticator (real PRF over the SAME salt)
+  // still unlocks, and the forged value never became an unlock key.
+  await post('/api/gpg-vault/lock');
+  const honest = await unlock(cred);
+  assert.equal(honest.res.statusCode, 200, honest.res.body);
+  await post('/api/gpg-vault/lock');
+  const forgedReplay = await unlock(cred, { prfFirst: forgedSecond });
+  assert.equal(forgedReplay.res.statusCode, 401, 'forged value is not a wrapping key');
 });
 
 // ---------------------------------------------------------------------------

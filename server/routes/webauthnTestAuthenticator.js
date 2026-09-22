@@ -102,7 +102,9 @@ export function createRegistrationResponse({ rpID, origin, challenge, credential
 // PRF-capable authenticator would drive.
 //
 // `prfResultSecond` (optional) likewise fakes PRF `second` (the next salt's
-// output, used for per-unlock salt rotation -- security audit F6).
+// output). Per-unlock salt rotation is currently disabled (vuln_scan M4),
+// but a forged `second` is exactly what the M4 regression test feeds in to
+// prove the server ignores it.
 export function createAuthenticationResponse({ rpID, origin, challenge, credentialId, privateKey, counter, prfResultFirst, prfResultSecond }) {
   const authData = buildAuthenticatorData({ rpID, counter, attestedCredential: null });
   const clientDataJSON = buildClientDataJSON('webauthn.get', challenge, origin);

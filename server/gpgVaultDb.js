@@ -133,6 +133,10 @@ export function addCredentialWrap({ credentialId, wrappedKey, wrapNonce, wrapTag
 // under a new PRF salt, but only if the wrap is still the one the caller just
 // decrypted (optimistic lock on wrap_tag -- a concurrent rotation wins, this
 // one becomes a no-op). Returns true iff the row was replaced.
+//
+// Dormant: rotation is disabled by policy (vuln_scan M4, see rotationFor in
+// routes/gpgVault.js), so no current caller passes a rotation. Kept as the
+// DB half of the rotation mechanism for a future verifiable design.
 export function rotateCredentialWrap({ credentialId, expectedOldTag, wrappedKey, wrapNonce, wrapTag, prfSalt }) {
   if (!prfSalt) throw new Error('rotateCredentialWrap: prfSalt is required');
   const result = getDb().prepare(`
