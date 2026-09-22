@@ -34,13 +34,13 @@ after(() => {
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
 });
 
-test('linked worktree cwd gets a broker with allowlist, non-git cwd gets no broker', () => {
+test('linked worktree cwd gets a broker with allowlist, non-git cwd gets no broker', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   let spawn1;
   let spawn2;
   try {
-    spawn1 = buildSandboxSpawn({ cwd: workerRepo, targetCommand: ['/bin/true'], app: 'claude' });
+    spawn1 = await buildSandboxSpawn({ cwd: workerRepo, targetCommand: ['/bin/true'], app: 'claude' });
     // Should have broker fields populated
     assert.ok(spawn1.gitBrokerProc, 'linked worktree should have broker proc');
     assert.ok(spawn1.gitBrokerDir, 'linked worktree should have broker dir');
@@ -52,7 +52,7 @@ test('linked worktree cwd gets a broker with allowlist, non-git cwd gets no brok
     // Non-git cwd
     const nonGit = join(tmpRoot, 'not-a-repo');
     mkdirSync(nonGit, { recursive: true });
-    spawn2 = buildSandboxSpawn({ cwd: nonGit, targetCommand: ['/bin/true'], app: 'claude' });
+    spawn2 = await buildSandboxSpawn({ cwd: nonGit, targetCommand: ['/bin/true'], app: 'claude' });
     assert.equal(spawn2.gitBrokerProc, null, 'non-git cwd must not get a broker');
     assert.equal(spawn2.gitBrokerDir, null);
     assert.ok(!spawn2.args.join(' ').includes('broker.sock'), 'no broker bind for non-git');
@@ -64,7 +64,7 @@ test('linked worktree cwd gets a broker with allowlist, non-git cwd gets no brok
   }
 });
 
-test('broker startup failure is propagated as launch error (no silent dead wrapper)', () => {
+test('broker startup failure is propagated as launch error (no silent dead wrapper)', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   // Simulate failure by making RUNTIME_BASE unwritable to force mkdir fail
@@ -76,9 +76,10 @@ test('broker startup failure is propagated as launch error (no silent dead wrapp
   process.env.XDG_RUNTIME_DIR = filePath;
   try {
     // This should throw because broker dir creation will fail or socket cannot be created
-    assert.throws(() => {
-      buildSandboxSpawn({ cwd: workerRepo, targetCommand: ['/bin/true'], app: 'claude' });
-    }, /git broker|Failed to build sandbox/);
+    await assert.rejects(
+      () => buildSandboxSpawn({ cwd: workerRepo, targetCommand: ['/bin/true'], app: 'claude' }),
+      /git broker|Failed to build sandbox/,
+    );
   } finally {
     if (origRuntime === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = origRuntime;
     if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG; else process.env.CCSERVER_SANDBOX_CONFIG = prev;

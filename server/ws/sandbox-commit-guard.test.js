@@ -39,8 +39,8 @@ after(() => {
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-test('enabled by default: hook/config are bound, core.hooksPath is wired via GIT_CONFIG_*, and the runtime dir is returned', () => {
-  const spawn = spawnFor({ docker: false, gitBroker: false, persistentHome: false });
+test('enabled by default: hook/config are bound, core.hooksPath is wired via GIT_CONFIG_*, and the runtime dir is returned', async () => {
+  const spawn = await spawnFor({ docker: false, gitBroker: false, persistentHome: false });
   try {
     assert.ok(spawn.commitGuardDir, 'a commit guard runtime dir must be created even with gitBroker off (independent flags)');
     assert.ok(existsSync(spawn.commitGuardDir), 'the runtime dir actually exists on disk');
@@ -63,8 +63,8 @@ test('enabled by default: hook/config are bound, core.hooksPath is wired via GIT
   }
 });
 
-test('commitMessageGuard.enabled: false disables the whole feature, independent of gitBroker', () => {
-  const spawn = spawnFor({ docker: false, gitBroker: true, persistentHome: false, commitMessageGuard: { enabled: false } });
+test('commitMessageGuard.enabled: false disables the whole feature, independent of gitBroker', async () => {
+  const spawn = await spawnFor({ docker: false, gitBroker: true, persistentHome: false, commitMessageGuard: { enabled: false } });
   try {
     assert.equal(spawn.commitGuardDir, null);
     const argsStr = spawn.args.join(' ');
@@ -76,9 +76,9 @@ test('commitMessageGuard.enabled: false disables the whole feature, independent 
   }
 });
 
-test('the written config file contains the built-in patterns plus configured blockedPatterns, in order', () => {
+test('the written config file contains the built-in patterns plus configured blockedPatterns, in order', async () => {
   const extra = 'Co-Authored-By:.*noreply@anthropic\\.com';
-  const spawn = spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { blockedPatterns: [extra] } });
+  const spawn = await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { blockedPatterns: [extra] } });
   try {
     assert.ok(spawn.commitGuardDir);
     const configPath = join(spawn.commitGuardDir, 'commit-guard.json');

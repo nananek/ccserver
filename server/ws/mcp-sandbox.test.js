@@ -37,12 +37,12 @@ after(() => {
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-test('buildSandboxSpawn binds the MCP socket, wrapper and node binary when mcpSocketPath is set', () => {
+test('buildSandboxSpawn binds the MCP socket, wrapper and node binary when mcpSocketPath is set', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
     const sockPath = join(tmpRoot, 'fake-mcp.sock');
-    const spawn = buildSandboxSpawn({
+    const spawn = await buildSandboxSpawn({
       cwd: tmpRoot,
       targetCommand: ['claude'],
       app: 'claude',
@@ -69,11 +69,11 @@ test('buildSandboxSpawn binds the MCP socket, wrapper and node binary when mcpSo
   }
 });
 
-test('buildSandboxSpawn without mcpSocketPath adds no MCP bindings', () => {
+test('buildSandboxSpawn without mcpSocketPath adds no MCP bindings', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    const spawn = buildSandboxSpawn({
+    const spawn = await buildSandboxSpawn({
       cwd: tmpRoot,
       targetCommand: ['claude'],
       app: 'claude',
@@ -87,11 +87,11 @@ test('buildSandboxSpawn without mcpSocketPath adds no MCP bindings', () => {
   }
 });
 
-test('buildSandboxSpawn adds no /workers mounts (worker-dir roBinds removed)', () => {
+test('buildSandboxSpawn adds no /workers mounts (worker-dir roBinds removed)', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    const spawn = buildSandboxSpawn({
+    const spawn = await buildSandboxSpawn({
       cwd: tmpRoot,
       targetCommand: ['claude'],
       app: 'claude',
@@ -110,12 +110,12 @@ test('buildSandboxSpawn adds no /workers mounts (worker-dir roBinds removed)', (
 // must be bound, the wrapper ro-bound, CCSANDBOX_NOTIFY_MCP_SOCK set, and the
 // node binary bound for the wrapper's shebang -- without any group-socket
 // bindings leaking in.
-test('buildSandboxSpawn binds the notify socket + wrapper when notifySocketPath is set (no group socket)', () => {
+test('buildSandboxSpawn binds the notify socket + wrapper when notifySocketPath is set (no group socket)', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
     const notifySock = join(tmpRoot, 'fake-notify.sock');
-    const spawn = buildSandboxSpawn({
+    const spawn = await buildSandboxSpawn({
       cwd: tmpRoot,
       targetCommand: ['claude'],
       app: 'claude',
@@ -144,11 +144,11 @@ test('buildSandboxSpawn binds the notify socket + wrapper when notifySocketPath 
   }
 });
 
-test('buildSandboxSpawn without notifySocketPath adds no notify bindings', () => {
+test('buildSandboxSpawn without notifySocketPath adds no notify bindings', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    const spawn = buildSandboxSpawn({
+    const spawn = await buildSandboxSpawn({
       cwd: tmpRoot,
       targetCommand: ['claude'],
       app: 'claude',
@@ -165,12 +165,12 @@ test('buildSandboxSpawn without notifySocketPath adds no notify bindings', () =>
 // ccserver-usage (see usageMcp.js): same shape as the notify socket bindings
 // above, independent of both the group socket and the notify socket -- a
 // claude session may carry any combination of the three.
-test('buildSandboxSpawn binds the usage socket + wrapper when usageSocketPath is set (no group/notify socket)', () => {
+test('buildSandboxSpawn binds the usage socket + wrapper when usageSocketPath is set (no group/notify socket)', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
     const usageSock = join(tmpRoot, 'fake-usage.sock');
-    const spawn = buildSandboxSpawn({
+    const spawn = await buildSandboxSpawn({
       cwd: tmpRoot,
       targetCommand: ['claude'],
       app: 'claude',
@@ -197,11 +197,11 @@ test('buildSandboxSpawn binds the usage socket + wrapper when usageSocketPath is
   }
 });
 
-test('buildSandboxSpawn without usageSocketPath adds no usage bindings', () => {
+test('buildSandboxSpawn without usageSocketPath adds no usage bindings', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    const spawn = buildSandboxSpawn({
+    const spawn = await buildSandboxSpawn({
       cwd: tmpRoot,
       targetCommand: ['claude'],
       app: 'claude',

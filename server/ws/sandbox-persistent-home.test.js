@@ -24,9 +24,9 @@ let cfgPath;
 let tmpRoot;
 let homeRoot;
 
-function spawnArgs({ cwd, reuseSandboxHome = true, json = { docker: false, gitBroker: false } } = {}) {
+async function spawnArgs({ cwd, reuseSandboxHome = true, json = { docker: false, gitBroker: false } } = {}) {
   writeFileSync(cfgPath, JSON.stringify(json));
-  return buildSandboxSpawn({ cwd, targetCommand: ['claude'], app: 'claude', sandboxOpts: null, reuseSandboxHome }).args;
+  return (await buildSandboxSpawn({ cwd, targetCommand: ['claude'], app: 'claude', sandboxOpts: null, reuseSandboxHome })).args;
 }
 
 // --bind <src> <HOME> pairs, and --tmpfs <HOME> pairs (the args array also
@@ -68,18 +68,18 @@ test('persistentHomeDir is deterministic and resolve-normalized per cwd', () => 
   assert.ok(a.startsWith(homeRoot), 'lives under the configured home root');
 });
 
-test('sandboxHomeStatus reports enabled/exists with persistentHome on', () => {
+test('sandboxHomeStatus reports enabled/exists with persistentHome on', async () => {
   const cwd = join(tmpRoot, 'proj');
   assert.equal(sandboxHomeStatus(cwd).enabled, true);
   assert.equal(sandboxHomeStatus(cwd).exists, false, 'no dir yet');
   // A previous sandbox leaves its HOME behind.
-  spawnArgs({ cwd });
+  await spawnArgs({ cwd });
   assert.equal(sandboxHomeStatus(cwd).exists, true);
 });
 
-test('persistentHome on binds the per-project dir at HOME (no tmpfs HOME)', () => {
+test('persistentHome on binds the per-project dir at HOME (no tmpfs HOME)', async () => {
   const cwd = join(tmpRoot, 'proj-a');
-  const args = spawnArgs({ cwd });
+  const args = await spawnArgs({ cwd });
   const home = persistentHomeDir(cwd);
   const idx = findBindHome(args, home);
   assert.ok(idx > 0, 'uses a bind for HOME');
@@ -88,31 +88,31 @@ test('persistentHome on binds the per-project dir at HOME (no tmpfs HOME)', () =
   assert.ok(existsSync(home), 'the HOME dir is created on the host');
 });
 
-test('persistentHome off keeps the legacy fresh tmpfs HOME', () => {
+test('persistentHome off keeps the legacy fresh tmpfs HOME', async () => {
   const cwd = join(tmpRoot, 'proj-b');
-  const args = spawnArgs({ cwd, json: { docker: false, gitBroker: false, persistentHome: false } });
+  const args = await spawnArgs({ cwd, json: { docker: false, gitBroker: false, persistentHome: false } });
   const idx = findTmpfsHome(args);
   assert.ok(idx > 0, 'tmpfs present');
   assert.equal(findBindHome(args, persistentHomeDir(cwd)), -1, 'no persistent HOME bind');
 });
 
-test('reuseSandboxHome false wipes the previous HOME and starts empty', () => {
+test('reuseSandboxHome false wipes the previous HOME and starts empty', async () => {
   const cwd = join(tmpRoot, 'proj-c');
   // First launch (reuse) leaves state behind.
-  spawnArgs({ cwd });
+  await spawnArgs({ cwd });
   const home = persistentHomeDir(cwd);
   assert.ok(existsSync(home));
   writeFileSync(join(home, 'installed-tool'), 'x');
   assert.deepEqual(readdirSync(home).sort(), ['.ccserver-tmp', '.local', 'installed-tool'], 'state survives a reuse launch');
 
   // Second launch with reuseSandboxHome:false wipes it.
-  spawnArgs({ cwd, reuseSandboxHome: false });
+  await spawnArgs({ cwd, reuseSandboxHome: false });
   assert.deepEqual(readdirSync(home).sort(), ['.ccserver-tmp', '.local'], 'the previous tool is gone after a fresh launch');
 });
 
-test('persistentHome on binds /tmp under the persistent HOME (no fresh tmpfs)', () => {
+test('persistentHome on binds /tmp under the persistent HOME (no fresh tmpfs)', async () => {
   const cwd = join(tmpRoot, 'proj-f');
-  const args = spawnArgs({ cwd });
+  const args = await spawnArgs({ cwd });
   const tmpSrc = join(persistentHomeDir(cwd), '.ccserver-tmp');
   const idx = args.indexOf('/tmp');
   assert.ok(idx > 0, '/tmp mount present');
@@ -121,17 +121,17 @@ test('persistentHome on binds /tmp under the persistent HOME (no fresh tmpfs)', 
   assert.ok(existsSync(tmpSrc), 'the /tmp dir is created on the host');
 });
 
-test('persistentHome off keeps /tmp as a fresh tmpfs', () => {
+test('persistentHome off keeps /tmp as a fresh tmpfs', async () => {
   const cwd = join(tmpRoot, 'proj-g');
-  const args = spawnArgs({ cwd, json: { docker: false, gitBroker: false, persistentHome: false } });
+  const args = await spawnArgs({ cwd, json: { docker: false, gitBroker: false, persistentHome: false } });
   const idx = args.indexOf('/tmp');
   assert.ok(idx > 0, '/tmp mount present');
   assert.equal(args[idx - 1], '--tmpfs', '/tmp stays a tmpfs without a persistent HOME');
 });
 
-test('persistent home exposes host ~/.local/bin at a secondary bin-host path on PATH', () => {
+test('persistent home exposes host ~/.local/bin at a secondary bin-host path on PATH', async () => {
   const cwd = join(tmpRoot, 'proj-d');
-  const args = spawnArgs({ cwd });
+  const args = await spawnArgs({ cwd });
   const hostBinDest = join(HOME, '.local', 'bin-host');
   const bindIdx = args.indexOf('--ro-bind-try');
   assert.ok(bindIdx > 0, 'bin-host bind present');
@@ -142,9 +142,9 @@ test('persistent home exposes host ~/.local/bin at a secondary bin-host path on 
   assert.ok(args[pathEnvIdx + 1].endsWith(hostBinDest), 'PATH includes bin-host');
 });
 
-test('tmpfs home keeps the legacy ro-bind of host ~/.local/bin at its real path', () => {
+test('tmpfs home keeps the legacy ro-bind of host ~/.local/bin at its real path', async () => {
   const cwd = join(tmpRoot, 'proj-e');
-  const args = spawnArgs({ cwd, json: { docker: false, gitBroker: false, persistentHome: false } });
+  const args = await spawnArgs({ cwd, json: { docker: false, gitBroker: false, persistentHome: false } });
   assert.ok(!args.includes(join(HOME, '.local', 'bin-host')), 'no bin-host path with tmpfs home');
   const pathEnvIdx = args.indexOf('PATH');
   assert.ok(!String(args[pathEnvIdx + 1]).includes('bin-host'), 'PATH has no bin-host');

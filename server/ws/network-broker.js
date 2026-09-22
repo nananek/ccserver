@@ -59,7 +59,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { createServer, request as httpRequest } from 'node:http';
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -244,7 +244,7 @@ export function buildIsolatedProxyEnv({ host = '127.0.0.1', port, token, noProxy
   };
 }
 
-function runServer({ allowlist, denylist, mode, portFile, state: initialState }) {
+function runServer({ allowlist, denylist, mode, portFile, state: initialState, adminToken }) {
   let allowedHosts;
   try {
     allowedHosts = JSON.parse(readFileSync(allowlist, 'utf-8'));
@@ -280,8 +280,17 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
   // derivable from anything visible inside the sandbox, or a sandboxed agent
   // could read it off its own env and use it to disable its own egress
   // allow-list, exactly like a stolen proxy token used to be able to.
+  //
+  // adminToken arrives as a plain parameter (read from stdin by
+  // readAdminTokenFromStdin, below the process.argv guard at the bottom of
+  // this file), never via env/argv/a file: a same-UID sandboxed process can
+  // read another process's OWN env on some backends (macOS: KERN_PROCARGS2
+  // -- see sandbox-seatbelt.js's own probe/tests for the documented proof),
+  // so putting the admin secret in *this broker's* env would have handed a
+  // sandboxed agent on macOS the same self-unlock this H1 fix exists to
+  // close, just one hop further removed (read the broker's env instead of
+  // the sandbox's own).
   const token = process.env.CCSANDBOX_NETWORK_BROKER_TOKEN || '';
-  const adminToken = process.env.CCSANDBOX_NETWORK_BROKER_ADMIN_TOKEN || '';
 
   const server = createServer((req, res) => {
     // Socket aborts (RST after 403/407/404 etc.) surface as 'error' on
@@ -486,7 +495,7 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState })
 //   deniedHosts - absolute deny-list (sandbox.config.json's
 //           network.deniedHosts): same syntax as allowedHosts, but a match
 //           here always wins -- even in live 'open' state and in audit mode.
-export function startNetworkBroker({ allowedHosts = [], deniedHosts = [], mode = 'enforce', state = 'enforce' }) {
+export async function startNetworkBroker({ allowedHosts = [], deniedHosts = [], mode = 'enforce', state = 'enforce' }) {
   const dir = join(hostRuntimeDir(), `ccserver-network-broker-${randomUUID()}`);
   try {
     ensureHostRuntimeDir();
@@ -505,15 +514,22 @@ export function startNetworkBroker({ allowedHosts = [], deniedHosts = [], mode =
     throw new Error(`network broker failed to start: ${e.message}`);
   }
 
-  // Two independent, unguessable tokens -- see runServer's comment. Only
-  // `token` is ever destined for the sandbox's env (buildIsolatedProxyEnv,
-  // called by sandbox.js); `adminToken` must stay host-side only.
+  // Two independent, unguessable tokens -- see runServer's comment. `token`
+  // goes to the child via env (it's ALSO destined for the sandbox's own env,
+  // buildIsolatedProxyEnv, called by sandbox.js, so there's nothing gained
+  // by keeping it out of the child's env too). `adminToken` must stay
+  // host-side only, including out of the CHILD BROKER PROCESS's own env --
+  // see runServer's comment on why -- so it travels over a private,
+  // anonymous pipe (the child's otherwise-unused stdin) exactly once at
+  // startup instead. The child never starts its HTTP server (and its
+  // /__admin/* auth) until it has read and validated it -- see
+  // readAdminTokenFromStdin below.
   const token = randomBytes(24).toString('base64url');
   const adminToken = randomBytes(24).toString('base64url');
   const serveArgs = [__filename, '--serve', '--allowlist', allowlistPath, '--denylist', denylistPath, '--mode', mode, '--state', state, '--port-file', portFile];
   const proc = spawn(process.execPath, serveArgs, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, CCSANDBOX_NETWORK_BROKER_TOKEN: token, CCSANDBOX_NETWORK_BROKER_ADMIN_TOKEN: adminToken },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, CCSANDBOX_NETWORK_BROKER_TOKEN: token },
   });
 
   proc.stdout.on('data', (d) => process.stdout.write(`[network-broker] ${d}`));
@@ -529,15 +545,24 @@ export function startNetworkBroker({ allowedHosts = [], deniedHosts = [], mode =
     }
   });
 
-  // Same synchronous busy-wait rationale as startGitBroker: buildSandboxSpawn
-  // is synchronous and every backend's arg-builder needs the broker's real
-  // port to set HTTP_PROXY/HTTPS_PROXY, which only exists once the child has
-  // actually bound its listen socket.
+  // Best-effort: a write/EOF failure here just means the child's own
+  // readAdminTokenFromStdin sees a stdin error/early EOF and refuses to
+  // start on its own -- caught by the readiness wait below the same way a
+  // spawn failure is, no separate handling needed on this side.
+  try {
+    proc.stdin.end(adminToken);
+  } catch { /* surfaced via the child's own exit/stderr instead */ }
+
+  // Async wait for the child to report its chosen port (H1 review: a
+  // synchronous Atomics.wait busy-wait here would starve the event loop the
+  // stdin write above needs in order to actually flush, and every caller up
+  // the chain -- buildSandboxSpawn -> createSession -- now awaits this
+  // whole function).
   const deadline = Date.now() + 2000;
   while (!existsSync(portFile) && Date.now() < deadline) {
     if (spawnError) break;
     if (proc.exitCode !== null || proc.signalCode !== null) break;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    await sleep(20);
   }
 
   if (spawnError || proc.exitCode !== null || proc.signalCode !== null || !existsSync(portFile)) {
@@ -557,7 +582,7 @@ export function startNetworkBroker({ allowedHosts = [], deniedHosts = [], mode =
     throw new Error(`network broker failed to start: ${e.message}`);
   }
 
-  const probed = probeBrokerSync(port, token);
+  const probed = await probeBroker(port);
   if (!probed) {
     try { proc.kill('SIGKILL'); } catch { /* already dead */ }
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -567,29 +592,24 @@ export function startNetworkBroker({ allowedHosts = [], deniedHosts = [], mode =
   return { proc, dir, port, token, adminToken, allowedHosts, deniedHosts, mode, state };
 }
 
-// Synchronous readiness probe: connect and confirm the port actually accepts
-// TCP connections (mirrors git-broker's probeBrokerSync, simplified since
-// there's no line-JSON handshake to speak here -- a bare connect+close is
-// enough to distinguish "listening" from "nothing there yet").
-function probeBrokerSync(port, token, timeoutMs = 700) {
-  void token; // reserved: a full CONNECT probe could also verify auth, kept minimal for now
-  const probeScript = `
-    const net=require('net');
-    const port=Number(process.argv[1]);
-    const c=net.createConnection(port,'127.0.0.1');
-    const t=setTimeout(()=>process.exit(2), ${timeoutMs});
-    c.on('connect',()=>{ clearTimeout(t); c.end(); process.exit(0); });
-    c.on('error',()=>{ clearTimeout(t); process.exit(1); });
-  `;
-  try {
-    execFileSync(process.execPath, ['-e', probeScript, String(port)], {
-      timeout: timeoutMs + 500,
-      stdio: ['ignore', 'ignore', 'ignore'],
-    });
-    return true;
-  } catch {
-    return false;
-  }
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Async readiness probe: connect and confirm the port actually accepts TCP
+// connections -- a bare connect+close is enough to distinguish "listening"
+// from "nothing there yet". Was a synchronous execFileSync-spawned-subprocess
+// probe (probeBrokerSync); now that startNetworkBroker itself is async (H1
+// review), a plain in-process connect works and needs no subprocess at all.
+function probeBroker(port, timeoutMs = 700) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok) => { if (settled) return; settled = true; resolve(ok); };
+    const sock = netConnect(port, '127.0.0.1');
+    const timer = setTimeout(() => { try { sock.destroy(); } catch { /* ignore */ } finish(false); }, timeoutMs);
+    sock.on('connect', () => { clearTimeout(timer); sock.end(); finish(true); });
+    sock.on('error', () => { clearTimeout(timer); finish(false); });
+  });
 }
 
 // Flips a running broker's live enforce/open state (the running-session UI
@@ -679,8 +699,57 @@ function parseServeArgs(argv) {
   return out;
 }
 
+// Format of the token startNetworkBroker generates: randomBytes(24) base64url
+// -- always exactly 32 characters from this charset, never padded.
+const ADMIN_TOKEN_RE = /^[A-Za-z0-9_-]{32}$/;
+// Generous but bounded: the real payload is exactly 32 bytes; this only
+// exists to stop an unbounded buffer if something unexpected is piped in.
+const MAX_ADMIN_TOKEN_STDIN_BYTES = 256;
+
+// Reads the admin token from stdin -- a single write + EOF from the parent
+// (see startNetworkBroker) over an otherwise-unused pipe, never env/argv/a
+// file (see runServer's comment on why). Resolves to the validated token
+// string; rejects if stdin closes without ever producing exactly one
+// well-formed token, the input is oversized, or a read error occurs -- any
+// of which must abort startup before the HTTP server (and its /__admin/*
+// auth) ever comes up, never fall back to some empty/guessed value.
+function readAdminTokenFromStdin() {
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    let settled = false;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      process.stdin.removeAllListeners('data');
+      process.stdin.removeAllListeners('end');
+      process.stdin.removeAllListeners('error');
+      fn(arg);
+    };
+    process.stdin.setEncoding('utf-8');
+    process.stdin.on('data', (chunk) => {
+      buf += chunk;
+      if (buf.length > MAX_ADMIN_TOKEN_STDIN_BYTES) {
+        finish(reject, new Error('admin token stdin exceeded the expected size'));
+      }
+    });
+    process.stdin.on('end', () => {
+      if (ADMIN_TOKEN_RE.test(buf)) finish(resolve, buf);
+      else finish(reject, new Error('admin token stdin closed without a well-formed token'));
+    });
+    process.stdin.on('error', (err) => finish(reject, err));
+  });
+}
+
 // See git-broker.js's matching guard for why argv[1] === __filename matters
 // here too, symmetrically (this file is itself importable).
 if (process.argv[2] === '--serve' && process.argv[1] === __filename) {
-  runServer(parseServeArgs(process.argv.slice(3)));
+  readAdminTokenFromStdin()
+    .then((adminToken) => runServer({ ...parseServeArgs(process.argv.slice(3)), adminToken }))
+    .catch((err) => {
+      // Fail closed: never listen (and never accept /__admin/* auth
+      // attempts against an uninitialized adminToken) without a validated
+      // token from the parent.
+      process.stderr.write(`[network-broker] refusing to start: ${err.message}\n`);
+      process.exit(1);
+    });
 }

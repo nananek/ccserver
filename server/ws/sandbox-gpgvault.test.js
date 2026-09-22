@@ -102,25 +102,25 @@ function setUpUnlockedVault() {
   });
 }
 
-test('gpgVault:true while no vault has been set up throws before any broker starts', { skip: !TOOLS_AVAILABLE }, () => {
-  assert.throws(
+test('gpgVault:true while no vault has been set up throws before any broker starts', { skip: !TOOLS_AVAILABLE }, async () => {
+  await assert.rejects(
     () => spawnFor({ docker: false, gitBroker: true, persistentHome: false }),
     /no GPG vault has been set up yet/,
   );
 });
 
-test('gpgVault:true while the vault is locked throws before any broker starts', { skip: !TOOLS_AVAILABLE }, () => {
+test('gpgVault:true while the vault is locked throws before any broker starts', { skip: !TOOLS_AVAILABLE }, async () => {
   setUpUnlockedVault();
   lockVault();
-  assert.throws(
+  await assert.rejects(
     () => spawnFor({ docker: false, gitBroker: true, persistentHome: false }),
     /currently locked/,
   );
 });
 
-test('gpgVault:true while unlocked: binds public files+sockets, sets GNUPGHOME/SSH_AUTH_SOCK, injects git identity, and never exposes secret material', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, () => {
+test('gpgVault:true while unlocked: binds public files+sockets, sets GNUPGHOME/SSH_AUTH_SOCK, injects git identity, and never exposes secret material', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
   const vault = setUpUnlockedVault();
-  const spawn = spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } });
+  const spawn = await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } });
   try {
     const argsStr = spawn.args.join(' ');
 
@@ -158,9 +158,9 @@ test('gpgVault:true while unlocked: binds public files+sockets, sets GNUPGHOME/S
   }
 });
 
-test('gpgVault + commitMessageGuard both active: GIT_CONFIG_COUNT accounts for both, indices do not collide', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, () => {
+test('gpgVault + commitMessageGuard both active: GIT_CONFIG_COUNT accounts for both, indices do not collide', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
   setUpUnlockedVault();
-  const spawn = spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: true } });
+  const spawn = await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: true } });
   try {
     assert.equal(findSetenv(spawn.args, 'GIT_CONFIG_COUNT'), '6', 'core.hooksPath (1) + gpgVault (5) = 6');
     const gitConfig = {};
@@ -176,10 +176,10 @@ test('gpgVault + commitMessageGuard both active: GIT_CONFIG_COUNT accounts for b
   }
 });
 
-test('gpgVault:true alongside the legacy gpg host-forwarding flag does not throw (warns, gpgVault wins)', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, () => {
+test('gpgVault:true alongside the legacy gpg host-forwarding flag does not throw (warns, gpgVault wins)', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
   setUpUnlockedVault();
   writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false }, gpg: true }));
-  const spawn = buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: { gpgVault: true } });
+  const spawn = await buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: { gpgVault: true } });
   try {
     const sshAuthSock = findSetenv(spawn.args, 'SSH_AUTH_SOCK');
     assert.ok(sshAuthSock && sshAuthSock.includes('gnupg-vault'), 'gpgVault wins the SSH_AUTH_SOCK setenv (last bind wins)');
@@ -230,7 +230,7 @@ test('gpgVaultRelay: forwards live traffic to the CURRENT backend, refuses while
   // real gpgVault:true launch would -- no bwrap/pty actually runs here (this
   // file only ever assembles argv), but the relay's real net.Server
   // listeners DO start for real, which is exactly what this test exercises.
-  const spawn = spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } });
+  const spawn = await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } });
   cleanupSpawn(spawn);
 
   const relaySockets = getRelaySocketPaths();
@@ -343,7 +343,7 @@ function relayOnlyGnupgHome(vaultHomeDir, relayAgentSock) {
 
 test('F1: every relay-exposed socket reaches ONLY the restricted agent, and export commands are Forbidden', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
   setUpUnlockedVault();
-  cleanupSpawn(spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+  cleanupSpawn(await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
   const relaySockets = getRelaySocketPaths();
   assert.deepEqual(Object.keys(relaySockets).sort(), ['agent', 'agentSsh'], 'only the agent + ssh sockets are relayed');
 
@@ -358,7 +358,7 @@ test('F1: every relay-exposed socket reaches ONLY the restricted agent, and expo
 
 test('F1: `gpg --export-secret-keys` through the relay yields nothing, while git-style signing still works', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
   const vault = setUpUnlockedVault();
-  cleanupSpawn(spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+  cleanupSpawn(await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
   const info = getUnlockedAgentInfo();
   const { home, extraSocketDir } = relayOnlyGnupgHome(info.homeDir, getRelaySocketPaths().agent);
   try {
@@ -382,7 +382,7 @@ test('F1: `gpg --export-secret-keys` through the relay yields nothing, while git
 
 test('F1: the relayed ssh-agent lists and signs with the vault key but refuses to add/remove/lock keys', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
   const vault = setUpUnlockedVault();
-  cleanupSpawn(spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+  cleanupSpawn(await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
   const env = { ...process.env, SSH_AUTH_SOCK: getRelaySocketPaths().agentSsh };
   const keyBlob = vault.sshPublicKey.split(' ')[1];
   const listed = await run('ssh-add', ['-L'], { env });
@@ -411,7 +411,7 @@ test('F1 (real bwrap): inside a gpgVault:true sandbox, export-secret-keys yields
     'if ssh-add -L >/dev/null 2>&1; then echo SSH=ok; else echo SSH=fail; fi',
     'ls "$GNUPGHOME"',
   ].join('\n');
-  const sb = spawnFor(
+  const sb = await spawnFor(
     { docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } },
     { targetCommand: ['bash', '-c', script] },
   );
@@ -440,10 +440,10 @@ test('F1 (real bwrap): inside a gpgVault:true sandbox, export-secret-keys yields
 test('F3 negative control (real bwrap): a sandbox without gpgVault cannot reach the relay sockets', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP || !bwrapUsable() }, async (t) => {
   setUpUnlockedVault();
   // Make sure the relay is actually listening on the host.
-  cleanupSpawn(spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+  cleanupSpawn(await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
   const relay = getRelaySocketPaths();
   const script = Object.values(relay).map((p) => `if [ -e '${p}' ]; then echo "VISIBLE ${p}"; else echo "ABSENT ${p}"; fi`).join('\n');
-  const sb = spawnFor(
+  const sb = await spawnFor(
     { docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } },
     { targetCommand: ['bash', '-c', script], gpgVault: false },
   );

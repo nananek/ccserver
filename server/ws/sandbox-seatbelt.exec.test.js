@@ -34,6 +34,7 @@ import { buildSeatbeltLaunch, seatbeltEnvArgs } from './sandbox-seatbelt.js';
 import { SANDBOX_PATH, buildSandboxSpawn } from './sandbox.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
 import { createServer } from 'node:net';
+import { startNetworkBroker } from './network-broker.js';
 
 const HOME = homedir();
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
@@ -539,6 +540,79 @@ test('KERN_PROCARGS2 (other processes argv/env): denied inside, or a documented 
   }
 });
 
+test('H1 (PR #178 review): network-broker admin token is absent from the broker\'s own env, even under the KERN_PROCARGS2 limitation', SKIP_OPTS, async (t) => {
+  if (!checkRunnable(t)) return;
+  // Same probe as the sibling test above, but pointed at a REAL network
+  // broker child (network-broker.js --serve) instead of a synthetic sleeper.
+  // The H1 fix (see network-broker.js's runServer/startNetworkBroker
+  // comments) never puts CCSANDBOX_NETWORK_BROKER_ADMIN_TOKEN in this
+  // process's own env at all -- it arrives over a private pipe at startup
+  // instead -- so this must hold even where the sibling test finds the
+  // general same-UID KERN_PROCARGS2 path unmediated (the deny/skip branch
+  // there does not excuse a leak of this specific secret).
+  const probeSrc = join(tmpRoot, 'procargs2-probe-nb.c');
+  const probeBin = join(tmpRoot, 'procargs2-probe-nb');
+  writeFileSync(probeSrc, [
+    '#include <sys/sysctl.h>',
+    '#include <stdio.h>',
+    '#include <stdlib.h>',
+    '#include <unistd.h>',
+    'int main(int argc, char **argv){',
+    '  int pid = argc > 1 ? atoi(argv[1]) : 1;',
+    '  int mib[3] = { CTL_KERN, KERN_PROCARGS2, pid };',
+    '  size_t sz = 0;',
+    '  if (sysctl(mib, 3, NULL, &sz, NULL, 0) != 0) { printf("DENIED\\n"); return 3; }',
+    '  char *buf = calloc(1, sz + 1);',
+    '  if (sysctl(mib, 3, buf, &sz, NULL, 0) != 0) { printf("DENIED\\n"); return 3; }',
+    '  printf("READABLE %zu\\n", sz);',
+    '  fwrite(buf, 1, sz, stdout);',
+    '  return 0;',
+    '}',
+  ].join('\n'));
+  try {
+    execFileSync('cc', ['-O0', '-o', probeBin, probeSrc], { stdio: 'ignore', timeout: 30000 });
+  } catch {
+    t.skip('no working cc to build the KERN_PROCARGS2 probe');
+    return;
+  }
+
+  let broker;
+  try {
+    broker = await startNetworkBroker({ allowedHosts: [] });
+  } catch (e) {
+    t.skip(`could not start a real network broker to probe (${e.message})`);
+    return;
+  }
+  try {
+    const target = String(broker.proc.pid);
+    const outside = spawnSync(probeBin, [target], { encoding: 'utf-8', timeout: 10000 });
+    if (!String(outside.stdout).startsWith('READABLE')) {
+      t.skip(`KERN_PROCARGS2 not readable even outside a sandbox here (${fmtResult(outside)}) -- test would be vacuous`);
+      return;
+    }
+    // Sanity: the proxy token IS deliberately in the broker's env (it has to
+    // be -- buildIsolatedProxyEnv reads it back out for the sandbox's own
+    // HTTP_PROXY), so it must show up outside the sandbox. This confirms the
+    // probe/target are wired correctly before trusting the admin-token
+    // assertions below.
+    assert.ok(String(outside.stdout).includes(broker.token), 'sanity: proxy token readable outside the sandbox (expected -- it IS in env)');
+    assert.ok(!String(outside.stdout).includes(broker.adminToken), 'admin token must not be in the broker env even outside the sandbox');
+
+    const opts = baseOpts();
+    const sb = buildSeatbeltLaunch(opts);
+    trackDir(sb.dir);
+    sb.cwd = opts.cwd;
+    const inside = runInSeatbelt(sb, [probeBin, target], { cwd: opts.cwd });
+    // Whether or not this macOS mediates KERN_PROCARGS2 (see the sibling
+    // test's documented limitation), the admin token specifically must never
+    // appear here: it was never written to the broker's env to begin with.
+    assert.ok(!String(inside.stdout).includes(broker.adminToken), `admin token must not leak via KERN_PROCARGS2 even under the known same-UID limitation: ${fmtResult(inside)}`);
+  } finally {
+    try { broker.proc.kill('SIGKILL'); } catch { /* already dead */ }
+    try { rmSync(broker.dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
 test('toolchain sysctls stay readable inside the sandbox (allow-list not too tight)', SKIP_OPTS, (t) => {
   if (!checkRunnable(t)) return;
   // The sysctl-read allow-list replaced the broad `(allow sysctl-read)`; make
@@ -791,10 +865,10 @@ test('F3: relay sockets are unreachable without gpgVault and reachable with it',
   }
 });
 
-test('cwd=/ is refused fail-closed (no sandbox-exec spawn)', () => {
+test('cwd=/ is refused fail-closed (no sandbox-exec spawn)', async () => {
   // Platform-independent: buildSandboxSpawn rejects the filesystem root
   // before any backend branch (subtrees('/') would grant everything).
-  assert.throws(
+  await assert.rejects(
     () => buildSandboxSpawn({ cwd: '/', targetCommand: ['/bin/echo', 'hi'] }),
     /filesystem root/,
   );

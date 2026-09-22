@@ -30,17 +30,17 @@ after(() => {
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-test('sandbox: group member gets read-only bind at /ccserver-group-files, standalone does not', () => {
+test('sandbox: group member gets read-only bind at /ccserver-group-files, standalone does not', async () => {
   const cwd = '/tmp';
   const groupId = 'test-group-id';
   const groupFilesDir = getGroupFilesDir(groupId);
   // standalone: groupFilesDir null -> no bind
-  const standalone = buildSandboxSpawn({ cwd, targetCommand: ['/bin/true'], app: 'claude', groupFilesDir: null });
+  const standalone = await buildSandboxSpawn({ cwd, targetCommand: ['/bin/true'], app: 'claude', groupFilesDir: null });
   const standaloneArgs = standalone.args.join(' ');
   assert.equal(standaloneArgs.includes('/ccserver-group-files'), false, 'standalone must not bind group files');
 
   // group member: explicit dir -> ro-bind-try
-  const member = buildSandboxSpawn({ cwd, targetCommand: ['/bin/true'], app: 'claude', groupFilesDir });
+  const member = await buildSandboxSpawn({ cwd, targetCommand: ['/bin/true'], app: 'claude', groupFilesDir });
   const args = member.args.join(' ');
   assert.ok(args.includes('--ro-bind-try'), 'group bind is present');
   assert.ok(args.includes('/ccserver-group-files'), 'fixed sandbox path present');
@@ -63,7 +63,7 @@ test('sandbox: groupFilesDir is auto-resolved for sandboxed group sessions', asy
   const dir = getGroupFilesDir(groupId);
   ensureGroupFilesDir(groupId);
   assert.ok(existsSync(dir), 'ensureGroupFilesDir creates the host dir');
-  const spawn = buildSandboxSpawn({ cwd: '/tmp', targetCommand: ['/bin/true'], app: 'claude', groupFilesDir: dir });
+  const spawn = await buildSandboxSpawn({ cwd: '/tmp', targetCommand: ['/bin/true'], app: 'claude', groupFilesDir: dir });
   assert.ok(spawn.args.join(' ').includes('/ccserver-group-files'), 'auto-resolved dir is bound');
   rmSync(tmp, { recursive: true, force: true });
   delete process.env.CCSERVER_GROUP_FILES_ROOT;

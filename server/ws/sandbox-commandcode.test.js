@@ -46,8 +46,8 @@ function hasRwBind(args, src) {
   return false;
 }
 
-test('buildSandboxSpawn rw-binds ~/.commandcode so the API key survives sandbox launches', () => {
-  const spawn = buildSandboxSpawn({
+test('buildSandboxSpawn rw-binds ~/.commandcode so the API key survives sandbox launches', async () => {
+  const spawn = await buildSandboxSpawn({
     cwd: tmpRoot,
     targetCommand: ['command-code'],
     app: 'commandcode',
@@ -59,8 +59,8 @@ test('buildSandboxSpawn rw-binds ~/.commandcode so the API key survives sandbox 
   );
 });
 
-test('buildSandboxSpawn binds ~/.commandcode for non-commandcode apps too (shared auth state, like ~/.claude)', () => {
-  const spawn = buildSandboxSpawn({
+test('buildSandboxSpawn binds ~/.commandcode for non-commandcode apps too (shared auth state, like ~/.claude)', async () => {
+  const spawn = await buildSandboxSpawn({
     cwd: tmpRoot,
     targetCommand: ['claude'],
     app: 'claude',

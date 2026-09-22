@@ -58,14 +58,14 @@ function findSetenv(args, name) {
   return null;
 }
 
-test('buildSandboxSpawn(docker:true): CCSANDBOX_DOCKERD_TAG is the stateDir basename, and writing it to the data-root status file round-trips through dockerdStatus', (t) => {
+test('await buildSandboxSpawn(docker:true): CCSANDBOX_DOCKERD_TAG is the stateDir basename, and writing it to the data-root status file round-trips through dockerdStatus', async (t) => {
   if (!dockerSandboxAvailable()) {
     t.skip('bwrap/rootlesskit/slirp4netns/newuidmap not installed in this environment');
     return;
   }
   writeFileSync(cfgPath, JSON.stringify({ docker: true, gitBroker: false }));
   const cwd = '/srv/docker-status-proj-b';
-  const spawn = buildSandboxSpawn({ cwd, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
+  const spawn = await buildSandboxSpawn({ cwd, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
   assert.equal(spawn.docker, true, 'docker tooling is available in this environment');
 
   const dockerHomeDest = join(homedir(), '.local', 'share', 'docker');
@@ -84,7 +84,7 @@ test('buildSandboxSpawn(docker:true): CCSANDBOX_DOCKERD_TAG is the stateDir base
   assert.equal(dockerdStatus(cwd), tag, 'dockerdStatus reads back exactly the tag the entrypoint would have written');
 });
 
-test('dockerdStatus: isolated per cwd, trims surrounding whitespace', (t) => {
+test('dockerdStatus: isolated per cwd, trims surrounding whitespace', async (t) => {
   if (!dockerSandboxAvailable()) {
     t.skip('bwrap/rootlesskit/slirp4netns/newuidmap not installed in this environment');
     return;
@@ -93,7 +93,7 @@ test('dockerdStatus: isolated per cwd, trims surrounding whitespace', (t) => {
   const cwdA = '/srv/docker-status-proj-c';
   const cwdB = '/srv/docker-status-proj-d';
   const dockerHomeDest = join(homedir(), '.local', 'share', 'docker');
-  const specA = buildSandboxSpawn({ cwd: cwdA, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
+  const specA = await buildSandboxSpawn({ cwd: cwdA, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
   const dataRootA = findBindSrc(specA.args, dockerHomeDest);
   writeFileSync(join(dataRootA, '.ccserver-dockerd.status'), '  tag-a  \n');
   assert.equal(dockerdStatus(cwdA), 'tag-a');

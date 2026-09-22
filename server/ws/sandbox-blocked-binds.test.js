@@ -67,25 +67,25 @@ function bindsUnder(args, p) {
   return hits;
 }
 
-test('~/.ssh and ~/.config/gh are never bound, including via a `..` that collapses onto them', SKIP, () => {
-  const spawn = buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
+test('~/.ssh and ~/.config/gh are never bound, including via a `..` that collapses onto them', SKIP, async () => {
+  const spawn = await buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
   assert.deepEqual(bindsUnder(spawn.args, join(HOME, '.ssh')), [], 'no bind under ~/.ssh (raw key path via `..` must be caught too)');
   assert.deepEqual(bindsUnder(spawn.args, join(HOME, '.config', 'gh')), [], 'no bind under ~/.config/gh');
 });
 
-test('a legitimate configured bind still goes through', SKIP, () => {
-  const spawn = buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
+test('a legitimate configured bind still goes through', SKIP, async () => {
+  const spawn = await buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
   const ok = bindsUnder(spawn.args, '/srv/ccserver-ok');
   assert.ok(ok.includes('/srv/ccserver-ok'), 'the non-blocked bind is present');
 });
 
-test('buildSandboxSpawn tolerates a missing/null app (normalizes to claude)', SKIP, () => {
+test('buildSandboxSpawn tolerates a missing/null app (normalizes to claude)', SKIP, async () => {
   // buildSandboxSpawn does `app = app || 'claude'` up front so the later
   // `app === 'claude'` checks (incl. the macOS Keychain seed gate) never see a
   // raw null. On Linux the observable proof is that it does not throw and
   // still assembles a claude launch.
-  const withNull = buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: null, sandboxOpts: null });
-  const explicit = buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
+  const withNull = await buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: null, sandboxOpts: null });
+  const explicit = await buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
   assert.equal(withNull.command, explicit.command);
   assert.deepEqual(withNull.args, explicit.args, 'null app produces the same launch as app:"claude"');
 });

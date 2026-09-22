@@ -24,13 +24,13 @@ after(() => {
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-test('buildSandboxSpawn ro-binds orchestratorClaudeMdSrc over CLAUDE.md and AGENTS.md, after the rw cwd bind', () => {
+test('buildSandboxSpawn ro-binds orchestratorClaudeMdSrc over CLAUDE.md and AGENTS.md, after the rw cwd bind', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
     const src = join(tmpRoot, 'generated-orchestrator.md');
     writeFileSync(src, '# Orchestrator\n');
-    const spawn = buildSandboxSpawn({
+    const spawn = await buildSandboxSpawn({
       cwd: tmpRoot,
       targetCommand: ['claude'],
       app: 'claude',
@@ -63,11 +63,11 @@ test('buildSandboxSpawn ro-binds orchestratorClaudeMdSrc over CLAUDE.md and AGEN
   }
 });
 
-test('buildSandboxSpawn without orchestratorClaudeMdSrc adds no CLAUDE.md/AGENTS.md bindings (regular/worker sessions)', () => {
+test('buildSandboxSpawn without orchestratorClaudeMdSrc adds no CLAUDE.md/AGENTS.md bindings (regular/worker sessions)', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    const spawn = buildSandboxSpawn({
+    const spawn = await buildSandboxSpawn({
       cwd: tmpRoot,
       targetCommand: ['claude'],
       app: 'claude',

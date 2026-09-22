@@ -7,8 +7,14 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, connect as netConnect } from 'node:net';
-import { rmSync } from 'node:fs';
+import { spawn as spawnFn } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isHostAllowed, isHostDenied, isHostMatched, startNetworkBroker, setNetworkBrokerMode, setNetworkBrokerLists, networkBrokerProxyUrl, buildIsolatedProxyEnv } from './network-broker.js';
+
+const NETWORK_BROKER_PATH = fileURLToPath(new URL('./network-broker.js', import.meta.url));
 
 // --- isHostAllowed (pure) ----------------------------------------------------
 
@@ -91,7 +97,7 @@ function basicAuth(token) {
 
 test('allowed host: CONNECT succeeds and data relays both ways', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: ['127.0.0.1'] });
+  const broker = await startNetworkBroker({ allowedHosts: ['127.0.0.1'] });
   brokers.push(broker);
 
   const { statusLine, sock } = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
@@ -107,7 +113,7 @@ test('allowed host: CONNECT succeeds and data relays both ways', async () => {
 
 test('non-allowed host: CONNECT is refused with 403', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: ['some-other-host.example'] });
+  const broker = await startNetworkBroker({ allowedHosts: ['some-other-host.example'] });
   brokers.push(broker);
 
   const { statusLine } = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
@@ -116,7 +122,7 @@ test('non-allowed host: CONNECT is refused with 403', async () => {
 
 test('missing or wrong proxy token: 407, even for an allowed host', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: ['127.0.0.1'] });
+  const broker = await startNetworkBroker({ allowedHosts: ['127.0.0.1'] });
   brokers.push(broker);
 
   const noAuth = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, null);
@@ -128,7 +134,7 @@ test('missing or wrong proxy token: 407, even for an allowed host', async () => 
 
 test('audit mode: always allows (and would-deny is only logged)', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: [], mode: 'audit' });
+  const broker = await startNetworkBroker({ allowedHosts: [], mode: 'audit' });
   brokers.push(broker);
 
   const { statusLine } = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
@@ -140,7 +146,7 @@ test('state: "open" starts the broker unrestricted, no toggle needed', async () 
   // must behave exactly like no isolation at all until the running-session
   // toggle flips it, not like the (default) 'enforce' start.
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: [], state: 'open' });
+  const broker = await startNetworkBroker({ allowedHosts: [], state: 'open' });
   brokers.push(broker);
   assert.equal(broker.state, 'open');
 
@@ -150,7 +156,7 @@ test('state: "open" starts the broker unrestricted, no toggle needed', async () 
 
 test('live toggle: setNetworkBrokerMode flips enforce <-> open without restarting', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: [] }); // nothing allow-listed
+  const broker = await startNetworkBroker({ allowedHosts: [] }); // nothing allow-listed
   brokers.push(broker);
 
   const denied = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
@@ -168,7 +174,7 @@ test('live toggle: setNetworkBrokerMode flips enforce <-> open without restartin
 });
 
 test('setNetworkBrokerMode rejects an invalid mode and a wrong token', async () => {
-  const broker = startNetworkBroker({ allowedHosts: [] });
+  const broker = await startNetworkBroker({ allowedHosts: [] });
   brokers.push(broker);
 
   assert.equal(await setNetworkBrokerMode({ port: broker.port, token: broker.adminToken }, 'not-a-real-mode'), false);
@@ -183,7 +189,7 @@ test('setNetworkBrokerMode rejects an invalid mode and a wrong token', async () 
 // now be independent, and the proxy token alone must never authenticate an
 // admin call.
 test('H1: the proxy token (visible inside the sandbox) cannot authenticate admin endpoints', async () => {
-  const broker = startNetworkBroker({ allowedHosts: ['allowed.example'] });
+  const broker = await startNetworkBroker({ allowedHosts: ['allowed.example'] });
   brokers.push(broker);
 
   assert.notEqual(broker.token, broker.adminToken, 'proxy token and admin token must be independent secrets');
@@ -196,6 +202,75 @@ test('H1: the proxy token (visible inside the sandbox) cannot authenticate admin
 
   const acceptedMode = await adminPost(broker.port, '/__admin/mode', broker.adminToken, { mode: 'open' });
   assert.match(acceptedMode.statusLine, /^HTTP\/1\.1 200/, 'the real admin token still works');
+});
+
+// --- H1 follow-up (review on #178): the admin token now arrives over a
+// private pipe (the child's stdin) instead of its own env -- see
+// network-broker.js's readAdminTokenFromStdin. These spawn the file directly
+// (bypassing startNetworkBroker's own well-formed handshake) to drive that
+// handshake into every failure shape it must reject: the broker must never
+// listen (no port file, no accepting socket) without a validated token.
+
+function spawnBrokerDirect() {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-nb-stdin-test-'));
+  const allowlistPath = join(dir, 'allowlist.json');
+  const denylistPath = join(dir, 'denylist.json');
+  const portFile = join(dir, 'port');
+  writeFileSync(allowlistPath, '[]');
+  writeFileSync(denylistPath, '[]');
+  const proc = spawnFn(process.execPath, [
+    NETWORK_BROKER_PATH, '--serve',
+    '--allowlist', allowlistPath, '--denylist', denylistPath,
+    '--mode', 'enforce', '--state', 'enforce', '--port-file', portFile,
+  ], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, CCSANDBOX_NETWORK_BROKER_TOKEN: 'irrelevant-proxy-token' },
+  });
+  proc.stdout.resume();
+  proc.stderr.resume();
+  return { proc, dir, portFile };
+}
+
+function waitForExit(proc, timeoutMs) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), timeoutMs);
+    proc.on('exit', (code, signal) => { clearTimeout(t); resolve({ code, signal }); });
+  });
+}
+
+test('H1: empty, malformed, or oversized admin-token stdin fails the broker closed', async () => {
+  const cases = [
+    ['empty (immediate EOF)', (p) => p.stdin.end()],
+    ['malformed token', (p) => p.stdin.end('not-a-real-token')],
+    ['oversized payload', (p) => p.stdin.end('a'.repeat(1000))],
+  ];
+  for (const [name, write] of cases) {
+    const { proc, dir, portFile } = spawnBrokerDirect();
+    write(proc);
+    const result = await waitForExit(proc, 3000);
+    try {
+      assert.ok(result, `${name}: broker must exit, not hang, on bad admin-token stdin`);
+      assert.notEqual(result.code, 0, `${name}: broker must exit non-zero on bad admin-token stdin`);
+      assert.equal(existsSync(portFile), false, `${name}: broker must never create a port file / start listening without a valid admin token`);
+    } finally {
+      try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  }
+});
+
+test('H1: admin-token stdin that never reaches EOF never starts the broker', async () => {
+  const { proc, dir, portFile } = spawnBrokerDirect();
+  // Deliberately never call proc.stdin.end(): readAdminTokenFromStdin waits
+  // for EOF and must not fall back to starting the server in the meantime.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  try {
+    assert.equal(existsSync(portFile), false, 'broker must not start listening while still waiting on the admin-token handshake');
+    assert.equal(proc.exitCode, null, 'broker should still be waiting, not have exited/crashed on its own');
+  } finally {
+    try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
 });
 
 test('networkBrokerProxyUrl embeds the token as Basic-auth userinfo', () => {
@@ -273,7 +348,7 @@ function adminPost(brokerPort, path, token, body) {
 
 test('allowlist endpoint: live replacement flips verdicts without restarting', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: [] }); // enforce, nothing allowed
+  const broker = await startNetworkBroker({ allowedHosts: [] }); // enforce, nothing allowed
   brokers.push(broker);
   const target = `127.0.0.1:${targetPort}`;
 
@@ -291,7 +366,7 @@ test('allowlist endpoint: live replacement flips verdicts without restarting', a
 });
 
 test('allowlist endpoint: 401 without token, 400 on bad lists', async () => {
-  const broker = startNetworkBroker({ allowedHosts: ['127.0.0.1'] });
+  const broker = await startNetworkBroker({ allowedHosts: ['127.0.0.1'] });
   brokers.push(broker);
 
   const noAuth = await adminPost(broker.port, '/__admin/allowlist', 'wrong-token', { hosts: [] });
@@ -322,7 +397,7 @@ test('isHostDenied: same exact-or-leading-dot syntax as the allow-list', () => {
 
 test('denied host: CONNECT is refused even when allow-listed (enforce)', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: ['127.0.0.1'], deniedHosts: ['127.0.0.1'] });
+  const broker = await startNetworkBroker({ allowedHosts: ['127.0.0.1'], deniedHosts: ['127.0.0.1'] });
   brokers.push(broker);
 
   const { statusLine } = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
@@ -331,7 +406,7 @@ test('denied host: CONNECT is refused even when allow-listed (enforce)', async (
 
 test('denied host: refused even in live open state', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: [], deniedHosts: ['127.0.0.1'], state: 'open' });
+  const broker = await startNetworkBroker({ allowedHosts: [], deniedHosts: ['127.0.0.1'], state: 'open' });
   brokers.push(broker);
 
   const { statusLine } = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
@@ -340,7 +415,7 @@ test('denied host: refused even in live open state', async () => {
 
 test('denied host: refused even in audit mode', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: [], deniedHosts: ['127.0.0.1'], mode: 'audit' });
+  const broker = await startNetworkBroker({ allowedHosts: [], deniedHosts: ['127.0.0.1'], mode: 'audit' });
   brokers.push(broker);
 
   const { statusLine } = await rawConnect(broker.port, `127.0.0.1:${targetPort}`, basicAuth(broker.token));
@@ -349,7 +424,7 @@ test('denied host: refused even in audit mode', async () => {
 
 test('denylist endpoint: live replacement via setNetworkBrokerLists', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: ['127.0.0.1'] });
+  const broker = await startNetworkBroker({ allowedHosts: ['127.0.0.1'] });
   brokers.push(broker);
   const target = `127.0.0.1:${targetPort}`;
 
@@ -375,7 +450,7 @@ test('denylist endpoint: live replacement via setNetworkBrokerLists', async () =
 // client RST after the verdict killed the whole broker process.
 test('client RST after 403/407/400 does not kill the broker', async () => {
   const targetPort = await startEchoServer();
-  const broker = startNetworkBroker({ allowedHosts: [], deniedHosts: ['127.0.0.1'] });
+  const broker = await startNetworkBroker({ allowedHosts: [], deniedHosts: ['127.0.0.1'] });
   brokers.push(broker);
   const target = `127.0.0.1:${targetPort}`;
 

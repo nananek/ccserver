@@ -2204,7 +2204,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 // tests simulate a host with/without the rootlesskit/slirp4netns/newuidmap
 // tooling, to exercise the enablement logic below hermetically -- see
 // sandbox-network-isolation.test.js.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }, deps = {}) {
+export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }, deps = {}) {
   const { startNetworkBroker: startNetworkBrokerFn = startNetworkBroker, dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable } = deps || {};
   // Normalize the app id up front: a nullish `app` resolves to 'claude' in
   // resolveApp(), so every later `app === 'claude'` / `app === 'opencode'`
@@ -2375,7 +2375,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   let networkBroker = null;
   if (needBwrapIsolation || (IS_MACOS && netIsolate)) {
     try {
-      networkBroker = startNetworkBrokerFn({
+      networkBroker = await startNetworkBrokerFn({
         allowedHosts: netCfg.allowedHosts,
         deniedHosts: netCfg.deniedHosts,
         mode: netCfg.mode, // operator-only enforce/audit (sandbox.config.json)

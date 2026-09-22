@@ -167,10 +167,10 @@ test('macOSNetworkBrokerInitialState: initialState selects the starting state', 
   assert.equal(macOSNetworkBrokerInitialState('sometimes'), 'enforce');
 });
 
-test('buildSandboxSpawn: network.isolate:true enables structural isolation (Linux)', { skip: process.platform === 'darwin' }, () => {
+test('buildSandboxSpawn: network.isolate:true enables structural isolation (Linux)', { skip: process.platform === 'darwin' }, async () => {
   writeConfig({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false }, network: { isolate: true } });
   const calls = [];
-  const spawn = buildSandboxSpawn(
+  const spawn = await buildSandboxSpawn(
     { cwd: tmpRoot, targetCommand: ['claude'], app: 'claude' },
     { startNetworkBroker: fakeBrokerStarter(calls), dockerSandboxAvailable: () => true },
   );
@@ -207,10 +207,10 @@ test('buildSandboxSpawn: network.isolate:true enables structural isolation (Linu
   assert.notEqual(spawn.networkBrokerAdminToken, env.HTTP_PROXY.match(/networkbroker:([^@]+)@/)[1]);
 });
 
-test('buildSandboxSpawn: a plain bwrap launch (network.isolate off) never starts a broker, even when tooling exists', { skip: process.platform === 'darwin' }, () => {
+test('buildSandboxSpawn: a plain bwrap launch (network.isolate off) never starts a broker, even when tooling exists', { skip: process.platform === 'darwin' }, async () => {
   writeConfig({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } });
   const calls = [];
-  const spawn = buildSandboxSpawn(
+  const spawn = await buildSandboxSpawn(
     { cwd: tmpRoot, targetCommand: ['claude'], app: 'claude' },
     { startNetworkBroker: fakeBrokerStarter(calls), dockerSandboxAvailable: () => true },
   );
@@ -221,10 +221,10 @@ test('buildSandboxSpawn: a plain bwrap launch (network.isolate off) never starts
   assert.equal(spawn.networkBrokerPort, null);
 });
 
-test('buildSandboxSpawn: network.initialState:open starts the broker open (Linux)', { skip: process.platform === 'darwin' }, () => {
+test('buildSandboxSpawn: network.initialState:open starts the broker open (Linux)', { skip: process.platform === 'darwin' }, async () => {
   writeConfig({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false }, network: { isolate: true, initialState: 'open' } });
   const calls = [];
-  const spawn = buildSandboxSpawn(
+  const spawn = await buildSandboxSpawn(
     { cwd: tmpRoot, targetCommand: ['claude'], app: 'claude' },
     { startNetworkBroker: fakeBrokerStarter(calls), dockerSandboxAvailable: () => true },
   );
@@ -234,7 +234,7 @@ test('buildSandboxSpawn: network.initialState:open starts the broker open (Linux
   assert.equal(spawn.networkIsolateMode, 'open');
 });
 
-test('buildSandboxSpawn: docker:true (nested dockerd) alone does not enable network isolation', { skip: process.platform === 'darwin' }, () => {
+test('buildSandboxSpawn: docker:true (nested dockerd) alone does not enable network isolation', { skip: process.platform === 'darwin' }, async () => {
   // needBwrapIsolation is gated on network.isolate, not on the unrelated
   // `docker` (nested dockerd) flag -- a docker:true launch keeps its
   // existing unrestricted slirp4netns NAT networking unless network.isolate
@@ -243,7 +243,7 @@ test('buildSandboxSpawn: docker:true (nested dockerd) alone does not enable netw
   // firewall.)
   writeConfig({ docker: true, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } });
   const calls = [];
-  const spawn = buildSandboxSpawn(
+  const spawn = await buildSandboxSpawn(
     { cwd: tmpRoot, targetCommand: ['claude'], app: 'claude' },
     { startNetworkBroker: fakeBrokerStarter(calls), dockerSandboxAvailable: () => true },
   );
@@ -254,10 +254,10 @@ test('buildSandboxSpawn: docker:true (nested dockerd) alone does not enable netw
   assert.equal(spawn.networkIsolateArmed, false);
 });
 
-test('buildSandboxSpawn: gracefully degrades to a plain, unisolated bwrap launch when rootlesskit tooling is missing', { skip: process.platform === 'darwin' }, () => {
+test('buildSandboxSpawn: gracefully degrades to a plain, unisolated bwrap launch when rootlesskit tooling is missing', { skip: process.platform === 'darwin' }, async () => {
   writeConfig({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false }, network: { isolate: true } });
   const calls = [];
-  const spawn = buildSandboxSpawn(
+  const spawn = await buildSandboxSpawn(
     { cwd: tmpRoot, targetCommand: ['claude'], app: 'claude' },
     { startNetworkBroker: fakeBrokerStarter(calls), dockerSandboxAvailable: () => false },
   );

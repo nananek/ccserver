@@ -25,13 +25,13 @@ after(() => {
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-test('buildSandboxSpawn rw-binds gitCommonDir when provided', () => {
+test('buildSandboxSpawn rw-binds gitCommonDir when provided', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
     const worktreeCwd = join(tmpRoot, 'worker-cwd');
     const gitCommonDir = join(tmpRoot, 'main-repo', '.git');
-    const spawn = buildSandboxSpawn({
+    const spawn = await buildSandboxSpawn({
       cwd: worktreeCwd,
       targetCommand: ['claude'],
       app: 'claude',
@@ -49,14 +49,14 @@ test('buildSandboxSpawn rw-binds gitCommonDir when provided', () => {
   }
 });
 
-test('buildSandboxSpawn without gitCommonDir adds no extra .git bind', () => {
+test('buildSandboxSpawn without gitCommonDir adds no extra .git bind', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
     const worktreeCwd = join(tmpRoot, 'worker-cwd-2');
     const gitCommonDir = join(tmpRoot, 'main-repo-2', '.git');
-    const withoutBind = buildSandboxSpawn({ cwd: worktreeCwd, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
-    const withBind = buildSandboxSpawn({ cwd: worktreeCwd, targetCommand: ['claude'], app: 'claude', sandboxOpts: null, gitCommonDir });
+    const withoutBind = await buildSandboxSpawn({ cwd: worktreeCwd, targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
+    const withBind = await buildSandboxSpawn({ cwd: worktreeCwd, targetCommand: ['claude'], app: 'claude', sandboxOpts: null, gitCommonDir });
     assert.ok(!withoutBind.args.includes(gitCommonDir), 'no gitCommonDir bind when the option is omitted');
     // The only difference between the two spawns should be exactly the
     // 3-token '--bind gitCommonDir gitCommonDir' triple.

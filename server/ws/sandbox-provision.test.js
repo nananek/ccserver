@@ -137,9 +137,9 @@ test('resolveTools: threaded cfgTools avoids re-reading the config file', () => 
   assert.equal(off.rtk, true, 'per-session toggles still apply on top of the snapshot');
 });
 
-test('buildSandboxSpawn binds the provisioner + sets env when a tool is enabled', () => {
+test('buildSandboxSpawn binds the provisioner + sets env when a tool is enabled', async () => {
   writeConfig({ docker: false, gitBroker: false, tools: { rtk: true, 'code-review-graph': true } });
-  const spawn = buildSandboxSpawn({ cwd: join(tmpRoot, 'proj'), targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
+  const spawn = await buildSandboxSpawn({ cwd: join(tmpRoot, 'proj'), targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
   const args = spawn.args;
   const provisionBind = args.findIndex((v, i) => v === '--ro-bind' && args[i + 1].endsWith('sandbox-provision.sh') && args[i + 2] === PROVISION_PATH);
   assert.ok(provisionBind > 0, 'provisioner ro-bound at the fixed path');
@@ -151,16 +151,16 @@ test('buildSandboxSpawn binds the provisioner + sets env when a tool is enabled'
   assert.equal(env.CCSANDBOX_CRG_VERSION, '2.3.7');
 });
 
-test('buildSandboxSpawn adds no provision bind/env when tools are off', () => {
+test('buildSandboxSpawn adds no provision bind/env when tools are off', async () => {
   writeConfig({ docker: false, gitBroker: false });
-  const spawn = buildSandboxSpawn({ cwd: join(tmpRoot, 'proj2'), targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
+  const spawn = await buildSandboxSpawn({ cwd: join(tmpRoot, 'proj2'), targetCommand: ['claude'], app: 'claude', sandboxOpts: null });
   assert.ok(!spawn.args.includes(PROVISION_PATH), 'no provisioner bind');
   assert.equal(provisionEnv(spawn.args).CCSANDBOX_PROVISION_RTK, undefined);
 });
 
-test('buildSandboxSpawn respects per-session sandboxOpts.tools over the config', () => {
+test('buildSandboxSpawn respects per-session sandboxOpts.tools over the config', async () => {
   writeConfig({ docker: false, gitBroker: false });
-  const spawn = buildSandboxSpawn({
+  const spawn = await buildSandboxSpawn({
     cwd: join(tmpRoot, 'proj3'), targetCommand: ['claude'], app: 'claude',
     sandboxOpts: { tools: { rtk: true, codeReviewGraph: false } },
   });

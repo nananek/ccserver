@@ -11,15 +11,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildSandboxSpawn } from './sandbox.js';
 
-test('buildSandboxSpawn refuses the filesystem root as cwd', () => {
-  assert.throws(
+test('buildSandboxSpawn refuses the filesystem root as cwd', async () => {
+  await assert.rejects(
     () => buildSandboxSpawn({ cwd: '/', targetCommand: ['claude'], app: 'claude', sandboxOpts: null }),
     /Cannot build a sandbox for the filesystem root/,
   );
 });
 
-test('buildSandboxSpawn refuses path spellings that resolve to the root', () => {
-  assert.throws(
+test('buildSandboxSpawn refuses path spellings that resolve to the root', async () => {
+  await assert.rejects(
     () => buildSandboxSpawn({ cwd: '/tmp/..', targetCommand: ['claude'], app: 'claude', sandboxOpts: null }),
     /Cannot build a sandbox for the filesystem root/,
   );
