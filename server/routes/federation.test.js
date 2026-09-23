@@ -159,6 +159,16 @@ test('full pairing + proxy lifecycle over the REST surface', { skip }, async () 
   const badLaunch = await app.inject({ method: 'POST', url: `/api/federation/instances/${aRow.id}/sessions`, payload: {} });
   assert.equal(badLaunch.statusCode, 502);
 
+  // A session the peer has already forgotten is "already gone" (404), not a
+  // 502: the client's termination paths treat 404 as success and would
+  // otherwise show a spurious "could not terminate" alert. The peer's
+  // sessions.destroy answers {ok:false,'session not found'} here because this
+  // peer listener has no such session.
+  const goneDelete = await app.inject({ method: 'DELETE', url: `/api/federation/instances/${aRow.id}/sessions/does-not-exist` });
+  assert.equal(goneDelete.statusCode, 404);
+  // Distinguishes the mapped peer error from the "not an active pair" 404.
+  assert.match(goneDelete.json().error, /session not found/i);
+
   // 5. Rename via PATCH.
   const patch = await app.inject({ method: 'PATCH', url: `/api/federation/instances/${aRow.id}`, payload: { label: 'renamed' } });
   assert.equal(patch.statusCode, 200);

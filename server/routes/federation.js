@@ -32,7 +32,11 @@ async function reconcileBestEffort() {
 // throws otherwise). On failure it has ALREADY sent the error reply (404 for
 // "not an active pair", 502 for an unreachable/refusing peer) and returns
 // null -- callers just check for null and return.
-async function callActive(reply, id, method, params) {
+// `notFoundAs404` additionally maps a peer-side "session not found" to 404:
+// the local DELETE /api/sessions/:id answers 404 for an already-gone session
+// and the client's termination paths treat that as success (no error alert),
+// so the relay must preserve that contract rather than turning it into a 502.
+async function callActive(reply, id, method, params, { notFoundAs404 = false } = {}) {
   if (!pairing.getActiveInstance(id)) {
     reply.code(404).send({ error: 'instance not found or not an active pair' });
     return null;
@@ -40,6 +44,10 @@ async function callActive(reply, id, method, params) {
   try {
     return await client.callInstanceRpc(id, method, params);
   } catch (err) {
+    if (notFoundAs404 && /session not found/i.test(err.message)) {
+      reply.code(404).send({ error: err.message });
+      return null;
+    }
     reply.code(502).send({ error: err.message });
     return null;
   }
@@ -185,7 +193,7 @@ export async function federationRoute(fastify, opts) {
   });
 
   fastify.delete('/federation/instances/:id/sessions/:sid', async (request, reply) => {
-    const resp = await callActive(reply, request.params.id, 'sessions.destroy', { id: request.params.sid });
+    const resp = await callActive(reply, request.params.id, 'sessions.destroy', { id: request.params.sid }, { notFoundAs404: true });
     if (!resp) return;
     return { success: true, id: request.params.sid };
   });
