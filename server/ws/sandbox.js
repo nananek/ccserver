@@ -36,6 +36,7 @@ import { startNetworkBroker, buildIsolatedProxyEnv, normalizeNetworkSettings } f
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 import { normalizeBrowseRoots, isContained, isCcserverScratchPath } from '../pathPolicy.js';
+import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -828,6 +829,11 @@ export function loadSandboxConfig() {
     docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, hiddenApps, browseRoots, browseRootsInvalid, configError, allowUnsandboxedAgents, network,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
+      // Agent notification bridge (plan-notify-bridge). Parsed by the same
+      // normalizer the Settings GUI's read/write boundary uses, so the two
+      // structurally cannot disagree about what the file says -- exactly the
+      // arrangement `network` above has with normalizeNetworkSettings.
+      bridge: normalizeBridgeSettings(rawNotify.bridge),
     },
     configPath,
   };
