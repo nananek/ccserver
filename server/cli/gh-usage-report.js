@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { defaultRecordingPath, formatGhUsageReport, resetGhUsage, resetTargetStatus } from '../ghUsageRecording.js';
 // pathPolicy is dependency-free (node builtins only), so the CLI can reuse
 // the server's own containment rule without pulling in ws/sandbox.js.
-import { isContained, normalizeBrowseRoots } from '../pathPolicy.js';
+import { isCcserverScratchPath, isContained, normalizeBrowseRoots } from '../pathPolicy.js';
 
 // Paths come from --file and from the config, and end up on a terminal. Quote
 // them so an embedded escape sequence cannot repaint the operator's screen.
@@ -112,6 +112,13 @@ const file = resolve(fileArg || (typeof current.file === 'string' && current.fil
 // be a session cwd, which is why the docs ask for a path outside the
 // checkout regardless.
 if (command === 'enable') {
+  // Same two refusals index.js applies at boot, so the operator hears about
+  // it now instead of as a server that will not start. The scratch tree is
+  // sandbox-writable regardless of browseRoots (persistent HOME and combo
+  // worktrees are rw-bound from there), so that one is unconditional.
+  if (isCcserverScratchPath(file)) {
+    die(`Refusing to enable: ${q(file)} is inside the ccserver sandbox scratch tree, which sessions can write. Choose a path outside it.`);
+  }
   const roots = normalizeBrowseRoots(cfg.browseRoots);
   if (roots.length > 0 && isContained(file, roots)) {
     die(`Refusing to enable: ${q(file)} is inside browseRoots, so ccserver would refuse to start. Choose a path outside it.`);
@@ -122,8 +129,11 @@ else if (command === 'reset') {
   if (!resetGhUsage(file, { force })) {
     const status = resetTargetStatus(file);
     const why = {
-      'not-a-regular-file': 'it is a directory, symlink, FIFO or device',
+      // A directory is deliberately not forceable here (an operator-typed
+      // path must not become a recursive delete); say what to do instead.
+      'not-a-regular-file': 'it is a directory, symlink, FIFO or device -- remove it yourself, or let the next recorded gh call replace it',
       'not-an-aggregate': 'it is not a gh usage aggregate -- pass --force to overwrite it anyway',
+      'too-large': 'it is larger than a gh usage aggregate can be -- pass --force to overwrite it anyway',
       unreadable: 'the path is unusable or could not be read',
     }[status] || 'the write failed';
     die(`Refusing to reset ${q(file)}: ${why}.`);

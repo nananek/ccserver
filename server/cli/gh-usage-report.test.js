@@ -5,8 +5,8 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 
 const CLI = join(import.meta.dirname, 'gh-usage-report.js');
 let tmpRoot;
@@ -21,7 +21,7 @@ after(() => {
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-function run(args) {
+function run(args, opts = {}) {
   const env = { ...process.env, CCSERVER_SANDBOX_CONFIG: cfgPath };
   // Node's test runner marks the process running each test file with
   // NODE_TEST_CONTEXT; a spawned node script inherits it and (Node 26) can
@@ -35,6 +35,7 @@ function run(args) {
     encoding: 'utf8',
     env,
     timeout: 20_000,
+    ...opts,
   });
 }
 function writeConfig(obj) { writeFileSync(cfgPath, JSON.stringify(obj)); }
@@ -106,11 +107,13 @@ test('a relative file in the config is rewritten as absolute', () => {
   // loadSandboxConfig treats a relative `file` as unset, so writing one back
   // would print "Enabled" for a config the server silently ignores.
   writeConfig({ docker: false, ghUsageRecording: { enabled: false, file: 'usage-relative.json' } });
-  const res = run(['enable']);
+  // Run from tmpRoot, not the repo: this checkout may itself live under the
+  // ccserver scratch tree, which `enable` refuses (see the scratch-tree test).
+  const res = run(['enable'], { cwd: tmpRoot });
   assert.equal(res.status, 0, res.stderr);
   const { file } = readConfig().ghUsageRecording;
   assert.equal(isAbsolute(file), true, `enable wrote a relative path: ${file}`);
-  assert.equal(file, resolve('usage-relative.json'));
+  assert.equal(file, join(tmpRoot, 'usage-relative.json'));
 });
 
 // mkfifo is POSIX-only; the suite already assumes symlinks elsewhere, but
@@ -178,4 +181,29 @@ test('enable refuses a path inside browseRoots instead of bricking the next boot
   assert.equal(run(['enable', '--file', outside]).status, 0);
   assert.equal(readConfig().ghUsageRecording.file, outside);
   assert.equal(run(['disable']).status, 0);
+});
+
+test('enable refuses the ccserver scratch tree even without browseRoots', () => {
+  // pathPolicy exempts this tree from browseRoots precisely because each
+  // session's persistent HOME and the combo worktrees are rw-bound from it --
+  // so an aggregate there is writable by the agents it counts, in the default
+  // configuration where the browseRoots guard does not run at all.
+  const inScratch = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'home', 'proj', 'agg.json');
+  writeConfig({ docker: false });
+  const res = run(['enable', '--file', inScratch]);
+  assert.equal(res.status, 1, `enable should refuse: ${res.stdout}`);
+  assert.match(res.stderr, /scratch tree/);
+  assert.deepEqual(readConfig(), { docker: false }, 'the config must be untouched');
+});
+
+test('an aggregate past the read cap is repairable with reset --force', () => {
+  const big = join(tmpRoot, 'big-aggregate.json');
+  writeFileSync(big, 'x'.repeat(1024 * 1024 + 1));
+  writeConfig({ docker: false });
+  const refused = run(['reset', '--file', big]);
+  assert.equal(refused.status, 1, refused.stdout);
+  assert.match(refused.stderr, /larger than a gh usage aggregate/);
+  const forced = run(['reset', '--force', '--file', big]);
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(big, 'utf8')).counters, {});
 });
