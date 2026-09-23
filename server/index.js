@@ -339,7 +339,7 @@ try {
 // browseRootsInvalid), and a running server that keeps re-reading a broken
 // config would fail open at runtime too.
 {
-  const { browseRoots, browseRootsInvalid, configError, configPath } = loadSandboxConfig();
+  const { browseRoots, browseRootsInvalid, configError, configPath, ghUsageRecording } = loadSandboxConfig();
   if (configError) {
     fastify.log.error(
       `Refusing to start: sandbox.config.json (${configPath}) exists but could not be read/parsed: ${configError}. `
@@ -366,6 +366,11 @@ try {
       ['.saved-sessions.json (CCSERVER_SAVED_SESSIONS_PATH)', SAVED_SESSIONS_PATH],
       ['.scheduled-prompts.json', SCHEDULES_PATH],
       ['.saved-vikunja-tasks.json (CCSERVER_VIKUNJA_TASKS_PATH)', tasksPath()],
+      // The opt-in gh usage aggregate (issue #198). Inside browseRoots it is
+      // a session cwd away from being rewritten by the very agents it counts,
+      // so enforce "keep it out of sandbox-writable paths" with the guard
+      // that already exists rather than only documenting it.
+      ...(ghUsageRecording.enabled ? [["gh usage aggregate (sandbox.config.json's ghUsageRecording.file)", ghUsageRecording.file]] : []),
     ];
     const exposed = internalPaths.filter(([, p]) => isContained(resolve(p), browseRoots));
     if (exposed.length > 0) {

@@ -19,7 +19,7 @@
     "blockedPatterns": []
   },
 
-  "//ghUsageRecording": "Issue #198 の任意・ローカル集計 (既定: 無効)。{ \"enabled\": true, \"file\": \"/absolute/path/gh-usage-recording.json\" } を指定して起動した新規サンドボックスセッションだけが、gitBroker 経由の gh 実行を固定カテゴリのカウンタとして保存する。gh の argv・owner/repo・URL・本文・パス・出力・認証情報・識別子は保存せず、ccserver が送信・アップロードすることもない。`node server/cli/gh-usage-report.js enable --file ...` / `show` / `reset` / `disable` で管理する。SECURITY: file はサンドボックスから書き換えられない場所 (browseRoots 配下やプロジェクトディレクトリの外。既定の sandbox.config.json 隣が安全) に置くこと。詳細は docs-site sandbox/configuration.md。",
+  "//ghUsageRecording": "Issue #198 の任意・ローカル集計 (既定: 無効)。{ \"enabled\": true, \"file\": \"/absolute/path/gh-usage-recording.json\" } を指定して起動した新規サンドボックスセッションだけが、gitBroker 経由の gh 実行を固定カテゴリのカウンタとして保存する。gh の argv・owner/repo・URL・本文・パス・出力・認証情報・識別子は保存せず、ccserver が送信・アップロードすることもない。`node server/cli/gh-usage-report.js enable --file ...` / `show` / `reset` / `disable` で管理する。file は絶対パス必須。SECURITY: サンドボックスから書き換えられない場所 (browseRoots 配下の外。既定の sandbox.config.json 隣が安全) に置くこと — 有効なまま browseRoots 配下を指した場合、ccserver は起動を拒否する。詳細は docs-site sandbox/configuration.md。",
   "ghUsageRecording": {
     "enabled": false,
     "file": ""

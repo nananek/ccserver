@@ -25,7 +25,7 @@ import { chmod as chmodP, readdir as readdirP, rm as rmP, stat as statP } from '
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
@@ -779,10 +779,16 @@ export function loadSandboxConfig() {
   // Issue #198: the broker's privacy-preserving local aggregate is off unless
   // the operator explicitly enables it and names a local state file. Keeping
   // the path out of every report row avoids ever recording a project path.
+  // The path must be ABSOLUTE: a relative one would resolve against whatever
+  // cwd ccserver happened to be started from (usually the repo checkout) --
+  // i.e. exactly the sandbox-writable tree the aggregate has to stay out of,
+  // where a session could forge or suppress counts. index.js additionally
+  // refuses to boot when this file falls inside browseRoots.
   const rawGhUsageRecording = (raw.ghUsageRecording && typeof raw.ghUsageRecording === 'object') ? raw.ghUsageRecording : {};
+  const ghUsageFile = typeof rawGhUsageRecording.file === 'string' && isAbsolute(rawGhUsageRecording.file) ? rawGhUsageRecording.file : null;
   const ghUsageRecording = {
-    enabled: rawGhUsageRecording.enabled === true && typeof rawGhUsageRecording.file === 'string' && rawGhUsageRecording.file.length > 0,
-    file: typeof rawGhUsageRecording.file === 'string' && rawGhUsageRecording.file.length > 0 ? rawGhUsageRecording.file : null,
+    enabled: rawGhUsageRecording.enabled === true && ghUsageFile !== null,
+    file: ghUsageFile,
   };
   // Launch options to hide from every picker (issue #105): apps the operator
   // hasn't contracted for. Server-side install detection alone can't tell
