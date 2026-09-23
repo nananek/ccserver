@@ -84,10 +84,12 @@ test('appResumeArgs: opencode resumes by id or -c', () => {
   assert.deepEqual(appResumeArgs('opencode', 'ses_abc', { resumeLast: true }), ['--session', 'ses_abc']);
 });
 
-test('appStandaloneArgs: only opencode gets --standalone (avoids the shared managed-service singleton, see appLaunch.js comment)', () => {
-  assert.deepEqual(appStandaloneArgs('opencode'), ['--standalone']);
+test('appStandaloneArgs: opencode only gets --standalone when the caller confirms the binary supports it', () => {
+  assert.deepEqual(appStandaloneArgs('opencode', { opencodeStandalone: true }), ['--standalone']);
+  assert.deepEqual(appStandaloneArgs('opencode'), [], 'defaults to false -- an opencode <2.0.0 install rejects the flag outright');
+  assert.deepEqual(appStandaloneArgs('opencode', { opencodeStandalone: false }), []);
   for (const app of ['claude', 'copilot', 'codex', 'commandcode', 'bogus', null, undefined]) {
-    assert.deepEqual(appStandaloneArgs(app), [], `${app} must never receive --standalone`);
+    assert.deepEqual(appStandaloneArgs(app, { opencodeStandalone: true }), [], `${app} must never receive --standalone, even if the (meaningless for it) capability flag is true`);
   }
 });
 
@@ -286,10 +288,12 @@ test('appLaunchArgs: commandcode launch argv keeps resume + model + permission f
   assert.deepEqual(appLaunchArgs('commandcode', { resumeLast: true, permissionMode: 'yolo' }), ['-c', '--yolo']);
 });
 
-test('appLaunchArgs: opencode launch argv always leads with --standalone, ahead of resume/model', () => {
-  assert.deepEqual(appLaunchArgs('opencode', { model: null }), ['--standalone']);
-  assert.deepEqual(appLaunchArgs('opencode', { resumeLast: true }), ['--standalone', '-c']);
-  assert.deepEqual(appLaunchArgs('opencode', { resumeId: 'ses_abc', model: 'gpt-5' }), ['--standalone', '--session', 'ses_abc', '--model', 'gpt-5']);
+test('appLaunchArgs: opencode leads with --standalone, ahead of resume/model, only when the caller confirms support', () => {
+  assert.deepEqual(appLaunchArgs('opencode', { model: null }), [], 'without opencodeStandalone, no flag is emitted -- must not break a <2.0.0 install');
+  assert.deepEqual(appLaunchArgs('opencode', { resumeLast: true }), ['-c']);
+  assert.deepEqual(appLaunchArgs('opencode', { model: null, opencodeStandalone: true }), ['--standalone']);
+  assert.deepEqual(appLaunchArgs('opencode', { resumeLast: true, opencodeStandalone: true }), ['--standalone', '-c']);
+  assert.deepEqual(appLaunchArgs('opencode', { resumeId: 'ses_abc', model: 'gpt-5', opencodeStandalone: true }), ['--standalone', '--session', 'ses_abc', '--model', 'gpt-5']);
 });
 
 test('appSubmitKey: every agent CLI submits with CR, Codex included (regression lock)', () => {

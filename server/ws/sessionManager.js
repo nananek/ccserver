@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools, opencodeSupportsStandalone } from './sandbox.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
 import { releaseSeatbeltOverlay } from './sandbox-seatbelt.js';
 import { setNetworkBrokerLists } from './network-broker.js';
@@ -826,11 +826,16 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     // appLaunchArgs combines resume + model + permission-mode args in this
     // exact order; appLaunch.test.js exercises the same function so a
     // reordering here can't drift away from what's tested (see PR#108 review).
+    // opencodeStandalone is probed against the actually-resolved binary
+    // (resolved.hostCommand) rather than assumed -- see appLaunch.js's
+    // appStandaloneArgs comment: an opencode <2.0.0 install rejects the flag
+    // outright, so this must never be passed without checking first.
     args = appLaunchArgs(sessionApp, {
       resumeId: claudeSessionId,
       resumeLast,
       model: sessionModel,
       permissionMode: sessionPermissionMode,
+      opencodeStandalone: sessionApp === 'opencode' && opencodeSupportsStandalone(resolved.hostCommand),
     });
   }
   command = resolveCommand(command);

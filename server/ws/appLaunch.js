@@ -89,9 +89,20 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
 // replaced; shutting down" every few seconds. `--standalone` makes the CLI
 // spawn a private child server instead of racing for that shared singleton
 // (conversation history/resume is unaffected: it lives in opencode's sqlite
-// db, not the ephemeral server process), so it's always passed for opencode.
-export function appStandaloneArgs(app) {
-  if (app === 'opencode') return ['--standalone'];
+// db, not the ephemeral server process).
+//
+// The flag itself only exists from 2.0.0 onward: an opencode 1.x CLI is a
+// strict yargs parser that rejects an unknown --standalone outright (prints
+// usage, exits 1, never launches -- verified against a cached 1.18.29
+// binary), which would turn "restarts occasionally when 2+ tabs are open"
+// into "opencode never starts" on any host still running the 1.x line.
+// `opencodeStandalone` is therefore an explicit, caller-supplied capability
+// flag (see sandbox.js's opencodeSupportsStandalone, which probes the
+// resolved binary's own --version) rather than assumed true -- this file
+// does no I/O of its own (see the header comment), so it can't check the
+// installed version itself.
+export function appStandaloneArgs(app, { opencodeStandalone = false } = {}) {
+  if (app === 'opencode' && opencodeStandalone) return ['--standalone'];
   return [];
 }
 
@@ -160,9 +171,9 @@ export function appPermissionArgs(app, mode) {
 // model, then permission). Shared by sessionManager and this file's own
 // tests so a reordering in the real launch path can't drift away from what's
 // tested -- see PR#108 review.
-export function appLaunchArgs(app, { resumeId, resumeLast, model, permissionMode } = {}) {
+export function appLaunchArgs(app, { resumeId, resumeLast, model, permissionMode, opencodeStandalone } = {}) {
   return [
-    ...appStandaloneArgs(app),
+    ...appStandaloneArgs(app, { opencodeStandalone }),
     ...appResumeArgs(app, resumeId, { resumeLast }),
     ...appModelArgs(app, model),
     ...appPermissionArgs(app, permissionMode),
