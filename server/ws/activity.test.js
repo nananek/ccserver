@@ -201,7 +201,7 @@ test('detectBusyMarker: empty / missing screens never match', () => {
   assert.equal(detectBusyMarker('claude', ['', '', '']), null);
 });
 
-// --- screenTailText ----------------------------------------------------
+// --- screenTailRows ----------------------------------------------------
 
 test('screenTailRows: trailing blank rows do not push the footer out of range', () => {
   // A TUI that leaves the bottom of the screen empty would otherwise hide its
