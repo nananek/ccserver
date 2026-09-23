@@ -12,9 +12,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   APP_BUSY_MARKERS,
-  BUSY_ROWS_PER_SEC,
+  BUSY_ENTER_ROWS_PER_SEC,
+  BUSY_EXIT_ROWS_PER_SEC,
   MARKER_ROWS,
   QUIET_MS,
+  RATE_HOLD_WINDOW_MS,
+  RATE_WINDOW_MS,
   appHasBusyMarker,
   changeRateFromSamples,
   classifyActivity,
@@ -177,7 +180,7 @@ test('changeRateFromSamples: rows per second over the window', () => {
     { at: now, rows: 5 },
   ];
   const rate = changeRateFromSamples(samples, now);
-  assert.ok(rate > BUSY_ROWS_PER_SEC, `expected a busy rate, got ${rate}`);
+  assert.ok(rate > BUSY_ENTER_ROWS_PER_SEC, `expected a busy rate, got ${rate}`);
 });
 
 test('changeRateFromSamples: samples older than the window are ignored', () => {
@@ -187,7 +190,7 @@ test('changeRateFromSamples: samples older than the window are ignored', () => {
     { at: now - 250, rows: 1 },
   ];
   const rate = changeRateFromSamples(samples, now);
-  assert.ok(rate < BUSY_ROWS_PER_SEC, `a stale burst must not keep a session red (got ${rate})`);
+  assert.ok(rate < BUSY_EXIT_ROWS_PER_SEC, `a stale burst must not keep a session red (got ${rate})`);
 });
 
 test('changeRateFromSamples: no samples at all means nothing is being drawn', () => {
@@ -204,7 +207,7 @@ test('changeRateFromSamples: a single fresh sample cannot divide by ~zero', () =
 
 // --- classifyActivity: the truth table ---------------------------------
 
-const busyRate = BUSY_ROWS_PER_SEC + 10;
+const busyRate = BUSY_ENTER_ROWS_PER_SEC + 10;
 const lowRate = 2;
 const quietMs = QUIET_MS + 500;
 const movingMs = 100;
@@ -328,4 +331,98 @@ test('APP_BUSY_MARKERS: patterns are not sticky (a reused regex must not skip ma
   const rows = CLAUDE_BUSY;
   assert.ok(detectBusyMarker('claude', rows));
   assert.ok(detectBusyMarker('claude', rows), 'a second call must give the same answer');
+});
+
+// --- hysteresis: the red/yellow split must not strobe -------------------
+
+// The measured gap between "a spinner ticking" (<=9 rows/s) and "content
+// being painted" (>=13 rows/s) is narrow, and the answer is a colour on a
+// tab. Two guards keep it from blinking: two thresholds (ENTER to go red,
+// EXIT to come back) and two windows (the short one promotes, the long one
+// holds). Neither is allowed to touch the green decision.
+
+test('hysteresis: a rate inside the gap holds whichever level it already had', () => {
+  const mid = (BUSY_ENTER_ROWS_PER_SEC + BUSY_EXIT_ROWS_PER_SEC) / 2;
+  const common = { app: 'claude', screenRows: CLAUDE_BUSY, screenIdleMs: movingMs, changeRate: mid, holdRate: mid };
+  assert.equal(classifyActivity({ ...common, previousLevel: 'busy' }).level, 'busy', 'already red: stays red');
+  assert.equal(classifyActivity({ ...common, previousLevel: 'low' }).level, 'low', 'already yellow: stays yellow');
+  assert.equal(classifyActivity({ ...common, previousLevel: null }).level, 'low', 'no history: needs ENTER to claim red');
+});
+
+test('hysteresis: crossing ENTER promotes, and only dropping under EXIT demotes', () => {
+  const rows = CLAUDE_BUSY;
+  const at = (changeRate, holdRate, previousLevel) => classifyActivity({
+    app: 'claude', screenRows: rows, screenIdleMs: movingMs, changeRate, holdRate, previousLevel,
+  }).level;
+  assert.equal(at(BUSY_ENTER_ROWS_PER_SEC, BUSY_ENTER_ROWS_PER_SEC, 'low'), 'busy', 'at ENTER exactly: red');
+  assert.equal(at(BUSY_ENTER_ROWS_PER_SEC - 1, BUSY_ENTER_ROWS_PER_SEC - 1, 'low'), 'low', 'just under ENTER: still yellow');
+  assert.equal(at(0, BUSY_EXIT_ROWS_PER_SEC, 'busy'), 'busy', 'at EXIT exactly: holds red');
+  assert.equal(at(0, BUSY_EXIT_ROWS_PER_SEC - 1, 'busy'), 'low', 'under EXIT: finally yellow');
+});
+
+test('hysteresis: a spinner can never HOLD red once the burst is over', () => {
+  // The thresholds are only useful if both sit above the measured spinner
+  // band (5-9 rows/s). Otherwise a session that went red during output would
+  // stay red for the rest of a long think.
+  const spinnerCeiling = 9;
+  assert.ok(BUSY_EXIT_ROWS_PER_SEC > spinnerCeiling, 'EXIT must be above the spinner band');
+  assert.ok(BUSY_ENTER_ROWS_PER_SEC >= BUSY_EXIT_ROWS_PER_SEC, 'ENTER must not be below EXIT');
+  const r = classifyActivity({
+    app: 'claude', screenRows: CLAUDE_BUSY, screenIdleMs: movingMs,
+    changeRate: spinnerCeiling, holdRate: spinnerCeiling, previousLevel: 'busy',
+  });
+  assert.equal(r.level, 'low');
+});
+
+test('hysteresis: a lull inside a turn does not demote, a finished turn does', () => {
+  // Replays the shape the flicker would come from: a burst, then a second of
+  // near-silence while the model thinks, then another burst. The long window
+  // still remembers the burst during the lull, so the tab stays red.
+  const now = 100_000;
+  const burst = [];
+  for (let i = 0; i < 4; i++) burst.push({ at: now - 3500 + i * 250, rows: 12 });
+  const lull = [];
+  for (let i = 0; i < 6; i++) lull.push({ at: now - 1250 + i * 250, rows: 1 });
+  const samples = [...burst, ...lull];
+
+  const fast = changeRateFromSamples(samples, now, RATE_WINDOW_MS);
+  const slow = changeRateFromSamples(samples, now, RATE_HOLD_WINDOW_MS);
+  assert.ok(fast < BUSY_EXIT_ROWS_PER_SEC, `the lull alone looks quiet (${fast} rows/s)`);
+  assert.ok(slow >= BUSY_EXIT_ROWS_PER_SEC, `the long window still remembers the burst (${slow} rows/s)`);
+  assert.equal(
+    classifyActivity({ app: 'claude', screenRows: CLAUDE_BUSY, screenIdleMs: movingMs, changeRate: fast, holdRate: slow, previousLevel: 'busy' }).level,
+    'busy',
+    'a lull inside a turn keeps the tab red',
+  );
+
+  // Same session a few seconds later: the burst has aged out of both windows.
+  const later = now + RATE_HOLD_WINDOW_MS;
+  const slowLater = changeRateFromSamples(samples, later, RATE_HOLD_WINDOW_MS);
+  assert.equal(
+    classifyActivity({ app: 'claude', screenRows: CLAUDE_BUSY, screenIdleMs: movingMs, changeRate: 0, holdRate: slowLater, previousLevel: 'busy' }).level,
+    'low',
+    'once the burst ages out, the tab goes back to yellow',
+  );
+});
+
+test('hysteresis: holdRate defaults to changeRate when the caller has only one figure', () => {
+  const r = classifyActivity({ app: 'claude', screenRows: CLAUDE_BUSY, screenIdleMs: movingMs, changeRate: busyRate });
+  assert.equal(r.level, 'busy');
+});
+
+test('hysteresis: previousLevel can never drag a session out of green', () => {
+  // The invariant from the requirement: whatever history says, an absent
+  // marker plus a still screen is the user's turn, and a present marker is
+  // never the user's turn.
+  for (const previousLevel of [null, 'idle', 'low', 'busy']) {
+    const green = classifyActivity({
+      app: 'claude', screenRows: CLAUDE_IDLE, screenIdleMs: quietMs, changeRate: busyRate, holdRate: busyRate, previousLevel,
+    });
+    assert.equal(green.level, 'idle', `previousLevel=${previousLevel}: quiet + no marker is idle`);
+
+    const running = classifyActivity({
+      app: 'claude', screenRows: CLAUDE_BUSY, screenIdleMs: quietMs, changeRate: 0, holdRate: 0, previousLevel,
+    });
+    assert.notEqual(running.level, 'idle', `previousLevel=${previousLevel}: the marker still wins`);
+  }
 });

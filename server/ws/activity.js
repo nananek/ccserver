@@ -44,13 +44,20 @@ export const ACTIVITY_LEVELS = ['idle', 'low', 'busy'];
 // a running agent never slips into green between two redraws.
 export const QUIET_MS = 1500;
 
-// Rows-per-second at or above which a running session counts as 'busy'.
+// Rows-per-second thresholds for the 'busy' (red) / 'low' (yellow) split.
 // Measured on this host (2026-09-24, 100-column pty, see activity.test.js's
-// fixtures): both CLIs sit at 0 rows/s while idle; a spinner ticking on its
-// own touches ~1-2 rows per 250ms sample (4-8 rows/s); painting real content
-// measured 13, 20, 29 and 43 rows/s. 12 sits in that gap, closer to the
-// spinner side so that "a whole answer is being drawn" reliably reads red.
-export const BUSY_ROWS_PER_SEC = 12;
+// fixtures): both CLIs sit at 0 rows/s while idle; a spinner or a footer
+// animation ticking on its own measured 5-9 rows/s; painting real content
+// measured 13, 20, 29 and 43 rows/s.
+//
+// The gap between those two bands is only 9..13 wide, and this figure is
+// painted on a tab: a rate hovering near a single threshold would blink the
+// tab between yellow and red on every poll. So the threshold is split in two
+// and the level only moves when the rate leaves the gap entirely -- ENTER to
+// go red, EXIT to come back. Both sit inside the measured gap, so a spinner
+// (<=9) can never HOLD red and real painting (>=13) always reaches it.
+export const BUSY_ENTER_ROWS_PER_SEC = 12;
+export const BUSY_EXIT_ROWS_PER_SEC = 10;
 
 // How many rows at the bottom of the screen the busy marker may appear in.
 // The marker lives in the TUI's footer, so the search is anchored there and
@@ -59,15 +66,24 @@ export const BUSY_ROWS_PER_SEC = 12;
 // running. Trailing blank rows are skipped before counting.
 export const MARKER_ROWS = 10;
 
-// Sampling cadence for the rows-per-second figure, and the window the rate is
-// averaged over. One sample per 250ms is fine-grained enough that a spinner's
-// repeated row lands in several samples (deduped inside each one), and the 2s
-// window keeps a single quiet frame from dropping a busy session to yellow.
+// Sampling cadence for the rows-per-second figure. One sample per 250ms is
+// fine-grained enough that a spinner's repeated row lands in several samples
+// (deduped inside each one).
 export const SAMPLE_MS = 250;
-export const RATE_WINDOW_MS = 2000;
 
-// Enough samples to cover RATE_WINDOW_MS at SAMPLE_MS, plus a little slack.
-export const MAX_SAMPLES = Math.ceil(RATE_WINDOW_MS / SAMPLE_MS) + 2;
+// The two windows the rate is averaged over -- the second half of the
+// anti-flicker story. Going red is judged on the short window so a burst
+// shows up promptly; coming back to yellow is judged on the long one, which
+// still remembers the burst for a few seconds. An agent that alternates
+// thinking and printing therefore stays red through the lulls instead of
+// strobing, while a turn that really ended falls back within ~4s.
+// (Green is not affected by either: it is decided by the marker and
+// QUIET_MS, never by these rates.)
+export const RATE_WINDOW_MS = 2000;
+export const RATE_HOLD_WINDOW_MS = 4000;
+
+// Enough samples to cover the longer window at SAMPLE_MS, plus a little slack.
+export const MAX_SAMPLES = Math.ceil(RATE_HOLD_WINDOW_MS / SAMPLE_MS) + 2;
 
 // The "this agent is running" marker each CLI paints in its footer, keyed by
 // the app ids in appLaunch.js's APPS.
@@ -158,8 +174,14 @@ export function changeRateFromSamples(samples, now, windowMs = RATE_WINDOW_MS) {
 //   shell        is this a plain shell session (no agent to be busy)
 //   screenRows   screenModel.screenRows() -- may be null when there is no
 //                screen model (restored members, test doubles)
-//   screenIdleMs ms since the screen last visibly changed (null = never)
-//   changeRate   rows per second, from changeRateFromSamples
+//   screenIdleMs  ms since the screen last visibly changed (null = never)
+//   changeRate    rows per second over RATE_WINDOW_MS (drives going red)
+//   holdRate      rows per second over RATE_HOLD_WINDOW_MS (drives coming
+//                 back to yellow); defaults to changeRate, which collapses
+//                 the hysteresis to a single window
+//   previousLevel the level last reported for this session, so red/yellow
+//                 can hold their ground instead of chattering around one
+//                 threshold. Passing null just means "no history yet".
 //
 // Returns { level, reason, marker, markerVerified, screenIdleMs, changeRate }.
 // `level` is null when the question does not apply (no session, exited,
@@ -172,6 +194,8 @@ export function classifyActivity({
   screenRows = null,
   screenIdleMs = null,
   changeRate = 0,
+  holdRate = null,
+  previousLevel = null,
 } = {}) {
   const markerVerified = appHasBusyMarker(app);
   const base = { marker: null, markerVerified, screenIdleMs, changeRate };
@@ -189,11 +213,17 @@ export function classifyActivity({
   // up (and the screen moving), so a thinking agent can never read as idle.
   if (!hit && quiet) return { ...base, level: 'idle', reason: 'quiet' };
 
-  const rate = Number.isFinite(changeRate) ? changeRate : 0;
+  const fast = Number.isFinite(changeRate) ? changeRate : 0;
+  const slow = Number.isFinite(holdRate) ? holdRate : fast;
+  // Already red: keep it until even the long window drops below EXIT.
+  // Otherwise: only go red once the short window clears ENTER.
+  const busy = previousLevel === 'busy'
+    ? slow >= BUSY_EXIT_ROWS_PER_SEC
+    : fast >= BUSY_ENTER_ROWS_PER_SEC;
   return {
     ...base,
     marker: hit ? hit.marker : null,
-    level: rate >= BUSY_ROWS_PER_SEC ? 'busy' : 'low',
+    level: busy ? 'busy' : 'low',
     // What made this "running": the app's own marker, or (no marker, or no
     // marker table for this app) the screen simply still moving.
     reason: hit ? 'marker' : 'movement',
