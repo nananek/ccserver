@@ -12,7 +12,9 @@ description: エージェントが自分で呼べる通知用 MCP サーバー�
 3. **PWA 通知 (Web Push)** — ブラウザ/スマートフォンへの push。タブを閉じていても届きます。設定 &gt; 通知 から端末ごとに購読します。詳細は [PWA 通知 (Web Push)](#pwa-通知-web-push)。
 
 :::caution[配信先を1つも設定しないと通知機能ごと無効になります]
-`notify.discordWebhook` が未設定で購読もゼロだと `notifyEnabled()` が false になり、**notify MCP 自体がセッションに注入されません** (= エージェントは人間を呼ぶ手段を持ちません)。最低でも 1 つは設定してください。
+`notify.discordWebhook` が未設定で購読もゼロだと `notifyEnabled()` が false になり、**notify MCP 自体がセッションに注入されません** (= エージェントは人間を呼ぶ手段を持ちません)。起動時のログにも警告が出ます。最低でも 1 つは設定してください。
+
+なお PWA 通知 (Web Push) は**この判定には数えません**。notify MCP をエージェントに渡すかどうかは webhook 系の設定で決まり、Web Push は通知ブリッジと `notify` ツールの配信先として使われます。
 :::
 
 ## 設定例
