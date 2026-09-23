@@ -485,7 +485,9 @@ export default function App() {
   // only after success (terminateSessionAndCloseTab below) rely on this.
   // リモート (ペアリング先) のセッション一覧。terminateSessionById が
   // 終了後に一覧から外すため、その宣言より前で呼ぶ。
-  const { remoteSessions, refreshRemoteSessions, dropRemoteSession } = useRemoteSessions();
+  const { remoteSessions, remoteGroups, refreshRemoteSessions, dropRemoteSession, dropRemoteGroup } = useRemoteSessions();
+  // サイドバーのリモートグループ行 → Remote タブで該当グループを展開する要求。
+  const [remoteFocus, setRemoteFocus] = useState(null);
 
   const terminateSessionById = useCallback(async (tabId) => {
     if (terminatingTabIdsRef.current.has(tabId)) return false;
@@ -725,18 +727,24 @@ export default function App() {
   }, [openRemoteTerminalTab, sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
   // 下段 (未オープン / リモート) の ✕: 開いているタブと同じ確認モーダル
   // (closeConfirm kind 'unopened') を出し、「次回以降確認しない」の設定も共有する。
-  // target は { kind: 'local', session } | { kind: 'remote', instance, session }。
+  // target は { kind: 'local', session } | { kind: 'remote', instance, session }
+  // | { kind: 'remote-group', instance, group }。
   // 成功時 true、失敗 (alert 済み) や同一対象の二重実行時は false を返す。
   const terminatingUnopenedRef = useRef(new Set());
   const terminateUnopened = useCallback(async (target) => {
-    const { session } = target;
+    const { session, group } = target;
     const remote = target.kind === 'remote';
-    const key = remote ? `${target.instance.id}:${session.id}` : session.id;
+    const remoteGroup = target.kind === 'remote-group';
+    const key = remoteGroup
+      ? `${target.instance.id}:group:${group.groupId}`
+      : remote ? `${target.instance.id}:${session.id}` : session.id;
     if (terminatingUnopenedRef.current.has(key)) return false;
     terminatingUnopenedRef.current.add(key);
     setIsTerminatingSession(true);
     try {
-      const url = remote
+      const url = remoteGroup
+        ? `/api/federation/instances/${encodeURIComponent(target.instance.id)}/groups/${encodeURIComponent(group.groupId)}`
+        : remote
         ? `/api/federation/instances/${encodeURIComponent(target.instance.id)}/sessions/${encodeURIComponent(session.id)}`
         : `/api/sessions/${session.id}`;
       const res = await authFetch(url, { method: 'DELETE' });
@@ -747,13 +755,16 @@ export default function App() {
         throw new Error(body.error || `HTTP ${res.status}`);
       }
     } catch (err) {
-      window.alert(`セッションを終了できませんでした: ${err.message}`);
+      window.alert(`${remoteGroup ? 'グループを破棄' : 'セッションを終了'}できませんでした: ${err.message}`);
       return false;
     } finally {
       terminatingUnopenedRef.current.delete(key);
       setIsTerminatingSession(terminatingTabIdsRef.current.size > 0 || terminatingUnopenedRef.current.size > 0);
     }
-    if (remote) {
+    if (remoteGroup) {
+      dropRemoteGroup(target.instance.id, group.groupId);
+      refreshRemoteSessions();
+    } else if (remote) {
       dropRemoteSession(target.instance.id, session.id);
       refreshRemoteSessions();
     } else {
@@ -761,7 +772,7 @@ export default function App() {
       fetchServerSessions();
     }
     return true;
-  }, [dropRemoteSession, refreshRemoteSessions, fetchServerSessions]);
+  }, [dropRemoteSession, dropRemoteGroup, refreshRemoteSessions, fetchServerSessions]);
   const requestTerminateUnopened = useCallback((target) => {
     if (skipCloseConfirm) {
       terminateUnopened(target);
@@ -773,6 +784,17 @@ export default function App() {
   const handleTerminateRemoteSession = useCallback(({ instance, session }) => {
     requestTerminateUnopened({ kind: 'remote', instance, session });
   }, [requestTerminateUnopened]);
+  const handleDestroyRemoteGroup = useCallback(({ instance, group }) => {
+    requestTerminateUnopened({ kind: 'remote-group', instance, group });
+  }, [requestTerminateUnopened]);
+  // リモートのコンボは3ペインのグループタブでは開けないため、Remote タブで
+  // そのインスタンスを選択し、グループのメンバー一覧を展開する。
+  const handleOpenRemoteGroup = useCallback(({ instance, group }) => {
+    if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
+    else closeSessionSidebarIfOverlay();
+    setRemoteFocus({ instanceId: instance.id, groupId: group.groupId, nonce: Date.now() });
+    setActiveTabId('remote');
+  }, [sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
   const handleTerminateUnopenedSession = useCallback((session) => {
     requestTerminateUnopened({ kind: 'local', session });
   }, [requestTerminateUnopened]);
@@ -910,11 +932,14 @@ export default function App() {
   // 「次回以降確認しない」も出さない (handleCloseTab のスキップ対象外と揃える)。
   const isRemoteTabCloseConfirm = !!closeConfirmTab?.remote;
   const canDetachCloseConfirm = isRemoteTabCloseConfirm && canTerminateTab(closeConfirmTab);
+  const closeConfirmIsGroup = closeConfirm?.kind === 'group' || closeConfirm?.target?.kind === 'remote-group';
   let closeConfirmTargetText = null;
   if (closeConfirm?.kind === 'unopened') {
     const { target } = closeConfirm;
-    const where = target.session.cwd || target.session.id;
-    closeConfirmTargetText = target.kind === 'remote'
+    const where = target.kind === 'remote-group'
+      ? (target.group.cwd || target.group.groupId)
+      : (target.session.cwd || target.session.id);
+    closeConfirmTargetText = target.kind !== 'local'
       ? `⇄ ${target.instance.label || target.instance.fingerprint?.slice(0, 8) || target.instance.id}: ${where}`
       : where;
   } else if (isRemoteTabCloseConfirm) {
@@ -1004,6 +1029,9 @@ export default function App() {
             unopenedRemoteSessions={unopenedRemoteSessions}
             onOpenRemoteSession={handleOpenRemoteSession}
             onTerminateRemoteSession={handleTerminateRemoteSession}
+            unopenedRemoteGroups={remoteGroups}
+            onOpenRemoteGroup={handleOpenRemoteGroup}
+            onDestroyRemoteGroup={handleDestroyRemoteGroup}
             onOpenGroup={handleOpenGroupFromList}
             customLabels={labelBySessionId}
             onRowContextMenu={handleRowContextMenu}
@@ -1096,6 +1124,9 @@ export default function App() {
           unopenedRemoteSessions={unopenedRemoteSessions}
           onOpenRemoteSession={handleOpenRemoteSession}
           onTerminateRemoteSession={handleTerminateRemoteSession}
+          unopenedRemoteGroups={remoteGroups}
+          onOpenRemoteGroup={handleOpenRemoteGroup}
+          onDestroyRemoteGroup={handleDestroyRemoteGroup}
           onOpenGroup={handleOpenGroupFromList}
           customLabels={labelBySessionId}
           onRowContextMenu={handleRowContextMenu}
@@ -1106,7 +1137,7 @@ export default function App() {
           <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} initialPath={lastDir} sandboxDefaults={sandboxDefaults} />
         </div>
         <div style={{ display: activeTabId === 'remote' ? 'flex' : 'none', height: '100%', flexDirection: 'column', overflow: 'auto' }}>
-          <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} />
+          <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} focusRequest={remoteFocus} />
         </div>
         {tabs.some((t) => t.type === 'settings') && (
           <div style={{ display: activeTabId === 'settings' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
@@ -1290,8 +1321,8 @@ export default function App() {
       {closeConfirm && (
         <div className="resume-overlay" onClick={() => { if (!isTerminatingSession) setCloseConfirm(null); }}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : closeConfirm.kind === 'unopened' ? 'セッションを終了しますか?' : 'タブを閉じますか?'}</h3>
-            <p>{closeConfirm.kind === 'group'
+            <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : closeConfirmIsGroup ? 'グループを破棄しますか?' : closeConfirm.kind === 'unopened' ? 'セッションを終了しますか?' : 'タブを閉じますか?'}</h3>
+            <p>{closeConfirmIsGroup
               ? 'グループの3つのセッション（ワーカー2つとオーケストレーター）を終了します。'
               : canDetachCloseConfirm
                 ? '「セッションを終了」はピア側のセッションも破棄します。「切断」はタブを閉じるだけで、セッションはリモート一覧から再接続できます。'

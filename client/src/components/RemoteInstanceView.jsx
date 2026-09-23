@@ -35,7 +35,7 @@ function shortFingerprint(fp) {
   return parts.length > 4 ? `${parts.slice(0, 4).join(':')}…` : fp;
 }
 
-export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
+export default function RemoteInstanceView({ onOpenRemoteTerminal, visible, focusRequest = null }) {
   const [instances, setInstances] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [sessions, setSessions] = useState([]);
@@ -120,6 +120,31 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
       // leave the member list empty on failure
     }
   }, [selectedId, expandedGroupId]);
+
+  // サイドバーのリモートグループ行から開かれたとき: そのインスタンスを選択し、
+  // グループを展開する。selectedId 変更時のリセット effect (上) の後に展開する
+  // ため、対象を ref に保持して selectedId が一致した時点で処理する。
+  const pendingFocusRef = useRef(null);
+  useEffect(() => {
+    if (!focusRequest) return;
+    pendingFocusRef.current = focusRequest;
+    setSelectedId(focusRequest.instanceId);
+  }, [focusRequest]);
+  useEffect(() => {
+    const pending = pendingFocusRef.current;
+    if (!pending || pending.instanceId !== selectedId) return;
+    pendingFocusRef.current = null;
+    setExpandedGroupId(pending.groupId);
+    setGroupMembers([]);
+    (async () => {
+      try {
+        const res = await authFetch(`/api/federation/instances/${encodeURIComponent(pending.instanceId)}/groups/${encodeURIComponent(pending.groupId)}/members`);
+        if (res.ok) setGroupMembers((await res.json()).members || []);
+      } catch {
+        // leave the member list empty on failure
+      }
+    })();
+  }, [selectedId, focusRequest]);
 
   const instance = instances.find((i) => i.id === selectedId) || null;
 
