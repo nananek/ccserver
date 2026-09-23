@@ -4,7 +4,7 @@
 // never receives argv, repository names, paths, command output, error text,
 // account identifiers, or an event timestamp.  The on-disk file is a small
 // aggregate, not an event log, and is never sent anywhere by ccserver.
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const VERSION = 1;
@@ -19,6 +19,7 @@ const CLIENTS = new Set(['claude', 'codex', 'opencode', 'copilot', 'commandcode'
 const TARGETS = new Set(['issue', 'pr', 'repository', 'workflow', 'release']);
 const OPERATIONS = new Set(['read', 'create', 'edit', 'close', 'comment', 'workflow', 'release']);
 const RESULTS = new Set(['success', 'cli-error', 'broker-unavailable', 'auth-error', 'timeout', 'cancelled']);
+const DENIED_PREFIX = 'broker-denied:';
 const DENIALS = new Set([
   'subcommand-not-allowed', 'ambiguous-flags', 'repo-unresolved', 'repo-must-be-explicit',
   'not-allowlisted', 'blocked-message', 'file-arg-requires-stdin', 'unrecognized-flag',
@@ -28,8 +29,10 @@ const DENIALS = new Set([
 ]);
 
 export function recordingPath() {
-  const configured = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
-  return configured && configured.trim() ? configured : null;
+  // Trim what we return, not just what we test: a config value padded with
+  // whitespace would otherwise name a literally space-padded path.
+  const configured = (process.env.CCSERVER_GH_USAGE_RECORDING_FILE || '').trim();
+  return configured || null;
 }
 
 export function recordingEnabled() {
@@ -38,18 +41,51 @@ export function recordingEnabled() {
   return process.env.CCSERVER_GH_USAGE_RECORDING === '1' && Boolean(recordingPath());
 }
 
-function today() { return new Date().toISOString().slice(0, 10); }
+// Local calendar date, not toISOString()'s UTC one: this is a report an
+// operator reads next to their own clock, and in e.g. JST the UTC date is a
+// day behind for the first nine hours of every day.
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 function emptyState() { return { version: VERSION, startedOn: today(), counters: {} }; }
+
+// The single definition of a well-formed row, shared by readState (what may
+// be kept on disk) and formatGhUsageReport (what may be printed) so the two
+// can never drift. A key is exactly four tab-separated fixed categories; a
+// key with a different field count would also mis-align the tuple the report
+// destructures (a 3-field key shifted `count` into `result`, and printing
+// then threw on result.startsWith).
+function validRow(key, count) {
+  const parts = key.split('\t');
+  if (parts.length !== 4) return false;
+  const [client, target, operation, result] = parts;
+  return CLIENTS.has(client) && TARGETS.has(target) && OPERATIONS.has(operation)
+    && (RESULTS.has(result) || (result.startsWith(DENIED_PREFIX) && DENIALS.has(result.slice(DENIED_PREFIX.length))))
+    && Number.isSafeInteger(count) && count > 0;
+}
 
 function readState(path) {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    if (parsed && parsed.version === VERSION && parsed.counters && typeof parsed.counters === 'object') {
-      // Counters are validated again at print time (fixed categories), but
+    // `typeof [] === 'object'` too, and JSON.stringify drops the string
+    // properties an increment adds to an array -- so a one-byte tamper
+    // ("counters": []) would silently swallow every future increment while
+    // recordGhUsage still reported success. Require a plain object.
+    if (parsed && parsed.version === VERSION && isPlainObject(parsed.counters)) {
       // startedOn is printed verbatim: never trust it from disk. Falling back
       // to today() also normalizes a tampered file on the next write.
       const startedOn = typeof parsed.startedOn === 'string' && DATE_RE.test(parsed.startedOn) ? parsed.startedOn : today();
-      return { ...parsed, startedOn };
+      // Rebuild rather than spread `parsed`: spreading carried arbitrary
+      // top-level keys and malformed counter rows from a tampered/corrupt
+      // file straight back into the next writeState, so the "fixed categories
+      // only" file an operator is invited to share could hold planted text
+      // forever (and grow without bound).
+      const counters = {};
+      for (const [key, count] of Object.entries(parsed.counters)) {
+        if (validRow(key, count)) counters[key] = count;
+      }
+      return { version: VERSION, startedOn, counters };
     }
   } catch { /* missing/corrupt data starts fresh; never expose its contents */ }
   return emptyState();
@@ -104,6 +140,7 @@ function withLock(path, fn) {
 }
 
 function valid(value, set, fallback) { return set.has(value) ? value : fallback; }
+function isPlainObject(value) { return Boolean(value) && typeof value === 'object' && !Array.isArray(value); }
 
 function writeState(path, state) {
   const tmp = `${path}.${process.pid}.tmp`;
@@ -128,7 +165,7 @@ export function recordGhUsage({ client, target, operation, result, denial } = {}
   const safeClient = valid(client, CLIENTS, 'shell');
   const safeTarget = valid(target, TARGETS, 'repository');
   const safeOperation = valid(operation, OPERATIONS, 'read');
-  const safeResult = denial && DENIALS.has(denial) ? `broker-denied:${denial}` : valid(result, RESULTS, 'cli-error');
+  const safeResult = denial && DENIALS.has(denial) ? `${DENIED_PREFIX}${denial}` : valid(result, RESULTS, 'cli-error');
   return withLock(path, () => {
     const state = readState(path);
     const key = `${safeClient}\t${safeTarget}\t${safeOperation}\t${safeResult}`;
@@ -151,11 +188,20 @@ export function formatGhUsageReport(path, { includePeriod = true } = {}) {
   if (includePeriod) lines.push(`period: ${state.startedOn}..${today()}`);
   lines.push('recording: opted-in-local-aggregate', '');
   const rows = Object.entries(state.counters)
-    .map(([key, count]) => [...key.split('\t'), count])
-    .filter(([client, target, operation, result, count]) => CLIENTS.has(client) && TARGETS.has(target) && OPERATIONS.has(operation) && (RESULTS.has(result) || (result.startsWith('broker-denied:') && DENIALS.has(result.slice(14)))) && Number.isSafeInteger(count) && count > 0)
-    .sort(([a], [b]) => a.localeCompare(b));
+    .filter(([key, count]) => validRow(key, count))
+    // Order on the whole key with a plain codepoint compare: sorting on the
+    // client alone left same-client rows in JSON key order, and localeCompare
+    // made a shared report depend on the host's locale.
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, count]) => [...key.split('\t'), count]);
+  let openClient = null;
   for (const [client, target, operation, result, count] of rows) {
-    lines.push(`client=${client} sandbox=sandboxed broker=on`);
+    // One header per client with its rows indented under it -- the sample
+    // output in docs-site sandbox/configuration.md, not a header per row.
+    if (client !== openClient) {
+      openClient = client;
+      lines.push(`client=${client} sandbox=sandboxed broker=on`);
+    }
     lines.push(`  target=${target} operation=${operation} result=${result} count=${count}`);
   }
   return `${lines.join('\n')}\n`;
@@ -180,4 +226,3 @@ export function defaultRecordingPath(configPath) {
   return join(dirname(configPath), 'gh-usage-recording.json');
 }
 
-export function stateFileExists(path) { return existsSync(path); }
