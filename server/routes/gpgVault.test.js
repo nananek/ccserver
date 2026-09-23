@@ -26,7 +26,7 @@ import {
   simulatePrf,
 } from './webauthnTestAuthenticator.js';
 import { authRoute } from './auth.js';
-import { gpgVaultRoute } from './gpgVault.js';
+import { gpgVaultRoute, validateIdentity } from './gpgVault.js';
 import { gpgVaultToolsAvailable, isUnlocked, lockVault } from '../ws/gpgVaultAgent.js';
 
 const RP_HOST = 'ccserver.test';
@@ -157,6 +157,15 @@ async function post(url, { flowId = null, payload, sessionCookie = ownerCookie }
 
 const IDENTITY = { nameReal: 'ccserver test', nameEmail: 'ccserver-test@example.invalid' };
 
+test('validateIdentity: accepts a one-character name and rejects a blank name', () => {
+  assert.deepEqual(validateIdentity('x', 'x@example.invalid'), {
+    ok: true, nameReal: 'x', nameEmail: 'x@example.invalid',
+  });
+  assert.deepEqual(validateIdentity('   ', 'x@example.invalid'), {
+    ok: false, error: 'nameReal must be between 1 and 200 characters',
+  });
+});
+
 async function setUpVault(cred) {
   const optsRes = await post('/api/gpg-vault/setup-options');
   assert.equal(optsRes.statusCode, 200, optsRes.body);
@@ -236,14 +245,14 @@ test('POST /api/gpg-vault/unlock-options: 404 when no vault has been set up yet'
   assert.equal(res.statusCode, 404);
 });
 
-test('POST /api/gpg-vault/setup-verify: 400 for an invalid identity (short name / bad email), without consuming the ceremony', { skip: !TOOLS_AVAILABLE }, async () => {
+test('POST /api/gpg-vault/setup-verify: accepts a one-character name', { skip: !TOOLS_AVAILABLE }, async () => {
   const cred = await registerCredential();
   const optsRes = await post('/api/gpg-vault/setup-options');
   const res = await post('/api/gpg-vault/setup-verify', {
-    flowId: flowIdFrom(optsRes), payload: { response: assertion(cred, optsRes.json()), nameReal: 'ab', nameEmail: 'not-an-email' },
+    flowId: flowIdFrom(optsRes), payload: { response: assertion(cred, optsRes.json()), nameReal: 'x', nameEmail: 'x@example.invalid' },
   });
-  assert.equal(res.statusCode, 400);
-  assert.equal(isUnlocked(), false);
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(res.json().vault.nameReal, 'x');
 });
 
 test('POST /api/gpg-vault/setup-verify: 401 when the authenticator has no PRF result', { skip: !TOOLS_AVAILABLE }, async () => {

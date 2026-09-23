@@ -59,7 +59,7 @@ const MAX_IDENTITY_LEN = 200;
 // (e.g. a second Key-Type/override of %no-protection). Loose email-shape
 // check, not full RFC 5322 -- good enough to reject garbage, not a general
 // email validator.
-function validateIdentity(nameReal, nameEmail) {
+export function validateIdentity(nameReal, nameEmail) {
   if (typeof nameReal !== 'string' || typeof nameEmail !== 'string') {
     return { ok: false, error: 'nameReal and nameEmail are required strings' };
   }
@@ -68,8 +68,11 @@ function validateIdentity(nameReal, nameEmail) {
   if (/[\r\n]/.test(real) || /[\r\n]/.test(email)) {
     return { ok: false, error: 'nameReal/nameEmail must not contain newlines' };
   }
-  if (real.length < 5 || real.length > MAX_IDENTITY_LEN) {
-    return { ok: false, error: 'nameReal must be between 5 and 200 characters' };
+  // GnuPG's unattended key-generation format accepts a non-empty Name-Real;
+  // its historical five-character prompt restriction does not apply to this
+  // batch API. Keep only the limits ccserver itself needs.
+  if (!real || real.length > MAX_IDENTITY_LEN) {
+    return { ok: false, error: 'nameReal must be between 1 and 200 characters' };
   }
   if (email.length > MAX_IDENTITY_LEN || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return { ok: false, error: 'nameEmail must look like a valid email address' };
