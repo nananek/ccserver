@@ -17,7 +17,8 @@
     "dev:client": "npm run dev --workspace=client",
     "test": "npm run test --workspace=server",
     "test:e2e": "playwright test",
-    "login-token": "node server/cli/issue-login-token.js"
+    "login-token": "node server/cli/issue-login-token.js",
+    "setup": "node server/cli/setup.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2"
