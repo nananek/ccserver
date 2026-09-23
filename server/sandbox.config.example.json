@@ -19,6 +19,12 @@
     "blockedPatterns": []
   },
 
+  "//ghUsageRecording": "Issue #198 の任意・ローカル集計 (既定: 無効)。{ \"enabled\": true, \"file\": \"/absolute/path/gh-usage-recording.json\" } を指定して起動した新規サンドボックスセッションだけが、gitBroker 経由の gh 実行を固定カテゴリのカウンタとして保存する。gh の argv・owner/repo・URL・本文・パス・出力・認証情報・識別子は保存せず、ccserver が送信・アップロードすることもない。`node server/cli/gh-usage-report.js enable --file ...` / `show` / `reset` / `disable` で管理する。SECURITY: file はサンドボックスから書き換えられない場所 (browseRoots 配下やプロジェクトディレクトリの外。既定の sandbox.config.json 隣が安全) に置くこと。詳細は docs-site sandbox/configuration.md。",
+  "ghUsageRecording": {
+    "enabled": false,
+    "file": ""
+  },
+
   "//forceSandbox": "false (default): the client decides per session whether to run inside the sandbox (bwrap on Linux, sandbox-exec on macOS). true: forbid launching the agent or a shell outside the sandbox entirely -- every session is forced sandboxed, the per-session UI toggle is overridden, and a launch is REFUSED (instead of falling back to a direct unsandboxed spawn) when the sandbox is unavailable (bwrap not installed, sandbox-exec not available on macOS, or Windows). It also blocks the /usage background capture's direct-launch fallback. The sandbox backend (bwrap on Linux / sandbox-exec on macOS) must be available on the host for any session to start.",
   "forceSandbox": false,
 
