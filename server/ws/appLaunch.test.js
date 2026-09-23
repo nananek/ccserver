@@ -5,6 +5,7 @@ import {
   isValidApp,
   appDisplayName,
   appResumeArgs,
+  appStandaloneArgs,
   appModelArgs,
   appSupportsModelFlag,
   PERMISSION_MODES,
@@ -81,6 +82,13 @@ test('appResumeArgs: opencode resumes by id or -c', () => {
   assert.deepEqual(appResumeArgs('opencode', 'ses_abc'), ['--session', 'ses_abc']);
   assert.deepEqual(appResumeArgs('opencode', null, { resumeLast: true }), ['-c']);
   assert.deepEqual(appResumeArgs('opencode', 'ses_abc', { resumeLast: true }), ['--session', 'ses_abc']);
+});
+
+test('appStandaloneArgs: only opencode gets --standalone (avoids the shared managed-service singleton, see appLaunch.js comment)', () => {
+  assert.deepEqual(appStandaloneArgs('opencode'), ['--standalone']);
+  for (const app of ['claude', 'copilot', 'codex', 'commandcode', 'bogus', null, undefined]) {
+    assert.deepEqual(appStandaloneArgs(app), [], `${app} must never receive --standalone`);
+  }
 });
 
 test('appResumeArgs: copilot resumes only via --continue (no id-based resume)', () => {
@@ -276,6 +284,12 @@ test('appLaunchArgs: commandcode launch argv keeps resume + model + permission f
   assert.deepEqual(appLaunchArgs('commandcode', { model: 'gpt-5', permissionMode: 'yolo' }), ['--model', 'gpt-5', '--yolo']);
   assert.deepEqual(appLaunchArgs('commandcode', { resumeId: 'abc123', permissionMode: 'auto-accept' }), ['--resume', 'abc123', '--auto-accept']);
   assert.deepEqual(appLaunchArgs('commandcode', { resumeLast: true, permissionMode: 'yolo' }), ['-c', '--yolo']);
+});
+
+test('appLaunchArgs: opencode launch argv always leads with --standalone, ahead of resume/model', () => {
+  assert.deepEqual(appLaunchArgs('opencode', { model: null }), ['--standalone']);
+  assert.deepEqual(appLaunchArgs('opencode', { resumeLast: true }), ['--standalone', '-c']);
+  assert.deepEqual(appLaunchArgs('opencode', { resumeId: 'ses_abc', model: 'gpt-5' }), ['--standalone', '--session', 'ses_abc', '--model', 'gpt-5']);
 });
 
 test('appSubmitKey: every agent CLI submits with CR, Codex included (regression lock)', () => {
