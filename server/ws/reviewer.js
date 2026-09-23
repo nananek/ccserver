@@ -66,7 +66,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync, execFile } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isContained } from '../pathPolicy.js';
 import { getDb } from '../db.js';
@@ -79,6 +78,7 @@ import { stripAnsi } from './mcpTools.js';
 // server-side completion event" pattern). Safe as a static import: notify.js
 // imports neither this module nor sessionManager.js, so no cycle.
 import { sendNotification } from './notify.js';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 // Issue #143 problem 1: a dedicated directory holding only `sock`, bound into
 // the sandbox as a directory rather than the socket file itself -- see
@@ -138,8 +138,7 @@ export function reviewerBrokerRunning() {
 // --- worktree management ----------------------------------------------------
 
 export function reviewWorktreeRoot() {
-  return process.env.CCSERVER_REVIEW_WORKTREE_ROOT
-    || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'review-worktrees');
+  return resolvePath(PATH_IDS.reviewWorktrees);
 }
 
 export function reviewWorktreePath(projectCwd, jobId) {

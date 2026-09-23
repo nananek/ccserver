@@ -11,16 +11,16 @@
 // `//` comment keys survive read-modify-write untouched (they are plain JSON
 // string keys); only formatting normalizes to 2-space + trailing newline.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeAllowedHosts, MAX_ALLOWED_HOSTS, normalizeNetworkSettings } from './network-broker.js';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export function resolveSandboxConfigPath() {
-  return process.env.CCSERVER_SANDBOX_CONFIG
-    || join(__dirname, '..', 'sandbox.config.json');
+  return resolvePath(PATH_IDS.sandboxConfig);
 }
 
 function readRawConfig() {
@@ -118,6 +118,11 @@ export function updateNetworkSettings(patch = {}) {
   }
   next.network = net;
   try {
+    // The config directory does not exist yet on a host that has not run the
+    // setup wizard, and this is the only writer of the file (issue #201 R8).
+    // The reader already treats ENOENT as {}, so creating the directory here
+    // makes the two symmetric instead of failing the Settings save.
+    mkdirSync(dirname(resolveSandboxConfigPath()), { recursive: true, mode: 0o700 });
     writeFileSync(resolveSandboxConfigPath(), `${JSON.stringify(next, null, 2)}\n`);
   } catch (err) {
     return { ok: false, code: 'internal', message: `failed to write sandbox config: ${err.message}` };

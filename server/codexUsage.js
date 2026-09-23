@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, isAppHidden, forceSandboxUnavailableReason } from './ws/sandbox.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
 import { formatResets } from './usageResetFormat.js';
+import { resolvePath, PATH_IDS } from './paths.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
 const CAPTURE_TIMEOUT_MS = 10 * 1000; // hard cap on a single capture (real round trip is ~100ms)
@@ -28,7 +29,7 @@ const CAPTURE_TIMEOUT_MS = 10 * 1000; // hard cap on a single capture (real roun
 // exists so bwrap has a cwd to bind/chdir into without exposing a real
 // project). Codex's app-server doesn't require a git repo cwd just to answer
 // account/rateLimits/read (no thread is ever started).
-const CODEX_USAGE_CWD = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'codex-usage-cwd');
+function codexUsageCwd() { return resolvePath(PATH_IDS.codexUsageCwd); }
 
 let cache = null;      // { usage, updatedAt }
 let inflight = null;   // Promise<captureResult> while a capture is running
@@ -113,15 +114,15 @@ function capture() {
 
     if (process.platform !== 'win32' && sandboxAvailable()) {
       try {
-        mkdirSync(CODEX_USAGE_CWD, { recursive: true });
+        mkdirSync(codexUsageCwd(), { recursive: true });
         const spawnSpec = buildMinimalSandboxSpawn({
-          cwd: CODEX_USAGE_CWD,
+          cwd: codexUsageCwd(),
           targetCommand: ['codex', 'app-server'],
           app: 'codex',
         });
         command = spawnSpec.command;
         args = spawnSpec.args;
-        spawnCwd = CODEX_USAGE_CWD;
+        spawnCwd = codexUsageCwd();
         sandboxed = true;
         // macOS seatbelt launches mint a runtime dir (profile + throwaway
         // HOME); removed in finish() below. Null on every other backend.

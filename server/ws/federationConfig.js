@@ -11,6 +11,7 @@ import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -31,8 +32,7 @@ export function derivePairingToken(rawToken) {
 }
 
 export function federationConfig() {
-  const configPath = process.env.CCSERVER_SANDBOX_CONFIG
-    || join(__dirname, '..', 'sandbox.config.json');
+  const configPath = resolvePath(PATH_IDS.sandboxConfig);
   let raw = {};
   try {
     raw = JSON.parse(readFileSync(configPath, 'utf-8'));

@@ -62,11 +62,12 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Agent } from 'undici';
 import { loadSandboxConfig } from './sandbox.js';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export function tasksPath() {
-  return process.env.CCSERVER_VIKUNJA_TASKS_PATH || join(__dirname, '..', '..', '.saved-vikunja-tasks.json');
+  return resolvePath(PATH_IDS.savedVikunjaTasks);
 }
 
 const MAX_ATTEMPTS = 3;

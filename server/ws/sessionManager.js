@@ -34,10 +34,15 @@ import {
   DEFAULT_SESSION_EXITED_TIMEOUT_MS,
   MIN_SESSION_EXITED_TIMEOUT_MS,
 } from '../timeoutEnv.js';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-export const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
-export const SCHEDULES_PATH = join(__dirname, '..', '..', '.scheduled-prompts.json');
+// Functions, not module-load constants (issue #201): the registry resolves
+// these against $XDG_STATE_HOME and has to be free to answer differently
+// after the setup wizard moves a file, so nothing may freeze a path at
+// import time. CCSERVER_SAVED_SESSIONS_PATH / CCSERVER_SCHEDULES_PATH still
+// override.
+export function savedSessionsPath() { return resolvePath(PATH_IDS.savedSessions); }
+export function schedulesPath() { return resolvePath(PATH_IDS.scheduledPrompts); }
 
 const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 const IDLE_TIMEOUT_MS = 3000;
@@ -1369,9 +1374,9 @@ function persistSchedules() {
       });
     }
     if (arr.length > 0) {
-      writeFileSync(SCHEDULES_PATH, JSON.stringify(arr));
+      writeFileSync(schedulesPath(), JSON.stringify(arr));
     } else {
-      try { unlinkSync(SCHEDULES_PATH); } catch { /* nothing to remove */ }
+      try { unlinkSync(schedulesPath()); } catch { /* nothing to remove */ }
     }
   } catch {
     // best effort — persistence must never crash the session manager
@@ -1819,7 +1824,7 @@ export function cancelScheduledPrompt(id) {
 export function restoreSchedules() {
   let arr;
   try {
-    arr = JSON.parse(readFileSync(SCHEDULES_PATH, 'utf-8'));
+    arr = JSON.parse(readFileSync(schedulesPath(), 'utf-8'));
   } catch {
     return; // no file / unreadable
   }
@@ -2228,7 +2233,7 @@ export function gracefulShutdown() {
 
       if (savedSessions.length > 0) {
         try {
-          writeFileSync(SAVED_SESSIONS_PATH, JSON.stringify(savedSessions));
+          writeFileSync(savedSessionsPath(), JSON.stringify(savedSessions));
         } catch {
           // best effort
         }
@@ -2270,7 +2275,7 @@ export function gracefulShutdown() {
 // intact.
 export function peekSavedSessions() {
   try {
-    return JSON.parse(readFileSync(SAVED_SESSIONS_PATH, 'utf-8'));
+    return JSON.parse(readFileSync(savedSessionsPath(), 'utf-8'));
   } catch {
     return null;
   }

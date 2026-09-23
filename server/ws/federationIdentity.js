@@ -19,8 +19,8 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, chmodSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { X509Certificate } from 'node:crypto';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -31,8 +31,7 @@ const CERT_SUBJECT = '/CN=ccserver';
 const CERT_DAYS = '36500';
 
 export function federationHomeDir() {
-  return process.env.CCSERVER_FEDERATION_HOME
-    || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'federation');
+  return resolvePath(PATH_IDS.federationHome);
 }
 
 export function keyPath() {

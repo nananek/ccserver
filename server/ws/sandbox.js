@@ -36,6 +36,7 @@ import { startNetworkBroker, buildIsolatedProxyEnv, normalizeNetworkSettings } f
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 import { normalizeBrowseRoots, isContained, isCcserverScratchPath } from '../pathPolicy.js';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -169,8 +170,7 @@ function newStateDir() {
 // across sessions of the same project. Overridable via
 // CCSERVER_SANDBOX_DIND_ROOT for tests/alternate layouts.
 function dindRoot() {
-  return process.env.CCSERVER_SANDBOX_DIND_ROOT
-    || join(HOME, '.local', 'share', 'ccserver-sandbox', 'dind');
+  return resolvePath(PATH_IDS.dind);
 }
 
 // Where each project's persistent writable HOME lives (see buildBwrapArgs).
@@ -178,8 +178,7 @@ function dindRoot() {
 // session of the same project survive a relaunch. Overridable via
 // CCSERVER_SANDBOX_HOME_ROOT for tests/alternate layouts.
 export function sandboxHomeRoot() {
-  return process.env.CCSERVER_SANDBOX_HOME_ROOT
-    || join(HOME, '.local', 'share', 'ccserver-sandbox', 'home');
+  return resolvePath(PATH_IDS.sandboxHome);
 }
 
 // Whether any on-disk remnant of a failed deletion is still present for this
@@ -593,12 +592,13 @@ function resolveFlag(envVal, fileVal, def) {
 // the other's shared state.
 export const APP_IDS = [...APPS];
 
-// Load the optional sandbox config. Path from CCSERVER_SANDBOX_CONFIG, else
-// server/sandbox.config.json (next to this module's parent). Shape:
+// Load the optional sandbox config. Path from the registry (issue #201):
+// CCSERVER_SANDBOX_CONFIG, else $XDG_CONFIG_HOME/ccserver/sandbox.config.json,
+// falling back to the pre-#201 in-tree server/sandbox.config.json while that
+// is the only copy present. Shape:
 //   { "docker": true, "binds": [ { "src": "~/.ssh", "mode": "ro" }, ... ] }
 export function loadSandboxConfig() {
-  const configPath = process.env.CCSERVER_SANDBOX_CONFIG
-    || join(__dirname, '..', 'sandbox.config.json');
+  const configPath = resolvePath(PATH_IDS.sandboxConfig);
   let raw = {};
   // A missing file is legitimate (every setting has a default). A file that
   // exists but cannot be read/parsed is NOT: silently proceeding would run

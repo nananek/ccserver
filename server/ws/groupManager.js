@@ -21,7 +21,6 @@ export function setAgentPublishHookForTests(fn) {
   agentPublishHook = fn || null;
 }
 import { basename, dirname, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, setMemberCwdResolver, peekSavedSessions, dockerAvailability } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
@@ -46,27 +45,29 @@ import {
   MAX_FILES_PER_GROUP,
   MAX_GROUP_BYTES,
   SANDBOX_GROUP_FILES_PATH,
+  getGroupFilesManifestPath,
 } from './groupFiles.js';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Groups survive a server restart via this file (groupId, member roles,
-// orchestrator dir/app/instructions -- see persistGroups). Overridable for
-// tests, which must never touch the real repo-root state file.
-export const GROUPS_PATH = process.env.CCSERVER_GROUPS_PATH || join(__dirname, '..', '..', '.saved-groups.json');
+// orchestrator dir/app/instructions -- see persistGroups). Located by the
+// registry ($XDG_STATE_HOME/ccserver/saved-groups.json, CCSERVER_GROUPS_PATH
+// still overrides) and resolved per call, never frozen at import.
+export function groupsPath() { return resolvePath(PATH_IDS.savedGroups); }
 // Group-scoped published documents (publish_doc/fetch_doc/list_docs, see
 // section 7 of the plan), kept in their own file rather than folded into
-// GROUPS_PATH: persistGroups() is called far more often (every member
+// groupsPath(): persistGroups() is called far more often (every member
 // registration / pref change) than documents are published, and mixing the
 // two would mean re-serializing every doc's content on each of those
 // unrelated writes.
-export const GROUP_DOCS_PATH = process.env.CCSERVER_GROUP_DOCS_PATH || join(__dirname, '..', '..', '.saved-group-docs.json');
-const GROUP_FILES_PATH = process.env.CCSERVER_GROUP_FILES_PATH || join(__dirname, '..', '..', '.saved-group-files.json');
+export function groupDocsPath() { return resolvePath(PATH_IDS.savedGroupDocs); }
 
 // Orchestrator CLAUDE.md/AGENTS.md source: a repo-tracked template, read
 // fresh on every (re)spawn (never cached at module load) so an edit to the
 // file lands the next time an orchestrator launches -- no ccserver restart
 // needed. See generateOrchestratorClaudeMdSrc. Overridable (same pattern as
-// ORCHESTRATOR_GENERATED_ROOT below) so a test can exercise "template edit
+// the registry-backed roots below) so a test can exercise "template edit
 // lands on the next generation" against a throwaway copy instead of
 // mutating this real, repo-tracked file in place -- other test files read
 // it concurrently as their content oracle (node --test runs files in
@@ -77,10 +78,9 @@ const ORCHESTRATOR_TEMPLATE_PATH = process.env.CCSERVER_ORCHESTRATOR_TEMPLATE_PA
 // outside orchestratorDir, which is bind-mounted rw into the sandbox -- if
 // the generated file lived inside it, the orchestrator could see (and get
 // confused by, or attempt to reference) its own overlay source. This dir is
-// never mounted into any sandbox. Overridable (same pattern as sandbox.js's
-// CCSERVER_SANDBOX_HOME_ROOT) so tests never write under the real home dir.
-const ORCHESTRATOR_GENERATED_ROOT = process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT
-  || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'orchestrator-generated');
+// never mounted into any sandbox. CCSERVER_ORCHESTRATOR_GENERATED_ROOT
+// overrides it so tests never write under the real data dir.
+function orchestratorGeneratedRoot() { return resolvePath(PATH_IDS.orchestratorGenerated); }
 
 const groups = new Map(); // groupId -> group (see createGroup)
 
@@ -190,7 +190,7 @@ function mergeOrchestratorInstructions(customInstructions) {
 // orchestratorDir's basename is already the cwd hash (orchestratorDirForCwd
 // in routes/groups.js) -- no need to re-hash cwd here.
 function generatedClaudeMdPath(orchestratorDir) {
-  return join(ORCHESTRATOR_GENERATED_ROOT, `${basename(orchestratorDir)}.md`);
+  return join(orchestratorGeneratedRoot(), `${basename(orchestratorDir)}.md`);
 }
 
 // Called right before every orchestrator (re)spawn (initial launch, restart,
@@ -512,9 +512,9 @@ function persistGroups() {
       });
     }
     if (arr.length > 0) {
-      writeFileSync(GROUPS_PATH, JSON.stringify(arr));
+      writeFileSync(groupsPath(), JSON.stringify(arr));
     } else {
-      try { unlinkSync(GROUPS_PATH); } catch { /* nothing to remove */ }
+      try { unlinkSync(groupsPath()); } catch { /* nothing to remove */ }
     }
   } catch {
     // best effort -- persistence must never crash the session manager
@@ -533,7 +533,7 @@ function persistGroups() {
 export function restoreGroups() {
   let arr;
   try {
-    arr = JSON.parse(readFileSync(GROUPS_PATH, 'utf-8'));
+    arr = JSON.parse(readFileSync(groupsPath(), 'utf-8'));
   } catch {
     return { restored: 0, ids: [] }; // no file / unreadable
   }
@@ -616,7 +616,7 @@ export function restoreGroups() {
   // counterpart, so this can never fail for the same reasons a worktree
   // restore could.
   try {
-    const rawDocs = JSON.parse(readFileSync(GROUP_DOCS_PATH, 'utf-8'));
+    const rawDocs = JSON.parse(readFileSync(groupDocsPath(), 'utf-8'));
     if (rawDocs && typeof rawDocs === 'object') {
       for (const [gid, docsObj] of Object.entries(rawDocs)) {
         const group = groups.get(gid);
@@ -639,7 +639,7 @@ export function restoreGroups() {
   // whose blob is missing or not a regular file under the group's root are
   // ignored.
   try {
-    const rawFiles = JSON.parse(readFileSync(GROUP_FILES_PATH, 'utf-8'));
+    const rawFiles = JSON.parse(readFileSync(getGroupFilesManifestPath(), 'utf-8'));
     if (rawFiles && typeof rawFiles === 'object') {
       for (const [gid, filesObj] of Object.entries(rawFiles)) {
         const group = groups.get(gid);
@@ -1336,9 +1336,9 @@ function persistGroupDocs() {
       out[g.id] = Object.fromEntries([...g.docs]);
     }
     if (Object.keys(out).length > 0) {
-      writeFileSync(GROUP_DOCS_PATH, JSON.stringify(out));
+      writeFileSync(groupDocsPath(), JSON.stringify(out));
     } else {
-      try { unlinkSync(GROUP_DOCS_PATH); } catch { /* nothing to remove */ }
+      try { unlinkSync(groupDocsPath()); } catch { /* nothing to remove */ }
     }
   } catch {
     // best effort -- persistence must never crash a publish/delete call
@@ -1723,12 +1723,12 @@ function persistGroupFiles() {
       if (g.files.size === 0) continue;
       out[g.id] = Object.fromEntries([...g.files]);
     }
-    const tmp = GROUP_FILES_PATH + '.tmp';
+    const tmp = getGroupFilesManifestPath() + '.tmp';
     if (Object.keys(out).length > 0) {
       writeFileSync(tmp, JSON.stringify(out));
-      renameSync(tmp, GROUP_FILES_PATH);
+      renameSync(tmp, getGroupFilesManifestPath());
     } else {
-      try { unlinkSync(GROUP_FILES_PATH); } catch { /* nothing to remove */ }
+      try { unlinkSync(getGroupFilesManifestPath()); } catch { /* nothing to remove */ }
       try { unlinkSync(tmp); } catch { /* ignore */ }
     }
   } catch {

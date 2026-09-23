@@ -34,6 +34,7 @@ import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 import { deriveWrappingKey, aesGcmEncrypt, aesGcmDecrypt, generateVaultKey } from '../gpgVaultCrypto.js';
 import * as gpgVaultDb from '../gpgVaultDb.js';
 import { getDb } from '../db.js';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -176,7 +177,7 @@ export function gpgVaultToolsAvailable() {
 // `raw.gpgVault === true`, a plain boolean, so nesting an object under the
 // same key would make one of the two readers see the wrong shape.
 function resolveSandboxConfigPath() {
-  return process.env.CCSERVER_SANDBOX_CONFIG || join(__dirname, '..', 'sandbox.config.json');
+  return resolvePath(PATH_IDS.sandboxConfig);
 }
 
 function idleTimeoutMinutes() {

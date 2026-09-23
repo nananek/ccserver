@@ -32,6 +32,7 @@ import { Agent } from 'undici';
 import { loadSandboxConfig } from './sandbox.js';
 import { hostRuntimeDir } from './git-broker.js';
 import { vikunjaEnabled, createOrUpdateTask } from './vikunjaClient.js';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -40,7 +41,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // override) so tests can point it at a temp file without touching the real
 // repo-root state file.
 export function notifyPath() {
-  return process.env.CCSERVER_NOTIFY_PATH || join(__dirname, '..', '..', '.saved-notifications.json');
+  return resolvePath(PATH_IDS.savedNotifications);
 }
 
 // Issue #143 problem 1: a dedicated directory holding only `sock`, bound into

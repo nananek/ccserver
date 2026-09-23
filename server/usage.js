@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig, isAppHidden, forceSandboxUnavailableReason } from './ws/sandbox.js';
 import { recordSessionLimitReset } from './sessionLimitState.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
+import { resolvePath, PATH_IDS } from './paths.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
 // The first capture can include Claude startup, the project trust prompt, and
@@ -29,7 +30,7 @@ const TRUST_SETTLE_MS = 1500;         // let the UI replace the trust dialog bef
 
 // A cwd claude hasn't seen before shows a "trust this folder" gate that would
 // otherwise swallow the /usage command. Detected in the rendered text.
-// The sandboxed capture uses a throwaway USAGE_CWD (below), so it hits this
+// The sandboxed capture uses a throwaway usageCwd() (below), so it hits this
 // gate while an unsandboxed capture in an already-trusted $HOME does not --
 // a missed variant here surfaces as a sandbox-only "Timed out reading /usage"
 // with the process still alive. Keep the alternation conservative (dashboard
@@ -69,7 +70,7 @@ export function buildTimeoutError(buf, { sandboxed = false, sentUsage = false, t
 
 // A throwaway working directory for the sandboxed capture (kept empty; only
 // exists so bwrap has a cwd to bind/chdir into without exposing a real project).
-const USAGE_CWD = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'usage-cwd');
+function usageCwd() { return resolvePath(PATH_IDS.usageCwd); }
 
 let cache = null;      // { usage, updatedAt }
 let inflight = null;   // Promise<captureResult> while a capture is running
@@ -258,14 +259,14 @@ function capture() {
 
     if (process.platform !== 'win32' && sandboxAvailable()) {
       try {
-        mkdirSync(USAGE_CWD, { recursive: true });
+        mkdirSync(usageCwd(), { recursive: true });
         const spawn = buildMinimalSandboxSpawn({
-          cwd: USAGE_CWD,
+          cwd: usageCwd(),
           targetCommand: ['claude', '--ax-screen-reader'],
         });
         command = spawn.command;
         args = spawn.args;
-        spawnCwd = USAGE_CWD;
+        spawnCwd = usageCwd();
         sandboxed = true;
         // macOS seatbelt launches mint a runtime dir (profile + throwaway
         // HOME); removed in finish() below. Null on every other backend.

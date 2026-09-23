@@ -14,41 +14,38 @@
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { resolvePath, pathEntry, layoutVersion, legacyHomeIndexFile, CURRENT_LAYOUT_VERSION, PATH_IDS } from './paths.js';
 // Leaf modules only (node builtins below them): importing anything that
 // reaches back into the stores here would create an evaluation-order cycle
 // (stores import getDb from this file).
 import { projectHashForCwd } from './ws/projectHash.js';
 import { resolveOriginUrl } from './ws/gitAllowlist.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
 let dbInstance = null;
 
-// Host-level DB by default -- same ~/.local/share/ccserver-sandbox/ home
-// every other piece of persistent, non-per-checkout state already uses (see
-// legacyHomeIndexFile() below, worktree.js, sandbox.js's HOME root, etc.).
+// Host-level DB, located by the path registry (server/paths.js, issue #201).
 // This DB holds host-singleton data (auth sessions, GPG vault secret key
 // material, paired instances) that must survive a `git clean`/reclone of
 // this checkout and must not collide when two checkouts share a parent dir
-// -- overridable for tests / multi-instance hosts. Read on every getDb()
-// call, never cached.
+// -- overridable via CCSERVER_DB_PATH for tests / multi-instance hosts.
+//
+// Until the setup wizard has run this still answers with
+// ~/.local/share/ccserver-sandbox/ccserver.sqlite3, byte for byte what it
+// answered before #201; the registry only switches to the XDG path once the
+// layout marker says so. Read on every getDb() call, never cached.
 export function dbPath() {
-  return process.env.CCSERVER_DB_PATH
-    || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'ccserver.sqlite3');
+  return resolvePath(PATH_IDS.db);
 }
 
 // Pre-fix default (up through #190): a directory-nesting bug in the '..'
 // count landed the DB one level ABOVE the repo instead of at its root --
 // server/db.js sits one directory shallower than the server/ws/*.js modules
 // the two '..'s were tuned for, so this resolves to the repo's *parent*
-// directory. migrateLegacyDbFile() relocates an existing file here to the
-// new default on first boot; kept forever since anyone's checkout may still
-// have one sitting there.
+// directory. Kept forever; anyone's checkout may still have one sitting
+// there.
 function legacyDbPath() {
-  return join(__dirname, '..', '..', 'ccserver.sqlite3');
+  return pathEntry(PATH_IDS.db).legacyPaths[1];
 }
 
 // One-time relocation of a DB left at the pre-fix default path (see
@@ -64,6 +61,15 @@ function legacyDbPath() {
 // while the real data sits un-migrated.
 // legacy is injectable (defaults to legacyDbPath()) purely as a test seam --
 // production callers always take the default.
+//
+// #201 kept this function rather than folding it into the wizard, and the
+// distinction matters: this is the OLD-OLD -> OLD hop (repo parent ->
+// ~/.local/share/ccserver-sandbox), both of which are pre-#201 locations.
+// The XDG hop is the wizard's alone. A host that has pulled #201 but not
+// yet run the wizard MUST still boot on the legacy layout (decision D3), and
+// if that host only has a DB at the repo-parent path, losing this automatic
+// hop means booting on an empty DB -- exactly the auth-session and GPG-vault
+// loss this function was written to prevent.
 export function migrateLegacyDbFile(path, legacy = legacyDbPath()) {
   if (process.env.CCSERVER_DB_PATH || path === ':memory:') return;
   if (existsSync(path)) {
@@ -100,6 +106,15 @@ export function migrateLegacyDbFile(path, legacy = legacyDbPath()) {
   console.warn(`[db] moved ccserver.sqlite3 from its old default location (${legacy}) to ${path} (set CCSERVER_DB_PATH to override).`);
 }
 
+// getDb()'s entry point into the above, scoped so the automatic hop can only
+// ever happen WITHIN the legacy layout. Once the marker says v2, dbPath()
+// points at the XDG location and relocating into it is the wizard's
+// decision, not a side effect of someone calling getDb().
+function ensureDbInPlace(path) {
+  if (layoutVersion() >= CURRENT_LAYOUT_VERSION) return;
+  migrateLegacyDbFile(path);
+}
+
 function applyPragmas(db) {
   // WAL: concurrent readers during writes (the UI polls while stores persist).
   // NORMAL fsync is the documented WAL pairing. busy_timeout keeps parallel
@@ -111,15 +126,12 @@ function applyPragmas(db) {
 }
 
 // The pre-v2 sidecar index sandbox.js kept under the sandbox home root
-// (slug -> resolved project cwd), imported once by the v2 migration. Mirrors
-// sandbox.js's sandboxHomeRoot() -- kept in lockstep deliberately; a test
-// asserts the two agree so a future edit to either cannot silently split the
-// path.
-export function legacyHomeIndexFile() {
-  const root = process.env.CCSERVER_SANDBOX_HOME_ROOT
-    || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'home');
-  return join(root, '.index.json');
-}
+// (slug -> resolved project cwd), imported once by the v2 migration.
+// Re-exported from the registry, which derives it from the same
+// 'sandboxHome' entry sandbox.js's sandboxHomeRoot() resolves -- the two
+// used to read CCSERVER_SANDBOX_HOME_ROOT independently and were kept in
+// lockstep only by a test asserting they agreed. They cannot drift now.
+export { legacyHomeIndexFile };
 
 // v1: worker presets. v2: projects + sandboxes (the formal successor of
 // sandbox.js's old homeIndex.json sidecar -- one row per real project
@@ -510,6 +522,45 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    // v10 (issue #201, decision D2): the landing pad for DYNAMIC settings.
+    // The boundary this table exists to establish:
+    //   dynamic = changeable from the Web UI, effective without a restart
+    //             -> here
+    //   static  = read once at process start, needs a restart to change,
+    //             especially the security boundaries (browseRoots /
+    //             forceSandbox / allowUnsandboxedAgents / hiddenApps)
+    //             -> sandbox.config.json
+    // The test for which side something belongs on: does the safety of an
+    // ALREADY RUNNING session depend on the value? If yes, it is static.
+    // (A running sandbox's binds were computed from browseRoots at launch,
+    // which is why browseRoots can never become dynamic.)
+    //
+    // Ships EMPTY. #201 moves nothing onto it; #205 makes named network
+    // profiles its first occupant. See server/settingsStore.js.
+    //
+    // (scope, scope_id, key) rather than a flat key so one scope can hold a
+    // whole set of NAMED objects -- exactly the shape #205 needs:
+    //   ('global','','network.activeProfile','"strict"')
+    //   ('network-profile','strict','allowedHosts','["github.com"]')
+    // value is always JSON.stringify'd, even for a string or boolean, so
+    // there is one decode path and json_extract() still works.
+    version: 10,
+    up(db) {
+      db.exec(`
+        CREATE TABLE settings (
+          scope       TEXT    NOT NULL,
+          scope_id    TEXT    NOT NULL DEFAULT '',
+          key         TEXT    NOT NULL,
+          value       TEXT    NOT NULL,
+          updated_at  INTEGER NOT NULL,
+          updated_by  TEXT,
+          PRIMARY KEY (scope, scope_id, key)
+        ) WITHOUT ROWID;
+        CREATE INDEX idx_settings_scope ON settings(scope, scope_id);
+      `);
+    },
+  },
 ];
 
 // Runs pending migrations in order. Each one executes inside BEGIN IMMEDIATE
@@ -551,7 +602,7 @@ export function getDb() {
   }
   const path = dbPath();
   if (path !== ':memory:') {
-    migrateLegacyDbFile(path);
+    ensureDbInPlace(path);
     try { mkdirSync(dirname(path), { recursive: true }); } catch { /* open will report */ }
   }
   const db = new DatabaseSync(path);
