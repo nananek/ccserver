@@ -84,7 +84,8 @@ checked out are invisible to the other role.
 - workerA (plan / review): stays on the base branch the whole time and
   never checks out a working branch itself. Writes the implementation plan
   and hands it to workerB via publish_doc (see "Sharing documents between
-  workers" below), then waits. After workerB's self-review stage passes,
+  workers" below), then waits. After workerB's self-review stage AND the
+  mandatory attacker-perspective review stage pass (both below),
   workerA does the final review, push, and PR creation WITHOUT checking the
   branch out locally: `git fetch` to see workerB's pushed branch, `git diff
   <base>...<branch>` (or `git log <base>..<branch>`) to review it, `git
@@ -157,8 +158,63 @@ raise the quality bar on its own first:
 5. Cap this loop at 3 rounds. If issues remain after 3 rounds, hand off to
    workerA anyway with the outstanding issues noted, rather than looping
    forever.
-6. Once the self-review comes back clean (or the cap is hit), hand off to
-   workerA for the final review -> push -> PR stage.
+6. Once the self-review comes back clean (or the cap is hit), move on to the
+   attacker-perspective review stage below. Only after that stage closes does
+   workerA do the final review -> push -> PR stage.
+
+## Attacker-perspective review stage (MANDATORY before the final review)
+
+Every change goes through one attacker-perspective review by a dedicated
+OpenCode worker before workerA's final review. This is a required gate, not
+an optional extra: no branch reaches `gh pr create` without it.
+
+1. Have the implementing worker push its branch first (`git push -u origin
+   <branch>`). The reviewer reads the branch from the remote, so an unpushed
+   branch has nothing to review.
+2. Open a dedicated reviewer with `open_tab({ role: 'workerSec', app:
+   'opencode', cwd: <any string -- the argument is ignored, the server
+   assigns the worktree> })`. The role name must start with `worker`, so
+   pick something like `workerSec`. Two rules about who does this:
+   - It MUST be a separate worker. Never ask the worker that wrote the code
+     to attack its own change -- it reviews its own intent, not its result.
+     The self-review stage above already covers the author's own pass.
+   - It MUST be `app: 'opencode'`. This gate deliberately uses a different
+     model family from the implementer so the review does not inherit the
+     implementer's blind spots.
+3. Tell the reviewer to check the branch out DETACHED:
+   `git fetch origin && git checkout --detach origin/<branch>`.
+   The implementing worker's worktree already has that branch checked out,
+   and git refuses to check the same branch out in a second worktree. The
+   detached form sidesteps that and is read-only anyway.
+4. Spell these out in the request -- without them the review silently
+   degrades into a static read-through:
+   - **Actually run the attacks.** Reading the diff is not the deliverable.
+     Construct the malicious input, craft the path/URL/payload, and execute
+     it against the code to see what really happens.
+   - **Separate what was reproduced from what was reasoned about.** Every
+     finding must say which it is: a reproduced exploit (with the exact
+     steps and observed output) or an unverified hypothesis. A review that
+     blurs the two cannot be acted on.
+5. Have the reviewer publish its findings with `publish_doc` (e.g. key
+   `"attack-review"`) and hand off. Relay the key to the implementing
+   worker, not the content.
+6. The implementing worker addresses the findings and commits. Whether to
+   run another attacker round afterwards is YOUR call -- weigh how much the
+   fixes changed and whether any finding was only partially closed.
+
+Two things this gate is explicitly NOT:
+
+- **Existing hardening is not an answer.** When you send a branch that
+  already contains defensive code back for review, say so and tell the
+  reviewer that the presence of a defense proves nothing: the questions are
+  whether the defense can be bypassed, and whether the defense itself opened
+  something new. Reviewers otherwise read a validation function and move on.
+- **No change is exempt for having "no attack surface".** Documentation-only
+  diffs are in scope too. This very file is injected into an agent's prompt,
+  so text IS an attack surface here: a wording change can redirect what an
+  agent does, and prose in a doc can carry an injection aimed at whatever
+  reads it next. Do not skip the gate on a judgment that a diff looks
+  harmless.
 
 ## Handoff discipline
 

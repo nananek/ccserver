@@ -64,3 +64,49 @@ test('mcpServer.js: read_output description states the discipline, status tools 
   // wait_for_handoff stays the once-per-turn default.
   assert.match(mcpServerSource, /Call this once per turn instead of polling read_output/);
 });
+
+// The attacker-perspective review is a required gate before the final review
+// -> push -> PR stage, not an optional extra. Every load-bearing instruction
+// below has a failure mode if it silently disappears, so each is pinned:
+// drop "actually run the attacks" and the review decays into a static
+// read-through; drop the detached checkout and the reviewer hits git's
+// same-branch-in-two-worktrees refusal; drop the separate-worker rule and the
+// author reviews its own intent instead of its result.
+test('template: the attacker-perspective review gate is mandatory and fully specified', () => {
+  // The stage exists and is marked mandatory in the heading itself.
+  assert.match(template, /^## Attacker-perspective review stage \(MANDATORY before the final review\)$/m);
+  assert.match(template, /required gate, not\s*\n\s*an optional extra: no branch reaches `gh pr create` without it/);
+
+  // The self-review stage routes into it rather than straight to workerA,
+  // and workerA's own description knows the gate is a precondition.
+  assert.match(template, /move on to the\s*\n\s+attacker-perspective review stage below/);
+  assert.match(template, /After workerB's self-review stage AND the\s*\n\s+mandatory attacker-perspective review stage pass/);
+
+  // A dedicated OpenCode worker -- never the implementer.
+  assert.match(template, /open_tab\(\{ role: 'workerSec', app:\s*\n\s*'opencode'/);
+  assert.match(template, /It MUST be a separate worker\. Never ask the worker that wrote the code\s*\n\s+to attack its own change/);
+  assert.match(template, /It MUST be `app: 'opencode'`/);
+
+  // Push first, then review the remote branch detached (git refuses a second
+  // checkout of the same branch).
+  assert.match(template, /push its branch first \(`git push -u origin/);
+  assert.match(template, /git fetch origin && git checkout --detach origin\/<branch>/);
+  assert.match(template, /git refuses to check the same branch out in a second worktree/);
+
+  // The two instructions that keep this from degrading into a static review.
+  assert.match(template, /\*\*Actually run the attacks\.\*\* Reading the diff is not the deliverable/);
+  assert.match(template, /\*\*Separate what was reproduced from what was reasoned about\.\*\*/);
+  assert.match(template, /a reproduced exploit \(with the exact\s*\n\s+steps and observed output\) or an unverified hypothesis/);
+
+  // Findings go through the document board; re-running the gate is a judgment call.
+  assert.match(template, /publish its findings with `publish_doc`/);
+  assert.match(template, /run another attacker round afterwards is YOUR call/);
+
+  // The two refusals: hardening is not proof, and nothing is exempt for
+  // looking harmless -- this template is itself an injected prompt, so a
+  // docs-only diff still carries attack surface.
+  assert.match(template, /\*\*Existing hardening is not an answer\.\*\*/);
+  assert.match(template, /whether the defense can be bypassed, and whether the defense itself opened\s*\n\s+something new/);
+  assert.match(template, /\*\*No change is exempt for having "no attack surface"\.\*\* Documentation-only\s*\n\s*diffs are in scope too/);
+  assert.match(template, /text IS an attack surface here/);
+});
