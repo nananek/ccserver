@@ -4,10 +4,17 @@
 // never receives argv, repository names, paths, command output, error text,
 // account identifiers, or an event timestamp.  The on-disk file is a small
 // aggregate, not an event log, and is never sent anywhere by ccserver.
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const VERSION = 1;
+// startedOn is the only free-form string a report ever prints. It must look
+// like a plain date so a tampered/corrupt aggregate can never inject extra
+// lines into `show` output (see readState).
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// A lock older than this is considered abandoned (crashed writer) or planted
+// to suppress recording, and is broken on the next attempt (see tryLock).
+const LOCK_STALE_MS = 30_000;
 const CLIENTS = new Set(['claude', 'codex', 'opencode', 'copilot', 'commandcode', 'shell']);
 const TARGETS = new Set(['issue', 'pr', 'repository', 'workflow', 'release']);
 const OPERATIONS = new Set(['read', 'create', 'edit', 'close', 'comment', 'workflow', 'release']);
@@ -37,9 +44,48 @@ function emptyState() { return { version: VERSION, startedOn: today(), counters:
 function readState(path) {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    if (parsed && parsed.version === VERSION && typeof parsed.startedOn === 'string' && parsed.counters && typeof parsed.counters === 'object') return parsed;
+    if (parsed && parsed.version === VERSION && parsed.counters && typeof parsed.counters === 'object') {
+      // Counters are validated again at print time (fixed categories), but
+      // startedOn is printed verbatim: never trust it from disk. Falling back
+      // to today() also normalizes a tampered file on the next write.
+      const startedOn = typeof parsed.startedOn === 'string' && DATE_RE.test(parsed.startedOn) ? parsed.startedOn : today();
+      return { ...parsed, startedOn };
+    }
   } catch { /* missing/corrupt data starts fresh; never expose its contents */ }
   return emptyState();
+}
+
+// Best-effort, single-attempt lock. Recording is observability, so it must
+// never delay a gh call: an earlier draft busy-waited up to 1s on contention,
+// which a planted lock turned into +1s on every gh call. A stale lock
+// (crashed writer, or one planted to suppress recording) is broken by mtime
+// so it cannot silence recording forever. The atomic rename in writeState is
+// what actually protects the file; the lock only avoids lost increments.
+let warnedStaleLock = false;
+function warnStaleLock(lock) {
+  if (warnedStaleLock) return;
+  warnedStaleLock = true;
+  console.warn(`[gh-usage] removed a stale aggregate lock (${lock}); a previous writer may have crashed or the aggregate may be under attack`);
+}
+
+function tryLock(lock) {
+  try {
+    const fd = openSync(lock, 'wx', 0o600);
+    try { closeSync(fd); } catch {}
+    return true;
+  } catch (e) {
+    if (e.code !== 'EEXIST') return false;
+  }
+  try {
+    if (Date.now() - statSync(lock).mtimeMs < LOCK_STALE_MS) return false;
+    unlinkSync(lock);
+    const fd = openSync(lock, 'wx', 0o600);
+    try { closeSync(fd); } catch {}
+    warnStaleLock(lock);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function withLock(path, fn) {
@@ -49,16 +95,10 @@ function withLock(path, fn) {
   } catch {
     return false; // observability must never block gh
   }
-  const deadline = Date.now() + 1000;
-  let fd;
-  while (Date.now() < deadline) {
-    try { fd = openSync(lock, 'wx', 0o600); break; } catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); }
-  }
-  if (fd === undefined) return false; // observability must never block gh
+  if (!tryLock(lock)) return false; // another writer holds it (or it cannot be created); never wait
   try { return fn(); }
   catch { return false; } // an unwritable/full aggregate must never fail the gh call
   finally {
-    try { closeSync(fd); } catch {}
     try { unlinkSync(lock); } catch {}
   }
 }
@@ -68,7 +108,13 @@ function valid(value, set, fallback) { return set.has(value) ? value : fallback;
 function writeState(path, state) {
   const tmp = `${path}.${process.pid}.tmp`;
   try {
-    writeFileSync(tmp, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+    // 'wx' (O_CREAT|O_EXCL) never opens an existing path, so a symlink
+    // planted at the tmp name cannot redirect this write to another file
+    // (the previous plain writeFileSync followed such a symlink). Remove a
+    // leftover tmp from a crashed writer first: it is ours by pid, and
+    // leaving it would block this process's recording forever.
+    try { unlinkSync(tmp); } catch {}
+    writeFileSync(tmp, `${JSON.stringify(state)}\n`, { flag: 'wx', mode: 0o600 });
     renameSync(tmp, path);
   } catch (e) {
     try { unlinkSync(tmp); } catch {}
