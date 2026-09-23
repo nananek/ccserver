@@ -16,15 +16,16 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isolatedEnv, assertSafeToMigrate } from './testIsolation.js';
+import { isolatedEnv, spawnWizard } from './testIsolation.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, 'index.js');
 const SETUP_CLI = join(__dirname, 'cli', 'setup.js');
+const REPO_ROOT = join(__dirname, '..');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -91,22 +92,14 @@ class Server {
   logs() { return this.logChunks.join(''); }
 }
 
+// Routed through spawnWizard(), the single choke point that isolates HOME
+// and ABORTS if it or the XDG roots resolve outside the temp tree.
 function runWizard(dir) {
-  const env = { ...childEnv(dir), PORT: '1' };
-  // Refuses to run at all unless HOME and the XDG roots are inside the temp
-  // tree. This is the guard that stops `npm test` migrating real host data.
-  assertSafeToMigrate(env);
-  return new Promise((resolve, reject) => {
-    const proc = spawn(process.execPath, [SETUP_CLI, '--yes'], {
-      cwd: join(__dirname, '..'),
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let out = '';
-    proc.stdout.on('data', (d) => { out += d; });
-    proc.stderr.on('data', (d) => { out += d; });
-    proc.on('exit', (code) => (code === 0 ? resolve(out) : reject(new Error(`setup --yes failed:\n${out}`))));
-  });
+  const res = spawnWizard(dir, ['--yes'], { CCSERVER_HOST: '127.0.0.1' });
+  if (res.status !== 0) {
+    throw new Error(`setup --yes failed:\n${res.stdout}${res.stderr}`);
+  }
+  return res.stdout;
 }
 
 async function withServer(dir, extra, fn) {
@@ -195,7 +188,7 @@ test('GET /api/setup-status explains the gate: required, versions, and the pendi
 test('after the wizard runs, the gate is gone and writes are accepted again', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-gate-after-'));
   try {
-    await runWizard(dir);
+    runWizard(dir);
     await withServer(dir, {}, async (server) => {
       const status = await (await fetch(`${server.baseUrl}/api/setup-status`)).json();
       assert.equal(status.setupRequired, false);
@@ -213,3 +206,92 @@ test('after the wizard runs, the gate is gone and writes are accepted again', as
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// attack-test-201 F2 (High): the gate was completely bypassable over
+// WebSocket. HTTP POST /api/sessions returned 503, but a WS `init` created a
+// session anyway, and `schedule_prompt` wrote .scheduled-prompts.json -- both
+// into the pre-migration paths the operator was about to migrate. The gate's
+// stated purpose was simply not met.
+//
+// The fix gates by MESSAGE, not by connection, because blocking /ws/
+// wholesale would cut running sessions off from their browsers and let the
+// 12h idle timeout reap them (the very thing rev2's R2 warns about). So these
+// two tests are a pair: the write paths must be refused AND the re-attach
+// path must still work.
+test('★ F2: WS init and schedule_prompt are refused while gated, and write nothing to the legacy paths', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-gate-ws-'));
+  try {
+    await withServer(dir, { CCSERVER_LAYOUT: 'legacy' }, async (server) => {
+      const legacyHome = join(dir, 'home');
+
+      const init = await wsRequest(server, {
+        type: 'init', cwd: '/tmp', cols: 80, rows: 24, shell: true,
+      });
+      assert.equal(init.type, 'error', `init must be refused; got ${JSON.stringify(init)}`);
+      assert.equal(init.code, 'SETUP_REQUIRED');
+
+      const sched = await wsRequest(server, {
+        type: 'schedule_prompt', time: '23:59', text: 'GATE-BYPASS-PROMPT',
+      });
+      assert.equal(sched.type, 'error', `schedule_prompt must be refused; got ${JSON.stringify(sched)}`);
+      assert.equal(sched.code, 'SETUP_REQUIRED');
+
+      // The state files F2 showed being written must not exist, in either
+      // layout's location. (The SQLite DB is deliberately NOT on this list:
+      // an un-migrated host legitimately opens/creates it at the legacy path
+      // on boot -- that is the layout it is running in, not a gate bypass.)
+      for (const p of [
+        join(legacyHome, '.scheduled-prompts.json'),
+        join(legacyHome, '.saved-sessions.json'),
+        join(REPO_ROOT, '.scheduled-prompts.json'),
+        join(dir, 'state', 'ccserver', 'scheduled-prompts.json'),
+        join(dir, 'state', 'ccserver', 'saved-sessions.json'),
+      ]) {
+        assert.equal(existsSync(p), false, `${p} must not have been created while gated`);
+      }
+      assert.equal((await (await fetch(`${server.baseUrl}/api/sessions`)).json()).length ?? 0, 0,
+        'no session may exist after a refused init');
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('F2: the re-attach path (attach/ping) stays open while gated -- R2 is not reintroduced', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-gate-ws-attach-'));
+  try {
+    await withServer(dir, { CCSERVER_LAYOUT: 'legacy' }, async (server) => {
+      // `ping` needs no session and proves the socket is not gated wholesale.
+      const pong = await wsRequest(server, { type: 'ping' });
+      assert.notEqual(pong.code, 'SETUP_REQUIRED', 'ping must not be gated');
+
+      // `attach` to a session that does not exist answers with its own
+      // error, NOT the setup gate: the message class is allowed through, so
+      // a browser holding a live sessionId can still reconnect to it.
+      const attach = await wsRequest(server, { type: 'attach', sessionId: 'no-such-session' });
+      assert.notEqual(attach.code, 'SETUP_REQUIRED',
+        'attach must reach its own handler -- this is the path that keeps running sessions reachable');
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Opens /ws/terminal, sends one message, resolves with the first reply that
+// is not an unrelated broadcast.
+function wsRequest(server, msg, { timeoutMs = 10_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${server.baseUrl.replace('http', 'ws')}/ws/terminal`);
+    const timer = setTimeout(() => { ws.close(); reject(new Error(`no reply to ${msg.type} within ${timeoutMs}ms`)); }, timeoutMs);
+    const done = (value) => { clearTimeout(timer); ws.close(); resolve(value); };
+    ws.addEventListener('open', () => ws.send(JSON.stringify(msg)));
+    ws.addEventListener('message', (ev) => {
+      let parsed;
+      try { parsed = JSON.parse(ev.data); } catch { return; }
+      // 'output'/'pong' chatter aside, the first typed reply is the answer.
+      if (parsed.type === 'output') return;
+      done(parsed);
+    });
+    ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error(`ws error for ${msg.type}`)); });
+  });
+}

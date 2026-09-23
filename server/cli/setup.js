@@ -105,6 +105,29 @@ if (plan.steps.length > 0) writeBreadcrumbs();
 writeMarker();
 resetLayoutCache();
 
+// An explicit record of what actually moved, in the same output as the
+// plan above. `--yes` is irreversible and runs unattended (ssh, systemd), so
+// when something later looks wrong the operator's scrollback -- or the
+// journal -- has to be able to answer "where did this file go?" without
+// re-deriving it from the registry.
+if (plan.steps.length > 0) {
+  console.log('');
+  console.log(`移動しました (${plan.steps.length}件):`);
+  for (const step of plan.steps) {
+    const extra = step.items.length > 1
+      ? ` (+ ${step.items.slice(1).map((i) => i.to.slice(step.to.length)).join(', ')})`
+      : '';
+    console.log(`  [${step.kind}] ${step.label}${extra}`);
+    console.log(`        ${step.from}`);
+    console.log(`     -> ${step.to}`);
+  }
+}
+if (plan.kept.length > 0) {
+  console.log('');
+  console.log(`その場に残しました (${plan.kept.length}件):`);
+  for (const k of plan.kept) console.log(`  ${k.label.padEnd(28)} ${k.at}`);
+}
+
 console.log('');
 if (plan.steps.length === 0 && plan.kept.length === 0 && plan.skips.every((s) => s.reason !== 'nothing-to-move')) {
   console.log('すべてのパスが env var で明示されています。マーカーのみ書き込みました。');

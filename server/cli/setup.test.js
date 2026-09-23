@@ -5,13 +5,11 @@
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isolatedEnv, assertSafeToMigrate } from '../testIsolation.js';
+import { spawnWizard } from '../testIsolation.js';
 
-const SETUP_CLI = join(import.meta.dirname, 'setup.js');
 const REPO_ROOT = join(import.meta.dirname, '..', '..');
 let tmpRoot;
 let caseDir;
@@ -31,15 +29,13 @@ function roots() {
   };
 }
 
+// Every spawn of the real wizard goes through spawnWizard(), which isolates
+// HOME as well as the XDG roots and ABORTS if either resolves outside the
+// temp tree. legacyDataRoot() is homedir()-based, so without that a `--yes`
+// here would migrate the operator's live DB, federation key and group-files
+// into caseDir -- which after() deletes.
 function runSetup(args = [], extraEnv = {}) {
-  // HOME as well as the XDG roots (testIsolation.js): legacyDataRoot() is
-  // homedir()-based, so a child with the real $HOME would have `--yes`
-  // migrate the operator's live DB, federation key and group-files into
-  // caseDir -- which after() deletes. PORT points at a port nothing listens
-  // on so the running-server probe resolves false.
-  const env = isolatedEnv(caseDir, { LC_ALL: 'C', PORT: '1', ...extraEnv });
-  if (args.includes('--yes')) assertSafeToMigrate(env);
-  return spawnSync(process.execPath, [SETUP_CLI, ...args], { env, encoding: 'utf8', timeout: 60000 });
+  return spawnWizard(caseDir, args, extraEnv);
 }
 
 function marker() {

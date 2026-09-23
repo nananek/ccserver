@@ -143,6 +143,21 @@ npm run setup -- --yes  # 実行
 
 ウィザードが生成する `sandbox.config.json` は、コメント 1 行だけの**最小ファイル**です。`sandbox.config.example.json` をそのままコピーすると `"gpg": true` が含まれるため、ホストの gpg-agent と `~/.gnupg` のサンドボックスへの転送が**黙って有効になってしまう**ためです。全キーの解説が欲しい場合は `--seed-example` を使うか、`server/sandbox.config.example.json` を参照してください。
 
+### 開発・テスト時の注意
+
+`npm test` / `npm run test:e2e` はセットアップウィザードを実際に `--yes` で実行するテストを含みます。ウィザードが探す移行元 (`~/.local/share/ccserver-sandbox`) は `$XDG_DATA_HOME` ではなく **`$HOME` 基準**なので (旧コードがそうハードコードしていたため意図的にそうしています)、`$HOME` を隔離しないままテストを走らせると本物のデータが移動・削除されます。
+
+- リポジトリのテストは `server/testIsolation.js` 経由で `$HOME` と XDG 3 本を一時ディレクトリへ向け、そうなっていなければ**テストを失敗させて中断**します。そのまま実行する分には安全です。
+- ウィザードを手で叩いて動作確認する場合は、必ず `HOME` も一時ディレクトリへ向けてください。
+
+```bash
+T=$(mktemp -d)
+env HOME=$T/home XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data XDG_STATE_HOME=$T/state \
+    node server/cli/setup.js
+```
+
+**本番ホストのチェックアウト上でテストスイートを実行しないでください。** ccserver は systemd 常駐での運用を想定しており、その前提の下ではテスト実行が移行操作と見分けがつきません。
+
 ### 複数インスタンス
 
 同一ホストで 2 つの ccserver を動かす場合、`$XDG_CONFIG_HOME` を共有しているとマーカーも共有されます。環境変数による上書きはレイアウトより優先されるので実害はありませんが、2 つ目のインスタンスを旧解決に固定したい場合は `CCSERVER_LAYOUT=legacy` を指定してください (`CCSERVER_LAYOUT=xdg` で逆も可能です)。

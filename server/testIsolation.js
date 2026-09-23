@@ -24,9 +24,13 @@
 // assertSafeToMigrate() first. The assertion is the point: a future test that
 // forgets HOME fails loudly instead of eating someone's data.
 
+import { spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const SETUP_CLI = join(dirname(fileURLToPath(import.meta.url)), 'cli', 'setup.js');
 
 function isUnder(path, root) {
   const abs = resolve(path);
@@ -93,4 +97,20 @@ export function withIsolatedHome(dir) {
       if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
     }
   };
+}
+
+// The ONE sanctioned way for a test to run the real wizard as a child
+// process. Everything that spawns server/cli/setup.js goes through here, so
+// the isolation check cannot be skipped by forgetting to call it -- which is
+// the whole point. Relying on "remember to isolate HOME" as a convention is
+// what produced the data loss in the first place; this makes the convention
+// mechanical.
+//
+// Checks the RESOLVED values immediately before spawning (not at env
+// construction time), so an `extra` override that reintroduces the real HOME
+// is caught too.
+export function spawnWizard(dir, args = [], extra = {}) {
+  const env = isolatedEnv(dir, { LC_ALL: 'C', PORT: '1', ...extra });
+  assertSafeToMigrate(env);
+  return spawnSync(process.execPath, [SETUP_CLI, ...args], { env, encoding: 'utf8', timeout: 60000 });
 }

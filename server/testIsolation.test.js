@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isolatedEnv, assertSafeToMigrate, withIsolatedHome } from './testIsolation.js';
+import { isolatedEnv, assertSafeToMigrate, withIsolatedHome, spawnWizard } from './testIsolation.js';
 
 const SETUP_CLI = join(import.meta.dirname, 'cli', 'setup.js');
 
@@ -124,5 +124,45 @@ test('withIsolatedHome moves homedir() in-process and restores it', () => {
       restore();
     }
     assert.equal(homedir(), before, 'the real HOME comes back');
+  });
+});
+
+// --- the assertion must actually fire (anti-vacuity) ------------------------
+// A guard nobody has watched fail is a guard you do not have. These pin that
+// the un-isolated shapes are REFUSED, so the protection cannot quietly rot
+// into a no-op the next time someone edits the helpers.
+
+test('★ spawnWizard aborts instead of running when HOME is not isolated', () => {
+  withTmp((dir) => {
+    // The exact mistake: caller hands back the real HOME through `extra`.
+    assert.throws(
+      () => spawnWizard(dir, ['--yes'], { HOME: homedir() }),
+      /assertSafeToMigrate: HOME=.*is outside/,
+      'an un-isolated HOME must abort the test, not silently migrate real data',
+    );
+  });
+});
+
+test('★ spawnWizard aborts when any single XDG root escapes the temp tree', () => {
+  withTmp((dir) => {
+    for (const key of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) {
+      assert.throws(
+        () => spawnWizard(dir, ['--yes'], { [key]: join(homedir(), '.config') }),
+        new RegExp(`assertSafeToMigrate: ${key}=.*is outside`),
+        `${key} escaping the temp tree must abort`,
+      );
+    }
+  });
+});
+
+test('spawnWizard refuses a working directory outside the temp tree outright', () => {
+  assert.throws(() => spawnWizard(homedir(), ['--yes']), /not under/);
+});
+
+test('spawnWizard runs normally once everything is isolated', () => {
+  withTmp((dir) => {
+    const res = spawnWizard(dir, []);
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /ドライラン/);
   });
 });
