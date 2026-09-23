@@ -1,9 +1,9 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyGhUsage, formatGhUsageReport, recordGhUsage, resetGhUsage } from './ghUsageRecording.js';
+import { classifyGhUsage, formatGhUsageReport, recordGhUsage, resetGhUsage, resetTargetStatus } from './ghUsageRecording.js';
 
 let dir;
 let oldEnabled;
@@ -193,4 +193,69 @@ test('the report groups rows under one header per client, in stable key order', 
     '  target=issue operation=create result=success count=3',
     '  target=pr operation=edit result=success count=2',
   ]);
+});
+
+// An obstruction planted at the lock or tmp path used to stop recording
+// permanently AND silently: unlink(2) cannot remove a directory, so the
+// stale-lock recovery failed, and warnStaleLock only fires on success.
+for (const kind of ['lock', 'tmp']) {
+  test(`a directory planted at the ${kind} path cannot silence recording`, () => {
+    oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+    oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+    dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+    const file = join(dir, 'aggregate.json');
+    const planted = kind === 'lock' ? `${file}.lock` : `${file}.${process.pid}.tmp`;
+    mkdirSync(planted, { recursive: true });
+    // Older than LOCK_STALE_MS, so the mtime check alone would call it stale
+    // and then fail to unlink it.
+    const old = new Date(Date.now() - 600_000);
+    utimesSync(planted, old, old);
+
+    process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+    process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+    assert.equal(recordGhUsage({ client: 'codex', target: 'pr', operation: 'read', result: 'success' }), true);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).counters['codex\tpr\tread\tsuccess'], 1);
+    assert.equal(existsSync(planted), false, 'the obstruction must be cleared, not worked around');
+  });
+}
+
+test('an oversized aggregate is ignored rather than read into memory', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const file = join(dir, 'aggregate.json');
+  writeFileSync(file, `{"version":1,"startedOn":"2026-01-01","counters":{}}${' '.repeat(1024 * 1024 + 1)}`);
+  assert.doesNotMatch(formatGhUsageReport(file), /count=/);
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+  assert.equal(recordGhUsage({ client: 'codex', target: 'pr', operation: 'read', result: 'success' }), true);
+  const state = JSON.parse(readFileSync(file, 'utf8'));
+  assert.deepEqual(state.counters, { 'codex\tpr\tread\tsuccess': 1 }, 'the oversized file is replaced, not appended to');
+});
+
+test('reset refuses anything that is not an aggregate unless forced', () => {
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const victim = join(dir, 'victim.txt');
+  writeFileSync(victim, 'IMPORTANT USER DATA\n');
+  assert.equal(resetTargetStatus(victim), 'not-an-aggregate');
+  assert.equal(resetGhUsage(victim), false);
+  assert.equal(readFileSync(victim, 'utf8'), 'IMPORTANT USER DATA\n', 'reset must not clobber an unrelated file');
+  // --force exists for an aggregate too corrupt to recognise, which is
+  // exactly what reset is for.
+  assert.equal(resetGhUsage(victim, { force: true }), true);
+  assert.deepEqual(JSON.parse(readFileSync(victim, 'utf8')).counters, {});
+
+  const asDir = join(dir, 'a-directory');
+  mkdirSync(asDir);
+  assert.equal(resetTargetStatus(asDir), 'not-a-regular-file');
+  assert.equal(resetGhUsage(asDir, { force: true }), false, 'not even --force may write over a directory');
+  assert.equal(lstatSync(asDir).isDirectory(), true);
+
+  const link = join(dir, 'link.json');
+  symlinkSync(victim, link);
+  assert.equal(resetTargetStatus(link), 'not-a-regular-file', 'reset must not follow a symlink');
+
+  const fresh = join(dir, 'fresh.json');
+  assert.equal(resetTargetStatus(fresh), 'ok');
+  assert.equal(resetGhUsage(fresh), true);
 });

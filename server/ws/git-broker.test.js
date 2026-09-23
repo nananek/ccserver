@@ -13,9 +13,9 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, symlinkSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, statSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startGitBroker, ensureHostRuntimeDir } from './git-broker.js';
@@ -257,6 +257,44 @@ test('gh usage recording: a gh spawn failure is broker-unavailable, not a denial
   const counters = JSON.parse(readFileSync(file, 'utf8')).counters;
   assert.equal(counters['codex\tpr\tread\tbroker-unavailable'], 1);
   assert.equal(Object.keys(counters).some((k) => k.includes('broker-denied')), false, `non-denial recorded as a denial: ${JSON.stringify(counters)}`);
+});
+
+test('gh usage recording: a FIFO aggregate cannot wedge the broker past SIGTERM', async () => {
+  const file = join(root, 'usage-fifo.json');
+  if (spawnSync('mkfifo', [file]).status !== 0) return; // POSIX-only; skip elsewhere
+  // readFileSync on a FIFO blocks until a writer appears. That froze the
+  // broker's event loop, so it answered nothing further AND could not run its
+  // own SIGTERM handler -- session teardown left an orphan broker + socket.
+  const gitOnly = join(root, 'git-only-bin');
+  mkdirSync(gitOnly, { recursive: true });
+  try { symlinkSync(execFileSync('which', ['git'], { encoding: 'utf8' }).trim(), join(gitOnly, 'git')); } catch { /* already present */ }
+  const savedPath = process.env.PATH;
+  process.env.PATH = gitOnly;
+  let b;
+  try {
+    b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+    // The gh call itself still answers...
+    const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'exec-failed');
+    // ...and so does the next request on the same broker.
+    const again = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '2'] });
+    assert.equal(again.ok, false);
+  } finally {
+    process.env.PATH = savedPath;
+  }
+  b.proc.kill('SIGTERM');
+  const exited = await Promise.race([
+    new Promise((r) => b.proc.once('exit', () => r(true))),
+    new Promise((r) => setTimeout(() => r(false), 5000)),
+  ]);
+  if (!exited) b.proc.kill('SIGKILL');
+  rmSync(b.dir, { recursive: true, force: true });
+  assert.equal(exited, true, 'the broker ignored SIGTERM and would have been orphaned');
+  // The planted FIFO is replaced by a real aggregate rather than stopping
+  // recording for good.
+  assert.equal(statSync(file).isFile(), true, 'the FIFO should have been replaced by a regular file');
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).counters['codex\tpr\tread\tbroker-unavailable'], 2);
 });
 
 test('startGitBroker returns null for non-git cwd (no dead wrapper)', () => {

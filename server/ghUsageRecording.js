@@ -4,7 +4,16 @@
 // never receives argv, repository names, paths, command output, error text,
 // account identifiers, or an event timestamp.  The on-disk file is a small
 // aggregate, not an event log, and is never sent anywhere by ccserver.
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+//
+// Scope of the hardening below: it keeps a hostile *file* from harming the
+// broker or the operator -- no blocking reads, no crash, no unbounded growth,
+// no escape sequences or planted text reaching a report, no lock or tmp path
+// that can silence recording.  It is NOT integrity protection: the aggregate
+// is unauthenticated, so anyone who can write it can forge counts within the
+// fixed categories.  Keeping the file where sessions cannot write it is the
+// only thing that makes the numbers trustworthy (see docs-site
+// sandbox/configuration.md).
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const VERSION = 1;
@@ -15,6 +24,9 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // A lock older than this is considered abandoned (crashed writer) or planted
 // to suppress recording, and is broken on the next attempt (see tryLock).
 const LOCK_STALE_MS = 30_000;
+// The aggregate is bounded by construction (a few thousand fixed-category
+// rows at most), so anything larger is corrupt or planted and is not read.
+const MAX_AGGREGATE_BYTES = 1024 * 1024;
 const CLIENTS = new Set(['claude', 'codex', 'opencode', 'copilot', 'commandcode', 'shell']);
 const TARGETS = new Set(['issue', 'pr', 'repository', 'workflow', 'release']);
 const OPERATIONS = new Set(['read', 'create', 'edit', 'close', 'comment', 'workflow', 'release']);
@@ -65,9 +77,34 @@ function validRow(key, count) {
     && Number.isSafeInteger(count) && count > 0;
 }
 
-function readState(path) {
+// Open `path` only if it is a regular file, and never block doing so.
+// readFileSync assumed a regular file: on a FIFO planted at the aggregate
+// path, read(2) blocked until a writer showed up, freezing the broker's event
+// loop so completely that its SIGTERM handler could not run -- session
+// teardown then left an orphan broker and socket behind, and every later gh
+// call in that session hung. O_NONBLOCK makes open(2) return immediately for
+// a FIFO, and fstat on the descriptor we already hold (not a separate lstat,
+// which a symlink swap could race) rules out FIFOs, devices and directories.
+function openRegularFile(path) {
+  let fd;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK); }
+  catch { return null; }
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    const st = fstatSync(fd);
+    if (st.isFile() && st.size <= MAX_AGGREGATE_BYTES) return fd;
+  } catch { /* fall through to close */ }
+  try { closeSync(fd); } catch {}
+  return null;
+}
+
+function readState(path) {
+  const fd = openRegularFile(path);
+  // Not a readable regular file: start fresh rather than read it. The next
+  // writeState renames over whatever is there, so a planted FIFO/symlink is
+  // replaced by a real aggregate instead of stopping recording for good.
+  if (fd === null) return emptyState();
+  try {
+    const parsed = JSON.parse(readFileSync(fd, 'utf8'));
     // `typeof [] === 'object'` too, and JSON.stringify drops the string
     // properties an increment adds to an array -- so a one-byte tamper
     // ("counters": []) would silently swallow every future increment while
@@ -88,6 +125,7 @@ function readState(path) {
       return { version: VERSION, startedOn, counters };
     }
   } catch { /* missing/corrupt data starts fresh; never expose its contents */ }
+  finally { try { closeSync(fd); } catch {} }
   return emptyState();
 }
 
@@ -103,25 +141,52 @@ function warnStaleLock(lock) {
   warnedStaleLock = true;
   console.warn(`[gh-usage] removed a stale aggregate lock (${lock}); a previous writer may have crashed or the aggregate may be under attack`);
 }
+// Recovery itself can fail (an unwritable directory, or an obstruction we
+// could not clear). Say so once: silence here is indistinguishable from
+// "nothing to record", which is what made a planted lock such an effective
+// way to stop recording unnoticed.
+let warnedLockStuck = false;
+function warnLockStuck(lock) {
+  if (warnedLockStuck) return;
+  warnedLockStuck = true;
+  console.warn(`[gh-usage] cannot acquire or clear the aggregate lock (${lock}); recording is stopped until it is removed by hand`);
+}
+
+function createLock(lock) {
+  try {
+    const fd = openSync(lock, 'wx', 0o600);
+    try { closeSync(fd); } catch {}
+    return true;
+  } catch { return false; }
+}
+
+// unlink(2) cannot remove a directory (EISDIR), so a directory planted at the
+// lock or tmp path defeated stale-lock recovery outright and silenced
+// recording permanently -- precisely the attack the mtime check exists to
+// stop. Fall back to rmSync for that case. The path is always our own
+// `<aggregate>.lock` / `.<pid>.tmp` sibling, never operator data, and unlink
+// already removes a symlink without following it.
+function removeObstruction(p) {
+  try { unlinkSync(p); return true; }
+  catch (e) { if (e.code === 'ENOENT') return true; }
+  try { rmSync(p, { recursive: true, force: true }); return true; }
+  catch { return false; }
+}
 
 function tryLock(lock) {
-  try {
-    const fd = openSync(lock, 'wx', 0o600);
-    try { closeSync(fd); } catch {}
-    return true;
-  } catch (e) {
-    if (e.code !== 'EEXIST') return false;
-  }
-  try {
-    if (Date.now() - statSync(lock).mtimeMs < LOCK_STALE_MS) return false;
-    unlinkSync(lock);
-    const fd = openSync(lock, 'wx', 0o600);
-    try { closeSync(fd); } catch {}
-    warnStaleLock(lock);
-    return true;
-  } catch {
+  if (createLock(lock)) return true;
+  let st;
+  try { st = lstatSync(lock); }
+  catch { return createLock(lock); } // it vanished, or never existed (not EEXIST)
+  // A lock that is not a regular file was never written by us, so it is an
+  // obstruction whatever its mtime says.
+  if (st.isFile() && Date.now() - st.mtimeMs < LOCK_STALE_MS) return false;
+  if (!removeObstruction(lock) || !createLock(lock)) {
+    warnLockStuck(lock);
     return false;
   }
+  warnStaleLock(lock);
+  return true;
 }
 
 function withLock(path, fn) {
@@ -147,14 +212,16 @@ function writeState(path, state) {
   try {
     // 'wx' (O_CREAT|O_EXCL) never opens an existing path, so a symlink
     // planted at the tmp name cannot redirect this write to another file
-    // (the previous plain writeFileSync followed such a symlink). Remove a
-    // leftover tmp from a crashed writer first: it is ours by pid, and
-    // leaving it would block this process's recording forever.
-    try { unlinkSync(tmp); } catch {}
+    // (the previous plain writeFileSync followed such a symlink)...
+    // ...and clear a leftover tmp from a crashed writer first: it is ours by
+    // pid, and leaving it would block this process's recording forever. A
+    // planted *directory* here could not be unlinked at all, which is why
+    // this goes through removeObstruction rather than a bare unlink.
+    removeObstruction(tmp);
     writeFileSync(tmp, `${JSON.stringify(state)}\n`, { flag: 'wx', mode: 0o600 });
     renameSync(tmp, path);
   } catch (e) {
-    try { unlinkSync(tmp); } catch {}
+    removeObstruction(tmp);
     throw e;
   }
 }
@@ -175,7 +242,35 @@ export function recordGhUsage({ client, target, operation, result, denial } = {}
   });
 }
 
-export function resetGhUsage(path) {
+// What `reset` may replace. It creates or overwrites its target outright, so
+// a mistyped --file used to silently turn an operator's unrelated file into
+// aggregate JSON. Absent or an existing aggregate is always fine; a
+// directory, FIFO, device or symlink is never written; and any other regular
+// file needs --force, which also covers the one legitimate case this cannot
+// recognise -- an aggregate too corrupt to parse, i.e. exactly what `reset`
+// exists to repair. lstat, not stat: a symlink is not something to follow and
+// clobber.
+export function resetTargetStatus(path) {
+  let st;
+  try { st = lstatSync(path); }
+  catch (e) { return e.code === 'ENOENT' ? 'ok' : 'unreadable'; }
+  if (!st.isFile()) return 'not-a-regular-file';
+  const fd = openRegularFile(path);
+  if (fd === null) return 'unreadable';
+  try {
+    const parsed = JSON.parse(readFileSync(fd, 'utf8'));
+    if (parsed && parsed.version === VERSION && isPlainObject(parsed.counters)) return 'ok';
+  } catch { /* unparseable: not recognisably ours */ }
+  finally { try { closeSync(fd); } catch {} }
+  return 'not-an-aggregate';
+}
+
+// recordGhUsage deliberately runs no such check: its rename replaces a
+// planted FIFO/symlink and restores recording, whereas refusing would let one
+// stop recording for good.
+export function resetGhUsage(path, { force = false } = {}) {
+  const status = resetTargetStatus(path);
+  if (status !== 'ok' && !(force && status === 'not-an-aggregate')) return false;
   return withLock(path, () => {
     writeState(path, emptyState());
     return true;
