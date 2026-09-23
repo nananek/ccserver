@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startGitBroker, ensureHostRuntimeDir } from './git-broker.js';
@@ -66,6 +66,7 @@ before(() => {
   writeFileSync(fakeGh, [
     '#!/usr/bin/env bash',
     'if [ "$1" = "auth" ] && [ "$2" = "token" ]; then echo "fake-token-123"; exit 0; fi',
+    'case " $* " in *" __exit7__ "*) echo "fake-gh-boom" >&2; exit 7;; esac',
     'echo "GH_ARGS:$*"',
     'exit 0',
     '',
@@ -220,8 +221,45 @@ test('gh-exec: malformed argv fails closed', async () => {
   assert.equal(r.reason, 'bad-request');
 });
 
-test('startGitBroker returns null for non-git cwd (no dead wrapper)', () => {
-  const dir = join(root, 'not-a-repo2');
+test('gh usage recording: a gh CLI non-zero exit is cli-error, not broker-denied', async () => {
+  const file = join(root, 'usage-cli-error.json');
+  const b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+  try {
+    const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1', '--json', '__exit7__'] });
+    assert.equal(r.ok, true);
+    assert.equal(r.exitCode, 7);
+  } finally {
+    if (b) { b.proc.kill('SIGTERM'); await new Promise((r) => setTimeout(r, 200)); rmSync(b.dir, { recursive: true, force: true }); }
+  }
+  const counters = JSON.parse(readFileSync(file, 'utf8')).counters;
+  assert.equal(counters['codex\tpr\tread\tcli-error'], 1);
+  assert.equal(Object.keys(counters).some((k) => k.includes('broker-denied')), false, `non-denial recorded as a denial: ${JSON.stringify(counters)}`);
+});
+
+test('gh usage recording: a gh spawn failure is broker-unavailable, not a denial', async () => {
+  const file = join(root, 'usage-execless.json');
+  // PATH with git (the broker resolves the cwd origin before exec) but no gh.
+  const gitOnly = join(root, 'git-only-bin');
+  mkdirSync(gitOnly, { recursive: true });
+  try { symlinkSync(execFileSync('which', ['git'], { encoding: 'utf8' }).trim(), join(gitOnly, 'git')); } catch { /* already present */ }
+  const savedPath = process.env.PATH;
+  process.env.PATH = gitOnly;
+  let b;
+  try {
+    b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+    const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'exec-failed');
+  } finally {
+    process.env.PATH = savedPath;
+    if (b) { b.proc.kill('SIGTERM'); await new Promise((r) => setTimeout(r, 200)); rmSync(b.dir, { recursive: true, force: true }); }
+  }
+  const counters = JSON.parse(readFileSync(file, 'utf8')).counters;
+  assert.equal(counters['codex\tpr\tread\tbroker-unavailable'], 1);
+  assert.equal(Object.keys(counters).some((k) => k.includes('broker-denied')), false, `non-denial recorded as a denial: ${JSON.stringify(counters)}`);
+});
+
+test('startGitBroker returns null for non-git cwd (no dead wrapper)', () => {  const dir = join(root, 'not-a-repo2');
   mkdirSync(dir, { recursive: true });
   const b = startGitBroker({ cwd: dir });
   assert.equal(b, null);

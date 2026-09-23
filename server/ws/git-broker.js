@@ -313,7 +313,16 @@ async function handleGhExec(req, conn, ctx) {
   process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> allow (repo(s) ${repos.join(', ')})\n`);
   const stdinBuf = req.stdin ? Buffer.from(req.stdin, 'base64') : null;
   const result = await execGh(req.argv, ctx.cwd, stdinBuf);
-  record(result.exitCode === 0 ? 'success' : result.reason === 'timeout' ? 'timeout' : 'cli-error', result.ok ? null : result.reason);
+  // execGh failures are broker-side results, not policy denials: `timeout`
+  // keeps its own result category, and a spawn failure (gh missing or not
+  // runnable on the host) is broker-unavailable. cli-error is reserved for a
+  // gh process that actually ran and exited non-zero. Passing these reasons
+  // as `denial` would file them under broker-denied:*, which is only for the
+  // fixed allow-list/guard refusals above.
+  const outcome = result.ok
+    ? (result.exitCode === 0 ? 'success' : 'cli-error')
+    : (result.reason === 'timeout' ? 'timeout' : 'broker-unavailable');
+  record(outcome);
   conn.end(`${JSON.stringify(result)}\n`);
 }
 
