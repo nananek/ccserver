@@ -543,9 +543,12 @@ export default function App() {
     // スキップの対象外にする (スキップ設定のまま✕を押すと、切断のつもりが
     // ピア側セッションの破棄になってしまう)。スキップはローカルタブの
     // 従来挙動にだけ効かせる。
+    // リモートグループタブも同じ: ✕はピア側のコンボを破棄する破壊操作で、
+    // このダイアログには「次回以降確認しない」自体を出していない (下記) ため、
+    // 他所で保存されたスキップ設定をここで暗黙に適用しない。
     const tab = tabs.find((t) => t.id === tabId);
     if (tab?.type === 'group') {
-      if (skipCloseConfirm) {
+      if (skipCloseConfirm && !tab.remote) {
         // サーバ側のグループ破棄は完了させてからタブを閉じる: 先にタブだけ
         // 閉じて DELETE が後追いで走ると、その間に Groups リストから再
         // オープンしたときにサーバ側 teardown と競合する (attach→404→
@@ -1381,7 +1384,9 @@ export default function App() {
             <div className="resume-actions">
               {canTerminateCloseConfirm ? (
                 <button className="btn btn-danger btn-left" onClick={terminateSessionAndCloseTab} disabled={isTerminatingSession}>
-                  {isTerminatingSession ? '終了中...' : 'セッションを終了'}
+                  {isTerminatingSession
+                    ? (closeConfirmIsGroup ? '破棄中...' : '終了中...')
+                    : (closeConfirmIsGroup ? 'グループを破棄' : 'セッションを終了')}
                 </button>
               ) : null}
               <button className="btn btn-secondary" onClick={() => setCloseConfirm(null)} disabled={isTerminatingSession}>

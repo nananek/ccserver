@@ -479,10 +479,54 @@ test('remote combo lower-section ✕ destroys the group via federation', async (
   const modal = page.locator('.resume-overlay', { hasText: 'グループを破棄しますか?' });
   await expect(modal).toBeVisible();
   await expect(modal.locator('.close-confirm-target')).toHaveText('⇄ peerhost: /home/peer/combo');
-  await modal.getByRole('button', { name: 'セッションを終了', exact: true }).click();
+  await modal.getByRole('button', { name: 'グループを破棄', exact: true }).click();
   await expect(modal).toBeHidden();
   await expect.poll(() => deletedGroups).toEqual([groupId]);
   await expect(remoteGroupItems).toHaveCount(0);
+});
+
+test('remote combo tab close ignores "次回以降確認しない" and still confirms', async ({ page }) => {
+  // リモートグループタブの ✕ はピア側のコンボを破棄する破壊操作で、この
+  // ダイアログには「次回以降確認しない」自体を出していない。他所で保存された
+  // スキップ設定を暗黙に適用して無確認で破棄してはならない。
+  await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+  const instanceId = 'inst-remote-g4';
+  const groupId = 'grp-remote-4';
+  const members = [
+    { sessionId: 'rg-or', role: 'orchestrator', cwd: '/home/peer/combo', app: 'claude' },
+    { sessionId: 'rg-wa', role: 'workerA', cwd: '/home/peer/combo', app: 'claude' },
+  ];
+  let groups = [{ groupId, cwd: '/home/peer/combo', memberCount: 2, liveCount: 2 }];
+  const deletedGroups = [];
+  await page.route('**/api/federation/instances', (route) => route.fulfill({
+    json: { instances: [{ id: instanceId, status: 'active', label: 'peerhost', fingerprint: 'aa:bb:cc:dd:ee' }] },
+  }));
+  await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => route.fulfill({ json: { sessions: [] } }));
+  await page.route(`**/api/federation/instances/${instanceId}/groups`, (route) => route.fulfill({ json: { groups } }));
+  await page.route(`**/api/federation/instances/${instanceId}/groups/${groupId}/members`, (route) => route.fulfill({ json: { members } }));
+  await page.route(`**/api/federation/instances/${instanceId}/groups/${groupId}`, (route) => {
+    if (route.request().method() !== 'DELETE') return route.continue();
+    deletedGroups.push(groupId);
+    groups = [];
+    return route.fulfill({ json: { ok: true } });
+  });
+  await gotoApp(page);
+
+  // サイドバーのリモートグループ行からグループタブを開く。
+  const remoteGroupItems = leftSidebar(page).locator('[data-section="unopened-remote-groups"] .session-menu-item');
+  await expect(remoteGroupItems).toHaveCount(1);
+  await remoteGroupItems.first().locator('.session-menu-select').click();
+  await expect(openedItems(page)).toHaveCount(1);
+  await expect(openedItems(page).first()).toHaveAttribute('data-tab-type', 'group');
+
+  // スキップ設定済みでもモーダルが出て、チェックボックスは出さない。
+  await openedItems(page).first().locator('.session-menu-close').click();
+  const modal = page.locator('.resume-overlay', { hasText: 'グループを閉じますか?' });
+  await expect(modal).toBeVisible();
+  await expect(modal.locator('.close-confirm-checkbox')).toHaveCount(0);
+  await modal.getByRole('button', { name: '閉じる', exact: true }).click();
+  await expect(modal).toBeHidden();
+  await expect.poll(() => deletedGroups).toEqual([groupId]);
 });
 
 test('lower-section ✕ uses the in-app confirm modal and shares "次回以降確認しない"', async ({ page }) => {
