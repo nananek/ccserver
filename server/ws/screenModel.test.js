@@ -342,20 +342,101 @@ test('a realistic SGR run is not mistaken for an over-long one', () => {
   assert.deepEqual(s.screenRows(), ['LONG']);
 });
 
-// --- differential fuzz ---------------------------------------------------
+// --- self-consistency fuzz -----------------------------------------------
 //
 // Both parser regressions this file guards against were chunk-boundary bugs:
 // state kept between feed() calls (a pending ESC, a half-consumed sequence)
 // that the split-up path handled differently from the contiguous one. Hand
-// written cases keep finding yesterday's boundary, so the oracle here is a
-// property instead: HOW a byte string is split must never change what it
-// draws.
+// written cases keep finding yesterday's boundary, so these two catch the
+// shape of the bug instead of its address:
 //
-// That needs no reference implementation to drift against, and it covers what
-// a branch-vs-master comparison covers, on all four observables the rest of
-// the server actually reads: screenRows() (read_output / the marker search),
-// version() (screenIdleMs), takeDirtyRowCount() (the busy/idle rate) and
-// altScreenActive().
+//   - splitting a byte string must never change what it draws, on all four
+//     observables the rest of the server reads -- screenRows() (read_output
+//     and the marker search), version() (screenIdleMs), takeDirtyRowCount()
+//     (the busy/idle rate) and altScreenActive();
+//   - a stream of complete escapes must draw nothing at all.
+//
+// WHAT THEY CANNOT CATCH. Both compare the parser against ITSELF, so a parser
+// that is consistently wrong passes both. This is not theoretical: a one-line
+// mutant that ignores CUU (`ESC[nA`) passes all of these AND every hand
+// written case in this file, while drawing the wrong screen -- `AAAA\r\nBBBB`
+// then `ESC[1A\rX` gives ["AAAA","XBBB"] where it should give ["XAAA","BBBB"]
+// (measured in review). A comparison against a reference implementation would
+// have caught it; self-consistency cannot, and neither can it catch a wrong
+// wrap position, a wrong erase extent, or a sequence nobody put in the
+// corpus.
+//
+// So the semantics are carried by explicit expected-screen tests -- the ones
+// above for CUP / EL / ED / wrapping / scrolling, and the block right below
+// for the cursor moves and the alternate-screen switches that had no coverage
+// until that mutant pointed it out. When a supported sequence is added here,
+// it needs a case there too; the fuzz will not cover for it.
+
+// --- semantics: what each sequence is supposed to draw --------------------
+
+test('CUU / CUD move the write target by whole rows', () => {
+  const s = createScreenModel();
+  s.feed('AAAA\r\nBBBB\r\nCCCC');
+  s.feed('\x1b[2A\rX'); // two rows up, to the start of the line
+  assert.deepEqual(s.screenRows(), ['XAAA', 'BBBB', 'CCCC']);
+  s.feed('\x1b[1B\rY'); // one row back down
+  assert.deepEqual(s.screenRows(), ['XAAA', 'YBBB', 'CCCC']);
+});
+
+test('CUU / CUD default to one row and stop at the top', () => {
+  const s = createScreenModel();
+  s.feed('AAAA\r\nBBBB');
+  s.feed('\x1b[A\rX'); // no parameter means 1
+  assert.deepEqual(s.screenRows(), ['XAAA', 'BBBB']);
+  s.feed('\x1b[9A\rY'); // past the top: clamps to the first row
+  assert.deepEqual(s.screenRows(), ['YAAA', 'BBBB']);
+});
+
+test('CUF / CUB move the write target by columns', () => {
+  const s = createScreenModel();
+  s.feed('ABCDEF');
+  s.feed('\r\x1b[2CX'); // back to column 0, then forward two
+  assert.deepEqual(s.screenRows(), ['ABXDEF']);
+  s.feed('\x1b[2DY'); // two back from just after the X
+  assert.deepEqual(s.screenRows(), ['AYXDEF']);
+});
+
+test('CUB stops at the left margin, CUF at the right', () => {
+  const s = createScreenModel({ cols: 6 });
+  s.feed('ABCDEF');
+  s.feed('\r\x1b[9DX'); // already at column 0: cannot go further left
+  assert.deepEqual(s.screenRows(), ['XBCDEF']);
+  s.feed('\r\x1b[99CY'); // past the right edge: clamps to the last column
+  assert.deepEqual(s.screenRows(), ['XBCDEY']);
+});
+
+test('alternate screen: ?47 h/l toggles the flag like ?1049 does', () => {
+  // mcpTools reads altScreenActive() for read_output's screenAlt, and the
+  // module claims to support both spellings -- but only ?1049 had a test, so
+  // a mutant that dropped ?47 passed everything.
+  const s = createScreenModel();
+  assert.equal(s.altScreenActive(), false);
+  s.feed('\x1b[?47h');
+  assert.equal(s.altScreenActive(), true, '?47h enters the alternate screen');
+  s.feed('\x1b[?47l');
+  assert.equal(s.altScreenActive(), false, '?47l leaves it');
+});
+
+test('alternate screen: switching buffers counts as a visible change', () => {
+  const s = createScreenModel();
+  s.feed('main screen');
+  s.takeDirtyRowCount();
+  const before = s.version();
+  s.feed('\x1b[?47h');
+  assert.ok(s.version() > before, 'the switch bumps the change counter');
+  assert.equal(s.takeDirtyRowCount(), 1, 'every row that was visible is dirty');
+});
+
+test('other private modes do not touch the alternate-screen flag', () => {
+  const s = createScreenModel();
+  s.feed('\x1b[?25l\x1b[?25h\x1b[?2004h\x1b[?1000h');
+  assert.equal(s.altScreenActive(), false);
+});
 
 // xorshift32 -- seeded so a failure is reproducible from the printed seed.
 function rng(seed) {
@@ -375,7 +456,7 @@ const FUZZ_PIECES = [
   '\r', '\n', '\r\n', '\t', '\x08', '\x07',
   '\x1b[2K', '\x1b[K', '\x1b[J', '\x1b[2J', '\x1b[1J', '\x1b[0J',
   '\x1b[H', '\x1b[3;7H', '\x1b[5A', '\x1b[4B', '\x1b[2C', '\x1b[6D', '\x1b[9G',
-  '\x1b[?1049h', '\x1b[?1049l', '\x1b[?25l', '\x1b[?25h',
+  '\x1b[?1049h', '\x1b[?1049l', '\x1b[?47h', '\x1b[?47l', '\x1b[?25l', '\x1b[?25h',
   '\x1b[0m', '\x1b[38;2;255;128;0;48;2;0;0;0;1;3;4m',
   '\x1b]0;a title\x07', '\x1b]8;;https://example.com\x1b\\', '\x1b]0;unterminated',
   '\x1b(B', '\x1b=', '\x1b>', '\x1b', '\x1b[',
