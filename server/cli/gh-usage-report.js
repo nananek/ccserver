@@ -3,7 +3,14 @@
 // here uploads, opens a browser, or invokes gh.
 import { chmodSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { defaultRecordingPath, formatGhUsageReport, resetGhUsage } from '../ghUsageRecording.js';
+import { defaultRecordingPath, formatGhUsageReport, resetGhUsage, resetTargetStatus } from '../ghUsageRecording.js';
+// pathPolicy is dependency-free (node builtins only), so the CLI can reuse
+// the server's own containment rule without pulling in ws/sandbox.js.
+import { isContained, normalizeBrowseRoots } from '../pathPolicy.js';
+
+// Paths come from --file and from the config, and end up on a terminal. Quote
+// them so an embedded escape sequence cannot repaint the operator's screen.
+function q(path) { return JSON.stringify(path); }
 
 // import.meta.dirname, not new URL(import.meta.url).pathname: the latter is
 // percent-encoded, so an install path containing a space or '#' resolved to a
@@ -23,12 +30,12 @@ function readConfig(path) {
   try { text = readFileSync(path, 'utf8'); }
   catch (e) {
     if (e.code === 'ENOENT') return {};
-    return die(`Cannot read ${path}: ${e.message}. Fix the file, then retry.`);
+    return die(`Cannot read ${q(path)}: ${e.message}. Fix the file, then retry.`);
   }
   let value;
   try { value = JSON.parse(text); }
-  catch (e) { return die(`Cannot parse ${path}: ${e.message}. Fix the file, then retry (refusing to overwrite it with defaults).`); }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return die(`${path} is not a JSON object; refusing to overwrite it.`);
+  catch (e) { return die(`Cannot parse ${q(path)}: ${e.message}. Fix the file, then retry (refusing to overwrite it with defaults).`); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return die(`${q(path)} is not a JSON object; refusing to overwrite it.`);
   return value;
 }
 // Write via a temp file + rename, like ghUsageRecording's writeState: a
@@ -46,7 +53,7 @@ function writeConfig(path, cfg) {
     renameSync(tmp, target);
   } catch (e) {
     try { unlinkSync(tmp); } catch { /* best effort */ }
-    return die(`Failed to update ${target}: ${e.message}`);
+    return die(`Failed to update ${q(target)}: ${e.message}`);
   }
   return target;
 }
@@ -55,7 +62,7 @@ function writeConfig(path, cfg) {
 // silently enabled recording with the default path).
 function fail(message) {
   if (message) console.error(message);
-  console.error('Usage: gh-usage-report.js <enable|disable|show|reset> [--file PATH] [--no-period]');
+  console.error('Usage: gh-usage-report.js <enable|disable|show|reset> [--file PATH] [--no-period] [--force]');
   process.exit(2);
 }
 
@@ -63,6 +70,7 @@ const argv = process.argv.slice(2);
 let command = null;
 let fileArg = null;
 let noPeriod = false;
+let force = false;
 for (let i = 0; i < argv.length; i++) {
   const arg = argv[i];
   if (arg === '--file') {
@@ -73,6 +81,8 @@ for (let i = 0; i < argv.length; i++) {
     i++;
   } else if (arg === '--no-period') {
     noPeriod = true;
+  } else if (arg === '--force') {
+    force = true;
   } else if (arg.startsWith('-')) {
     fail(`unknown option: ${arg}`);
   } else if (command === null) {
@@ -84,6 +94,7 @@ for (let i = 0; i < argv.length; i++) {
 if (!command) fail('missing command');
 if (!['enable', 'disable', 'show', 'reset'].includes(command)) fail(`unknown command: ${command}`);
 if (noPeriod && command !== 'show') fail('--no-period is only valid with show');
+if (force && command !== 'reset') fail('--force is only valid with reset');
 
 const cfgPath = configPath();
 const cfg = readConfig(cfgPath);
@@ -93,16 +104,37 @@ const current = cfg.ghUsageRecording && typeof cfg.ghUsageRecording === 'object'
 // silently ignores (a hand-edited relative path, or a relative
 // CCSERVER_SANDBOX_CONFIG feeding defaultRecordingPath).
 const file = resolve(fileArg || (typeof current.file === 'string' && current.file ? current.file : defaultRecordingPath(cfgPath)));
+// `enable` only (never `disable`, which is how an operator recovers): an
+// aggregate inside browseRoots joins index.js's self-containment guard, so
+// the next start would be refused. Say so now instead of letting them find
+// out as a server that will not boot. This check, like the guard itself,
+// only exists when browseRoots is configured -- without it any directory can
+// be a session cwd, which is why the docs ask for a path outside the
+// checkout regardless.
+if (command === 'enable') {
+  const roots = normalizeBrowseRoots(cfg.browseRoots);
+  if (roots.length > 0 && isContained(file, roots)) {
+    die(`Refusing to enable: ${q(file)} is inside browseRoots, so ccserver would refuse to start. Choose a path outside it.`);
+  }
+}
 if (command === 'show') process.stdout.write(formatGhUsageReport(file, { includePeriod: !noPeriod }));
 else if (command === 'reset') {
-  if (!resetGhUsage(file)) { console.error(`Failed to reset local aggregate: ${file}`); process.exit(1); }
-  console.log(`Reset local aggregate: ${file}`);
+  if (!resetGhUsage(file, { force })) {
+    const status = resetTargetStatus(file);
+    const why = {
+      'not-a-regular-file': 'it is a directory, symlink, FIFO or device',
+      'not-an-aggregate': 'it is not a gh usage aggregate -- pass --force to overwrite it anyway',
+      unreadable: 'the path is unusable or could not be read',
+    }[status] || 'the write failed';
+    die(`Refusing to reset ${q(file)}: ${why}.`);
+  }
+  console.log(`Reset local aggregate: ${q(file)}`);
 } else {
   cfg.ghUsageRecording = { enabled: command === 'enable', file };
   const written = writeConfig(cfgPath, cfg);
   // writeConfig always creates a fresh 0600 file, but the open(2) mode is
   // masked by umask -- chmod pins it exactly (sandbox.config.json can carry
   // secrets such as tokens).
-  try { chmodSync(written, 0o600); } catch (e) { console.error(`warning: could not tighten permissions on ${written}: ${e.message}`); }
+  try { chmodSync(written, 0o600); } catch (e) { console.error(`warning: could not tighten permissions on ${q(written)}: ${e.message}`); }
   console.log(`${command === 'enable' ? 'Enabled' : 'Disabled'} local gh usage recording. ${command === 'enable' ? 'Restart new sandbox sessions to apply it.' : ''}`);
 }

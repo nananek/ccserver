@@ -4,7 +4,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -28,9 +28,13 @@ function run(args) {
   // start as a test-runner child with empty stdout instead of executing the
   // CLI. Strip it so the child is a plain CLI invocation.
   delete env.NODE_TEST_CONTEXT;
+  // A timeout, not an unbounded wait: a regression that blocks on the
+  // aggregate (a FIFO once froze readFileSync outright) must fail the test
+  // rather than hang the whole run.
   return spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf8',
     env,
+    timeout: 20_000,
   });
 }
 function writeConfig(obj) { writeFileSync(cfgPath, JSON.stringify(obj)); }
@@ -84,7 +88,7 @@ test('reset on an unusable path exits 1 instead of reporting success', () => {
   writeConfig({ docker: false });
   const res = run(['reset', '--file', join(notADir, 'usage.json')]);
   assert.equal(res.status, 1, `reset should fail: ${res.stdout}`);
-  assert.match(res.stderr, /Failed to reset/);
+  assert.match(res.stderr, /Refusing to reset .*unusable/);
 });
 
 test('an unparseable config is refused, never replaced with defaults', () => {
@@ -107,4 +111,71 @@ test('a relative file in the config is rewritten as absolute', () => {
   const { file } = readConfig().ghUsageRecording;
   assert.equal(isAbsolute(file), true, `enable wrote a relative path: ${file}`);
   assert.equal(file, resolve('usage-relative.json'));
+});
+
+// mkfifo is POSIX-only; the suite already assumes symlinks elsewhere, but
+// skip rather than fail if it is unavailable.
+function mkfifo(path) {
+  try { unlinkSync(path); } catch { /* usually absent */ }
+  return spawnSync('mkfifo', [path]).status === 0;
+}
+
+test('show and reset never block on a FIFO planted at the aggregate path', (t) => {
+  const fifo = join(tmpRoot, 'fifo.json');
+  if (!mkfifo(fifo)) return t.skip('mkfifo unavailable');
+  writeConfig({ docker: false });
+
+  // readFileSync on a FIFO waits for a writer, which froze the CLI (and, in
+  // the broker, the event loop -- SIGTERM could not even be delivered).
+  const show = run(['show', '--file', fifo]);
+  assert.equal(show.signal, null, 'show hung on the FIFO');
+  assert.equal(show.status, 0, show.stderr);
+  assert.doesNotMatch(show.stdout, /count=/);
+
+  const reset = run(['reset', '--file', fifo]);
+  assert.equal(reset.signal, null, 'reset hung on the FIFO');
+  assert.equal(reset.status, 1, `reset should refuse a FIFO: ${reset.stdout}`);
+  assert.match(reset.stderr, /Refusing to reset/);
+});
+
+test('reset refuses an unrelated file, and --force is what overwrites it', () => {
+  const victim = join(tmpRoot, 'victim.txt');
+  writeFileSync(victim, 'IMPORTANT USER DATA\n');
+  writeConfig({ docker: false });
+
+  const refused = run(['reset', '--file', victim]);
+  assert.equal(refused.status, 1, `reset clobbered an unrelated file: ${refused.stdout}`);
+  assert.match(refused.stderr, /not a gh usage aggregate/);
+  assert.equal(readFileSync(victim, 'utf8'), 'IMPORTANT USER DATA\n');
+
+  const forced = run(['reset', '--force', '--file', victim]);
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(victim, 'utf8')).counters, {});
+
+  assert.equal(run(['show', '--force']).status, 2, '--force is only valid with reset');
+});
+
+test('a path is quoted on its way to the terminal', () => {
+  const tricky = join(tmpRoot, 'esc-\u001b[31mRED.json');
+  writeFileSync(tricky, JSON.stringify({ version: 1, startedOn: '2026-01-01', counters: {} }));
+  writeConfig({ docker: false });
+  const res = run(['reset', '--file', tricky]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.doesNotMatch(res.stdout, /\u001b\[31m/, 'a raw escape sequence reached the terminal');
+  assert.match(res.stdout, /\\u001b\[31mRED/);
+});
+
+test('enable refuses a path inside browseRoots instead of bricking the next boot', () => {
+  const inside = join(tmpRoot, 'roots', 'project', 'agg.json');
+  writeConfig({ browseRoots: [join(tmpRoot, 'roots')], forceSandbox: true });
+  const res = run(['enable', '--file', inside]);
+  assert.equal(res.status, 1, `enable should refuse: ${res.stdout}`);
+  assert.match(res.stderr, /inside browseRoots/);
+  assert.deepEqual(readConfig(), { browseRoots: [join(tmpRoot, 'roots')], forceSandbox: true }, 'the config must be untouched');
+
+  // Outside is fine, and disable is never blocked (it is how you recover).
+  const outside = join(tmpRoot, 'outside', 'agg.json');
+  assert.equal(run(['enable', '--file', outside]).status, 0);
+  assert.equal(readConfig().ghUsageRecording.file, outside);
+  assert.equal(run(['disable']).status, 0);
 });
