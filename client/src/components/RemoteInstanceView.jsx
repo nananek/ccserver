@@ -14,12 +14,10 @@ import { useVisiblePolling } from '../hooks/useVisiblePolling.js';
 // "is this remote?" through DirectoryBrowser's every code path for Phase 1's
 // sake.
 //
-// Remote GROUP members open as ordinary individual remote terminal tabs
-// (same relay as a standalone session -- a group member IS just a session
-// with groupId/groupRole set, see server/ws/sessionManager.js), not as a
-// combined 3-pane GroupTabView: the live hand-off/turn-taking machinery
-// GroupTabView drives is entirely local to the peer's own MCP brokers, so
-// there is nothing for a second, separate combined view to coordinate here.
+// Remote GROUPS open as a group tab (GroupTabView with `remote`), exactly
+// like the session sidebar's remote group rows: App.jsx's
+// handleOpenRemoteGroup fetches the members over the federation relay and
+// each member terminal attaches through /ws/remote-terminal.
 
 const INSTANCES_POLL_MS = 4000;
 const CONTENT_POLL_MS = 4000;
@@ -35,13 +33,11 @@ function shortFingerprint(fp) {
   return parts.length > 4 ? `${parts.slice(0, 4).join(':')}…` : fp;
 }
 
-export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
+export default function RemoteInstanceView({ onOpenRemoteTerminal, onOpenRemoteGroup, visible }) {
   const [instances, setInstances] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [groups, setGroups] = useState([]);
-  const [expandedGroupId, setExpandedGroupId] = useState(null);
-  const [groupMembers, setGroupMembers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [launchOpen, setLaunchOpen] = useState(false);
@@ -100,26 +96,9 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
   useEffect(() => {
     setSessions([]);
     setGroups([]);
-    setExpandedGroupId(null);
   }, [selectedId]);
 
   useVisiblePolling(refreshContent, CONTENT_POLL_MS, visible && !!selectedId);
-
-  const toggleGroup = useCallback(async (groupId) => {
-    if (expandedGroupId === groupId) {
-      setExpandedGroupId(null);
-      setGroupMembers([]);
-      return;
-    }
-    setExpandedGroupId(groupId);
-    setGroupMembers([]);
-    try {
-      const res = await authFetch(`/api/federation/instances/${encodeURIComponent(selectedId)}/groups/${encodeURIComponent(groupId)}/members`);
-      if (res.ok) setGroupMembers((await res.json()).members || []);
-    } catch {
-      // leave the member list empty on failure
-    }
-  }, [selectedId, expandedGroupId]);
 
   const instance = instances.find((i) => i.id === selectedId) || null;
 
@@ -131,16 +110,6 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
       app: session.app || 'claude',
       sandbox: !!session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
-    });
-  }, [instance, onOpenRemoteTerminal]);
-
-  const openMemberTab = useCallback((member) => {
-    if (!instance || !member.sessionId || member.exited) return;
-    onOpenRemoteTerminal(instance, member.cwd, {
-      attachSessionId: member.sessionId,
-      app: member.app || 'claude',
-      sandbox: !!member.sandbox,
-      sandboxOpts: member.sandboxOpts || null,
     });
   }, [instance, onOpenRemoteTerminal]);
 
@@ -219,6 +188,8 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
           sandbox: !!data.sandbox,
           sandboxOpts: data.sandboxOpts || null,
         });
+      } else if (data.groupId) {
+        onOpenRemoteGroup({ instance, group: { ...data, cwd: data.cwd || launchCwd.trim() } });
       }
       refreshContent();
     } catch (err) {
@@ -226,7 +197,7 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
     } finally {
       setLaunching(false);
     }
-  }, [instance, launchKind, launchCwd, launchApp, launchShell, launchSandbox, launching, onOpenRemoteTerminal, refreshContent]);
+  }, [instance, launchKind, launchCwd, launchApp, launchShell, launchSandbox, launching, onOpenRemoteTerminal, onOpenRemoteGroup, refreshContent]);
 
   if (!visible) return null;
 
@@ -299,28 +270,13 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
                 <ul className="sandbox-list">
                   {groups.map((g) => (
                     <li key={g.groupId} className="sandbox-row remote-group-row">
-                      <div className="sandbox-body" onClick={() => toggleGroup(g.groupId)} style={{ cursor: 'pointer' }}>
+                      <div className="sandbox-body" onClick={() => onOpenRemoteGroup({ instance, group: g })} style={{ cursor: 'pointer' }}>
                         <div className="sandbox-item-top">
                           <span className="pairing-status-badge pairing-status-active">{g.liveCount}/{g.memberCount}</span>
                         </div>
                         <div className="sandbox-info">
                           <span className="sandbox-name">{formatCwd(g.cwd)}</span>
                         </div>
-                        {expandedGroupId === g.groupId && (
-                          <ul className="remote-group-members">
-                            {groupMembers.map((m) => (
-                              <li key={m.role}>
-                                <button
-                                  className="pairing-label-btn"
-                                  disabled={m.exited}
-                                  onClick={(e) => { e.stopPropagation(); openMemberTab(m); }}
-                                >
-                                  {m.role} ({m.app || 'claude'}){m.exited ? ' -- 終了済み' : ''}
-                                </button>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
                       </div>
                       <button className="sandbox-delete-btn" onClick={() => destroyGroup(g)} title="コンボを破棄" aria-label="コンボを破棄">
                         &#10005;

@@ -2007,16 +2007,6 @@ body {
   align-items: flex-start;
 }
 
-.remote-group-members {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 8px 0 0;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
 .remote-dir-browse {
   width: 100%;
 }

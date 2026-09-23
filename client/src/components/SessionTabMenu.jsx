@@ -32,6 +32,9 @@ export default function SessionTabMenu({
   unopenedRemoteSessions = [],
   onOpenRemoteSession,
   onTerminateRemoteSession,
+  unopenedRemoteGroups = [],
+  onOpenRemoteGroup,
+  onDestroyRemoteGroup,
   onOpenGroup,
   customLabels,
   onRowContextMenu,
@@ -82,6 +85,9 @@ export default function SessionTabMenu({
             unopenedRemoteSessions={unopenedRemoteSessions}
             onOpenRemoteSession={onOpenRemoteSession}
             onTerminateRemoteSession={onTerminateRemoteSession}
+            unopenedRemoteGroups={unopenedRemoteGroups}
+            onOpenRemoteGroup={onOpenRemoteGroup}
+            onDestroyRemoteGroup={onDestroyRemoteGroup}
             onOpenGroup={onOpenGroup}
             customLabels={customLabels}
             onRowContextMenu={onRowContextMenu}
