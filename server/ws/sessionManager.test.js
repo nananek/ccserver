@@ -2031,3 +2031,46 @@ test('listSessions: every session carries its activity reading', async () => {
     sessionManager.destroySession(res.sessionId, { keepSchedule: false });
   }
 });
+
+// The red/yellow hysteresis needs a previous level to hold onto. It lives on
+// the SESSION (server side), not in any viewer, which is what makes these
+// three cases behave: switching browser tabs, two clients watching the same
+// session, and a session watched from another instance over federation (the
+// owning server computes the level; the viewer only renders it).
+
+test('activitySnapshot: two readers in a row agree -- the history is the session\'s, not the viewer\'s', async () => {
+  const { createScreenModel } = await import('./screenModel.js');
+  const session = activityFixtureSession('claude');
+  session.screen = createScreenModel({ cols: 100, rows: 200 });
+  session.screen.feed('❯\r\n  auto mode on · esc to interrupt');
+  session.screenLastChangeAt = Date.now();
+
+  // Reading twice back to back (a browser poll and an MCP get_tab_status
+  // landing together) must not make the second reader see a different
+  // session just because the first one wrote the level back.
+  const first = sessionManager.activitySnapshot(session);
+  const second = sessionManager.activitySnapshot(session);
+  assert.equal(second.level, first.level);
+  assert.equal(second.reason, first.reason);
+});
+
+test('activitySnapshot: a busy level does not survive a long gap between reads', async () => {
+  const { createScreenModel } = await import('./screenModel.js');
+  const { RATE_HOLD_WINDOW_MS } = await import('./activity.js');
+  const session = activityFixtureSession('claude');
+  session.screen = createScreenModel({ cols: 100, rows: 200 });
+  session.screen.feed('  auto mode on · esc to interrupt');
+  session.screenLastChangeAt = Date.now();
+  // Pretend the session was painting hard a moment ago and was last read
+  // while it still was, e.g. the sidebar was open then and is opening again
+  // now. Nothing has been drawn since.
+  session.activityLevel = 'busy';
+  const longAgo = Date.now() - RATE_HOLD_WINDOW_MS - 10_000;
+  session.screenSamples = [{ at: longAgo, rows: 40 }, { at: longAgo + 250, rows: 40 }];
+  session.screenSampleAt = longAgo + 250;
+
+  const r = sessionManager.activitySnapshot(session);
+  assert.equal(r.level, 'low', 'the stale burst has aged out of both windows, so red cannot stick');
+  // Still running, though -- the marker is up.
+  assert.equal(r.reason, 'marker');
+});

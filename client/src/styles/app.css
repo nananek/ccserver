@@ -377,6 +377,67 @@ body {
   background: var(--text-muted);
 }
 
+/* エージェントの稼働度 (server/ws/activity.js)。上の左端の縦線が「ビューアが
+   接続しているか」を表すのに対し、こちらは「中のエージェントが動いているか」
+   という別の軸なので、独立した点として一覧行 (.session-activity) とグループの
+   サブタブ (.group-subtab-activity) の両方に出す。
+
+   色だけに頼らない: レベルごとに形が違う (中空 / 半分塗り / 塗りつぶし)ので、
+   色が区別できなくても・モノクロでも読める。状態語は行の aria-label と
+   title に入っている (activityLevel.js)。なお緑=空き / 赤=多忙は一般的な
+   「緑=正常」とは逆向きなので、テキスト併記は必須。 */
+.session-activity,
+.group-subtab-activity {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  background: transparent;
+}
+
+/* 待機中 (入力待ち): 中空 */
+.session-activity.is-idle,
+.group-subtab-activity.is-idle {
+  color: var(--success);
+}
+
+/* 低活動 (稼働中だが画面はほとんど動いていない): 半分塗り */
+.session-activity.is-low,
+.group-subtab-activity.is-low {
+  color: var(--warning);
+  background: linear-gradient(90deg, currentColor 0 50%, transparent 50% 100%);
+}
+
+/* 稼働中 (出力が流れている): 塗りつぶし */
+.session-activity.is-busy,
+.group-subtab-activity.is-busy {
+  color: var(--error);
+  background: currentColor;
+}
+
+/* 稼働中表示が未検証のCLI (codex / copilot / command-code) は画面の動きだけで
+   判定しているため確度が一段低い。彩度を落として控えめに差をつけるだけに
+   とどめる (根拠は title に書いてある)。常時「異常」に見えると実用の邪魔に
+   なるので、形も色相も変えない。 */
+.session-activity.is-unverified,
+.group-subtab-activity.is-unverified {
+  filter: saturate(0.45);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .session-activity.is-busy,
+  .group-subtab-activity.is-busy {
+    animation: activity-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes activity-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 /* Session right-click menu: fixed-position small menu shared by the popup
    and sidebar lists. Same look as .sidebar-add-menu.
    Widget right-click menu (.widget-context-menu) shares frame and item rules. */
@@ -579,7 +640,12 @@ body {
 
 .group-subtab-item.current-turn {
   color: var(--accent);
-  animation: tab-pulse 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .group-subtab-item.current-turn {
+    animation: tab-pulse 2s ease-in-out infinite;
+  }
 }
 
 .group-subtab-item.current-turn .group-subtab-label::after {
@@ -595,6 +661,8 @@ body {
   display: flex;
   align-items: center;
   gap: 5px;
+  /* 稼働度の点はここ (タブ左端) に入る。手番の点は .current-turn の ::after
+     で右端に出るので、2つが隣り合って紛らわしくなることはない。 */
   /* Worker preset display names can be up to 80 chars -- cap the label so a
      long name cannot blow out the subtab bar (full label stays on hover via
      the item's title attribute). */

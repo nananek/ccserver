@@ -59,7 +59,14 @@ export function useRemoteSessions(enabled = true) {
       lastByInstanceRef.current = next;
       // 一覧の描画に効く値だけを比較する (instance 行には last_seen_at のような
       // 無関係な可変カラムもあるため、オブジェクト全体は比較しない)。
-      const signature = JSON.stringify(flat.map(({ instance, session }) => [instance.id, instance.label || null, session]));
+      // activity は描画に効くが、changeRate (行/秒の実測値) はエージェントが
+      // 動いている限りポーリングのたびに変わる。そのまま含めると 5 秒ごとに
+      // 無条件で再レンダーしてしまうので、表示に使うレベルだけを残す。
+      const signature = JSON.stringify(flat.map(({ instance, session }) => [
+        instance.id,
+        instance.label || null,
+        { ...session, activity: session.activity?.level ?? null },
+      ]));
       if (signature !== signatureRef.current) {
         signatureRef.current = signature;
         setEntries(flat);
