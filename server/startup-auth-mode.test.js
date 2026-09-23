@@ -59,10 +59,17 @@ function getFreePort() {
 }
 
 function tempEnvPaths(dir) {
+  // One throwaway XDG triple instead of per-file CCSERVER_*_PATH overrides
+  // (issue #201): the registry puts the DB, the state JSONs, federation and
+  // the sandbox roots under these, so this covers strictly more than the
+  // individual vars did. CCSERVER_LAYOUT=xdg skips the setup gate -- these
+  // tests are about the auth hook, and running the wizard per case would be
+  // overkill.
   return {
-    CCSERVER_DB_PATH: join(dir, 'db.sqlite3'),
-    CCSERVER_GROUPS_PATH: join(dir, 'groups.json'),
-    CCSERVER_SAVED_SESSIONS_PATH: join(dir, 'sessions.json'),
+    XDG_CONFIG_HOME: join(dir, 'config'),
+    XDG_DATA_HOME: join(dir, 'data'),
+    XDG_STATE_HOME: join(dir, 'state'),
+    CCSERVER_LAYOUT: 'xdg',
   };
 }
 

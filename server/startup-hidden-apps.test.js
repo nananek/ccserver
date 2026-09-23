@@ -57,9 +57,13 @@ test('server refuses to start when hiddenApps hides every installed app id', asy
     const result = await runServer({
       CCSERVER_SANDBOX_CONFIG: cfgPath,
       CCSERVER_CLAUDE_BIN: process.execPath,
-      CCSERVER_DB_PATH: join(dir, 'db.sqlite3'),
-      CCSERVER_GROUPS_PATH: join(dir, 'groups.json'),
-      CCSERVER_SAVED_SESSIONS_PATH: join(dir, 'sessions.json'),
+      // One throwaway XDG triple instead of per-path overrides, plus
+      // CCSERVER_LAYOUT=xdg so the #201 setup gate is satisfied without
+      // running the wizard (this file tests hiddenApps, not setup).
+      XDG_CONFIG_HOME: join(dir, 'config'),
+      XDG_DATA_HOME: join(dir, 'data'),
+      XDG_STATE_HOME: join(dir, 'state'),
+      CCSERVER_LAYOUT: 'xdg',
       // Loopback-only: this test isn't about auth/bind posture at all, and
       // without it the H3 boot guard (none-mode + non-loopback bind refuses
       // to start) would fire before the hiddenApps check even runs.
@@ -96,9 +100,10 @@ test('server boots normally when hiddenApps leaves at least one app selectable',
         ...process.env,
         CCSERVER_SANDBOX_CONFIG: cfgPath,
         CCSERVER_CLAUDE_BIN: process.execPath,
-        CCSERVER_DB_PATH: join(dir, 'db.sqlite3'),
-        CCSERVER_GROUPS_PATH: join(dir, 'groups.json'),
-        CCSERVER_SAVED_SESSIONS_PATH: join(dir, 'sessions.json'),
+        XDG_CONFIG_HOME: join(dir, 'config'),
+        XDG_DATA_HOME: join(dir, 'data'),
+        XDG_STATE_HOME: join(dir, 'state'),
+        CCSERVER_LAYOUT: 'xdg',
         // See the H3-guard comment in the test above.
         CCSERVER_HOST: '127.0.0.1',
         PORT: '0',

@@ -20,18 +20,27 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    // CCSERVER_GROUPS_PATH/CCSERVER_SAVED_SESSIONS_PATH/CCSERVER_DB_PATH keep
-    // the e2e server's state out of the repo root: a killed test run would
-    // otherwise leave a .saved-groups.json (or ccserver.sqlite3 + WAL/SHM
-    // sidecars) behind that the next run's restoreGroups() / migration state
-    // resurrects as ghost groups or stale presets.
+    // A throwaway XDG triple keeps the whole of the e2e server's state out
+    // of the repo root and out of the operator's real dirs -- the DB and its
+    // WAL/SHM sidecars, the saved-*.json state files, federation, the
+    // sandbox home, dind. (It replaces three CCSERVER_*_PATH overrides that
+    // only covered groups, sessions and the DB file itself; anything with an
+    // env var set would also be reported as "env-override" by the wizard,
+    // so e2e would exercise a path production never takes.)
+    //
+    // `setup --yes` runs first because of the #201 gate: an un-migrated host
+    // refuses every state-creating request with 503. Running it here means
+    // the wizard's fresh-install path is exercised by every e2e run, which
+    // is most of what makes this suite evidence that setup+gate work.
+    //
     // CCSERVER_HOST=127.0.0.1: this suite never sets CCSERVER_TOKEN/
     // CCSERVER_AUTH_MODE, so AUTH_MODE resolves to 'none' -- and the H3 fix
-    // (server/index.js) now refuses to boot at all with none-mode on the
-    // server's 0.0.0.0 default bind. BASE_URL above is already localhost, so
-    // pinning loopback here costs nothing and matches every H3 test fixture
-    // (startup-auth-mode.test.js etc.) that hits this same guard.
-    command: `npm run build --workspace=client && NODE_ENV=production PORT=${PORT} CCSERVER_HOST=127.0.0.1 CCSERVER_GROUPS_PATH=$(mktemp -u /tmp/ccserver-e2e-groups.XXXXXX) CCSERVER_SAVED_SESSIONS_PATH=$(mktemp -u /tmp/ccserver-e2e-sessions.XXXXXX) CCSERVER_DB_PATH=$(mktemp -u /tmp/ccserver-e2e-db.XXXXXX) node server/index.js`,
+    // (server/index.js) refuses to boot with none-mode on the server's
+    // 0.0.0.0 default bind. BASE_URL above is already localhost.
+    command: `T=$(mktemp -d /tmp/ccserver-e2e.XXXXXX) && npm run build --workspace=client && `
+      + `XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data XDG_STATE_HOME=$T/state node server/cli/setup.js --yes && `
+      + `NODE_ENV=production PORT=${PORT} CCSERVER_HOST=127.0.0.1 `
+      + `XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data XDG_STATE_HOME=$T/state node server/index.js`,
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

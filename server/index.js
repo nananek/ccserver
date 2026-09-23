@@ -23,12 +23,12 @@ import { networkAllowlistRoute } from './routes/networkAllowlist.js';
 import { federationRoute } from './routes/federation.js';
 import { authRoute } from './routes/auth.js';
 import { gpgVaultRoute } from './routes/gpgVault.js';
+import { setupRoute } from './routes/setup.js';
 import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
-import { gracefulShutdown, restoreSchedules, SAVED_SESSIONS_PATH, SCHEDULES_PATH } from './ws/sessionManager.js';
-import { restoreGroups, detectOrphanWorktrees, GROUPS_PATH, GROUP_DOCS_PATH } from './ws/groupManager.js';
-import { getGroupFilesManifestPath } from './ws/groupFiles.js';
-import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled, notifyPath } from './ws/notify.js';
+import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
+import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
+import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/reviewer.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
@@ -41,8 +41,7 @@ import { warmOpencodeUsage } from './opencodeUsage.js';
 import { initDb, dbPath } from './db.js';
 import { selectableAppIds, installedApps, loadSandboxConfig } from './ws/sandbox.js';
 import { isContained } from './pathPolicy.js';
-import { tasksPath } from './ws/vikunjaClient.js';
-import { keyPath as federationKeyPath } from './ws/federationIdentity.js';
+import { guardedPaths, allPaths, configRoot, dataRoot, stateRoot, layoutVersion, CURRENT_LAYOUT_VERSION } from './paths.js';
 import { verifySessionCookie } from './authSessions.js';
 import { resolveAuthMode } from './authMode.js';
 import { lockVault, isLegacyVault } from './ws/gpgVaultAgent.js';
@@ -228,6 +227,67 @@ if (AUTH_MODE === 'token') {
 // specific none+non-loopback combination at boot unless an operator
 // explicitly opts in (e.g. a trusted isolated LAN with no other feasible
 // auth), rather than silently exposing it.
+// Setup gate (issue #201, decision D3). Registered after the auth hook and
+// before the route plugins: authentication still works, but the operations
+// that would CREATE new state do not, until `npm run setup` has run here.
+//
+// The server still STARTS, and nothing in this block ever calls
+// process.exit() -- it is a different thing entirely from the boot refusals
+// above. Three production hosts run this under `systemctl --user` with live
+// sessions in them; "refuses to boot until migrated" would take them all
+// down on the very upgrade that introduces the wizard.
+//
+// The guiding principle, because it decides every entry in the allowlist:
+//
+//     The gate's job is to stop the operator from creating NEW state in the
+//     WRONG PLACE. It is not to stop the server from serving state it
+//     already has.
+//
+// POST /api/sessions on an un-migrated host writes .saved-sessions.json to
+// the repo root, and the wizard would then move it out from under the
+// operator. GET does not. Hence: writes gated, reads and re-attach open.
+//
+// Not gated, and each for a reason that will bite if it is removed:
+//   /ws/*              re-attaching to a RUNNING pty. Block this and nobody
+//                      can reach their sessions, and DEFAULT_SESSION_TIMEOUT_MS
+//                      (12h, timeoutEnv.js) silently reaps them. Blocking
+//                      the UI would cause exactly the outage that not
+//                      restarting the server was meant to avoid.
+//   GET /api/sessions  the session list behind that re-attach.
+//   GET /api/system    the header's system stats; a broken header makes the
+//                      gate screen look like a crash.
+//   /api/setup-status  how the UI learns why it is gated.
+//   /api/auth/*        block this and you get a login loop with no way to
+//                      read the instructions.
+//   static assets      the SPA has to load to render the explanation.
+if (layoutVersion() < CURRENT_LAYOUT_VERSION) {
+  fastify.log.warn(
+    `Setup is not complete (layout v${layoutVersion()}, expected v${CURRENT_LAYOUT_VERSION}): ccserver is still `
+    + 'reading its config and state from the pre-#201 locations. Run `npm run setup` on this host '
+    + '(dry run first, then `npm run setup -- --yes`) and restart. Write operations are refused with 503 '
+    + 'until then; GET /api/setup-status lists what would move.'
+  );
+  fastify.addHook('onRequest', async (request, reply) => {
+    if (isSetupExempt(request)) return;
+    reply.code(503).send({
+      error: 'Setup is not complete on this host',
+      code: 'SETUP_REQUIRED',
+      command: 'npm run setup',
+    });
+  });
+}
+
+function isSetupExempt(request) {
+  const url = request.url;
+  if (!url.startsWith('/api') && !url.startsWith('/ws')) return true;
+  if (url.startsWith('/ws/')) return true;
+  const path = url.split('?')[0];
+  if (path === '/api/setup-status') return true;
+  if (path.startsWith('/api/auth/')) return true;
+  if (request.method === 'GET' && (path.startsWith('/api/sessions') || path.startsWith('/api/system'))) return true;
+  return false;
+}
+
 const HOST = process.env.CCSERVER_HOST || '0.0.0.0';
 const isLoopbackHost = (h) => h === '127.0.0.1' || h === '::1' || h === 'localhost';
 if (AUTH_MODE === 'none' && !isLoopbackHost(HOST) && process.env.CCSERVER_ALLOW_UNAUTHENTICATED_LAN !== '1') {
@@ -260,6 +320,7 @@ await fastify.register(networkAllowlistRoute, { prefix: '/api' });
 await fastify.register(federationRoute, { prefix: '/api' });
 await fastify.register(authRoute, { prefix: '/api' });
 await fastify.register(gpgVaultRoute, { prefix: '/api' });
+await fastify.register(setupRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
 await fastify.register(remoteTerminalWs);
 
@@ -329,9 +390,9 @@ try {
 // would fall inside the configured browseRoots. Without this guard, an
 // operator narrowing /api/files and /api/dirs to browseRoots could still
 // expose these files through those very same endpoints if browseRoots
-// happens to contain them (e.g. pointing it at the repo root, where the
-// .saved-*.json sidecars default to, or at the sandbox tree, where the
-// federation key defaults to).
+// happens to contain them (e.g. pointing it at $XDG_STATE_HOME, where the
+// saved-*.json state files live, or at $XDG_DATA_HOME, where the DB and the
+// federation key do).
 //
 // Also refuses to boot on an unreadable/unparseable sandbox.config.json or a
 // present-but-invalid browseRoots: falling back to defaults would silently
@@ -355,27 +416,43 @@ try {
     process.exit(1);
   }
   if (browseRoots.length > 0) {
-    const internalPaths = [
-      ['ccserver.sqlite3 (CCSERVER_DB_PATH)', dbPath()],
-      ['sandbox.config.json (CCSERVER_SANDBOX_CONFIG)', configPath],
-      ['federation instance key (CCSERVER_FEDERATION_HOME)', federationKeyPath()],
-      ['.saved-groups.json (CCSERVER_GROUPS_PATH)', GROUPS_PATH],
-      ['.saved-group-docs.json (CCSERVER_GROUP_DOCS_PATH)', GROUP_DOCS_PATH],
-      ['.saved-group-files.json (CCSERVER_GROUP_FILES_PATH)', getGroupFilesManifestPath()],
-      ['.saved-notifications.json (CCSERVER_NOTIFY_PATH)', notifyPath()],
-      ['.saved-sessions.json (CCSERVER_SAVED_SESSIONS_PATH)', SAVED_SESSIONS_PATH],
-      ['.scheduled-prompts.json', SCHEDULES_PATH],
-      ['.saved-vikunja-tasks.json (CCSERVER_VIKUNJA_TASKS_PATH)', tasksPath()],
-    ];
-    const exposed = internalPaths.filter(([, p]) => isContained(resolve(p), browseRoots));
+    // Registry-driven (decision D4). On a migrated host three roots cover
+    // every internal file, which is the point of the whole issue: a unified
+    // location makes this check nearly disappear (ten hardcoded entries ->
+    // three roots plus whatever an operator has pulled out with an env var
+    // or the wizard left behind). An un-migrated host keeps today's exact
+    // behavior, entry by entry.
+    const candidates = layoutVersion() >= CURRENT_LAYOUT_VERSION
+      ? [
+        { label: 'ccserver 設定ディレクトリ', envVar: 'XDG_CONFIG_HOME', path: configRoot() },
+        { label: 'ccserver データディレクトリ', envVar: 'XDG_DATA_HOME', path: dataRoot() },
+        { label: 'ccserver 状態ディレクトリ', envVar: 'XDG_STATE_HOME', path: stateRoot() },
+        ...allPaths().filter((e) => e.overridden || e.keptLegacy),
+      ]
+      : guardedPaths();
+    const exposed = candidates.filter((e) => isContained(resolve(e.path), browseRoots));
     if (exposed.length > 0) {
       fastify.log.error(
         'Refusing to start: "browseRoots" is set, but the following ccserver-internal state files fall '
         + 'inside it and would become browsable/downloadable via /api/files, /api/dirs: '
-        + exposed.map(([label, p]) => `${label} = ${p}`).join(', ')
+        + exposed.map((e) => `${e.label}${e.envVar ? ` (${e.envVar})` : ''} = ${e.path}`).join(', ')
         + '. Move them outside browseRoots via their env var override (shown in parens above), or narrow browseRoots to exclude them.'
       );
       process.exit(1);
+    }
+    // The reverse containment (a browseRoot sitting INSIDE one of our own
+    // trees, e.g. browseRoots: ["~/.local/share/ccserver/home/myproj"]) has
+    // never been checked and is not being promoted to a boot refusal here:
+    // someone may be deliberately browsing a sandbox home, and turning that
+    // into a hard failure belongs in its own security review, not in a
+    // path-layout change. Warn so it is at least visible.
+    const inverted = [configRoot(), dataRoot(), stateRoot()]
+      .filter((root) => browseRoots.some((b) => isContained(resolve(b), [root])));
+    if (inverted.length > 0) {
+      fastify.log.warn(
+        `"browseRoots" points inside ccserver's own directories (${inverted.join(', ')}). `
+        + 'Internal state may be reachable via /api/files and /api/dirs. Consider narrowing it.'
+      );
     }
   }
 }
