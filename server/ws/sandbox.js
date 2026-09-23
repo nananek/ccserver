@@ -776,6 +776,14 @@ export function loadSandboxConfig() {
   // sandboxed sessions (resource-consuming) on any caller's say-so, so it
   // must not exist unless explicitly enabled.
   const reviewerMcp = raw.reviewerMcp === true;
+  // Issue #198: the broker's privacy-preserving local aggregate is off unless
+  // the operator explicitly enables it and names a local state file. Keeping
+  // the path out of every report row avoids ever recording a project path.
+  const rawGhUsageRecording = (raw.ghUsageRecording && typeof raw.ghUsageRecording === 'object') ? raw.ghUsageRecording : {};
+  const ghUsageRecording = {
+    enabled: rawGhUsageRecording.enabled === true && typeof rawGhUsageRecording.file === 'string' && rawGhUsageRecording.file.length > 0,
+    file: typeof rawGhUsageRecording.file === 'string' && rawGhUsageRecording.file.length > 0 ? rawGhUsageRecording.file : null,
+  };
   // Launch options to hide from every picker (issue #105): apps the operator
   // hasn't contracted for. Server-side install detection alone can't tell
   // "not installed" apart from "installed but not contracted", so this is a
@@ -818,7 +826,7 @@ export function loadSandboxConfig() {
   // cannot drift apart -- see that function's header comment.
   const network = normalizeNetworkSettings(raw.network);
   return {
-    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, hiddenApps, browseRoots, browseRootsInvalid, configError, allowUnsandboxedAgents, network,
+    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, allowUnsandboxedAgents, network,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -2226,7 +2234,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   if (resolve(cwd) === '/') {
     throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
   }
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots, browseRootsInvalid } = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, ghUsageRecording, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots, browseRootsInvalid } = loadSandboxConfig();
   // Defense in depth behind sessionManager's browseRoots cwd check (issue
   // #189): same reasoning as the '/' guard just above. The scratch-tree
   // exemption is gated on the trusted `scratchCwd` flag (set only by
@@ -2381,7 +2389,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // null when commitMessageGuard is disabled, which the broker treats as
   // "no PR-body check", matching pre-plan8 behavior exactly.
   const gitBroker = gitBrokerEnabled
-    ? startGitBroker({ cwd, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null })
+    ? startGitBroker({ cwd, app, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null, ghUsageRecording })
     : null;
 
   // Commit-message guard (see commitGuard.js / startCommitGuard above):
