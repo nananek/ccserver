@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planMigration, applyMigration, nodeFs, findLeftovers, writeBreadcrumbs } from './pathMigration.js';
 import { resetLayoutCache } from './paths.js';
+import { withIsolatedHome } from './testIsolation.js';
 
 const ENV_VARS = ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'CCSERVER_LAYOUT'];
 const saved = {};
@@ -299,12 +300,22 @@ test('breadcrumbs name the new roots so an old-branch boot leaves a trail', () =
   // after the migration and resolving the old paths -- it boots empty and
   // nothing in that old code can notice. A note where someone hunting for
   // the missing files will look is all that can be done.
-  const written = writeBreadcrumbs();
-  assert.ok(written.length > 0);
-  for (const path of written) {
-    const text = readFileSync(path, 'utf-8');
-    assert.match(text, /XDG/);
-    assert.match(text, /古いブランチ/);
-    rmSync(path, { force: true });
+  //
+  // HOME is redirected for the duration: one breadcrumb goes to
+  // legacyDataRoot(), which without this is the developer's real
+  // ~/.local/share/ccserver-sandbox.
+  const restore = withIsolatedHome(caseDir);
+  try {
+    const written = writeBreadcrumbs();
+    assert.ok(written.length > 0);
+    for (const path of written) {
+      const text = readFileSync(path, 'utf-8');
+      assert.match(text, /XDG/);
+      assert.match(text, /古いブランチ/);
+      rmSync(path, { force: true });
+    }
+  } finally {
+    restore();
+    resetLayoutCache();
   }
 });

@@ -1,0 +1,128 @@
+// Regression net for the worst defect this branch shipped in review
+// (attack-test-201 F1, Critical): `npm test` migrated the operator's real
+// pre-#201 data into a temp directory and then deleted it.
+//
+// The tests that spawn the wizard isolated $XDG_*_HOME but not $HOME, and
+// legacyDataRoot() is homedir()-based by design -- so `setup.js --yes` found
+// the real ~/.local/share/ccserver-sandbox, moved the live SQLite DB, the
+// federation private key and group-files into the test's mkdtemp dir, and
+// the test's `finally { rmSync(dir) }` destroyed them. Reproduced against a
+// fake $HOME: DB gone, federation key gone, saved-sessions gone.
+//
+// The fix is testIsolation.js. These tests exist so that a future test which
+// forgets $HOME fails here loudly rather than eating someone's home
+// directory.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { isolatedEnv, assertSafeToMigrate, withIsolatedHome } from './testIsolation.js';
+
+const SETUP_CLI = join(import.meta.dirname, 'cli', 'setup.js');
+
+function withTmp(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-isolation-'));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('isolatedEnv redirects HOME, not just the XDG roots', () => {
+  withTmp((dir) => {
+    const env = isolatedEnv(dir);
+    assert.equal(env.HOME, join(dir, 'home'));
+    assert.notEqual(env.HOME, homedir());
+    assert.equal(env.XDG_CONFIG_HOME, join(dir, 'config'));
+    assert.equal(env.XDG_DATA_HOME, join(dir, 'data'));
+    assert.equal(env.XDG_STATE_HOME, join(dir, 'state'));
+    assert.equal(existsSync(env.HOME), true, 'HOME must exist -- the child resolves paths under it');
+  });
+});
+
+test('isolatedEnv strips ambient CCSERVER_* and XDG_* so the runner cannot leak into the child', () => {
+  withTmp((dir) => {
+    const savedDb = process.env.CCSERVER_DB_PATH;
+    const savedXdg = process.env.XDG_DATA_HOME;
+    try {
+      process.env.CCSERVER_DB_PATH = '/real/db.sqlite3';
+      process.env.XDG_DATA_HOME = '/real/data';
+      const env = isolatedEnv(dir);
+      assert.equal(env.CCSERVER_DB_PATH, undefined);
+      assert.equal(env.XDG_DATA_HOME, join(dir, 'data'));
+    } finally {
+      if (savedDb === undefined) delete process.env.CCSERVER_DB_PATH; else process.env.CCSERVER_DB_PATH = savedDb;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = savedXdg;
+    }
+  });
+});
+
+test('isolatedEnv refuses a directory outside the temp tree', () => {
+  assert.throws(() => isolatedEnv(homedir()), /not under/);
+  assert.throws(() => isolatedEnv('/'), /not under/);
+});
+
+test('★ assertSafeToMigrate rejects the exact env shape that caused the data loss', () => {
+  withTmp((dir) => {
+    // XDG isolated, HOME left real -- what every spawning test in this
+    // branch did before the fix.
+    const unsafe = {
+      HOME: homedir(),
+      XDG_CONFIG_HOME: join(dir, 'config'),
+      XDG_DATA_HOME: join(dir, 'data'),
+      XDG_STATE_HOME: join(dir, 'state'),
+    };
+    assert.throws(() => assertSafeToMigrate(unsafe), /HOME=.*is outside/);
+
+    // And the fully isolated env passes.
+    assertSafeToMigrate(isolatedEnv(dir));
+  });
+});
+
+test('assertSafeToMigrate rejects an unset HOME as well as a real one', () => {
+  withTmp((dir) => {
+    const env = isolatedEnv(dir);
+    delete env.HOME;
+    assert.throws(() => assertSafeToMigrate(env), /HOME=\(unset\)/);
+  });
+});
+
+test('★ the wizard with an isolated env leaves a decoy legacy tree under the real HOME alone', () => {
+  // The end-to-end shape of F1, with the decoy placed where the real data
+  // would be if $HOME were not redirected. If isolation regresses, the
+  // wizard migrates the decoy out and this fails.
+  withTmp((dir) => {
+    const fakeHome = join(dir, 'pretend-real-home');
+    const legacy = join(fakeHome, '.local', 'share', 'ccserver-sandbox');
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, 'ccserver.sqlite3'), 'PRECIOUS');
+
+    const env = isolatedEnv(dir, { LC_ALL: 'C', PORT: '1' });
+    assertSafeToMigrate(env);
+    const res = spawnSync(process.execPath, [SETUP_CLI, '--yes'], { env, encoding: 'utf8', timeout: 60000 });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+
+    assert.equal(existsSync(join(legacy, 'ccserver.sqlite3')), true,
+      'the wizard must not reach outside the env it was given');
+    assert.equal(existsSync(join(dir, 'data', 'ccserver', 'ccserver.sqlite3')), false,
+      'and must not have migrated the decoy into the isolated tree');
+  });
+});
+
+test('withIsolatedHome moves homedir() in-process and restores it', () => {
+  withTmp((dir) => {
+    const before = homedir();
+    const restore = withIsolatedHome(dir);
+    try {
+      assert.equal(homedir(), join(dir, 'home'), 'os.homedir() reads $HOME on POSIX');
+      assert.notEqual(homedir(), before);
+    } finally {
+      restore();
+    }
+    assert.equal(homedir(), before, 'the real HOME comes back');
+  });
+});

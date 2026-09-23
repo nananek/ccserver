@@ -20,6 +20,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isolatedEnv, assertSafeToMigrate } from './testIsolation.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, 'index.js');
@@ -49,19 +50,13 @@ function getFreePort() {
   });
 }
 
+// HOME is isolated too, not just the XDG roots. legacyDataRoot() is
+// homedir()-based by design, so a child with the real $HOME resolves the
+// operator's real pre-#201 tree -- and runWizard() below would migrate it
+// into `dir`, which every test here deletes in its `finally`. See
+// testIsolation.js.
 function childEnv(dir, extra = {}) {
-  const base = { ...process.env };
-  // Strip every CCSERVER_* so an ambient override cannot turn a registry
-  // entry into an env-override and change what the gate/plan reports.
-  for (const k of Object.keys(base)) if (k.startsWith('CCSERVER_')) delete base[k];
-  return {
-    ...base,
-    XDG_CONFIG_HOME: join(dir, 'config'),
-    XDG_DATA_HOME: join(dir, 'data'),
-    XDG_STATE_HOME: join(dir, 'state'),
-    CCSERVER_HOST: '127.0.0.1',
-    ...extra,
-  };
+  return isolatedEnv(dir, { CCSERVER_HOST: '127.0.0.1', ...extra });
 }
 
 class Server {
@@ -97,10 +92,14 @@ class Server {
 }
 
 function runWizard(dir) {
+  const env = { ...childEnv(dir), PORT: '1' };
+  // Refuses to run at all unless HOME and the XDG roots are inside the temp
+  // tree. This is the guard that stops `npm test` migrating real host data.
+  assertSafeToMigrate(env);
   return new Promise((resolve, reject) => {
     const proc = spawn(process.execPath, [SETUP_CLI, '--yes'], {
       cwd: join(__dirname, '..'),
-      env: { ...childEnv(dir), PORT: '1' },
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';

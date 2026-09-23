@@ -33,14 +33,21 @@ export default defineConfig({
     // the wizard's fresh-install path is exercised by every e2e run, which
     // is most of what makes this suite evidence that setup+gate work.
     //
+    // HOME is redirected into $T as well, and that is not optional. The
+    // registry's legacyDataRoot() is homedir()-based on purpose (see
+    // server/paths.js), so with the real $HOME this `setup --yes` would find
+    // and migrate the developer's live ~/.local/share/ccserver-sandbox --
+    // their SQLite DB, federation private key and group-files -- into this
+    // throwaway directory. Verified: it does exactly that.
+    //
     // CCSERVER_HOST=127.0.0.1: this suite never sets CCSERVER_TOKEN/
     // CCSERVER_AUTH_MODE, so AUTH_MODE resolves to 'none' -- and the H3 fix
     // (server/index.js) refuses to boot with none-mode on the server's
     // 0.0.0.0 default bind. BASE_URL above is already localhost.
-    command: `T=$(mktemp -d /tmp/ccserver-e2e.XXXXXX) && npm run build --workspace=client && `
-      + `XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data XDG_STATE_HOME=$T/state node server/cli/setup.js --yes && `
-      + `NODE_ENV=production PORT=${PORT} CCSERVER_HOST=127.0.0.1 `
-      + `XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data XDG_STATE_HOME=$T/state node server/index.js`,
+    command: `T=$(mktemp -d /tmp/ccserver-e2e.XXXXXX) && mkdir -p $T/home && npm run build --workspace=client && `
+      + `env HOME=$T/home XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data XDG_STATE_HOME=$T/state node server/cli/setup.js --yes && `
+      + `env HOME=$T/home XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data XDG_STATE_HOME=$T/state `
+      + `NODE_ENV=production PORT=${PORT} CCSERVER_HOST=127.0.0.1 node server/index.js`,
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

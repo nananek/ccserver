@@ -19,6 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isolatedEnv } from './testIsolation.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, 'index.js');
@@ -46,20 +47,18 @@ async function boot(dir, config, extraEnv = {}) {
   // form rather than the per-entry legacy one.
   writeFileSync(join(configHome, 'ccserver', 'layout.json'), JSON.stringify({ layoutVersion: 2, completedAt: Date.now() }));
 
-  const base = { ...process.env };
-  for (const k of Object.keys(base)) if (k.startsWith('CCSERVER_')) delete base[k];
   const port = await getFreePort();
+  // HOME isolated as well as XDG: the CCSERVER_LAYOUT=legacy case below
+  // resolves the legacy tree from homedir(), and the server's boot-time
+  // legacy DB hop would otherwise touch the operator's real files.
   const proc = spawn(process.execPath, [SERVER_ENTRY], {
     cwd: __dirname,
-    env: {
-      ...base,
+    env: isolatedEnv(dir, {
       XDG_CONFIG_HOME: configHome,
-      XDG_DATA_HOME: join(dir, 'data'),
-      XDG_STATE_HOME: join(dir, 'state'),
       CCSERVER_HOST: '127.0.0.1',
       PORT: String(port),
       ...extraEnv,
-    },
+    }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let logs = '';
