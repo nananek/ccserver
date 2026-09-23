@@ -127,3 +127,68 @@ test('version() counts visible changes; cursor-only movement does not', () => {
   s.feed('d'); // a real change
   assert.equal(s.version(), v + 1);
 });
+
+// takeDirtyRowCount: the "how much of the screen is moving" signal behind
+// activity.js's busy/low split. version() cannot serve that purpose because
+// it counts cells, so a one-line spinner on a wide terminal looks as heavy as
+// real output; counting DISTINCT rows per time slice does not.
+
+test('takeDirtyRowCount: a spinner redrawing one row counts as one row', () => {
+  const s = createScreenModel();
+  s.feed('line 1\n');
+  s.takeDirtyRowCount();
+  // Twenty frames of a spinner on the same row, the way a TUI paints one.
+  for (const g of '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏') s.feed(`\r\x1b[2K${g} working`);
+  assert.equal(s.takeDirtyRowCount(), 1, 'the same row over and over is still one row');
+});
+
+test('takeDirtyRowCount: streaming output counts every row it paints', () => {
+  const s = createScreenModel();
+  s.takeDirtyRowCount();
+  for (let i = 0; i < 12; i++) s.feed(`output line ${i}\r\n`);
+  assert.equal(s.takeDirtyRowCount(), 13, '12 written rows plus the empty row the last newline opened');
+});
+
+test('takeDirtyRowCount: resets on read, so each sample covers one slice', () => {
+  const s = createScreenModel();
+  s.feed('abc');
+  assert.equal(s.takeDirtyRowCount(), 1);
+  assert.equal(s.takeDirtyRowCount(), 0, 'nothing has been drawn since the previous sample');
+  s.feed('d');
+  assert.equal(s.takeDirtyRowCount(), 1);
+});
+
+test('takeDirtyRowCount: cursor-only movement dirties nothing', () => {
+  const s = createScreenModel();
+  s.feed('abc');
+  s.takeDirtyRowCount();
+  s.feed('\r');
+  s.feed('\x1b[2C');
+  s.feed('\x1b[A');
+  assert.equal(s.takeDirtyRowCount(), 0);
+});
+
+test('takeDirtyRowCount: a screen clear dirties every row that was visible', () => {
+  const s = createScreenModel();
+  s.feed('a\r\nb\r\nc\r\nd');
+  s.takeDirtyRowCount();
+  s.feed('\x1b[2J'); // ED 2: the whole screen goes
+  assert.equal(s.takeDirtyRowCount(), 4, 'all four rows changed, not just the one the cursor sat on');
+});
+
+test('takeDirtyRowCount: switching to the alternate screen replaces everything', () => {
+  const s = createScreenModel();
+  s.feed('a\r\nb\r\nc');
+  s.takeDirtyRowCount();
+  s.feed('\x1b[?1049h');
+  assert.equal(s.takeDirtyRowCount(), 3);
+});
+
+test('takeDirtyRowCount: ED 0 counts the rows it drops below the cursor', () => {
+  const s = createScreenModel();
+  s.feed('x\r\ny\r\nz\r\nw');
+  s.takeDirtyRowCount();
+  s.feed('\x1b[2;2H\x1b[J'); // cursor to row 2, erase to the end of the screen
+  assert.deepEqual(s.screenRows(), ['x', 'y']);
+  assert.equal(s.takeDirtyRowCount(), 3, 'the cursor row plus the two rows that went away');
+});

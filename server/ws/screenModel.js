@@ -4,7 +4,9 @@
 // cursor moves, line erases and alternate-screen diffs, so the byte stream
 // is "frame 1, frame 2, ..." with no way to tell which frame is on screen.
 // This module interprets a practical subset of the xterm stream per session
-// and exposes the current visible screen plus a change counter.
+// and exposes the current visible screen, a change counter, and a tally of
+// how many distinct rows changed since it was last read (takeDirtyRowCount,
+// the busy/quiet signal activity.js grades each session's tab colour from).
 //
 // Pure module (no app imports, Node builtins only), unit-testable directly
 // with node --test. Bounded memory: at most `rows` (default 200) visible
@@ -37,10 +39,34 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
   let alt = false;
   let version = 0;
   let pending = ''; // partial escape sequence awaiting the next chunk
+  // Row indices touched since the last takeDirtyRowCount(). `version` counts
+  // written CELLS, which scales with the terminal width and cannot tell a
+  // one-line spinner redrawing 60 columns from real output; the number of
+  // DISTINCT rows touched in a time slice can (see activity.js). Deduping in
+  // a Set is what makes a spinner cheap: it rewrites the same row every
+  // frame, so a whole slice of spinner frames counts as one row.
+  // Approximation: a row index is a screen position, not an identity, so a
+  // slice that also scrolls (ensureRow shifting the oldest row off) attributes
+  // the touches to whichever rows sat at those positions. Scrolling is itself
+  // heavy redraw activity, so this never makes a busy screen look quiet.
+  let dirtyRows = new Set();
 
   // --- internal mutations ---------------------------------------------------
 
-  const bump = () => { version++; };
+  // `row` is the screen row the mutation touched; omit it only for changes
+  // that are not about one row (bumpAll covers the whole-screen ones).
+  const bump = (row) => {
+    version++;
+    if (typeof row === 'number') dirtyRows.add(row);
+  };
+
+  // A whole-screen change (clear, alternate-screen switch): every row that
+  // exists right now is dirty. Call it BEFORE the mutation drops the rows,
+  // otherwise a clear would look like a one-row change.
+  const bumpAll = () => {
+    for (let r = 0; r < lines.length; r++) dirtyRows.add(r);
+    version++;
+  };
 
   // Grow rows until the cursor row exists, scrolling the oldest off the top
   // when the cap is reached (the cursor then stays at the same screen line).
@@ -64,7 +90,7 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
     if (line.length < cursorCol) line = line.padEnd(cursorCol, ' ');
     lines[cursorRow] = (line.slice(0, cursorCol) + ch + line.slice(cursorCol + 1)).replace(/\s+$/, '');
     cursorCol++;
-    bump();
+    bump(cursorRow);
   };
 
   // --- control sequences ----------------------------------------------------
@@ -81,34 +107,39 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
     } else {
       lines[cursorRow] = '';
     }
-    bump();
+    bump(cursorRow);
   };
 
   const eraseDisplay = (mode) => {
     if (mode === 2 || mode === 3) {
+      bumpAll(); // every row currently on screen is about to be dropped
       lines.length = 0;
       cursorRow = 0;
       cursorCol = 0;
       lines.push('');
-    } else if (mode === 1) {
+      return;
+    }
+    if (mode === 1) {
       // BOL of screen through the cursor -- rare; clear the rows above and
       // the current row's head.
-      for (let r = 0; r < cursorRow; r++) lines[r] = '';
+      for (let r = 0; r < cursorRow; r++) {
+        lines[r] = '';
+        bump(r);
+      }
       eraseLine(1);
       return;
-    } else {
-      // mode 0: cursor through the end of the screen.
-      eraseLine(0);
-      lines.length = cursorRow + 1;
     }
-    bump();
+    // mode 0: cursor through the end of the screen.
+    eraseLine(0);
+    for (let r = cursorRow + 1; r < lines.length; r++) bump(r);
+    lines.length = cursorRow + 1;
   };
 
   const cursorPos = (r, c) => {
     const before = lines.length;
     cursorRow = Math.max(0, (Number.isFinite(r) && r >= 1 ? r : 1) - 1);
     ensureRow(); // positions below the current bottom scroll down like xterm
-    if (lines.length !== before) bump(); // a new row appeared on screen
+    if (lines.length !== before) bump(cursorRow); // a new row appeared on screen
     cursorCol = Math.max(0, Math.min(Number.isFinite(c) && c >= 1 ? c - 1 : 0, capCols - 1));
   };
 
@@ -126,7 +157,7 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
         const before = lines.length;
         cursorRow += (p0 || 1);
         ensureRow();
-        if (lines.length !== before) bump();
+        if (lines.length !== before) bump(cursorRow);
         return;
       }
       case 'C': cursorCol = Math.min(capCols - 1, cursorCol + (p0 || 1)); return;
@@ -140,7 +171,7 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
         // ignored (they do not change visible content).
         if (priv && (parts[0] === 1049 || parts[0] === 47)) {
           alt = final === 'h';
-          bump();
+          bumpAll(); // switching buffers replaces everything that was visible
         }
         return;
       default:
@@ -157,7 +188,7 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
       const before = lines.length;
       cursorRow++;
       ensureRow();
-      if (lines.length !== before) bump(); // a new row appeared on screen
+      if (lines.length !== before) bump(cursorRow); // a new row appeared on screen
       return;
     } // LF/FF/VT
     if (code === 0x08) { cursorCol = Math.max(0, cursorCol - 1); return; } // BS
@@ -224,6 +255,17 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
     },
     version() {
       return version;
+    },
+    // Number of DISTINCT rows touched since the previous call, resetting the
+    // tally. The caller samples this on a fixed cadence and divides by the
+    // elapsed time to get "rows changed per second" -- the busy/quiet signal
+    // activity.js splits 'busy' from 'low' on. Unlike version(), it does not
+    // grow with the terminal width: a spinner redrawing one row for a whole
+    // slice counts as 1 no matter how many columns it paints.
+    takeDirtyRowCount() {
+      const n = dirtyRows.size;
+      dirtyRows = new Set();
+      return n;
     },
   };
 }
