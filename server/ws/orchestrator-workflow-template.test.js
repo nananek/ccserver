@@ -21,6 +21,15 @@
 //     'no escape hatch is added beside the gate' test blocks the specific
 //     phrasings worth naming, but an open-ended negative match is not
 //     achievable -- there are unboundedly many ways to write an exception.
+//     This was measured, not assumed: a review fed 18 different ways of
+//     writing an exemption through this suite and 15 of them passed. The
+//     ones it caught were the named shapes; the ones it missed were
+//     synonyms ("does not require", "is unnecessary", "is not mandatory",
+//     "may be omitted", "proceed directly to"), a word order it does not
+//     look for, and one that simply put a newline where the pattern
+//     expected none. Picking the next synonym costs an attacker a minute.
+//     Adding more patterns buys the next minute, not the class -- which is
+//     why the list below stays short and the honesty stays here.
 //   - This file is part of the same diff as the template. A change that
 //     wants the gate gone can delete these tests in the same commit.
 //
@@ -115,8 +124,8 @@ test('template: the attacker-perspective review gate is mandatory and fully spec
   // Push first, then review the recorded SHA detached (git refuses a second
   // checkout of the same branch).
   assert.match(template, /push first \(`git push -u origin "<branch>"`\)/);
-  assert.match(template, /git fetch origin && git checkout --detach <sha>/);
-  assert.match(template, /git refuses a second checkout of the same\s*\n\s+branch/);
+  assert.match(template, /git checkout --detach "<sha>"/);
+  assert.match(template, /git refuses a second checkout of the same branch; detaching/);
   // Detached is not read-only: the reviewer has to be able to build and run.
   assert.match(template, /Detached is NOT read-only/);
 
@@ -137,6 +146,8 @@ test('template: the attacker-perspective review gate is mandatory and fully spec
   assert.match(template, /\*\*No change is exempt for having "no attack surface"\.\*\* Documentation-only\s*\n\s*diffs are in scope too/);
   assert.match(template, /text IS an attack surface here/);
   assert.match(template, /\*\*Not a technical boundary\.\*\* Nothing in the server enforces any of this/);
+  // The measured bypass rate, so the honesty is quantified rather than vague.
+  assert.match(template, /measured against 18 ways of\s*\n\s+writing an exemption and 15 of them passed/);
 
   // The gate cannot be quietly skipped when it is not runnable.
   assert.match(template, /When the gate cannot run as written, stop and say so rather than proceeding/);
@@ -153,9 +164,12 @@ test('template: the review gate is pinned to the reviewed SHA, not the branch', 
   // Step 1 records the revision, and refuses a branch name that could carry
   // a shell payload into someone else's command line.
   assert.match(template, /git fetch origin && git rev-parse "origin\/<branch>"/);
-  assert.match(template, /That 40-character SHA -- not the branch name -- is what this round is\s*\n\s+about/);
-  assert.match(template, /git check-ref-format "refs\/heads\/<branch>"` accepts `;`, `\|`, `&`, `\$`,/);
-  assert.match(template, /Refuse\s*\n\s+a name carrying any of those, and quote every use of it regardless/);
+  assert.match(template, /Then have \*\*workerA\*\* -- not the implementing worker, and not you -- run/);
+  assert.match(template, /That hex SHA \(40 characters, or 64 in a SHA-256 repository\), not\s*\n\s+the branch name, is what this round is about/);
+  // Rejecting the name is the instruction; check-ref-format is explicitly
+  // NOT the thing that does it (it accepts every metacharacter listed).
+  assert.match(template, /refuse any\s*\n\s+name containing `;`, `\|`, `&`, `\$`, backticks, parentheses or a newline/);
+  assert.match(template, /does NOT do this for you -- it accepts all of\s*\n\s+those/);
 
   // Step 5/6: the findings key names the revision (a fixed key is
   // overwritable by the side under review), and the orchestrator checks the
@@ -172,7 +186,45 @@ test('template: the review gate is pinned to the reviewed SHA, not the branch', 
   assert.match(template, /It is your call\s*\n\s+how wide each incremental pass reaches, not whether it happens/);
 
   // workerA's last check before opening the PR.
-  assert.match(template, /Before `gh pr create`, workerA re-runs `git rev-parse "origin\/<branch>"` and\s*\nrefuses to open the PR unless it equals the last SHA a finding document was\s*\npublished for/);
+  assert.match(template, /Before `gh pr create`, workerA re-runs `git rev-parse "origin\/<branch>"`,/);
+  assert.match(template, /refuses to open the PR unless the tip equals the SHA that document was\s*\npublished for/);
+
+  // The anchor is honest about its own strength: the orchestrator cannot
+  // run git, so only workerA's comparison is independent of the reviewed
+  // party. Dropping this invites treating the chain as proof.
+  assert.match(template, /You cannot run this yourself\. You have no shell and `repo_info` returns/);
+  assert.match(template, /\*\*The only comparison that does not rest on\s*\n\s*the reviewed party's own word is workerA's/);
+});
+
+// `git checkout` is not inert: it runs whatever the repository config tells
+// it to run, and every role in a combo group shares one writable `.git`
+// (sandbox.js rw-binds the common dir). A smudge filter or core.fsmonitor
+// planted there by the implementing worker executes in the REVIEWER's
+// sandbox the moment it checks the revision out -- before it has read a
+// line of the diff. Demonstrated in review; issue #214 is the root fix.
+// These pins keep the three pre-checkout checks from quietly going away.
+test('template: the reviewer hardens the checkout itself', () => {
+  // 1. The relayed "SHA" is a string until it is validated as one.
+  assert.match(template, /\*\*Validate the string\.\*\*/);
+  assert.match(template, /\^\[0-9a-f\]\{40\}\$/);
+  assert.match(template, /git rev-parse --verify "<sha>\^\{commit\}"/);
+  assert.match(template, /one\s*\n\s+carrying `;` runs as a command in the checkout line below/);
+
+  // 2. The shared config is inspected for keys that make git execute.
+  assert.match(template, /\*\*Inspect the shared config\.\*\*/);
+  assert.match(template, /git config --list --show-origin/);
+  assert.match(template, /`filter\.\*` \(`\.clean`,\s*\n\s+`\.smudge`, `\.process`\), `core\.fsmonitor`/);
+  assert.match(template, /`core\.hooksPath` from anywhere other\s*\n\s+than `command line:`/);
+  assert.match(template, /a smudge\s*\n\s+filter planted in the shared config runs on checkout/);
+  assert.match(template, /Finding any of\s*\n\s+these is a finding in its own right: report it and do not check out/);
+
+  // 3. And a failed checkout stops the round instead of being worked around.
+  assert.match(template, /If the checkout fails,\s*\n\s+stop and report rather than improvising/);
+
+  // The mitigation does not claim to be the fix.
+  assert.match(template, /The inspection narrows this hole; it does not close it/);
+  assert.match(template, /Reviewing in a fresh clone/);
+  assert.match(template, /it is issue #214, the sandbox sharing one writable `\.git`/);
 });
 
 // Guard against the failure mode the pins above CANNOT catch on their own.

@@ -176,16 +176,22 @@ through it: pass review with a harmless version, then put the payload in the
 every step below carries a SHA, and a tip that moved since the review needs
 another pass over what moved.
 
-1. Have the implementing worker push first (`git push -u origin "<branch>"`),
-   then record the revision under review:
-   `git fetch origin && git rev-parse "origin/<branch>"`.
-   That 40-character SHA -- not the branch name -- is what this round is
-   about. Keep it: steps 3, 5, 6 and 7 all compare against it.
-   Check the branch name before it goes anywhere near a shell:
-   `git check-ref-format "refs/heads/<branch>"` accepts `;`, `|`, `&`, `$`,
-   backticks and parentheses, the implementing worker picks the name itself,
-   and you are about to paste it into another worker's command line. Refuse
-   a name carrying any of those, and quote every use of it regardless.
+1. Have the implementing worker push first (`git push -u origin "<branch>"`).
+   Then have **workerA** -- not the implementing worker, and not you -- run
+   `git fetch origin && git rev-parse "origin/<branch>"` and report the
+   result. That hex SHA (40 characters, or 64 in a SHA-256 repository), not
+   the branch name, is what this round is about: keep it, because steps 3, 5,
+   6 and 7 all compare against it.
+   You cannot run this yourself. You have no shell and `repo_info` returns
+   the project's local HEAD, not a remote tip, so every SHA in this section
+   reaches you as text an agent typed. Sourcing it from workerA rather than
+   from the worker being reviewed is what keeps the anchor off the reviewed
+   party's own word -- see the note after step 7 for how far that goes.
+   Reject the branch name before it goes anywhere near a shell: refuse any
+   name containing `;`, `|`, `&`, `$`, backticks, parentheses or a newline,
+   and quote every use of it regardless. `git check-ref-format
+   "refs/heads/<branch>"` does NOT do this for you -- it accepts all of
+   those -- and the implementing worker picks the name itself.
 2. Open a dedicated reviewer with `open_tab({ role: 'workerSec', app:
    'opencode', cwd: <any string -- the argument is ignored, the server
    assigns the worktree> })`. The role name must start with `worker`, so
@@ -197,19 +203,50 @@ another pass over what moved.
      when the implementer runs a different app, the review does not inherit
      its model's blind spots; when the implementer ALSO runs opencode, that
      part does not hold and only the fresh session, the separate worktree and
-     the adversarial brief remain. Check the implementer's app in
-     `list_group_sessions`, prefer giving it a non-opencode app when the
-     choice is yours, and when it is opencode anyway, say so in the request
-     so the finding document records the weaker independence.
-3. Tell the reviewer to check out THE SHA, detached:
-   `git fetch origin && git checkout --detach <sha>`.
-   A raw SHA is 40 hex characters, so unlike a branch name it cannot carry a
-   payload, and it pins the review to the revision you recorded even if the
-   branch moves underneath. The implementing worker's worktree already has
-   that branch checked out and git refuses a second checkout of the same
-   branch; detaching sidesteps that. Detached is NOT read-only -- the
-   worktree is writable and the reviewer needs that to build and run attacks
-   -- it only means no branch ref moves. Tell it not to commit or push.
+     the adversarial brief remain. Check the implementing worker's app in
+     `list_group_sessions`; when its app is yours to choose, give the
+     IMPLEMENTER something other than opencode (the reviewer stays opencode
+     either way), and when it is opencode anyway, say so in the request so
+     the finding document records the weaker independence.
+3. Have the reviewer take the SHA through three checks before it checks
+   anything out. `git checkout` is not an inert operation -- it runs whatever
+   the repository's config tells it to run -- and the roles in this group
+   share one `.git`, which the implementing worker can write to.
+   - **Validate the string.** Refuse to paste it anywhere unless it matches
+     `^[0-9a-f]{40}$` (or `^[0-9a-f]{64}$`), then confirm it resolves:
+     `git fetch origin && git rev-parse --verify "<sha>^{commit}"`. A value
+     that reached you as text is not a SHA because it was called one; one
+     carrying `;` runs as a command in the checkout line below.
+   - **Inspect the shared config.** `git config --list --show-origin` and
+     stop on any key that makes git execute something: `filter.*` (`.clean`,
+     `.smudge`, `.process`), `core.fsmonitor`, `core.sshCommand`,
+     `core.pager`, `core.editor`, `core.askpass`, `credential.helper`,
+     `diff.*.textconv`, `diff.*.command`, `merge.*.driver`, `gpg.program`,
+     `sequence.editor`, `alias.*`, and `core.hooksPath` from anywhere other
+     than `command line:` (the sandbox pins that one itself). Finding any of
+     these is a finding in its own right: report it and do not check out.
+     A branch can carry a `.gitattributes` that selects a filter, so a smudge
+     filter planted in the shared config runs on checkout, before the
+     reviewer has read a single line of the diff. This has been demonstrated
+     (smudge and fsmonitor both executed).
+   - **Then check out, detached:** `git checkout --detach "<sha>"`.
+     The implementing worker's worktree already has that branch checked out
+     and git refuses a second checkout of the same branch; detaching
+     sidesteps that. Detached is NOT read-only -- the worktree is writable
+     and the reviewer needs that to build and run attacks -- it only means no
+     branch ref moves. Tell it not to commit or push. If the checkout fails,
+     stop and report rather than improvising: a SHA that does not resolve
+     means the revision you were given is not the revision that was pushed.
+
+   The inspection narrows this hole; it does not close it. The implementing
+   worker's session is live and can write the shared config in the window
+   between the inspection and the checkout. Reviewing in a fresh clone
+   (a clone has its own config, and the execution does not happen there)
+   removes the class outright, at the cost of the worktree's installed
+   dependencies -- prefer it when the change is worth that cost, and require
+   it when the inspection found anything. The real fix is not in this
+   template: it is issue #214, the sandbox sharing one writable `.git`
+   between roles.
 4. Spell these out in the request -- without them the review silently
    degrades into a static read-through:
    - **Actually run the attacks.** Reading the diff is not the deliverable.
@@ -244,9 +281,19 @@ another pass over what moved.
    hide. Repeat until the tip equals the last reviewed SHA. It is your call
    how wide each incremental pass reaches, not whether it happens.
 
-Before `gh pr create`, workerA re-runs `git rev-parse "origin/<branch>"` and
-refuses to open the PR unless it equals the last SHA a finding document was
+Before `gh pr create`, workerA re-runs `git rev-parse "origin/<branch>"`,
+checks the last finding document itself with `list_docs` / `fetch_doc`, and
+refuses to open the PR unless the tip equals the SHA that document was
 published for. A tip that moved after the last pass means step 7 is not done.
+
+Be clear-eyed about what that chain proves. You cannot run git, so every SHA
+here is a value an agent reported to you; the check in step 6 compares one
+reported value against another. **The only comparison that does not rest on
+the reviewed party's own word is workerA's: it reads the tip and the finding
+document itself, from a repository the implementing worker does not control
+the reporting of.** That is why step 1 routes through workerA and why the PR
+is gated on workerA's comparison rather than on yours. It is one independent
+anchor, not a chain of them.
 
 When the gate cannot run as written, stop and say so rather than proceeding:
 a project that is not a git repository gives every role the same cwd (there
@@ -268,11 +315,13 @@ Three things this gate is explicitly NOT:
   reads it next. Do not skip the gate on a judgment that a diff looks
   harmless.
 - **Not a technical boundary.** Nothing in the server enforces any of this.
-  `gh pr create` does not check for a finding document, and the test that
-  pins this section only catches the wording being deleted -- an adversarial
-  change can edit that test in the same diff. This is a norm that holds
-  because you follow it, which is precisely why the steps above are written
-  as instructions to you rather than as a promise about the system.
+  `gh pr create` does not check for a finding document. The test that pins
+  this section catches the wording being deleted or weakened, and a handful
+  of named exception phrasings, but it was measured against 18 ways of
+  writing an exemption and 15 of them passed -- a synonym is enough. And an
+  adversarial change can edit that test in the same diff. This is a norm that
+  holds because you follow it, which is precisely why the steps above are
+  written as instructions to you rather than as a promise about the system.
 
 ## Handoff discipline
 
