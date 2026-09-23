@@ -18,6 +18,10 @@ cp server/sandbox.config.example.json server/sandbox.config.json
   "gpg": true,
   "sshAgent": false,
   "gitBroker": true,
+  "ghUsageRecording": {
+    "enabled": false,
+    "file": "/absolute/path/gh-usage-recording.json"
+  },
   "commitMessageGuard": {
     "enabled": true,
     "blockedPatterns": []
@@ -71,6 +75,68 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 ([通知と Vikunja 連携](/ccserver/guides/notify/) 参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。`vikunja` は Vikunja タスク連携の設定 (`baseUrl`+`apiToken` で有効化)。 |
 | `federation` | `{}` | 拠点間ペアリング ([federation](/ccserver/guides/federation/) 参照) の設定。`requireTokenForPairing: true` でペアリング開始リクエストに `CCSERVER_TOKEN` の提示を必須化 (既定 `false`)。機能自体の有効/無効は `CCSERVER_FEDERATION_PORT` 環境変数で制御し、ここでは切り替えられません。 |
 | `network` | `{ isolate: false, initialState: "enforce", mode: "enforce", allowedHosts: [], deniedHosts: [] }` | ネットワーク隔離 ([下記](#ネットワーク隔離)参照)。`isolate` は機能全体の on/off (`true` で隔離が有効になる)。`initialState` は隔離を有効にして起動したセッションの開始state (`"enforce"`/`"open"`)、`mode` は `"enforce"`/`"audit"`、`allowedHosts`/`deniedHosts` は完全一致か先頭ドット (`.example.com`) のみの許可/拒否リスト (各最大200件)。設定 UI (設定 → ネットワーク隔離) からも編集可能で、`allowedHosts`/`deniedHosts` の保存は稼働中セッションへ自動反映されます。 |
+
+## gh 利用記録（任意・ローカルのみ）
+
+これは Issue #198 の検証用機能です。既定では完全に無効で、**有効化しても ccserver がネットワーク送信、アップロード、Issue コメント投稿を行うことはありません**。保存先は利用者が指定し、共有するか、編集するか、削除するかも利用者自身が決めます。
+
+記録されるのは、**有効化後に新しく起動したサンドボックス**で `gitBroker` を通った `gh` の集計結果だけです。既に動いているセッション、サンドボックス外の `gh`、broker が起動しなかった操作は対象外です。生のイベント列は保存しません。
+
+### 有効化
+
+ccserver を起動しているホスト上で、保存したいローカル絶対パスを指定します。親ディレクトリは必要に応じて作られ、集計ファイルは初回の操作時に作成されます。
+
+```bash
+node server/cli/gh-usage-report.js enable \
+  --file /absolute/path/gh-usage-recording.json
+```
+
+このコマンドは `sandbox.config.json` の `ghUsageRecording` を次の形で更新します。反映されるのは新規セッションだけなので、記録を始める前に対象のサンドボックスセッションを起動し直してください。
+
+```json
+{
+  "ghUsageRecording": {
+    "enabled": true,
+    "file": "/absolute/path/gh-usage-recording.json"
+  }
+}
+```
+
+### 確認・共有
+
+いつでも集計をプレーンテキストで確認できます。出力は表示するだけで、送信はしません。
+
+```bash
+node server/cli/gh-usage-report.js show
+```
+
+期間を出力したくない場合は `--no-period` を加えます。共有する場合も、まずこの出力を確認し、必要なら編集したコピーを Issue コメントなどへ手動で貼り付けてください。
+
+```text
+ccserver-gh-usage-report: 1
+period: 2026-09-01..2026-09-30
+recording: opted-in-local-aggregate
+
+client=codex sandbox=sandboxed broker=on
+  target=issue operation=create result=success count=3
+  target=pr operation=edit result=broker-denied:not-allowlisted count=1
+```
+
+保存される値は、クライアント種別、固定の対象・操作分類、成功/CLI エラー/broker 拒否などの結果分類、および件数だけです。`gh` の引数、owner/repo、URL、Issue/PR 番号、本文、ファイルパス、標準出力/標準エラー、トークン、安定した利用者・端末・セッション ID は保存しません。
+
+### リセット・停止
+
+集計だけをゼロから始めるには、次を実行します。設定は有効のままです。
+
+```bash
+node server/cli/gh-usage-report.js reset
+```
+
+停止すると以後に起動するサンドボックスでは記録されません。すでにある集計ファイルは削除しないため、必要なら利用者自身が内容を確認して保持または削除できます。
+
+```bash
+node server/cli/gh-usage-report.js disable
+```
 
 ## ネットワーク隔離
 
