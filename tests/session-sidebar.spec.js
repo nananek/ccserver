@@ -320,6 +320,71 @@ test('remote sessions of paired instances are listed, openable and terminable', 
   await expect(remoteItems).toHaveCount(0);
 });
 
+test('remote session re-created by the SESSION_NOT_FOUND re-init is not listed twice', async ({ page }) => {
+  // リモートタブが SESSION_NOT_FOUND で init をやり直すと、ピア側には新しい
+  // セッションが作られ tab.sessionId だけがその新IDになる (attachSessionId は
+  // 死んだ旧IDのまま)。開いている側のIDも除外キーに入っていないと、その新
+  // セッションが「リモートのセッション」に二重表示されてしまう。
+  const instanceId = 'inst-reinit-1';
+  let sessions = [{ id: 'rs-old', cwd: '/home/peer/alpha', app: 'claude' }];
+  let fetchedAfterReinit = 0;
+  await page.route('**/api/federation/instances', (route) => route.fulfill({
+    json: { instances: [{ id: instanceId, status: 'active', label: 'peerhost', fingerprint: 'aa:bb:cc:dd:ee' }] },
+  }));
+  await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => {
+    if (sessions.some((s) => s.id === 'rs-new')) fetchedAfterReinit++;
+    return route.fulfill({ json: { sessions } });
+  });
+  await page.routeWebSocket('/ws/remote-terminal', (ws) => {
+    ws.onMessage((message) => {
+      let msg;
+      try { msg = JSON.parse(String(message)); } catch { return; }
+      if (msg.type === 'attach') {
+        ws.send(JSON.stringify({ type: 'error', message: 'Session not found', code: 'SESSION_NOT_FOUND' }));
+        return;
+      }
+      if (msg.type === 'init') {
+        sessions = [{ id: 'rs-new', cwd: '/home/peer/alpha', app: 'claude' }];
+        ws.send(JSON.stringify({ type: 'session', sessionId: 'rs-new', cwd: '/home/peer/alpha', cols: 80, rows: 24 }));
+      }
+    });
+  });
+  await gotoApp(page);
+
+  const remoteItems = leftSidebar(page).locator('[data-section="unopened-remote"] .session-menu-item');
+  await expect(remoteItems).toHaveCount(1);
+  await remoteItems.first().locator('.session-menu-select').click();
+  await expect(openedItems(page)).toHaveCount(1);
+
+  // ピアの一覧が rs-new に変わったポーリングを取り込んでも、タブが掴んでいる
+  // rs-new は未オープン扱いされない。
+  await expect.poll(() => fetchedAfterReinit, { timeout: 15_000 }).toBeGreaterThan(0);
+  await expect(remoteItems).toHaveCount(0);
+});
+
+test('remote group members are not listed as standalone sessions', async ({ page }) => {
+  // ローカルの一覧 (fetchServerSessions) は groupId != null を除外している
+  // (bare なタブで attach するとグループのソケットを奪い、✕で一部だけ終了
+  // させてしまうため)。リモート一覧も同じ規則に揃える。
+  const instanceId = 'inst-group-1';
+  await page.route('**/api/federation/instances', (route) => route.fulfill({
+    json: { instances: [{ id: instanceId, status: 'active', label: 'peerhost', fingerprint: 'aa:bb:cc:dd:ee' }] },
+  }));
+  await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => route.fulfill({
+    json: {
+      sessions: [
+        { id: 'standalone-1', cwd: '/home/peer/alpha', app: 'claude' },
+        { id: 'member-1', cwd: '/home/peer/combo', app: 'claude', groupId: 'g1', groupRole: 'orchestrator' },
+      ],
+    },
+  }));
+  await gotoApp(page);
+
+  const remoteItems = leftSidebar(page).locator('[data-section="unopened-remote"] .session-menu-item');
+  await expect(remoteItems).toHaveCount(1);
+  await expect(remoteItems.first().locator('.session-menu-label')).toHaveText('alpha');
+});
+
 test('lower-section ✕ uses the in-app confirm modal and shares "次回以降確認しない"', async ({ page }) => {
   await gotoApp(page);
   await terminateAllLowerSidebar(page);

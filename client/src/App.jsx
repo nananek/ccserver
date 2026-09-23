@@ -865,9 +865,15 @@ export default function App() {
   }
   const unopenedSessions = serverSessions.filter((s) => !openedSessionIds.has(s.id));
   // リモートはインスタンス単位でIDを区別する (ローカルのIDと混同しない)。
+  // sessionId 側も見る: SESSION_NOT_FOUND で TerminalView が init をやり直すと
+  // ピア側に新しいセッションが作られ、tab.sessionId だけがその新IDに更新される
+  // (attachSessionId は死んだ旧IDのまま残る) ため、attachSessionId だけを見ると
+  // 開いているセッションを「リモートのセッション」に二重表示してしまう。
   const openedRemoteKeys = new Set();
   for (const t of tabs) {
-    if (t.remote && t.attachSessionId) openedRemoteKeys.add(`${t.remote.instanceId}:${t.attachSessionId}`);
+    if (!t.remote) continue;
+    if (t.attachSessionId) openedRemoteKeys.add(`${t.remote.instanceId}:${t.attachSessionId}`);
+    if (t.sessionId) openedRemoteKeys.add(`${t.remote.instanceId}:${t.sessionId}`);
   }
   const unopenedRemoteSessions = remoteSessions.filter(({ instance, session }) => !openedRemoteKeys.has(`${instance.id}:${session.id}`));
   // 開き済みグループタブのあるグループを除いた未オープン一覧。
