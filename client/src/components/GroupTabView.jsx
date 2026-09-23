@@ -442,9 +442,6 @@ export default function GroupTabView({
           {docs.length > 0 && <span className="group-docs-badge">{docs.length}</span>}
         </button>
         </>)}
-        {remote && (
-          <span className="tab-remote-badge" title={`接続先: ${remote.label}`}>⇄ {remote.label}</span>
-        )}
         {!remote && orchestrator?.exited && (
           <button
             className="btn btn-secondary group-restart-orch-btn"
