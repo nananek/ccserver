@@ -13,11 +13,8 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { normalizeAllowedHosts, MAX_ALLOWED_HOSTS, normalizeNetworkSettings } from './network-broker.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export function resolveSandboxConfigPath() {
   return resolvePath(PATH_IDS.sandboxConfig);

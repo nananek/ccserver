@@ -214,18 +214,91 @@ test('an env-overridden DB is named in the output and stays put', () => {
   assert.ok(marker().skipped.some((s) => s.id === 'db'));
 });
 
+// The sticky trees live under legacyDataRoot(), which is homedir()-based --
+// and spawnWizard() points $HOME at caseDir/home. So they have to be seeded
+// THERE. An earlier version of this test built them under caseDir directly
+// and then looped over plan.kept, which was therefore always empty: every
+// assertion was inside a loop that never ran and a deepEqual([], []). It
+// passed no matter what the wizard did with a sticky tree.
+function legacySandboxRoot() {
+  return join(caseDir, 'home', '.local', 'share', 'ccserver-sandbox');
+}
+
 test('sticky trees are recorded in kept[] rather than moved', () => {
-  const legacyWorktrees = join(caseDir, 'legacy', 'worktrees');
+  const legacyWorktrees = join(legacySandboxRoot(), 'worktrees');
   mkdirSync(join(legacyWorktrees, 'proj'), { recursive: true });
-  // The sticky entries are keyed off the real ~/.local/share/ccserver-sandbox,
-  // so assert on whatever this host actually has rather than fabricating it.
+
   const plan = JSON.parse(runSetup(['--json']).stdout);
+  assert.ok(plan.kept.length > 0, 'the seeded worktrees tree must be reported as kept');
+  const worktrees = plan.kept.find((k) => k.id === 'worktrees');
+  assert.ok(worktrees, `worktrees must be kept; got ${JSON.stringify(plan.kept)}`);
+  assert.equal(worktrees.at, legacyWorktrees);
   for (const k of plan.kept) {
     assert.equal(k.reason, 'sticky-large');
     assert.equal(plan.steps.some((s) => s.id === k.id), false, `${k.id} must not also be a step`);
   }
+
   runSetup(['--yes']);
   assert.deepEqual(marker().kept.map((k) => k.id).sort(), plan.kept.map((k) => k.id).sort());
+  // Still where it was, and the marker is what makes resolution keep
+  // pointing at it (rather than an existsSync probe that could race).
+  assert.equal(existsSync(join(legacyWorktrees, 'proj')), true);
+  assert.equal(existsSync(join(roots().data, 'worktrees')), false);
+});
+
+test('★ --move-large really moves a sticky tree, and clears it from kept[]', () => {
+  const legacyWorktrees = join(legacySandboxRoot(), 'worktrees');
+  mkdirSync(join(legacyWorktrees, 'proj'), { recursive: true });
+  writeFileSync(join(legacyWorktrees, 'proj', 'f.txt'), 'WORKTREE-CONTENT');
+
+  runSetup(['--yes', '--move-large']);
+  assert.equal(readFileSync(join(roots().data, 'worktrees', 'proj', 'f.txt'), 'utf-8'), 'WORKTREE-CONTENT');
+  assert.equal(existsSync(legacyWorktrees), false, 'the old location is emptied');
+  assert.deepEqual(marker().kept, [], 'nothing is sticky once it has been moved');
+  assert.ok(marker().migrated.includes('worktrees'));
+});
+
+test('a both-present entry is warned about in BOTH the dry run and --yes', () => {
+  // rev2 §3-A keeps this a warning and not a blocker on purpose (a blocker
+  // leaves the operator with no way to ever finish), so being impossible to
+  // miss is all the enforcement it gets. It has to survive on an
+  // already-migrated host too, which is where it is most likely to appear.
+  const legacyFed = join(legacySandboxRoot(), 'federation');
+  mkdirSync(legacyFed, { recursive: true });
+  writeFileSync(join(legacyFed, 'instance.key'), 'OLD-KEY');
+  runSetup(['--yes']);                       // moves it; host is now v2
+  mkdirSync(legacyFed, { recursive: true }); // and it reappears at the old path
+  writeFileSync(join(legacyFed, 'instance.key'), 'RESURRECTED');
+
+  const dry = runSetup();
+  assert.match(dry.stdout, /両方にあります/, 'the dry run must say so');
+  assert.match(dry.stdout, /警告/);
+
+  const yes = runSetup(['--yes']);
+  assert.match(yes.stdout, /両方にあります/, '--yes must say so too, after the move list');
+  assert.equal(readFileSync(join(legacyFed, 'instance.key'), 'utf-8'), 'RESURRECTED', 'and merge nothing');
+  assert.equal(readFileSync(join(roots().data, 'federation', 'instance.key'), 'utf-8'), 'OLD-KEY');
+});
+
+test('★ the dry run predicts what --yes does on an ALREADY-MIGRATED host', () => {
+  // This used to be wrong: printPlan() was skipped once the marker said v2,
+  // so a host with a legacy file left behind (a rolled-back run, or an older
+  // branch booted once and re-creating it) printed
+  // "移行するものはありません" and then --yes moved the file anyway.
+  runSetup(['--yes']);
+  const legacyLeft = join(legacySandboxRoot(), 'orchestrator-generated');
+  mkdirSync(legacyLeft, { recursive: true });
+  writeFileSync(join(legacyLeft, 'x.md'), 'LEFT-BEHIND');
+
+  const dry = runSetup();
+  assert.match(dry.stdout, /移動するもの/, 'the dry run must announce the pending move');
+  assert.match(dry.stdout, /orchestrator-generated/);
+  assert.doesNotMatch(dry.stdout, /移行するものはありません/);
+  assert.equal(existsSync(join(legacyLeft, 'x.md')), true, 'and still move nothing');
+
+  const yes = runSetup(['--yes']);
+  assert.match(yes.stdout, /移動しました/);
+  assert.equal(readFileSync(join(roots().data, 'orchestrator-generated', 'x.md'), 'utf-8'), 'LEFT-BEHIND');
 });
 
 // --- the wizard must not open the DB ----------------------------------------

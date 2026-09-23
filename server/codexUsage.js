@@ -16,7 +16,6 @@
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, isAppHidden, forceSandboxUnavailableReason } from './ws/sandbox.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
 import { formatResets } from './usageResetFormat.js';

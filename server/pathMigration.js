@@ -59,8 +59,8 @@ export function planMigration({ entries = allPaths(), deps = nodeFs } = {}) {
     // whose committed-but-uncheckpointed transactions were still sitting in
     // the orphaned WAL. SQLite treats a DB with no WAL as clean, so those
     // commits vanish silently rather than as corruption.
-    const targetExists = anyPresent(target, entry.sidecars, deps);
-    const present = entry.legacyPaths.filter((p) => anyPresent(p, entry.sidecars, deps));
+    const targetExists = presentComponents(target, entry.sidecars, deps).length > 0;
+    const present = entry.legacyPaths.filter((p) => presentComponents(p, entry.sidecars, deps).length > 0);
 
     // 2. Both occupied. Moving would clobber live data and merging could
     //    clobber it differently, so neither happens -- db.js:69-79's
@@ -103,15 +103,29 @@ export function planMigration({ entries = allPaths(), deps = nodeFs } = {}) {
     //    waits -- leaving a server that never finishes booting AND ignores
     //    SIGTERM, so systemd could only kill it after TimeoutStopSec.
     //    Leaving the oddity at the old path means the new path is simply
-    //    absent, which every reader already handles.
-    const kind = fileKind(present[0], deps);
-    if (kind !== 'file' && kind !== 'dir') {
+    //    absent, which every reader already handles. Note this closes only
+    //    the "carried into the new layout" half: the restore side's bare
+    //    readFileSync is a pre-#201 weakness that still blocks on a FIFO
+    //    sitting at a LEGACY path, tracked separately as issue #212.
+    //
+    //    Asked of the components that EXIST, not of `present[0]` itself.
+    //    Presence is satisfied by a sidecar alone -- an interrupted run
+    //    leaves ccserver.sqlite3-wal with no main file -- and lstat'ing the
+    //    absent main file answered 'unknown', so the entry was refused with
+    //    a "not a regular file" warning naming a path that simply was not
+    //    there, and the orphaned WAL (which holds committed transactions
+    //    SQLite will otherwise treat as never having happened) stayed behind.
+    const components = presentComponents(present[0], entry.sidecars, deps);
+    const odd = components
+      .map((path) => ({ path, kind: fileKind(path, deps) }))
+      .find(({ kind }) => kind !== 'file' && kind !== 'dir');
+    if (odd) {
       warnings.push({
         id: entry.id,
         label: entry.label,
         reason: 'not-a-regular-file',
-        path: present[0],
-        message: `${entry.label} (${present[0]}) は通常のファイル/ディレクトリではありません (${kind})。`
+        path: odd.path,
+        message: `${entry.label} (${odd.path}) は通常のファイル/ディレクトリではありません (${odd.kind})。`
           + '移行せずにそのまま残します。不要なら手動で削除してください。',
       });
       continue;
@@ -124,7 +138,7 @@ export function planMigration({ entries = allPaths(), deps = nodeFs } = {}) {
       continue;
     }
 
-    steps.push(buildStep(entry, present[0], target, deps));
+    steps.push(buildStep(entry, present[0], target, components, deps));
   }
 
   return { steps, skips, warnings, kept };
@@ -147,22 +161,25 @@ function fileKind(path, deps) {
   return 'special';
 }
 
-// True when the path itself or any of its sidecars exists.
-function anyPresent(path, sidecars, deps) {
-  if (deps.existsSync(path)) return true;
-  return (sidecars || []).some((suffix) => deps.existsSync(`${path}${suffix}`));
+// Every component of an entry that is actually on disk: the path itself plus
+// whichever of its sidecars exist, main file first.
+//
+// One function for all three questions that need this set -- is anything
+// here at all, is any of it something we refuse to move, and what goes into
+// the step -- so they cannot answer differently. Sidecars count because a
+// SQLite WAL that ends up in a different directory from its main file is
+// corruption rather than an inconvenience, and because the main file can be
+// missing while a sidecar lingers after an interrupted run.
+function presentComponents(path, sidecars, deps) {
+  const out = [];
+  for (const suffix of ['', ...(sidecars || [])]) {
+    if (deps.existsSync(`${path}${suffix}`)) out.push(`${path}${suffix}`);
+  }
+  return out;
 }
 
-function buildStep(entry, from, to, deps) {
-  // Sidecars are part of the same logical object: a SQLite WAL that ends up
-  // in a different directory than its main file is corruption, not an
-  // inconvenience. Only the ones that actually exist go in.
-  // The main file may be absent while a sidecar lingers (an interrupted
-  // earlier run), so every component is tested individually.
-  const items = [];
-  for (const suffix of ['', ...entry.sidecars]) {
-    if (deps.existsSync(`${from}${suffix}`)) items.push({ from: `${from}${suffix}`, to: `${to}${suffix}` });
-  }
+function buildStep(entry, from, to, components, deps) {
+  const items = components.map((path) => ({ from: path, to: `${to}${path.slice(from.length)}` }));
   return {
     id: entry.id,
     label: entry.label,
@@ -323,7 +340,18 @@ function claimByLink(from, to, deps) {
     return;
   }
   deps.linkSync(from, to);
-  deps.unlinkSync(from);
+  try {
+    deps.unlinkSync(from);
+  } catch (err) {
+    // The destination is claimed but the source could not be released (an
+    // immutable attr, a sticky parent, a revoked permission). Leaving `to`
+    // there would hand the next run a both-present warning over a file that
+    // never actually moved -- the same partial-destination trap the copy
+    // path cleans up after itself for. Undo the claim; no data was at risk,
+    // since `to` is only ever another link to the same inode.
+    try { deps.unlinkSync(to); } catch { /* nothing to undo */ }
+    throw err;
+  }
 }
 
 // Keeps the operator-facing wording for the one failure they are most
@@ -349,11 +377,18 @@ function isDirectory(path, deps) {
 // requires 0700/0600), the DB session tokens and GPG vault material
 // (db.js's L2 chmod). Best-effort: an exotic or read-only fs must not undo
 // a successful move.
+// Driven off step.items rather than step.to plus its tail: the main file can
+// legitimately be ABSENT while a sidecar lingers (an interrupted earlier run
+// leaves ccserver.sqlite3-wal behind on its own), and chmod'ing a path that
+// was never moved threw ENOENT -- which, with one try around the whole loop,
+// silently skipped the sidecars that WERE moved. A -wal holds real database
+// pages, so leaving it at an inherited 0644 next to a 0600 DB would publish
+// the contents the chmod exists to protect. Each item gets its own try for
+// the same reason.
 function applyModes(step, deps) {
-  try {
-    deps.chmodSync(step.to, step.fileMode);
-    for (const item of step.items.slice(1)) deps.chmodSync(item.to, step.fileMode);
-  } catch { /* best effort */ }
+  for (const item of step.items) {
+    try { deps.chmodSync(item.to, step.fileMode); } catch { /* best effort */ }
+  }
 }
 
 export function ensureRoots(deps = nodeFs) {

@@ -16,16 +16,25 @@ import {
 
 let tmpRoot;
 const savedDbPath = process.env.CCSERVER_DB_PATH;
+const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 
 before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-settings-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
+  // Migrating a fresh DB runs v2's importLegacy/postApply, which read AND
+  // RENAME sandbox.js's legacy sidecar index under CCSERVER_SANDBOX_HOME_ROOT
+  // -- on a pre-v2 host that is the operator's real
+  // ~/.local/share/ccserver-sandbox/home/.index.json. Same hazard db.test.js
+  // documents at length; anything that opens a DB has to override this.
+  process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
 });
 
 after(() => {
   closeDb();
   if (savedDbPath === undefined) delete process.env.CCSERVER_DB_PATH;
   else process.env.CCSERVER_DB_PATH = savedDbPath;
+  if (savedHomeRoot === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
+  else process.env.CCSERVER_SANDBOX_HOME_ROOT = savedHomeRoot;
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 

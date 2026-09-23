@@ -280,6 +280,49 @@ test('the rollback survives a failure in the middle of one item\'s sidecars', ()
   assert.equal(existsSync(`${e.target}-wal`), false);
 });
 
+test('★ an orphaned sidecar moves on its own, and still gets the tight mode', () => {
+  // An interrupted earlier run can leave ccserver.sqlite3-wal behind with no
+  // main file. The planner has to notice it (F4b: a WAL orphaned at the old
+  // path holds committed transactions that SQLite would otherwise consider
+  // never to have happened) and the chmod has to reach it: a -wal holds real
+  // database pages, so leaving it at an inherited 0644 next to a 0600 DB
+  // publishes exactly what the chmod exists to protect. It used to be
+  // skipped, because applyModes chmod'd step.to -- the ABSENT main file --
+  // first, and one throw inside a single try swallowed the rest.
+  const e = entry({ id: 'db', kind: 'data', sidecars: ['-wal', '-shm'] });
+  put(`${e.legacyPaths[0]}-wal`, 'wal-only');
+  chmodSync(`${e.legacyPaths[0]}-wal`, 0o644);
+
+  const plan = planMigration({ entries: [e] });
+  assert.equal(plan.steps.length, 1, 'a lone sidecar is still something to move');
+  assert.deepEqual(plan.steps[0].items.map((i) => i.from), [`${e.legacyPaths[0]}-wal`]);
+
+  applyMigration(plan);
+  assert.equal(readFileSync(`${e.target}-wal`, 'utf-8'), 'wal-only');
+  assert.equal(statSync(`${e.target}-wal`).mode & 0o777, 0o600, 'the sidecar must be tightened too');
+  assert.equal(existsSync(e.target), false, 'and no empty main file is invented');
+});
+
+test('a claimed destination is released again when the source cannot be unlinked', () => {
+  // The same-device path claims `to` with link(2) and then unlinks `from`.
+  // If that unlink fails, leaving the link behind hands the NEXT run a
+  // both-present warning over a file that never actually moved -- the
+  // partial-destination trap (F4) that the copy path already cleans up after
+  // itself for.
+  const e = entry();
+  put(e.legacyPaths[0], 'payload');
+  const deps = {
+    ...nodeFs,
+    statSync: (p) => (typeof p === 'string' && p.includes('old') ? { dev: 1 } : { dev: 1 }),
+    unlinkSync: (p) => { if (p === e.legacyPaths[0]) { const err = new Error('operation not permitted'); err.code = 'EPERM'; throw err; } return nodeFs.unlinkSync(p); },
+  };
+  const plan = planMigration({ entries: [e], deps: { ...nodeFs, statSync: () => ({ dev: 1 }) } });
+  assert.equal(plan.steps[0].mode, 'rename');
+  assert.throws(() => applyMigration(plan, { deps }), /operation not permitted/);
+  assert.equal(readFileSync(e.legacyPaths[0], 'utf-8'), 'payload', 'the source is untouched');
+  assert.equal(existsSync(e.target), false, 'and nothing is left claiming the destination');
+});
+
 test('applyMigration reports what it moved and calls onLog per step', () => {
   const a = entry({ id: 'a' });
   const b = entry({ id: 'b' });
@@ -370,6 +413,25 @@ test('F6: a symlink at a legacy path is refused too (it is not the file it point
   assert.equal(plan.steps.length, 0);
   assert.equal(plan.warnings[0].reason, 'not-a-regular-file');
   assert.match(plan.warnings[0].message, /symlink/);
+});
+
+test('F6: an odd SIDECAR is refused too, not just an odd main file', () => {
+  // The kind check runs over every component that exists, so a FIFO planted
+  // at ccserver.sqlite3-wal cannot ride along with a perfectly ordinary main
+  // file into the new data directory.
+  const e = entry({ id: 'db', kind: 'data', sidecars: ['-wal', '-shm'] });
+  put(e.legacyPaths[0], 'main');
+  try {
+    execFileSync('mkfifo', [`${e.legacyPaths[0]}-wal`]);
+  } catch {
+    return; // no mkfifo on this platform
+  }
+  const plan = planMigration({ entries: [e] });
+  assert.equal(plan.steps.length, 0, 'the whole entry is held back, main file included');
+  assert.equal(plan.warnings[0].reason, 'not-a-regular-file');
+  assert.equal(plan.warnings[0].path, `${e.legacyPaths[0]}-wal`, 'and it names the component at fault');
+  applyMigration(plan);
+  assert.equal(existsSync(e.target), false);
 });
 
 test('F6: ordinary files and directories are still migrated normally', () => {

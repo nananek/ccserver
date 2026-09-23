@@ -32,10 +32,17 @@ let tmpRoot;
 let app;
 const savedDbPath = process.env.CCSERVER_DB_PATH;
 const savedAuthMode = process.env.CCSERVER_AUTH_MODE;
+const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 
 before(async () => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-auth-route-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
+  // Migrating a fresh DB runs v2's importLegacy/postApply, which read AND
+  // RENAME sandbox.js's legacy sidecar index under CCSERVER_SANDBOX_HOME_ROOT
+  // -- on a pre-v2 host that is the operator's real
+  // ~/.local/share/ccserver-sandbox/home/.index.json. Same hazard db.test.js
+  // documents at length; anything that opens a DB has to override this.
+  process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
   app = Fastify();
   await app.register(authRoute, { prefix: '/api' });
 });
@@ -45,6 +52,7 @@ after(async () => {
   closeDb();
   if (savedDbPath === undefined) delete process.env.CCSERVER_DB_PATH; else process.env.CCSERVER_DB_PATH = savedDbPath;
   if (savedAuthMode === undefined) delete process.env.CCSERVER_AUTH_MODE; else process.env.CCSERVER_AUTH_MODE = savedAuthMode;
+  if (savedHomeRoot === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT; else process.env.CCSERVER_SANDBOX_HOME_ROOT = savedHomeRoot;
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 

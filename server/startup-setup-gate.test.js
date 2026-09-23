@@ -24,7 +24,6 @@ import { isolatedEnv, spawnWizard } from './testIsolation.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, 'index.js');
-const SETUP_CLI = join(__dirname, 'cli', 'setup.js');
 const REPO_ROOT = join(__dirname, '..');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

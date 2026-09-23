@@ -75,13 +75,18 @@ if (asJson) {
 }
 
 printHeader();
+printCurrentLayout();
 
-if (alreadyMigrated) {
-  printAlreadyMigrated();
-  if (!apply) process.exit(0);
-}
-
-if (!alreadyMigrated) printPlan();
+// The plan is printed in EVERY mode, an already-migrated host included.
+// Skipping it there made the dry run LIE: a v2 host with a legacy file left
+// behind -- a rolled-back run, or an older branch booted once and
+// re-created <repo>/.saved-groups.json -- printed "移行するものはありません"
+// and then `--yes` went ahead and moved it. A dry run whose output does not
+// predict what --yes does is worse than having no dry run at all. It is also
+// the only place a both-present warning can reach the operator on a host
+// that is already at v2.
+printPlan();
+printLeftovers();
 
 if (running) {
   console.error(`ccserver (:${port()}) が応答しています。移行前に停止してください:`);
@@ -157,6 +162,13 @@ if (plan.kept.length > 0) {
   console.log(`その場に残しました (${plan.kept.length}件):`);
   for (const k of plan.kept) console.log(`  ${k.label.padEnd(28)} ${k.at}`);
 }
+// Repeated here on purpose, after the move list rather than only before it.
+// A both-present entry is the one thing this run did NOT resolve, and on a
+// host with a dozen moves the pre-flight copy has scrolled away by the time
+// the operator reads the result. It is deliberately not a blocker (rev2
+// §3-A: making it one leaves the operator with no way to ever finish), so
+// being impossible to miss is the whole of its enforcement.
+printWarnings('警告 -- 以下は移行していません');
 
 console.log('');
 if (plan.steps.length === 0 && plan.kept.length === 0 && plan.skips.every((s) => s.reason !== 'nothing-to-move')) {
@@ -193,6 +205,17 @@ function writeMarker() {
   };
   mkdirSync(dirname(layoutMarkerPath()), { recursive: true, mode: 0o700 });
   // Never written through a symlink (F5) -- see writeFileNoFollow.
+  //
+  // 0644 rather than 0600, deliberately. Everything the object above can
+  // hold is non-secret and checked field by field: an integer version, two
+  // millisecond timestamps, a fixed literal, registry ids, filesystem paths,
+  // and `detail` -- which is `${envVar}=${entry.path}`, an env var NAME and a
+  // path, never its contents. Nothing here is read from a file's body, from
+  // the DB, or from a request, so no secret has a route in. And the file sits
+  // inside configRoot(), which ensureRoots() creates 0700, so the mode on the
+  // file is not what decides who can read it anyway. Readable is useful: an
+  // operator debugging "where did my DB go" cats this, and so does a
+  // deployment script.
   writeFileNoFollow(layoutMarkerPath(), `${JSON.stringify(marker, null, 2)}\n`, 0o644);
 }
 
@@ -250,29 +273,32 @@ function printRoots(indent = '  ') {
   console.log(`${indent}状態 (state):  ${stateRoot()}`);
 }
 
-function printAlreadyMigrated() {
-  const marker = readLayout();
-  const when = marker?.completedAt ? new Date(marker.completedAt).toISOString() : '不明';
-  console.log(`現在のレイアウト: v${layoutVersion()} (移行済み, ${when})`);
+function printCurrentLayout() {
+  if (alreadyMigrated) {
+    const marker = readLayout();
+    const when = marker?.completedAt ? new Date(marker.completedAt).toISOString() : '不明';
+    console.log(`現在のレイアウト: v${layoutVersion()} (移行済み, ${when})`);
+  } else {
+    console.log(`現在のレイアウト: v${layoutVersion()} (未移行)`);
+    console.log('移行先:');
+  }
   printRoots();
   console.log('');
-  console.log('移行するものはありません。');
-  if (leftovers.length > 0) {
-    console.log('');
-    console.log('旧レイアウトの残骸を検出しました (ccserver は参照していません。確認のうえ手動で削除してください):');
-    for (const l of leftovers) console.log(`  ${l.path}`);
-  }
+}
+
+function printLeftovers() {
+  if (leftovers.length === 0) return;
+  console.log('旧レイアウトの残骸を検出しました (ccserver は参照していません。確認のうえ手動で削除してください):');
+  for (const l of leftovers) console.log(`  ${l.path}`);
   console.log('');
 }
 
 function printPlan() {
-  console.log(`現在のレイアウト: v${layoutVersion()} (未移行)`);
-  console.log('移行先:');
-  printRoots();
-  console.log('');
-
-  if (plan.steps.length === 0 && plan.kept.length === 0) {
-    console.log('移行対象は見つかりませんでした (新規インストール)。');
+  // Warnings count as "something to say": an entry present on both sides is
+  // not nothing, and reporting it under a "移行するものはありません" heading
+  // would bury it.
+  if (plan.steps.length === 0 && plan.kept.length === 0 && plan.warnings.length === 0) {
+    console.log(alreadyMigrated ? '移行するものはありません。' : '移行対象は見つかりませんでした (新規インストール)。');
     console.log('');
   }
 
@@ -306,18 +332,29 @@ function printPlan() {
     console.log('');
   }
 
-  if (plan.warnings.length > 0) {
-    console.log('警告:');
-    for (const w of plan.warnings) console.log(`  ${w.message}`);
-    console.log('');
-  }
+  printWarnings('警告');
 
-  printCreated();
-  printSettingsGuidance();
+  // Only on a host that has not been set up yet: on a v2 host the roots and
+  // the config file already exist, and restating the static/dynamic split
+  // every time the operator re-runs the wizard is noise.
+  if (!alreadyMigrated) {
+    printCreated();
+    printSettingsGuidance();
+  }
 }
 
-// Always shown: even a pure migration creates the three roots and the
-// marker, and the operator should see the config file appear before it does.
+function printWarnings(heading) {
+  if (plan.warnings.length === 0) return;
+  console.log('');
+  console.log(`${heading} (${plan.warnings.length}件):`);
+  for (const w of plan.warnings) console.log(`  ${w.message}`);
+  console.log('');
+}
+
+// Shown for any not-yet-set-up host, a pure migration included: that still
+// creates the three roots and the marker, and the operator should see the
+// config file listed before it appears. (printPlan skips it once the marker
+// says v2, where all of it already exists.)
 function printCreated() {
   const configEntry = allPaths().find((e) => e.id === 'sandboxConfig');
   console.log('作成されるもの:');

@@ -9,11 +9,7 @@
 
 import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { resolvePath, PATH_IDS } from '../paths.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // M8 fix (vuln_scan report): requireTokenForPairing used to send the raw
 // CCSERVER_TOKEN itself over the TOFU bootstrap connection -- which, by

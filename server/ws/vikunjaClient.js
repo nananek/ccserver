@@ -58,13 +58,10 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { hostname as osHostname } from 'node:os';
-import { basename, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename } from 'node:path';
 import { Agent } from 'undici';
 import { loadSandboxConfig } from './sandbox.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export function tasksPath() {
   return resolvePath(PATH_IDS.savedVikunjaTasks);

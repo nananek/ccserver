@@ -6,13 +6,10 @@
 // All path generation is server-controlled; upload filenames are never used as
 // path components.
 
-import { basename, dirname, extname, join, resolve } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 import { mkdirSync, statSync, realpathSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { resolvePath, PATH_IDS } from '../paths.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Limits (plan section 2): per-file, per-group count, per-group bytes.
 export const MAX_FILE_BYTES = 50 * 1024 * 1024;

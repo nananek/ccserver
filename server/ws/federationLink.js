@@ -38,6 +38,7 @@ import { LineFramer, FRAME_KINDS } from './federationProtocol.js';
 import * as pairing from './federationPairing.js';
 import { federationConfig, derivePairingToken } from './federationConfig.js';
 import { resolvedHostname } from './notify.js';
+import { setupRequired } from '../paths.js';
 import { attachTerminalHandler } from './terminal.js';
 import { hostname as osHostname } from 'node:os';
 import { loadSandboxConfig } from './sandbox.js';
@@ -168,7 +169,37 @@ async function rpcSessionsList(_params) {
   return { ok: true, sessions: smMod.listSessions() };
 }
 
+// The #201 setup gate reaches the federation surface too.
+//
+// index.js gates HTTP writes with a 503 and terminal.js gates the WS `init`
+// and `schedule_prompt` messages, but a paired peer talks neither: the
+// federation listener is its own TLS port and never passes through fastify's
+// onRequest hook. Without this, sessions.create / groups.create over a link
+// created sessions, groups and worktrees on an un-migrated host and wrote
+// saved-sessions.json / saved-groups.json to the PRE-migration paths -- the
+// files the operator was about to migrate out from under. That is
+// attack-test-201 F2 again, through a third door.
+//
+// Only the two creating methods are refused. sessions.list / groups.list /
+// groups.members / dirs.list read, and sessions.destroy / groups.destroy
+// only REMOVE -- none of them can put new state at a path the wizard is
+// about to move, and blocking them would cut a peer off from the sessions
+// already running here, which is the outage R2 warns about.
+//
+// Checked inside the two handlers rather than at the dispatcher, because
+// there are TWO dispatchers -- this module's link frames and
+// federationServer.js's surviving one-shot path -- and both share
+// RPC_METHODS. Guarding the handler covers them without a second copy.
+function setupGateError() {
+  return {
+    ok: false,
+    code: 'SETUP_REQUIRED',
+    error: 'peer has not completed setup: run `npm run setup` on that host and restart ccserver',
+  };
+}
+
 async function rpcSessionsCreate(params, ctx) {
+  if (setupRequired()) return setupGateError();
   const { sessionsMod } = await loadRouteDeps();
   const requestedBy = `federation:${ctx.existingRow.label || ctx.peerFingerprint.slice(0, 8)}`;
   // See federationServer.js's original header comment on this handler for
@@ -201,6 +232,7 @@ async function rpcGroupMembers(params) {
 }
 
 async function rpcGroupsCreate(params) {
+  if (setupRequired()) return setupGateError();
   const { groupsMod } = await loadRouteDeps();
   const res = await groupsMod.launchGroupFromSpec(params || {});
   if (!res.ok) return { ok: false, error: res.message };

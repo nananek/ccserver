@@ -14,7 +14,6 @@
 import * as pty from 'node-pty';
 import { homedir } from 'node:os';
 import { mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig, isAppHidden, forceSandboxUnavailableReason } from './ws/sandbox.js';
 import { recordSessionLimitReset } from './sessionLimitState.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';

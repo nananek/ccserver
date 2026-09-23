@@ -27,16 +27,13 @@
 
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 import { deriveWrappingKey, aesGcmEncrypt, aesGcmDecrypt, generateVaultKey } from '../gpgVaultCrypto.js';
 import * as gpgVaultDb from '../gpgVaultDb.js';
 import { getDb } from '../db.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const GEN_TIMEOUT_MS = 30_000;
 const EXPORT_TIMEOUT_MS = 10_000;

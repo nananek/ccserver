@@ -214,6 +214,62 @@ test('sticky trees stay at the path the marker recorded, not at the XDG target',
   assert.equal(pathEntry(PATH_IDS.dind).keptLegacy, false);
 });
 
+test('★ a kept[] record that is not an absolute path is ignored, not trusted', () => {
+  // attack-test-201 F7: the marker is an ordinary file in $XDG_CONFIG_HOME,
+  // so it arrives from dotfile sync and backup restores as readily as from
+  // the wizard. A relative `at` used to be taken verbatim, and then resolved
+  // against whatever cwd the service happened to start in -- so a marker
+  // saying "relative/evil" silently relocated the sandbox HOME root. A
+  // malformed record falls back to the entry's normal XDG target.
+  for (const bad of ['relative/evil', '', 42, null, undefined, { at: '/abs' }]) {
+    writeMarker({
+      layoutVersion: CURRENT_LAYOUT_VERSION,
+      kept: [{ id: 'sandboxHome', at: bad, reason: 'sticky-large' }],
+    });
+    const entry = pathEntry(PATH_IDS.sandboxHome);
+    assert.equal(entry.path, join(dataRoot(), 'home'), `at=${JSON.stringify(bad)} must not be honored`);
+    assert.equal(entry.keptLegacy, false);
+    assert.equal(entry.keptAt, null);
+  }
+  // A non-array kept, and entries for other ids, are equally harmless.
+  writeMarker({ layoutVersion: CURRENT_LAYOUT_VERSION, kept: 'not-an-array' });
+  assert.equal(resolvePath(PATH_IDS.sandboxHome), join(dataRoot(), 'home'));
+
+  // ...and an absolute one still IS honored, so the check above is not just
+  // rejecting everything.
+  writeMarker({
+    layoutVersion: CURRENT_LAYOUT_VERSION,
+    kept: [{ id: 'sandboxHome', at: '/srv/legacy/home', reason: 'sticky-large' }],
+  });
+  assert.equal(resolvePath(PATH_IDS.sandboxHome), '/srv/legacy/home');
+});
+
+test('a marker whose layoutVersion is not an integer reads as un-migrated', () => {
+  // The safe direction is always "today's paths": booting against empty
+  // files is the failure this whole design exists to avoid.
+  for (const bad of ['2', 2.5, true, null, [], { v: 2 }]) {
+    writeMarker({ layoutVersion: bad });
+    assert.equal(layoutVersion(), LEGACY_LAYOUT_VERSION, `layoutVersion=${JSON.stringify(bad)}`);
+  }
+  // A FUTURE version is honored, though -- that is why it is an integer and
+  // not a boolean, so a v3 can re-trigger the wizard without v2 hosts
+  // suddenly reading as un-migrated.
+  writeMarker({ layoutVersion: 3 });
+  assert.equal(layoutVersion(), 3);
+  assert.equal(setupRequired(), false);
+});
+
+test('a kept[] record is ignored for an entry that is not sticky', () => {
+  // kept[] is authoritative only where the wizard can actually leave
+  // something behind. A marker claiming the DB stayed at /tmp/evil must not
+  // move dbPath().
+  writeMarker({
+    layoutVersion: CURRENT_LAYOUT_VERSION,
+    kept: [{ id: 'db', at: '/tmp/evil.sqlite3', reason: 'sticky-large' }],
+  });
+  assert.equal(resolvePath(PATH_IDS.db), join(dataRoot(), 'ccserver.sqlite3'));
+});
+
 test('the sqlite entry carries both historical spellings, newest first', () => {
   const legacy = pathEntry(PATH_IDS.db).legacyPaths;
   assert.deepEqual(legacy, [

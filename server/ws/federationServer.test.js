@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { closeDb } from '../db.js';
+import { resetLayoutCache } from '../paths.js';
 import * as pairing from './federationPairing.js';
 import { opensslAvailable, _resetIdentityCacheForTests, loadIdentity } from './federationIdentity.js';
 import {
@@ -70,6 +71,7 @@ let peerKey;
 let peerCert;
 const savedHome = process.env.CCSERVER_FEDERATION_HOME;
 const savedPort = process.env.CCSERVER_FEDERATION_PORT;
+const savedLayout = process.env.CCSERVER_LAYOUT;
 
 before(async () => {
   if (skip) return;
@@ -77,6 +79,15 @@ before(async () => {
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
   process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
   process.env.CCSERVER_FEDERATION_HOME = join(tmpRoot, 'self-federation');
+  // The #201 setup gate refuses the CREATING federation RPCs (sessions.create
+  // / groups.create) while a host is un-migrated, so that a paired peer
+  // cannot plant new state in the pre-migration paths the operator is about
+  // to move. This file drives sessions.create for real, so it declares the
+  // migrated layout -- same reason sessionSharing.test.js and
+  // federationTwoInstance.test.js do. The gate itself is covered by
+  // federationLink.test.js and startup-setup-gate.test.js.
+  process.env.CCSERVER_LAYOUT = 'xdg';
+  resetLayoutCache();
   _resetIdentityCacheForTests();
 
   const server = await ensureFederationServer({ port: 0, log: console });
@@ -103,6 +114,8 @@ after(() => {
   delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
   if (savedHome === undefined) delete process.env.CCSERVER_FEDERATION_HOME; else process.env.CCSERVER_FEDERATION_HOME = savedHome;
   if (savedPort === undefined) delete process.env.CCSERVER_FEDERATION_PORT; else process.env.CCSERVER_FEDERATION_PORT = savedPort;
+  if (savedLayout === undefined) delete process.env.CCSERVER_LAYOUT; else process.env.CCSERVER_LAYOUT = savedLayout;
+  resetLayoutCache();
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 

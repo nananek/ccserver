@@ -26,15 +26,12 @@ import { randomUUID } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { basename, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join } from 'node:path';
 import { Agent } from 'undici';
 import { loadSandboxConfig } from './sandbox.js';
 import { hostRuntimeDir } from './git-broker.js';
 import { vikunjaEnabled, createOrUpdateTask } from './vikunjaClient.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Persisted subscription registry (same pattern as .saved-groups.json /
 // .saved-sessions.json). Read at each use (like loadSandboxConfig's env
