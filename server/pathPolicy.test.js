@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { normalizeBrowseRoots, isContained, resolveWithinRoots, isCcserverScratchPath } from './pathPolicy.js';
+import { resetLayoutCache } from './paths.js';
 
 test('normalizeBrowseRoots: non-array or missing collapses to []', () => {
   assert.deepEqual(normalizeBrowseRoots(undefined), []);
@@ -165,5 +166,61 @@ test('isCcserverScratchPath: a symlink resolving to a real directory inside the 
   } finally {
     rmSync(link, { force: true });
     rmSync(realDir, { recursive: true, force: true });
+  }
+});
+
+// Issue #201 R3: the migration gives ccserver a SECOND scratch root
+// ($XDG_DATA_HOME/ccserver), and the exemption has to cover both of them
+// forever. Narrowing it to whichever root is "current" would strip the
+// exemption from every session on the other side of the migration -- from a
+// still-running combo worker at the old path, or from a new one at the new
+// path -- and its launch cwd would then be refused as outside browseRoots.
+test('isCcserverScratchPath: BOTH the legacy and the XDG scratch roots are exempt, in either layout', () => {
+  const savedLayout = process.env.CCSERVER_LAYOUT;
+  const savedData = process.env.XDG_DATA_HOME;
+  const tmp = mkdtempSync(join(tmpdir(), 'ccserver-scratch-roots-'));
+  try {
+    process.env.XDG_DATA_HOME = tmp;
+    resetLayoutCache();
+    const legacyRoot = join(homedir(), '.local', 'share', 'ccserver-sandbox');
+    const xdgRoot = join(tmp, 'ccserver');
+
+    for (const layout of ['legacy', 'xdg']) {
+      process.env.CCSERVER_LAYOUT = layout;
+      resetLayoutCache();
+      assert.equal(isCcserverScratchPath(join(legacyRoot, 'worktrees', 'a')), true,
+        `legacy scratch root must stay exempt in the ${layout} layout`);
+      assert.equal(isCcserverScratchPath(join(xdgRoot, 'worktrees', 'a')), true,
+        `xdg scratch root must be exempt in the ${layout} layout`);
+      // Widening to two roots must not have widened anything else.
+      assert.equal(isCcserverScratchPath(`${xdgRoot}-evil`), false);
+      assert.equal(isCcserverScratchPath(join(tmp, 'other-app')), false);
+      assert.equal(isCcserverScratchPath('/'), false);
+    }
+  } finally {
+    if (savedLayout === undefined) delete process.env.CCSERVER_LAYOUT; else process.env.CCSERVER_LAYOUT = savedLayout;
+    if (savedData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = savedData;
+    resetLayoutCache();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('isCcserverScratchPath: the symlink escape stays closed on the XDG root too', () => {
+  const savedData = process.env.XDG_DATA_HOME;
+  const tmp = mkdtempSync(join(tmpdir(), 'ccserver-scratch-xdg-escape-'));
+  const outside = mkdtempSync(join(tmpdir(), 'ccserver-outside-'));
+  try {
+    process.env.XDG_DATA_HOME = tmp;
+    resetLayoutCache();
+    const link = join(tmp, 'ccserver', 'worktrees', 'escape');
+    mkdirSync(dirname(link), { recursive: true });
+    symlinkSync(outside, link);
+    assert.equal(isCcserverScratchPath(link), false,
+      'the realpath check must apply to the new root exactly as it did to the old one');
+  } finally {
+    if (savedData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = savedData;
+    resetLayoutCache();
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
