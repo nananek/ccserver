@@ -57,7 +57,7 @@ export function useRemoteSessions(enabled = true) {
           fetchList('sessions', 'sessions', lastByInstanceRef),
           fetchList('groups', 'groups', lastGroupsByInstanceRef),
         ]);
-        // id が文字列でない要素は描画側 (s.id.slice 等) を壊すので捨てる。
+        // id / groupId が文字列でない要素は描画側 (s.id.slice 等) を壊すので捨てる。
         return [
           instance,
           sessions.filter((s) => s && typeof s.id === 'string'),
