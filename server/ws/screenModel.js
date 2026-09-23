@@ -28,10 +28,12 @@
 export const SCREEN_COLS = 80;
 export const SCREEN_ROWS = 200;
 
-// Hostile-input bounds. The stream this parses comes from a pty that an agent
-// (or anything running in its shell) can write to at will, and feed() runs
-// synchronously inside sessionManager's onData for EVERY session -- so a
-// sequence that takes seconds here stops the whole server, not one tab.
+// Bounds on the ESCAPE-SEQUENCE paths. The stream this parses comes from a
+// pty that an agent (or anything running in its shell) can write to at will,
+// and feed() runs synchronously inside sessionManager's onData for EVERY
+// session -- so work that takes seconds here stops the whole server, not one
+// tab. What these bounds remove is the case where a SHORT input costs
+// unbounded time:
 //   - a CSI parameter is clamped, and its digit run is cut off, so
 //     `ESC[999999999999999999999B` can neither spin nor be rescanned forever
 //     (a parameter that long is malformed by any real terminal's reckoning).
@@ -40,6 +42,15 @@ export const SCREEN_ROWS = 200;
 //     screen as text;
 //   - an unterminated escape keeps at most MAX_PENDING characters waiting for
 //     the rest, instead of accumulating every byte that follows it.
+//
+// What they do NOT remove: the per-character cost of ordinary text. Plain
+// output still blocks the event loop in proportion to its size -- measured
+// at 3.3s for 12.5MiB, and 24-56s for the same volume broken into lines --
+// so `cat`-ing a large file in a shell session stalls the server just as
+// effectively as any of the sequences above. That is issue #210, and it is a
+// denial-of-service of the same class, not merely a throughput concern. Do
+// not read these bounds as "a pty writer can no longer stall the server";
+// they only close the escape-sequence shortcuts to it.
 const MAX_CSI_PARAM = 100_000;
 // Comfortably past anything real: a truecolor SGR run is ~36 characters and
 // a long chained one still under 64. Over-cap sequences are dropped whole

@@ -341,3 +341,188 @@ test('a realistic SGR run is not mistaken for an over-long one', () => {
   s.feed('\x1b[0;1;3;4;7;9;38;2;255;255;255;48;2;16;16;16mLONG');
   assert.deepEqual(s.screenRows(), ['LONG']);
 });
+
+// --- differential fuzz ---------------------------------------------------
+//
+// Both parser regressions this file guards against were chunk-boundary bugs:
+// state kept between feed() calls (a pending ESC, a half-consumed sequence)
+// that the split-up path handled differently from the contiguous one. Hand
+// written cases keep finding yesterday's boundary, so the oracle here is a
+// property instead: HOW a byte string is split must never change what it
+// draws.
+//
+// That needs no reference implementation to drift against, and it covers what
+// a branch-vs-master comparison covers, on all four observables the rest of
+// the server actually reads: screenRows() (read_output / the marker search),
+// version() (screenIdleMs), takeDirtyRowCount() (the busy/idle rate) and
+// altScreenActive().
+
+// xorshift32 -- seeded so a failure is reproducible from the printed seed.
+function rng(seed) {
+  let x = seed >>> 0 || 1;
+  return () => {
+    x ^= x << 13; x >>>= 0;
+    x ^= x >>> 17;
+    x ^= x << 5; x >>>= 0;
+    return x / 0x1_0000_0000;
+  };
+}
+
+// Pieces chosen to hit the paths that carry state across a feed(): the skip
+// modes, the pending prefix, and the parameter cap on both sides.
+const FUZZ_PIECES = [
+  'hello', 'a', ' ', '0123456789', '分析中…', ' ',
+  '\r', '\n', '\r\n', '\t', '\x08', '\x07',
+  '\x1b[2K', '\x1b[K', '\x1b[J', '\x1b[2J', '\x1b[1J', '\x1b[0J',
+  '\x1b[H', '\x1b[3;7H', '\x1b[5A', '\x1b[4B', '\x1b[2C', '\x1b[6D', '\x1b[9G',
+  '\x1b[?1049h', '\x1b[?1049l', '\x1b[?25l', '\x1b[?25h',
+  '\x1b[0m', '\x1b[38;2;255;128;0;48;2;0;0;0;1;3;4m',
+  '\x1b]0;a title\x07', '\x1b]8;;https://example.com\x1b\\', '\x1b]0;unterminated',
+  '\x1b(B', '\x1b=', '\x1b>', '\x1b', '\x1b[',
+  // The MAX_CSI_PARAM_CHARS frontier, from just inside to just outside.
+  `\x1b[${'1;'.repeat(63)}m`, `\x1b[${'1;'.repeat(64)}m`, `\x1b[${'1;'.repeat(65)}m`,
+  `\x1b[${'9'.repeat(127)}B`, `\x1b[${'9'.repeat(128)}B`, `\x1b[${'9'.repeat(129)}B`,
+  '\x1b[999999999999B', `\x1b[${'9'.repeat(400)}B`,
+];
+
+// The subset that draws nothing: COMPLETE escapes, plus controls that only
+// move the cursor. Whatever the parser does with these, none of their own
+// bytes may end up on the screen -- which is exactly what the over-long-CSI
+// regression did with its leftover parameters.
+//
+// Four pieces are excluded, for two different reasons.
+//
+// `ESC` and `ESC[` are truncated: an incomplete sequence's meaning is
+// whatever follows it, so `ESC` next to `ESC[` legitimately ends up printing
+// the `[` (the parser consumes ESC ESC as one unknown escape and the rest is
+// text). Not something this property is about.
+//
+// `ESC =` and `ESC >` are excluded because of a REAL, pre-existing defect
+// this fuzz found: escapeSequence treats them as three-byte sequences like
+// `ESC ( B`, but DECKPAM/DECKPNM are two bytes. The parser therefore eats the
+// byte after them -- typically the ESC introducing the next sequence, whose
+// remainder then lands on screen as text. It predates this branch (the
+// branch changed none of that path), neither captured CLI emits either
+// sequence, and fixing it would move behaviour away from master right as this
+// PR reaches its merge gate; it is reported for a follow-up instead of
+// changed here.
+const NON_PRINTING_PIECES = FUZZ_PIECES.filter(
+  (p) => (p.startsWith('\x1b') || /^[\x00-\x1f]+$/.test(p))
+    && !['\x1b', '\x1b[', '\x1b=', '\x1b>'].includes(p),
+);
+
+function randomStream(rand, pieces = 14, corpus = FUZZ_PIECES) {
+  let out = '';
+  for (let i = 0; i < pieces; i++) out += corpus[Math.floor(rand() * corpus.length)];
+  return out;
+}
+
+// Split at random points, sprinkling in empty chunks -- the shape of the
+// regression where feed('') consumed a pending ESC.
+function randomSplit(rand, s) {
+  const parts = [];
+  let at = 0;
+  while (at < s.length) {
+    if (rand() < 0.15) parts.push('');
+    const take = 1 + Math.floor(rand() * 6);
+    parts.push(s.slice(at, at + take));
+    at += take;
+  }
+  if (rand() < 0.5) parts.push('');
+  return parts;
+}
+
+function observe(feeds) {
+  const s = createScreenModel({ cols: 40, rows: 12 });
+  for (const f of feeds) s.feed(f);
+  return {
+    rows: s.screenRows(),
+    version: s.version(),
+    alt: s.altScreenActive(),
+    dirty: s.takeDirtyRowCount(),
+  };
+}
+
+test('fuzz: how a stream is split never changes what it draws', () => {
+  const rand = rng(0x5eed1234);
+  const RUNS = 3000;
+  for (let run = 0; run < RUNS; run++) {
+    const stream = randomStream(rand);
+    const split = randomSplit(rand, stream);
+    const whole = observe([stream]);
+    const piecewise = observe(split);
+    assert.deepEqual(
+      piecewise,
+      whole,
+      `run ${run}: splitting changed the result\n  stream: ${JSON.stringify(stream)}\n  split:  ${JSON.stringify(split)}`,
+    );
+  }
+});
+
+test('fuzz: random streams stay inside the model\'s bounds', () => {
+  // Nothing a pty can write may push the model past its caps, make it throw,
+  // or run away with time -- the last one being what a hostile sequence used
+  // to do.
+  const rand = rng(0xb0c1d5e7);
+  const cols = 40;
+  const rows = 12;
+  const started = Date.now();
+  for (let run = 0; run < 3000; run++) {
+    const s = createScreenModel({ cols, rows });
+    let previousVersion = 0;
+    for (const chunk of randomSplit(rand, randomStream(rand))) {
+      s.feed(chunk);
+      const v = s.version();
+      assert.ok(v >= previousVersion, 'version() is monotonic');
+      previousVersion = v;
+    }
+    const screen = s.screenRows();
+    assert.ok(screen.length <= rows, `screen grew past its cap: ${screen.length}`);
+    for (const row of screen) assert.ok(row.length <= cols, `row longer than the width: ${JSON.stringify(row)}`);
+    assert.ok(s.takeDirtyRowCount() <= rows, 'more rows reported dirty than exist');
+    assert.equal(typeof s.altScreenActive(), 'boolean');
+  }
+  assert.ok(Date.now() - started < 20_000, 'the whole sweep must stay quick enough for CI');
+});
+
+test('fuzz: a skip mode always gives the screen back', () => {
+  // Once inside the OSC or the over-long-CSI discard, a terminator has to end
+  // it -- otherwise a single malformed sequence would blind the tab forever.
+  const rand = rng(0x5c19a3f1);
+  const pick = (chars, n) => {
+    let out = '';
+    for (let i = 0; i < n; i++) out += chars[Math.floor(rand() * chars.length)];
+    return out;
+  };
+  for (let run = 0; run < 600; run++) {
+    const osc = rand() < 0.5;
+    // The body has to stay inside the sequence's own alphabet, or it ends it
+    // early and legitimately: any byte in @-~ is a CSI final byte, and BEL or
+    // ESC-backslash closes an OSC.
+    const opener = osc ? '\x1b]0;junk' : `\x1b[${'9'.repeat(200)}`;
+    const noise = osc
+      ? pick('abcdefgh 0123456789/:.-', 20)
+      : pick('0123456789;', 20);
+    const terminator = osc ? '\x07' : 'm';
+    const feeds = randomSplit(rand, `${opener}${noise}${terminator}RECOVERED`);
+    const s = createScreenModel({ cols: 40, rows: 12 });
+    for (const f of feeds) s.feed(f);
+    assert.deepEqual(s.screenRows(), ['RECOVERED'], `run ${run}: ${JSON.stringify(feeds)}`);
+  }
+});
+
+test('fuzz: an escape sequence never leaves its own bytes on the screen', () => {
+  // The second regression's class: the parser gave up in the middle of a
+  // sequence and the rest of it (`1;1;1;...m`) was drawn as text. Splitting
+  // cannot detect that -- whole and split both draw the same wrong thing --
+  // so the oracle here is that a stream of pure escapes and cursor motions
+  // must paint nothing at all, however the parser chooses to handle it.
+  const rand = rng(0x00e5ca9e);
+  for (let run = 0; run < 2000; run++) {
+    const feeds = randomSplit(rand, randomStream(rand, 12, NON_PRINTING_PIECES));
+    const s = createScreenModel({ cols: 40, rows: 12 });
+    for (const f of feeds) s.feed(f);
+    const printed = s.screenRows().join('');
+    assert.equal(printed, '', `run ${run}: escapes reached the screen as text: ${JSON.stringify(feeds)}`);
+  }
+});
