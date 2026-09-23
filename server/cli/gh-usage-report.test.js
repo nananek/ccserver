@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 const CLI = join(import.meta.dirname, 'gh-usage-report.js');
 let tmpRoot;
@@ -85,4 +85,26 @@ test('reset on an unusable path exits 1 instead of reporting success', () => {
   const res = run(['reset', '--file', join(notADir, 'usage.json')]);
   assert.equal(res.status, 1, `reset should fail: ${res.stdout}`);
   assert.match(res.stderr, /Failed to reset/);
+});
+
+test('an unparseable config is refused, never replaced with defaults', () => {
+  const broken = '{\n  "browseRoots": ["/srv/repos"],\n  "forceSandbox": true,\n  // stray comment\n}\n';
+  for (const args of [['enable', '--file', join(tmpRoot, 'usage2.json')], ['disable'], ['show']]) {
+    writeFileSync(cfgPath, broken);
+    const res = run(args);
+    assert.equal(res.status, 1, `${args.join(' ')} -> exit ${res.status}: ${res.stderr}`);
+    assert.match(res.stderr, /Cannot parse/);
+    assert.equal(readFileSync(cfgPath, 'utf8'), broken, `${args.join(' ')} clobbered an unparseable config`);
+  }
+});
+
+test('a relative file in the config is rewritten as absolute', () => {
+  // loadSandboxConfig treats a relative `file` as unset, so writing one back
+  // would print "Enabled" for a config the server silently ignores.
+  writeConfig({ docker: false, ghUsageRecording: { enabled: false, file: 'usage-relative.json' } });
+  const res = run(['enable']);
+  assert.equal(res.status, 0, res.stderr);
+  const { file } = readConfig().ghUsageRecording;
+  assert.equal(isAbsolute(file), true, `enable wrote a relative path: ${file}`);
+  assert.equal(file, resolve('usage-relative.json'));
 });
