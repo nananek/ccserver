@@ -700,7 +700,7 @@ test('notify broker: channels is forwarded to sendNotification verbatim', async 
   }
 });
 
-test('notify broker: a channels value outside discord/vikunja is rejected on the wire', async () => {
+test('notify broker: a channels value outside discord is rejected on the wire', async () => {
   const notifyApi = {
     sendNotification: async () => ({ ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } }),
     subscribe: () => ({ ok: true, subscription: { id: 'sub-1' } }),
@@ -720,7 +720,7 @@ test('notify broker: a channels value outside discord/vikunja is rejected on the
       clientInfo: { name: 'wire-test', version: '1' },
     });
     const result = await callToolRaw(c, 'notify', { title: 'x', body: 'y', channels: ['bogus'] });
-    assert.equal(result.isError, true, 'an enum value outside discord/vikunja must be rejected by the schema');
+    assert.equal(result.isError, true, 'an enum value outside discord must be rejected by the schema');
     c.close();
   } finally {
     broker.stopBroker(notify);

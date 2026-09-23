@@ -69,25 +69,12 @@
   "//reviewerMcp": "false (default): do not host the ccserver-reviewer MCP broker. Set true to opt in. run_review launches a disposable headless session against a fresh, throwaway git worktree (never the caller's own cwd) and drives it through /code-review, for a local ref/branch/PR/uncommitted diff. It is injected into ANY session -- shells and copilot excluded, groups/workers included -- since reviewing code needs no special privilege beyond spawning a sandboxed session. Job status/results are queryable via list_reviews/get_review and persist in the SQLite pr_reviews table across a restart.",
   "reviewerMcp": false,
 
-  "//notify": "ccserver-notify MCP (通知用, 下記 README)。discordWebhook: https:// の Discord webhook URL (空文字で無効)。設定するとエージェントの notify ツールが Discord へ通知を送れる。CCSERVER_DISCORD_WEBHOOK 環境変数で上書き可。subscriptions: 初期購読 (bootstrap)。https:// の webhook URL の配列。購読ゼロかつ discordWebhook 未設定かつ vikunja 未設定なら MCP は注入されない。hostname: 通知フッターのホスト名を固定したい場合のみ (未設定なら OS の hostname、CCSERVER_HOSTNAME 環境変数が最優先)。attribution: false にすると通知ペイロード末尾の \"_from: host · project · group · session\" フッターを丸ごと無効化 (既定 true)。",
+  "//notify": "ccserver-notify MCP (通知用, 下記 README)。discordWebhook: https:// の Discord webhook URL (空文字で無効)。設定するとエージェントの notify ツールが Discord へ通知を送れる。CCSERVER_DISCORD_WEBHOOK 環境変数で上書き可。subscriptions: 初期購読 (bootstrap)。https:// の webhook URL の配列。購読ゼロかつ discordWebhook 未設定なら MCP は注入されない。hostname: 通知フッターのホスト名を固定したい場合のみ (未設定なら OS の hostname、CCSERVER_HOSTNAME 環境変数が最優先)。attribution: false にすると通知ペイロード末尾の \"_from: host · project · group · session\" フッターを丸ごと無効化 (既定 true)。注意: 配信先を1つも設定しないと notify MCP 自体が注入されず、エージェントは人間を呼ぶ手段を持たない。",
   "notify": {
     "discordWebhook": "",
     "subscriptions": [],
     "hostname": "",
-    "attribution": true,
-    "//vikunja": "notify 呼び出しごとに Vikunja タスクを作成/更新する (Discord/webhook と並行配信、失敗してもエージェント側にはエラーを返さない)。baseUrl (https:// のみ) と apiToken の両方が設定されていれば有効になり、Discord/購読が空でも notify MCP 自体が注入される。apiToken は秘匿値なので、ここに書く代わりに環境変数 CCSERVER_VIKUNJA_API_TOKEN 経由を強く推奨 (sandbox.config.json は .gitignore 済みだが、それでも平文保存はできるだけ避ける)。baseUrl は CCSERVER_VIKUNJA_BASE_URL、projectId は CCSERVER_VIKUNJA_PROJECT_ID で上書き可。projectId 未設定だとタスク作成は行われない (warning ログのみ)。timeoutSeconds (既定15秒) はリクエストごとのタイムアウト。verifyTls: false で自己署名証明書のインスタンスを許容 (既定 true、無闇に false にしない)。statusLabelPrefix はラベル名の prefix (既定 'status-')。buckets.doing/buckets.todo は Kanban バケット名 (既定 'Doing'/'To-Do')。Claude が作業中 (level: info) は buckets.doing へ、それ以外 (success/warning/error、= 人間の番) は buckets.todo へタスクを移動する。無ければ自動作成する。CCSERVER_VIKUNJA_BUCKET_DOING / CCSERVER_VIKUNJA_BUCKET_TODO で上書き可。タスクを done (完了) にする操作は行わない -- 人間が Vikunja 上で確認して手動で done にする運用。",
-    "vikunja": {
-      "baseUrl": "",
-      "apiToken": "",
-      "projectId": null,
-      "timeoutSeconds": 15,
-      "verifyTls": true,
-      "statusLabelPrefix": "status-",
-      "buckets": {
-        "doing": "Doing",
-        "todo": "To-Do"
-      }
-    }
+    "attribution": true
   },
 
   "//federation": "拠点間ペアリング (下記 README「拠点間 (federation) ペアリング」)。requireTokenForPairing: true にすると、ペアリング開始リクエスト (bootstrap) にだけこのインスタンスの CCSERVER_TOKEN の提示を必須にする (既定 false)。あくまでスパム対策で、トークンが合っていても双方向の人間承認は省略されない。機能自体の有効/無効はここではなく CCSERVER_FEDERATION_PORT 環境変数で制御する。",

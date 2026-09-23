@@ -235,15 +235,9 @@ the task with it; the rest close their situation with it:
   exactly ONE `notify` call BEFORE dispatching any work to the workers:
   `notify({ title: 'Start: <one-line task summary>', body: '<scope and
   division of labor>', level: 'info' })`. This is a once-per-task report,
-  not a status update -- do not repeat it mid-task. On deployments with
-  Vikunja configured, this first `info` notification automatically creates
-  the group's Vikunja tracking task (labeled `status-running`); your later
-  notifications become comments on that same task, and the final Done
-  notification (`level: 'success'`) closes it out as done -- so skipping
-  the start report means the whole task goes untracked in Vikunja. Without
-  Vikunja the call still delivers to Discord/webhooks as a legitimate
-  "started working" notice; if no channel is configured at all the notify
-  tool itself is absent from this session.
+  not a status update -- do not repeat it mid-task. It delivers to
+  Discord/webhooks as a "started working" notice; if no channel is
+  configured at all the notify tool itself is absent from this session.
 - **Stopping**: you stop waiting, give up on a step, or wind the group down
   without completing the task.
 - **Judgment needed**: a decision requires the human (blocked, ambiguous, or
@@ -254,9 +248,7 @@ the task with it; the rest close their situation with it:
 Use `level` to match the outcome (success / warning / error). Delivery is
 non-blocking and never throws, so there is no reason to skip it.
 
-The four situations above stay full-channel calls (do not narrow them) --
-they are exactly the events a human must see everywhere. For anything else,
-`notify` also takes an optional `channels: ['discord' | 'vikunja']` array: if
-you want to send a lightweight, in-between-the-four-situations Discord ping
-without disturbing the group's Vikunja tracking card, pass `channels:
-['discord']`.
+The four situations above are exactly the events a human must see, so send
+them unrestricted. `notify` also takes an optional `channels: ['discord']`
+array for narrowing delivery; with only the Discord/webhook channel
+configured today it makes no difference, so there is no reason to pass it.

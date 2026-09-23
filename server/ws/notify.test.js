@@ -62,28 +62,6 @@ test('notifyEnabled: discord-only, subscriptions-only, and neither', async () =>
   });
 });
 
-// Confirmed with the user (see tmp/notify-vikunja-integration-plan.md section
-// 5, point 2): a Vikunja-only setup -- no Discord webhook, no subscriptions --
-// still counts as "notify is on" so the MCP server gets injected. This is the
-// one point the plan left open that was explicitly resolved before
-// implementation.
-test('notifyEnabled: vikunja-only (no discord, no subscriptions) also enables it', async () => {
-  await withNotifyConfig(
-    { notify: { subscriptions: [], vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok' } } },
-    async () => {
-      restoreNotify();
-      assert.equal(notifyEnabled(), true, 'vikunja baseUrl+apiToken alone enables notify');
-    },
-  );
-  await withNotifyConfig(
-    { notify: { subscriptions: [], vikunja: { baseUrl: 'https://vikunja.example' } } },
-    async () => {
-      restoreNotify();
-      assert.equal(notifyEnabled(), false, 'vikunja baseUrl alone (no apiToken) is not enough');
-    },
-  );
-});
-
 test('shouldInjectNotify: standalone agents and combo orchestrators only', () => {
   const base = { shell: false, app: 'claude', groupId: null, groupRole: null, notifyEnabled: true };
   assert.equal(shouldInjectNotify(base), true, 'standalone agent session');
@@ -376,212 +354,35 @@ test('resolvedHostname precedence: env > notify.hostname > os.hostname()', async
   }
 });
 
-// Vikunja channel (see vikunjaClient.js): sendNotification dispatches to it
-// in parallel with Discord/webhooks and merges the result into
-// delivered.vikunja, never letting a Vikunja failure affect the overall
-// ok:true / non-blocking contract (plan section 2.5 / 6).
-async function withVikunjaTasksPath(fn) {
-  const dir = mkdtempSync(join(tmpdir(), 'ccserver-notify-vikunja-'));
-  const tasksPath = join(dir, 'vikunja-tasks.json');
-  const prev = process.env.CCSERVER_VIKUNJA_TASKS_PATH;
-  process.env.CCSERVER_VIKUNJA_TASKS_PATH = tasksPath;
-  try {
-    await fn(tasksPath);
-  } finally {
-    if (prev === undefined) delete process.env.CCSERVER_VIKUNJA_TASKS_PATH;
-    else process.env.CCSERVER_VIKUNJA_TASKS_PATH = prev;
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
-}
-
-test('sendNotification includes delivered.vikunja when Vikunja is configured and a tracking key is present', async () => {
-  await withNotifyConfig(
-    {
-      notify: {
-        discordWebhook: 'https://discord.example/hook',
-        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
-      },
-    },
-    async () => {
-      restoreNotify();
-      await withVikunjaTasksPath(async () => {
-        const realFetch = global.fetch;
-        global.fetch = async (url, opts) => {
-          const u = String(url);
-          if (u.includes('discord.example')) return { ok: true };
-          const path = new URL(u).pathname;
-          const method = opts.method;
-          if (method === 'GET' && path === '/api/v1/labels') return { ok: true, status: 200, text: async () => '[]' };
-          if (method === 'PUT' && path === '/api/v1/labels') return { ok: true, status: 201, text: async () => JSON.stringify({ id: 1 }) };
-          if (method === 'PUT' && /^\/api\/v1\/projects\/\d+\/tasks$/.test(path)) return { ok: true, status: 201, text: async () => JSON.stringify({ id: 42 }) };
-          if (method === 'PUT' && /^\/api\/v1\/tasks\/\d+\/labels$/.test(path)) return { ok: true, status: 201, text: async () => '{}' };
-          throw new Error(`unexpected fetch: ${method} ${path}`);
-        };
-        try {
-          const res = await sendNotification(
-            { title: 'Build failed', body: 'details', level: 'error' },
-            { sessionId: 'sess-abc', groupId: null, cwd: '/srv/proj', projectName: 'proj' },
-          );
-          assert.equal(res.ok, true);
-          assert.equal(res.delivered.discord, true);
-          assert.deepEqual(res.delivered.vikunja, { ok: true, action: 'created', taskId: 42 });
-        } finally {
-          global.fetch = realFetch;
-        }
-      });
-    },
-  );
-});
-
-test('sendNotification omits delivered.vikunja when there is no tracking key (no identity)', async () => {
-  await withNotifyConfig(
-    {
-      notify: {
-        discordWebhook: 'https://discord.example/hook',
-        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
-      },
-    },
-    async () => {
-      restoreNotify();
-      const realFetch = global.fetch;
-      let vikunjaCalled = false;
-      global.fetch = async (url) => {
-        const u = String(url);
-        if (u.includes('discord.example')) return { ok: true };
-        vikunjaCalled = true;
-        return { ok: true, status: 200, text: async () => '{}' };
-      };
-      try {
-        const res = await sendNotification({ title: 'x', body: 'y', level: 'info' });
-        assert.equal(res.delivered.vikunja, undefined, 'no identity -> no tracking key -> vikunja is skipped entirely');
-        assert.equal(vikunjaCalled, false);
-      } finally {
-        global.fetch = realFetch;
-      }
-    },
-  );
-});
-
-test('sendNotification stays ok:true even when the Vikunja call fails (non-blocking, like Discord)', async () => {
-  await withNotifyConfig(
-    {
-      notify: {
-        discordWebhook: 'https://discord.example/hook',
-        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
-      },
-    },
-    async () => {
-      restoreNotify();
-      await withVikunjaTasksPath(async () => {
-        const realFetch = global.fetch;
-        global.fetch = async (url) => {
-          const u = String(url);
-          if (u.includes('discord.example')) return { ok: true };
-          return { ok: false, status: 500, text: async () => '{}' };
-        };
-        try {
-          const res = await sendNotification(
-            { title: 'x', body: 'y', level: 'error' },
-            { sessionId: 'sess-fail' },
-          );
-          assert.equal(res.ok, true, 'a failing Vikunja call does not fail sendNotification');
-          assert.equal(res.delivered.discord, true);
-          assert.equal(res.delivered.vikunja.ok, false);
-        } finally {
-          global.fetch = realFetch;
-        }
-      });
-    },
-  );
-});
-
-// channels param (Issue #152): lets a caller pick a subset of the configured
-// channels per-call instead of always getting every configured channel.
-// Omitting it (every test above) must keep delivering to everything -- these
-// only cover the new, narrower channels:[...] behavior.
-test("sendNotification with channels:['discord'] skips Vikunja even when configured and a tracking key is present", async () => {
-  await withNotifyConfig(
-    {
-      notify: {
-        discordWebhook: 'https://discord.example/hook',
-        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
-      },
-    },
-    async () => {
-      restoreNotify();
-      await withVikunjaTasksPath(async () => {
-        const realFetch = global.fetch;
-        let vikunjaCalled = false;
-        global.fetch = async (url) => {
-          const u = String(url);
-          if (u.includes('discord.example')) return { ok: true };
-          vikunjaCalled = true;
-          return { ok: true, status: 200, text: async () => '{}' };
-        };
-        try {
-          const res = await sendNotification(
-            {
-              title: 'x', body: 'y', level: 'info', channels: ['discord'],
-            },
-            { sessionId: 'sess-discord-only' },
-          );
-          assert.equal(res.ok, true);
-          assert.equal(res.delivered.discord, true);
-          assert.equal(res.delivered.vikunja, undefined, "channels:['discord'] must skip Vikunja entirely");
-          assert.equal(vikunjaCalled, false);
-        } finally {
-          global.fetch = realFetch;
-        }
-      });
-    },
-  );
-});
-
-test("sendNotification with channels:['vikunja'] skips Discord and every subscribed webhook", async () => {
+// channels param (Issue #152): 'discord' is the only channel left now that the
+// Vikunja one was removed, so naming it explicitly must behave exactly like
+// omitting it -- and an empty list must still mean "deliver nowhere" rather
+// than falling back to everything.
+test('channels: naming discord delivers, an empty list delivers nothing', async () => {
   await withNotifyConfig(
     {
       notify: {
         discordWebhook: 'https://discord.example/hook',
         subscriptions: [{ url: 'https://hooks.example.com/slack', name: 'slack' }],
-        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
       },
     },
     async () => {
       restoreNotify();
-      await withVikunjaTasksPath(async () => {
-        const realFetch = global.fetch;
-        let webhookCalled = false;
-        global.fetch = async (url, opts) => {
-          const u = String(url);
-          if (u.includes('discord.example') || u.includes('hooks.example.com')) {
-            webhookCalled = true;
-            return { ok: true };
-          }
-          const path = new URL(u).pathname;
-          const method = opts.method;
-          if (method === 'GET' && path === '/api/v1/labels') return { ok: true, status: 200, text: async () => '[]' };
-          if (method === 'PUT' && path === '/api/v1/labels') return { ok: true, status: 201, text: async () => JSON.stringify({ id: 1 }) };
-          if (method === 'PUT' && /^\/api\/v1\/projects\/\d+\/tasks$/.test(path)) return { ok: true, status: 201, text: async () => JSON.stringify({ id: 7 }) };
-          if (method === 'PUT' && /^\/api\/v1\/tasks\/\d+\/labels$/.test(path)) return { ok: true, status: 201, text: async () => '{}' };
-          throw new Error(`unexpected fetch: ${method} ${path}`);
-        };
-        try {
-          const res = await sendNotification(
-            {
-              title: 'x', body: 'y', level: 'info', channels: ['vikunja'],
-            },
-            { sessionId: 'sess-vikunja-only' },
-          );
-          assert.equal(res.ok, true);
-          assert.equal(res.delivered.discord, false, "channels:['vikunja'] must skip Discord");
-          assert.equal(res.delivered.webhooks, 0, "channels:['vikunja'] must skip subscribed webhooks too");
-          assert.equal(res.delivered.failed, 0);
-          assert.deepEqual(res.delivered.vikunja, { ok: true, action: 'created', taskId: 7 });
-          assert.equal(webhookCalled, false);
-        } finally {
-          global.fetch = realFetch;
-        }
-      });
+      const realFetch = global.fetch;
+      let calls = 0;
+      global.fetch = async () => { calls += 1; return { ok: true }; };
+      try {
+        const named = await sendNotification({ title: 'x', body: 'y', channels: ['discord'] });
+        assert.deepEqual(named.delivered, { discord: true, webhooks: 1, failed: 0 });
+        assert.equal(calls, 2, 'the Discord webhook and the subscription both got it');
+
+        calls = 0;
+        const none = await sendNotification({ title: 'x', body: 'y', channels: [] });
+        assert.deepEqual(none.delivered, { discord: false, webhooks: 0, failed: 0 });
+        assert.equal(calls, 0, 'an empty channels list must not fall back to every channel');
+      } finally {
+        global.fetch = realFetch;
+      }
     },
   );
 });

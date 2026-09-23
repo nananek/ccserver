@@ -593,6 +593,11 @@ function resolveFlag(envVal, fileVal, def) {
 // the other's shared state.
 export const APP_IDS = [...APPS];
 
+// One-shot latch for the removed-Vikunja-key notice below: loadSandboxConfig
+// re-reads the file on every call (every session launch, every notify), so the
+// warning has to be per-process rather than per-read.
+let warnedVikunjaConfig = false;
+
 // Load the optional sandbox config. Path from CCSERVER_SANDBOX_CONFIG, else
 // server/sandbox.config.json (next to this module's parent). Shape:
 //   { "docker": true, "binds": [ { "src": "~/.ssh", "mode": "ro" }, ... ] }
@@ -702,43 +707,19 @@ export function loadSandboxConfig() {
   // entirely (default on).
   const notifyHostname = typeof rawNotify.hostname === 'string' && rawNotify.hostname.length > 0 ? rawNotify.hostname : null;
   const notifyAttribution = rawNotify.attribution !== false;
-  // Vikunja task tracking (see vikunjaClient.js): a `notify` call also
-  // creates/updates a Vikunja task so a missed Discord ping still leaves a
-  // TODO behind. Same env > config > default priority as discordWebhook
-  // above; the API token is secret, so CCSERVER_VIKUNJA_API_TOKEN is the
-  // recommended way to set it (README).
-  const rawVikunja = (rawNotify.vikunja && typeof rawNotify.vikunja === 'object') ? rawNotify.vikunja : {};
-  let vikunjaBaseUrl = null;
-  for (const candidate of [process.env.CCSERVER_VIKUNJA_BASE_URL, rawVikunja.baseUrl]) {
-    if (typeof candidate === 'string' && candidate.startsWith('https://')) {
-      vikunjaBaseUrl = candidate.replace(/\/+$/, '');
-      break;
-    }
+  // A `notify.vikunja` block left over from the removed Vikunja channel is
+  // deliberately NOT parsed and NOT an error: an existing deployment's
+  // sandbox.config.json must keep booting untouched. Say so once per process
+  // so the operator knows the key is inert now (see the follow-up issue --
+  // Vikunja is being re-cut as its own MCP server).
+  if (rawNotify.vikunja && typeof rawNotify.vikunja === 'object' && !warnedVikunjaConfig) {
+    warnedVikunjaConfig = true;
+    console.warn(
+      '[config] "notify.vikunja" is set but no longer does anything: the Vikunja channel was removed from '
+      + 'ccserver-notify and is being re-cut as a separate MCP server. The key is ignored; remove it to silence this. '
+      + '(The CCSERVER_VIKUNJA_* environment variables are ignored too.)',
+    );
   }
-  let vikunjaApiToken = null;
-  for (const candidate of [process.env.CCSERVER_VIKUNJA_API_TOKEN, rawVikunja.apiToken]) {
-    if (typeof candidate === 'string' && candidate.length > 0) {
-      vikunjaApiToken = candidate;
-      break;
-    }
-  }
-  const vikunjaProjectId = process.env.CCSERVER_VIKUNJA_PROJECT_ID || rawVikunja.projectId || null;
-  const vikunjaTimeoutSecondsRaw = process.env.CCSERVER_VIKUNJA_TIMEOUT_SECONDS || rawVikunja.timeoutSeconds;
-  const vikunjaTimeoutSeconds = Number.isFinite(Number(vikunjaTimeoutSecondsRaw)) && Number(vikunjaTimeoutSecondsRaw) > 0
-    ? Number(vikunjaTimeoutSecondsRaw)
-    : 15;
-  const vikunjaVerifyTlsRaw = process.env.CCSERVER_VIKUNJA_VERIFY_TLS ?? rawVikunja.verifyTls;
-  const vikunjaVerifyTls = !(vikunjaVerifyTlsRaw === false || vikunjaVerifyTlsRaw === 'false');
-  const vikunjaStatusLabelPrefix = process.env.CCSERVER_VIKUNJA_STATUS_LABEL_PREFIX
-    || (typeof rawVikunja.statusLabelPrefix === 'string' && rawVikunja.statusLabelPrefix ? rawVikunja.statusLabelPrefix : 'status-');
-  // Kanban bucket titles for the Doing/To-Do "whose turn" distinction (see
-  // vikunjaClient.js's swapStatusBucket) -- same env > config > default
-  // precedence as statusLabelPrefix above.
-  const rawVikunjaBuckets = (rawVikunja.buckets && typeof rawVikunja.buckets === 'object') ? rawVikunja.buckets : {};
-  const vikunjaBucketDoing = process.env.CCSERVER_VIKUNJA_BUCKET_DOING
-    || (typeof rawVikunjaBuckets.doing === 'string' && rawVikunjaBuckets.doing ? rawVikunjaBuckets.doing : 'Doing');
-  const vikunjaBucketTodo = process.env.CCSERVER_VIKUNJA_BUCKET_TODO
-    || (typeof rawVikunjaBuckets.todo === 'string' && rawVikunjaBuckets.todo ? rawVikunjaBuckets.todo : 'To-Do');
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
   // Tools provisioned into the sandbox HOME at launch (rtk / code-review-graph).
@@ -821,15 +802,6 @@ export function loadSandboxConfig() {
     docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, hiddenApps, browseRoots, browseRootsInvalid, configError, allowUnsandboxedAgents, network,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
-      vikunja: {
-        baseUrl: vikunjaBaseUrl,
-        apiToken: vikunjaApiToken,
-        projectId: vikunjaProjectId,
-        timeoutSeconds: vikunjaTimeoutSeconds,
-        verifyTls: vikunjaVerifyTls,
-        statusLabelPrefix: vikunjaStatusLabelPrefix,
-        buckets: { doing: vikunjaBucketDoing, todo: vikunjaBucketTodo },
-      },
     },
     configPath,
   };

@@ -43,8 +43,7 @@ ccserver/
 │       ├── terminal.js             # WebSocket + node-pty ブリッジ (/ws/terminal)
 │       ├── sessionManager.js       # セッション・予約プロンプトの状態管理/永続化
 │       ├── appLaunch.js            # アプリ非依存の起動ロジック (resume引数・permission検出等)
-│       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook/Vikunja 配送 + MCP ソケット
-│       ├── vikunjaClient.js        # notify.js から呼ばれる Vikunja タスク作成/更新クライアント
+│       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook 配送 + MCP ソケット
 │       ├── usageMcp.js             # ccserver-usage: get_usage MCP ツール (server/usage.js の getUsage を直接呼ぶ)
 │       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify / ccserver-usage / ccserver-reviewer、sandbox/host 両モード)
 │       ├── mcpServer.js            # control / handoff / notify / usage / reviewer 各 MCP サーバー (SocketTransport 含む)
@@ -60,7 +59,7 @@ ccserver/
 │       ├── sandbox-mcp-wrapper.cjs        # MCP stdio ↔ Unix socket の中継 (argv 'notify'/'usage' でそれぞれのソケットへ)
 │       ├── sandbox-gitconfig / sandbox-known-hosts / sandbox-ssh-config
 │       ├── git-broker.js           # サンドボックス外で動く、リポジトリスコープの認証情報ブローカー
-│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js, notify.test.js, vikunjaClient.test.js)
+│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js, notify.test.js)
 └── client/
     ├── package.json
     ├── index.html

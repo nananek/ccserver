@@ -41,7 +41,6 @@ import { warmOpencodeUsage } from './opencodeUsage.js';
 import { initDb, dbPath } from './db.js';
 import { selectableAppIds, installedApps, loadSandboxConfig } from './ws/sandbox.js';
 import { isContained } from './pathPolicy.js';
-import { tasksPath } from './ws/vikunjaClient.js';
 import { keyPath as federationKeyPath } from './ws/federationIdentity.js';
 import { verifySessionCookie } from './authSessions.js';
 import { resolveAuthMode } from './authMode.js';
@@ -365,7 +364,6 @@ try {
       ['.saved-notifications.json (CCSERVER_NOTIFY_PATH)', notifyPath()],
       ['.saved-sessions.json (CCSERVER_SAVED_SESSIONS_PATH)', SAVED_SESSIONS_PATH],
       ['.scheduled-prompts.json', SCHEDULES_PATH],
-      ['.saved-vikunja-tasks.json (CCSERVER_VIKUNJA_TASKS_PATH)', tasksPath()],
     ];
     const exposed = internalPaths.filter(([, p]) => isContained(resolve(p), browseRoots));
     if (exposed.length > 0) {
