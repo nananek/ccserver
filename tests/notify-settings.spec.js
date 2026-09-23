@@ -119,3 +119,50 @@ test.describe('Settings notifications section', () => {
     await expect(panel).toContainText('設定するまで配信されません');
   });
 });
+
+test.describe('Settings notifications: Web Push', () => {
+  async function openPanel(page) {
+    await page.goto('/');
+    await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
+    await page.locator('.tab-list').getByTitle('Settings').click();
+    const settings = page.locator('.settings-view');
+    await settings.locator('.settings-sidebar').getByRole('tab', { name: '通知' }).click();
+    const panel = settings.locator('[role="tabpanel"]');
+    await expect(panel).toContainText('エージェント通知の転送');
+    return panel;
+  }
+
+  test('the push section renders and explains the secure-context requirement', async ({ page }) => {
+    const panel = await openPanel(page);
+    await expect(panel).toContainText('PWA 通知 (Web Push)');
+    // The e2e server is plain http on a non-localhost-named host only when
+    // CI says so; either way one of the two states must be shown rather than
+    // a blank section.
+    const subscribeButton = panel.getByRole('button', { name: 'この端末で受け取る' });
+    const unsupported = panel.getByText('このブラウザは Web Push に対応していない', { exact: false });
+    await expect(subscribeButton.or(unsupported).first()).toBeVisible();
+  });
+
+  test('the server mints a VAPID public key for the browser to subscribe with', async ({ request }) => {
+    const body = await (await request.get('/api/notify-settings')).json();
+    expect(typeof body.vapidPublicKey).toBe('string');
+    // Uncompressed P-256 point: 65 bytes, leading 0x04.
+    const raw = Buffer.from(body.vapidPublicKey, 'base64url');
+    expect(raw.length).toBe(65);
+    expect(raw[0]).toBe(0x04);
+  });
+
+  test('the test-send button reports what each channel did', async ({ page }) => {
+    const panel = await openPanel(page);
+    await panel.getByRole('button', { name: 'テスト通知を送る' }).click();
+    // Nothing is configured on the e2e server, so the honest answer is
+    // "Discord unconfigured, no push subscriptions" -- not silence.
+    await expect(panel).toContainText('PWA: 購読なし');
+    await expect(panel).toContainText('Discord: 未設定');
+  });
+
+  test('the observability counters are shown', async ({ page }) => {
+    const panel = await openPanel(page);
+    await expect(panel).toContainText('監視中のセッション:');
+  });
+});

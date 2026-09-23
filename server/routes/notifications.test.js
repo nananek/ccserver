@@ -15,12 +15,14 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { notificationsRoute } from './notifications.js';
+import { closeDb } from '../db.js';
 import { BRIDGE_APPS, BRIDGE_CHANNELS, BRIDGE_DEFAULTS } from '../ws/notifyBridgeSettings.js';
 
 let tmpRoot;
 let cfgPath;
 let prevConfig;
 let prevWebhook;
+let prevDb;
 let app;
 
 const writeConfig = (obj) => writeFileSync(cfgPath, JSON.stringify(obj, null, 2));
@@ -31,7 +33,12 @@ before(async () => {
   cfgPath = join(tmpRoot, 'sandbox.config.json');
   prevConfig = process.env.CCSERVER_SANDBOX_CONFIG;
   prevWebhook = process.env.CCSERVER_DISCORD_WEBHOOK;
+  prevDb = process.env.CCSERVER_DB_PATH;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  // This route reads the push store (VAPID key, subscription count), and
+  // getDb() otherwise opens the REAL host database and would mint a VAPID
+  // identity in it. Point it at a scratch file before the first call.
+  process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
   delete process.env.CCSERVER_DISCORD_WEBHOOK;
   app = Fastify();
   await app.register(notificationsRoute, { prefix: '/api' });
@@ -42,6 +49,9 @@ after(async () => {
   else process.env.CCSERVER_SANDBOX_CONFIG = prevConfig;
   if (prevWebhook === undefined) delete process.env.CCSERVER_DISCORD_WEBHOOK;
   else process.env.CCSERVER_DISCORD_WEBHOOK = prevWebhook;
+  if (prevDb === undefined) delete process.env.CCSERVER_DB_PATH;
+  else process.env.CCSERVER_DB_PATH = prevDb;
+  try { closeDb(); } catch { /* not opened */ }
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
   await app.close();
 });
@@ -150,4 +160,95 @@ test('PUT names an unknown setting instead of silently ignoring it (F5)', async 
   assert.equal(res.statusCode, 400);
   assert.match(res.json().error, /unknown setting\(s\): enabeld/);
   assert.equal((await get()).json().settings.enabled, false, 'and nothing was written');
+});
+
+// --- Web Push subscriptions --------------------------------------------------
+
+const VALID_SUB = {
+  endpoint: 'https://push.example.net/p/abc123',
+  keys: {
+    p256dh: 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4',
+    auth: 'BTBZMqHH6r4Tts7J_aSIgg',
+  },
+};
+
+test('GET exposes the VAPID public key a browser needs to subscribe', async () => {
+  const { vapidPublicKey } = (await get()).json();
+  assert.equal(typeof vapidPublicKey, 'string');
+  const raw = Buffer.from(vapidPublicKey, 'base64url');
+  assert.equal(raw.length, 65, 'an uncompressed P-256 point');
+  assert.equal(raw[0], 0x04);
+  // Stable across calls: the identity is minted once, not per request.
+  assert.equal((await get()).json().vapidPublicKey, vapidPublicKey);
+});
+
+test('a browser can subscribe, and webpush then reports as available', async () => {
+  assert.equal((await get()).json().channelsAvailable.webpush, false);
+  const res = await app.inject({ method: 'POST', url: '/api/push/subscriptions', payload: VALID_SUB });
+  assert.equal(res.statusCode, 200);
+  const { subscription } = res.json();
+  assert.ok(subscription.id);
+  assert.equal(subscription.endpointOrigin, 'https://push.example.net');
+  assert.equal((await get()).json().channelsAvailable.webpush, true);
+});
+
+test('the endpoint is never sent back to the client (it is a bearer secret)', async () => {
+  const body = JSON.stringify((await get()).json());
+  assert.ok(!body.includes('/p/abc123'), 'the endpoint path must not leave the server');
+});
+
+test('re-subscribing the same browser updates in place rather than duplicating', async () => {
+  const before = (await get()).json().pushSubscriptions.length;
+  await app.inject({ method: 'POST', url: '/api/push/subscriptions', payload: { ...VALID_SUB, label: 'my phone' } });
+  const after = (await get()).json().pushSubscriptions;
+  assert.equal(after.length, before, 'the endpoint is the identity');
+  assert.equal(after.at(-1).label, 'my phone');
+});
+
+test('a malformed subscription is refused with a reason', async () => {
+  const cases = [
+    [{ ...VALID_SUB, endpoint: 'http://push.example.net/p/x' }, /must be an https/],
+    [{ ...VALID_SUB, endpoint: 'https://127.0.0.1/p/x' }, /private, loopback or reserved/],
+    [{ ...VALID_SUB, keys: { ...VALID_SUB.keys, auth: 'AAAA' } }, /auth must decode to 16 bytes/],
+    [{ ...VALID_SUB, keys: { ...VALID_SUB.keys, p256dh: 'AAAA' } }, /p256dh must decode to 65 bytes/],
+    [{ endpoint: VALID_SUB.endpoint }, /p256dh is required/],
+  ];
+  for (const [payload, re] of cases) {
+    const res = await app.inject({ method: 'POST', url: '/api/push/subscriptions', payload });
+    assert.equal(res.statusCode, 400, JSON.stringify(payload).slice(0, 60));
+    assert.match(res.json().error, re);
+  }
+});
+
+test('a subscription can be removed, and an unknown id is a 404', async () => {
+  const { pushSubscriptions } = (await get()).json();
+  const id = pushSubscriptions[0].id;
+  assert.equal((await app.inject({ method: 'DELETE', url: `/api/push/subscriptions/${id}` })).statusCode, 200);
+  assert.equal((await get()).json().pushSubscriptions.length, pushSubscriptions.length - 1);
+  assert.equal((await app.inject({ method: 'DELETE', url: `/api/push/subscriptions/${id}` })).statusCode, 404);
+});
+
+test('the test-send endpoint reports what each channel did', async () => {
+  writeConfig({ notify: { discordWebhook: 'https://discord.example/hook' } });
+  const realFetch = global.fetch;
+  let posted = 0;
+  global.fetch = async () => { posted += 1; return { ok: true }; };
+  try {
+    const res = await app.inject({
+      method: 'POST', url: '/api/notify-settings/test', payload: { channels: ['discord'] },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().delivered.discord, true);
+    assert.equal(posted, 1);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test('the test-send endpoint rejects an unknown channel', async () => {
+  const res = await app.inject({
+    method: 'POST', url: '/api/notify-settings/test', payload: { channels: ['carrier-pigeon'] },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.json().error, /unknown channel\(s\): carrier-pigeon/);
 });

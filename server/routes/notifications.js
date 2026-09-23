@@ -50,6 +50,11 @@ import {
 import { loadSandboxConfig } from '../ws/sandbox.js';
 import { listSubscriptions } from '../ws/notify.js';
 import { bridgeStats } from '../ws/notifyBridge.js';
+import {
+  vapidPublicKey, listSubscriptions as listPushSubscriptions,
+  addSubscription, removeSubscription, countSubscriptions,
+} from '../ws/pushSubscriptions.js';
+import { sendNotification } from '../ws/notify.js';
 import { notifyDetectorStats } from '../ws/sessionManager.js';
 
 // Which delivery channels this host can actually reach right now. 'discord'
@@ -60,9 +65,10 @@ function channelsAvailable() {
   const notify = loadSandboxConfig().notify || {};
   return {
     discord: !!notify.discordWebhook || listSubscriptions().length > 0,
-    // Wired up in Step 4 (VAPID keys + push subscriptions); until then the
-    // GUI shows the channel as selectable but unreachable.
-    webpush: false,
+    // A channel is "available" when something is actually behind it: for Web
+    // Push that means at least one browser has subscribed. The VAPID key alone
+    // does not make it reachable.
+    webpush: countSubscriptions() > 0,
   };
 }
 
@@ -76,6 +82,10 @@ export async function notificationsRoute(fastify) {
     // `armed` answers "is anything even being watched right now", which is the
     // first question when notifications are not arriving.
     stats: { ...bridgeStats(), ...notifyDetectorStats() },
+    // What a browser needs to call pushManager.subscribe(). Public by
+    // definition (it is the applicationServerKey every subscriber embeds).
+    vapidPublicKey: vapidPublicKey(),
+    pushSubscriptions: listPushSubscriptions(),
     // Static vocabulary, served alongside the values so the GUI never has to
     // hardcode a list that could drift from the server's validation.
     choices: {
@@ -86,6 +96,55 @@ export async function notificationsRoute(fastify) {
       defaults: BRIDGE_DEFAULTS,
     },
   }));
+
+  // --- Web Push subscriptions ------------------------------------------------
+  //
+  // The endpoint a browser hands us is a bearer secret: anyone holding it can
+  // push to that browser. It is therefore accepted here, stored, and never
+  // sent back out -- GET returns only each subscription's origin and label.
+
+  fastify.post('/push/subscriptions', async (request, reply) => {
+    const body = request.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'body must be an object' });
+    }
+    const res = addSubscription({
+      endpoint: body.endpoint,
+      p256dh: body.keys?.p256dh,
+      auth: body.keys?.auth,
+      label: body.label,
+      // Recorded so the operator can tell their devices apart in the list.
+      userAgent: request.headers['user-agent'],
+    });
+    if (!res.ok) return reply.code(400).send({ error: res.message });
+    return { subscription: res.subscription, channelsAvailable: channelsAvailable() };
+  });
+
+  fastify.delete('/push/subscriptions/:id', async (request, reply) => {
+    if (!removeSubscription(request.params.id)) {
+      return reply.code(404).send({ error: 'subscription not found' });
+    }
+    return { ok: true, channelsAvailable: channelsAvailable() };
+  });
+
+  // "Does this actually work?" -- delivered through the real path (encryption,
+  // VAPID, the push service) so a green result means the whole chain works,
+  // not just that the row exists.
+  fastify.post('/notify-settings/test', async (request, reply) => {
+    const settings = getBridgeSettings();
+    const channels = Array.isArray(request.body?.channels) && request.body.channels.length > 0
+      ? request.body.channels
+      : settings.channels;
+    const bad = channels.filter((c) => !BRIDGE_CHANNELS.includes(c));
+    if (bad.length > 0) return reply.code(400).send({ error: `unknown channel(s): ${bad.join(', ')}` });
+    const res = await sendNotification({
+      title: 'ccserver',
+      body: 'Test notification from Settings. If you can read this, delivery works.',
+      level: 'info',
+      channels,
+    }, null);
+    return { delivered: res.delivered, channels };
+  });
 
   fastify.put('/notify-settings', async (request, reply) => {
     const res = updateBridgeSettings(request.body);

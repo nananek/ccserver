@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { authFetch } from '../auth.js';
+import { usePushSubscription } from '../hooks/usePushSubscription.js';
 
 // 「通知」メニュー: エージェント通知ブリッジ (sandbox.config.json の
 // notify.bridge) の GUI 編集。サンドボックス内の AI CLI がターミナルへ吐く
@@ -13,9 +14,9 @@ import { authFetch } from '../auth.js';
 //     起動時ポリシーなので次回起動から、配信まわり (配信先・間引き) は
 //     通知ごとにファイルを読み直すので即時に効く。
 //
-// PWA 通知 (Web Push) の購読 UI はこの下に別ブロックとして後から入る。
-// それまで webpush チャネルは選べるが配信先としては未到達 (サーバーが
-// channelsAvailable.webpush=false を返す)。
+// PWA 通知 (Web Push) の購読 UI もここに含む。前景通知 (設定 > 一般の
+// 「デスクトップ通知」= useNotifications.js) とは別物で、あちらはタブが開いて
+// いる間だけ、こちらはタブを閉じていても端末に届く。
 
 const APP_LABELS = {
   claude: 'Claude Code',
@@ -32,7 +33,7 @@ const CHANNEL_LABELS = {
 
 const CHANNEL_UNAVAILABLE_HINT = {
   discord: 'notify.discordWebhook も購読 webhook も未設定です。設定するまで配信されません。',
-  webpush: 'この端末の購読がまだありません (Web Push は準備中)。',
+  webpush: 'まだどの端末も購読していません。下の「この端末で受け取る」から購読してください。',
 };
 
 const LEVEL_LABELS = {
@@ -80,11 +81,19 @@ export default function NotificationsSection() {
   const [saved, setSaved] = useState(false);
   const [enabledSaving, setEnabledSaving] = useState(false);
   const [enabledSaveError, setEnabledSaveError] = useState(null);
+  const [subscriptions, setSubscriptions] = useState([]);
+  const [vapidPublicKey, setVapidPublicKey] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
 
   const applyResponse = useCallback((data) => {
     if (data.settings) setSettings(data.settings);
     if (data.choices) setChoices(data.choices);
     if (data.channelsAvailable) setAvailable(data.channelsAvailable);
+    if (data.pushSubscriptions) setSubscriptions(data.pushSubscriptions);
+    if (data.vapidPublicKey) setVapidPublicKey(data.vapidPublicKey);
+    if (data.stats) setStats(data.stats);
   }, []);
 
   const refresh = useCallback(async () => {
@@ -166,6 +175,38 @@ export default function NotificationsSection() {
       setSaveError(err.message || '保存に失敗しました');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const push = usePushSubscription({ vapidPublicKey, onChanged: () => refresh() });
+
+  const handleRemoveSubscription = async (id) => {
+    if (!window.confirm('この端末の購読を削除しますか？ その端末には届かなくなります。')) return;
+    try {
+      const res = await authFetch(`/api/push/subscriptions/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await refresh();
+    } catch (err) {
+      setError(err.message || '削除に失敗しました');
+    }
+  };
+
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await authFetch('/api/notify-settings/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      setTestResult(body.delivered);
+    } catch (err) {
+      setTestResult({ error: err.message || '送信に失敗しました' });
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -326,8 +367,84 @@ export default function NotificationsSection() {
       {saveError && <div className="error">Error: {saveError}</div>}
       <p className="settings-hint">
         {saved ? '保存しました。' : ''}
-        対象アプリと設定注入の変更は次回起動から、配信先と流量の制限は即座に適用されます。
+        対象アプリ・設定注入・配信先の有無は次回起動から、配信先の内訳と流量の制限は即座に適用されます。
       </p>
+
+      <h4 className="general-setting-subhead">PWA 通知 (Web Push)</h4>
+      <p className="settings-hint">
+        タブを閉じていても端末に届く通知です。設定 &gt; 一般の「デスクトップ通知」は
+        タブが開いている間だけの別機能なので、両方を使い分けられます。
+      </p>
+      {!push.supported && (
+        <p className="settings-hint">
+          このブラウザは Web Push に対応していないか、安全なコンテキスト (HTTPS または localhost) で開かれていません。
+          Tailscale Serve 等で HTTPS 公開したうえでアクセスしてください。iOS/iPadOS は「ホーム画面に追加」した PWA から開く必要があります。
+        </p>
+      )}
+      {push.supported && (
+        <>
+          <div className="resume-actions">
+            {push.subscribed ? (
+              <button className="btn btn-secondary" onClick={push.unsubscribe} disabled={push.busy}>
+                {push.busy ? '処理中...' : 'この端末の受信を停止'}
+              </button>
+            ) : (
+              <button className="btn btn-primary" onClick={push.subscribe} disabled={push.busy || !vapidPublicKey}>
+                {push.busy ? '処理中...' : 'この端末で受け取る'}
+              </button>
+            )}
+          </div>
+          {push.error && <div className="error">Error: {push.error}</div>}
+          <p className="settings-hint">
+            {push.subscribed
+              ? 'この端末は購読済みです。'
+              : push.permission === 'denied'
+                ? 'ブラウザの通知権限がブロックされています。ブラウザ側の設定から許可してください。'
+                : 'ボタンを押すとブラウザの通知許可を求めます。'}
+          </p>
+        </>
+      )}
+      {subscriptions.length > 0 && (
+        <>
+          <p className="settings-hint">購読中の端末 ({subscriptions.length}):</p>
+          <ul className="settings-hint">
+            {subscriptions.map((sub) => (
+              <li key={sub.id}>
+                {sub.label || sub.endpointOrigin || '(不明な端末)'}
+                {sub.userAgent ? ` — ${sub.userAgent.slice(0, 60)}` : ''}
+                {' '}
+                <button className="btn btn-secondary" onClick={() => handleRemoveSubscription(sub.id)}>削除</button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      <h4 className="general-setting-subhead">動作確認</h4>
+      <div className="resume-actions">
+        <button className="btn btn-secondary" onClick={handleTest} disabled={testing}>
+          {testing ? '送信中...' : 'テスト通知を送る'}
+        </button>
+      </div>
+      {testResult && (
+        <p className="settings-hint">
+          {testResult.error
+            ? `エラー: ${testResult.error}`
+            : `Discord: ${testResult.discord ? '送信' : '未設定'} ／ webhook: ${testResult.webhooks ?? 0} 件`
+              + (testResult.webpush
+                ? ` ／ PWA: ${testResult.webpush.sent} 件送信`
+                  + (testResult.webpush.failed ? ` (${testResult.webpush.failed} 件失敗)` : '')
+                  + (testResult.webpush.pruned ? ` (${testResult.webpush.pruned} 件の期限切れを削除)` : '')
+                : ' ／ PWA: 購読なし')}
+        </p>
+      )}
+      {stats && (
+        <p className="settings-hint">
+          監視中のセッション: {stats.armed ?? 0} ／ 配信 {stats.delivered ?? 0}
+          ／ 間引き {stats.throttled ?? 0}・重複 {stats.deduped ?? 0}・上限 {stats.capped ?? 0}
+          ・到達先なし {stats.unreachable ?? 0}・失敗 {stats.failed ?? 0}
+        </p>
+      )}
     </section>
   );
 }

@@ -285,12 +285,12 @@ export function buildNotifyMcpServer({ notifyApi, identity }) {
 
   server.tool(
     'notify',
-    'Deliver a notification to every configured channel (the Discord webhook set in sandbox.config.json, plus every webhook currently subscribed via subscribe). Use this when you need human attention that the terminal alone cannot provide. level is an optional severity (info/success/warning/error) reflected in the payload. channels is optional: omit it to deliver to every configured channel; pass a subset to restrict delivery -- \'discord\' means the Discord webhook + every subscribed webhook together.',
+    'Deliver a notification to every configured channel (the Discord webhook set in sandbox.config.json, plus every webhook currently subscribed via subscribe). Use this when you need human attention that the terminal alone cannot provide. level is an optional severity (info/success/warning/error) reflected in the payload. channels is optional: omit it to deliver to every configured channel; pass a subset to restrict delivery -- \'discord\' means the Discord webhook + every subscribed webhook together, \'webpush\' means the browsers/phones subscribed to this server\'s PWA notifications.',
     {
       title: z.string(),
       body: z.string(),
       level: z.enum(['info', 'success', 'warning', 'error']).optional(),
-      channels: z.array(z.enum(['discord'])).optional(),
+      channels: z.array(z.enum(['discord', 'webpush'])).optional(),
     },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await notifyApi.sendNotification(args, identity)) }] }),
   );

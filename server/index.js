@@ -30,6 +30,8 @@ import { gracefulShutdown, restoreSchedules, SAVED_SESSIONS_PATH, SCHEDULES_PATH
 import { restoreGroups, detectOrphanWorktrees, GROUPS_PATH, GROUP_DOCS_PATH } from './ws/groupManager.js';
 import { getGroupFilesManifestPath } from './ws/groupFiles.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled, notifyPath } from './ws/notify.js';
+import { ensureVapidKeys, countSubscriptions } from './ws/pushSubscriptions.js';
+import { setWebpushReachable } from './ws/notifyBridge.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/reviewer.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
@@ -381,6 +383,18 @@ try {
 }
 
 const PORT = process.env.PORT || 3001;
+
+// Web Push (plan-notify-bridge): mint the host's VAPID identity on first boot
+// so the public key is ready before any browser asks to subscribe, and tell
+// the notification bridge how to find out whether the webpush channel can
+// actually reach anyone (a late binding, so notifyBridge does not have to
+// depend on the push store existing).
+try {
+  ensureVapidKeys();
+  setWebpushReachable(() => countSubscriptions() > 0);
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to initialize Web Push VAPID keys; push notifications are unavailable');
+}
 
 // ccserver-notify: restore the subscription registry, then host the
 // process-global MCP socket if the feature is enabled (Discord webhook or

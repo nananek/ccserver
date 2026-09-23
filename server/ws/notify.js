@@ -402,17 +402,52 @@ export async function sendNotification({
     if (cfg.discordWebhook) targets.push(cfg.discordWebhook);
     for (const s of subscriptions) targets.push(s.url);
   }
-  const results = await Promise.all(targets.map((url) => deliver(url, content)));
+  // Web Push (plan-notify-bridge Step 4). Dispatched alongside the webhook
+  // fan-out rather than after it, and reached through a lazy dynamic import so
+  // the static graph stays acyclic (pushDelivery pulls in modules that import
+  // this one -- same reasoning as mcpBroker.js above).
+  const wantWebpush = channels == null || channels.includes('webpush');
+  const [results, push] = await Promise.all([
+    Promise.all(targets.map((url) => deliver(url, content))),
+    wantWebpush ? deliverWebpush({ title, body, level, identity, cfg }) : Promise.resolve(null),
+  ]);
+
   const discord = wantDiscordChannel && cfg.discordWebhook ? results[0] : false;
   const webhookResults = wantDiscordChannel && cfg.discordWebhook ? results.slice(1) : results;
-  return {
-    ok: true,
-    delivered: {
-      discord,
-      webhooks: webhookResults.filter(Boolean).length,
-      failed: webhookResults.filter((r) => !r).length,
-    },
+  const delivered = {
+    discord,
+    webhooks: webhookResults.filter(Boolean).length,
+    failed: webhookResults.filter((r) => !r).length,
   };
+  // Omitted entirely when the channel was excluded or nothing is subscribed,
+  // mirroring how an unconfigured Discord webhook simply reports discord:false.
+  if (push) delivered.webpush = push;
+  return { ok: true, delivered };
+}
+
+// Best effort: a push failure must never change what the webhook channels
+// report, and must never throw into the caller (an agent's MCP tool call, or a
+// pty data handler by way of notifyBridge).
+async function deliverWebpush({ title, body, level, identity, cfg }) {
+  try {
+    const mod = await import('./pushDelivery.js');
+    if (!mod.webpushConfigured()) return null;
+    const res = await mod.deliverToSubscribers({
+      title,
+      body,
+      level,
+      // The browser gets the attribution as its own field rather than as text
+      // appended to the body, so the Service Worker can render it separately.
+      attribution: cfg.attribution ? buildAttribution(identity, cfg.hostname).replace(/^\n\n_from: /, '') : null,
+      // One notification per session replaces the previous one for that
+      // session instead of stacking, which is what makes a phone usable.
+      tag: identity?.sessionId ? `ccserver-${String(identity.sessionId).slice(0, 8)}` : 'ccserver',
+    });
+    return res;
+  } catch (err) {
+    console.warn(`[notify] web push delivery failed: ${err?.message || err}`);
+    return { sent: 0, failed: 0, pruned: 0 };
+  }
 }
 
 // The notifyApi facade handed to buildNotifyMcpServer (see mcpServer.js).
