@@ -917,6 +917,10 @@ export default function App() {
     closeConfirmTargetText = target.kind === 'remote'
       ? `⇄ ${target.instance.label || target.instance.fingerprint?.slice(0, 8) || target.instance.id}: ${where}`
       : where;
+  } else if (isRemoteTabCloseConfirm) {
+    // リモートタブはどのセッションを終了/切断するのかを明示する
+    // (⇄ ホスト名: cwd。cwd が無ければタブのラベル)。
+    closeConfirmTargetText = `⇄ ${closeConfirmTab.remote.label}: ${closeConfirmTab.cwd || closeConfirmTab.label}`;
   }
   // Usage covers claude (Claude Code's /usage), codex (Codex's rate-limit
   // read) and opencode Go (the zen/go quota API); the UsageWidget (right

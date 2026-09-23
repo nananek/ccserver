@@ -265,6 +265,7 @@ test('remote tab offers "セッションを終了" and terminates through the fe
   // share one skip preference; see App.jsx's handleCloseTab).
   await expect(modal(page)).toContainText('「セッションを終了」はピア側のセッションも破棄します。');
   await expect(modal(page)).toContainText('「切断」はタブを閉じるだけで');
+  await expect(modal(page).locator('.close-confirm-target')).toHaveText('⇄ FakePeer: /tmp/remote-project');
   await expect(modal(page).getByRole('button', { name: '閉じる', exact: true })).toHaveCount(0);
   await expect(modal(page).getByRole('button', { name: '切断', exact: true })).toBeVisible();
   await expect(modal(page).locator('.close-confirm-checkbox')).toHaveCount(0);
@@ -320,6 +321,7 @@ test('remote tab "切断" closes the tab without terminating the peer session', 
   const dlg = modal(page);
   await expect(dlg).toBeVisible();
   await expect(dlg).toContainText('「切断」はタブを閉じるだけで');
+  await expect(dlg.locator('.close-confirm-target')).toHaveText('⇄ FakePeer: /tmp/remote-detach');
   await expect(dlg.locator('.close-confirm-checkbox')).toHaveCount(0);
 
   await dlg.getByRole('button', { name: '切断', exact: true }).click();
