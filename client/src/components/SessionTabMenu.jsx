@@ -29,6 +29,9 @@ export default function SessionTabMenu({
   onCloseTab,
   onOpenSession,
   onTerminateSession,
+  unopenedRemoteSessions = [],
+  onOpenRemoteSession,
+  onTerminateRemoteSession,
   onOpenGroup,
   customLabels,
   onRowContextMenu,
@@ -76,6 +79,9 @@ export default function SessionTabMenu({
             onCloseTab={onCloseTab}
             onOpenSession={onOpenSession}
             onTerminateSession={onTerminateSession}
+            unopenedRemoteSessions={unopenedRemoteSessions}
+            onOpenRemoteSession={onOpenRemoteSession}
+            onTerminateRemoteSession={onTerminateRemoteSession}
             onOpenGroup={onOpenGroup}
             customLabels={customLabels}
             onRowContextMenu={onRowContextMenu}

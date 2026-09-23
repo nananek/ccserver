@@ -63,9 +63,9 @@ test('$HOME paths keep the raw path on hover and show as ~ in the terminal title
     await expect(item).toBeVisible();
     // The raw full path stays available on hover (title attribute), and the
     // visible row never shows the full path.
-    await expect(item.locator('.session-menu-path')).toHaveAttribute('title', cwd);
-    await expect(item.locator('.session-menu-path')).toHaveText('project');
-    await expect(item.locator('.session-menu-path')).not.toHaveText(cwd);
+    await expect(item).toHaveAttribute('title', cwd);
+    await expect(item.locator('.session-menu-label')).toHaveText('project');
+    await expect(item.locator('.session-menu-label')).not.toHaveText(cwd);
 
     // Opening the session shows the abbreviated path in the terminal header.
     await item.locator('.session-menu-select').click();

@@ -13,6 +13,16 @@ const sidebarBadge = (page) => page.locator('.left-sidebar .session-menu-count')
 const openedItems = (page) => leftSidebar(page).locator('[data-section="opened"] .session-menu-item');
 const unopenedItems = (page) => leftSidebar(page).locator('[data-section="unopened"] .session-menu-item');
 
+// 下段 (未オープン/リモート) の ✕ はアプリ内の確認モーダルを出す。
+// 「次回以降確認しない」設定済みならモーダルなしで即終了するため、
+// モーダル表示か件数減少のどちらかを待ち、出ていれば「セッションを終了」を押す。
+async function confirmTerminateIfPrompted(page, count, before) {
+  const btn = page.locator('.resume-overlay', { hasText: 'セッションを終了しますか?' })
+    .getByRole('button', { name: 'セッションを終了', exact: true });
+  await expect.poll(async () => (await btn.isVisible()) || (await count()) < before, { timeout: 10_000 }).toBe(true);
+  if (await btn.isVisible()) await btn.click();
+}
+
 async function gotoApp(page) {
   await page.goto('/');
   await expect(openTerminalBtn(page)).toBeVisible();
@@ -39,8 +49,8 @@ async function terminateAllLowerSidebar(page) {
   for (let i = 0; i < 15; i++) {
     const before = await unopenedItems(page).count();
     if (before === 0) break;
-    page.once('dialog', (d) => d.accept());
     await unopenedItems(page).first().locator('.session-menu-close').click();
+    await confirmTerminateIfPrompted(page, () => unopenedItems(page).count(), before);
     await expect.poll(async () => unopenedItems(page).count(), { timeout: 10_000 }).toBeLessThan(before);
   }
 }
@@ -267,4 +277,96 @@ test('overlay時はグループ再オープンでも閉じる', async ({ page })
   await expect(leftSidebar(page)).toBeHidden();
   await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
   await expect(page.locator('.left-sidebar [data-section="opened"] .session-menu-item[data-tab-type="group"]', { hasText: 'stub-proj' })).toBeVisible({ timeout: 15_000 });
+});
+
+test('remote sessions of paired instances are listed, openable and terminable', async ({ page }) => {
+  const instanceId = 'inst-remote-1';
+  let sessions = [
+    { id: 'rs-1', cwd: '/home/peer/alpha', app: 'claude', sandbox: false },
+    { id: 'rs-2', cwd: '/home/peer/beta', app: 'codex', sandbox: true },
+  ];
+  const deleted = [];
+  await page.route('**/api/federation/instances', (route) => route.fulfill({
+    json: { instances: [{ id: instanceId, status: 'active', label: 'peerhost', fingerprint: 'aa:bb:cc:dd:ee' }] },
+  }));
+  await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => route.fulfill({ json: { sessions } }));
+  await page.route(`**/api/federation/instances/${instanceId}/sessions/*`, (route) => {
+    const id = route.request().url().split('/').pop();
+    deleted.push(id);
+    sessions = sessions.filter((s) => s.id !== id);
+    return route.fulfill({ json: { ok: true } });
+  });
+  await gotoApp(page);
+
+  const remoteItems = leftSidebar(page).locator('[data-section="unopened-remote"] .session-menu-item');
+  await expect(remoteItems).toHaveCount(2);
+  await expect(remoteItems.first().locator('.session-menu-label')).toHaveText('alpha');
+  await expect(remoteItems.first().locator('.tab-remote-badge')).toHaveText('⇄ peerhost');
+
+  // 開くとリモートタブになり、リモート一覧から消えて上段に移る。
+  await remoteItems.first().locator('.session-menu-select').click();
+  await expect(remoteItems).toHaveCount(1);
+  await expect(openedItems(page)).toHaveCount(1);
+  await expect(openedItems(page).first().locator('.tab-remote-badge')).toHaveText('⇄ peerhost');
+
+  // ✕ は federation 経由で DELETE する。
+  await remoteItems.first().locator('.session-menu-close').click();
+  const remoteModal = page.locator('.resume-overlay', { hasText: 'セッションを終了しますか?' });
+  await expect(remoteModal).toBeVisible();
+  await expect(remoteModal.locator('.close-confirm-target')).toHaveText('⇄ peerhost: /home/peer/beta');
+  await remoteModal.getByRole('button', { name: 'セッションを終了', exact: true }).click();
+  await expect(remoteModal).toBeHidden();
+  await expect.poll(() => deleted).toEqual(['rs-2']);
+  await expect(remoteItems).toHaveCount(0);
+});
+
+test('lower-section ✕ uses the in-app confirm modal and shares "次回以降確認しない"', async ({ page }) => {
+  await gotoApp(page);
+  await terminateAllLowerSidebar(page);
+
+  // 下段の一覧と DELETE はモックで検証する (実セッションは起動しない)。
+  let sessions = [
+    { id: 'lo-1', cwd: '/tmp/lower-one', app: 'claude', connected: false },
+    { id: 'lo-2', cwd: '/tmp/lower-two', app: 'claude', connected: false },
+  ];
+  const deleted = [];
+  await page.route('**/api/sessions', (route) => (route.request().method() === 'GET'
+    ? route.fulfill({ json: { sessions } })
+    : route.continue()));
+  await page.route('**/api/sessions/*', (route) => {
+    if (route.request().method() !== 'DELETE') return route.continue();
+    const id = route.request().url().split('/').pop();
+    deleted.push(id);
+    sessions = sessions.filter((s) => s.id !== id);
+    return route.fulfill({ json: { ok: true } });
+  });
+  let nativeDialog = false;
+  page.on('dialog', (d) => { nativeDialog = true; d.dismiss().catch(() => {}); });
+  await page.reload();
+  await expect(unopenedItems(page)).toHaveCount(2);
+
+  const modal = page.locator('.resume-overlay', { hasText: 'セッションを終了しますか?' });
+
+  // キャンセルでは残る。
+  await unopenedItems(page).first().locator('.session-menu-close').click();
+  await expect(modal).toBeVisible();
+  await expect(modal.locator('.close-confirm-target')).toHaveText('/tmp/lower-one');
+  await modal.getByRole('button', { name: 'キャンセル', exact: true }).click();
+  await expect(modal).toBeHidden();
+  await expect(unopenedItems(page)).toHaveCount(2);
+
+  // 「次回以降確認しない」付きで終了 → 永続化。
+  await unopenedItems(page).first().locator('.session-menu-close').click();
+  await modal.getByRole('checkbox').check();
+  await modal.getByRole('button', { name: 'セッションを終了', exact: true }).click();
+  await expect(modal).toBeHidden();
+  await expect(unopenedItems(page)).toHaveCount(1);
+  await expect.poll(() => page.evaluate((k) => localStorage.getItem(k), SKIP_KEY)).toBe('1');
+
+  // 以降はモーダルなしで即終了。
+  await unopenedItems(page).first().locator('.session-menu-close').click();
+  await expect(unopenedItems(page)).toHaveCount(0);
+  await expect(modal).toHaveCount(0);
+  expect(deleted).toEqual(['lo-1', 'lo-2']);
+  expect(nativeDialog).toBe(false);
 });

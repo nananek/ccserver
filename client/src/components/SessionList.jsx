@@ -30,6 +30,9 @@ export default function SessionList({
   onCloseTab,
   onOpenSession,
   onTerminateSession,
+  unopenedRemoteSessions = [],
+  onOpenRemoteSession,
+  onTerminateRemoteSession,
   customLabels,
   onRowContextMenu,
   unopenedGroups,
@@ -59,7 +62,8 @@ export default function SessionList({
             // サーバー保存の表示名があれば優先する (未確立タブは sessionId 不在のため対象外)。
             const sessionId = tab.sessionId || tab.attachSessionId || null;
             const customLabel = sessionId ? (customLabels?.get(sessionId) ?? null) : null;
-            const displayLabel = customLabel || tab.label;
+            // リモートタブのラベル先頭の「⇄ 」は一覧では出さない (ホストは下段バッジで示す)。
+            const displayLabel = customLabel || (tab.remote ? String(tab.label).replace(/^⇄\s*/, '') : tab.label);
             return (
               <div
                 key={tab.id}
@@ -78,19 +82,19 @@ export default function SessionList({
                   <span className="session-menu-item-top">
                     <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
                     <span className="session-menu-label">{displayLabel}</span>
-                    {tab.remote && (
-                      <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
-                    )}
-                    {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
-                    {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
                     {(() => {
-                      const badge = gpgVaultBadgeState(tab, vaultStatus?.data);
+                      // 一覧では Vault ありで起動したセッションにだけ鍵を出す。
+                      const badge = tab.gpgVaultActive ? gpgVaultBadgeState(tab, vaultStatus?.data) : null;
                       if (!badge) return null;
                       return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
                     })()}
+                    {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
+                    {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
                   </span>
                   <span className="session-menu-status">
-                    {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
+                    {tab.remote && (
+                      <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
+                    )}
                     <span className="session-menu-state">{statusText}</span>
                   </span>
                 </button>
@@ -135,7 +139,6 @@ export default function SessionList({
                     )}
                   </span>
                   <span className="session-menu-status">
-                    {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
                     <span className="session-menu-state">{statusText}</span>
                   </span>
                 </button>
@@ -176,17 +179,16 @@ export default function SessionList({
                 <span className="session-menu-item-top">
                   <TabIcon type="terminal" app={s.app} shell={!!s.shell} />
                   <span className="session-menu-label">{s.customLabel || baseName(s.cwd) || s.id.slice(0, 8)}</span>
-                  {s.sandbox
-                    ? <span className="session-badge sandbox">sandbox</span>
-                    : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
                   {(() => {
-                    const badge = gpgVaultBadgeState(s, vaultStatus?.data);
+                    const badge = s.gpgVaultActive ? gpgVaultBadgeState(s, vaultStatus?.data) : null;
                     if (!badge) return null;
                     return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
                   })()}
+                  {s.sandbox
+                    ? <span className="session-badge sandbox">sandbox</span>
+                    : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
                 </span>
                 <span className="session-menu-status">
-                  {s.cwd && <span className="session-menu-path" title={s.cwd}>{baseName(s.cwd)}</span>}
                   <span className="session-menu-state">{appLabel(s)}</span>
                 </span>
               </button>
@@ -201,6 +203,54 @@ export default function SessionList({
               </button>
             </div>
           ))}
+        </div>
+      )}
+      {unopenedRemoteSessions.length > 0 && (
+        <div className="session-menu-section" data-section="unopened-remote">
+          <div className="session-menu-sep" />
+          <div className="session-menu-section-label">リモートのセッション</div>
+          {unopenedRemoteSessions.map((entry) => {
+            const { instance, session: s } = entry;
+            const host = instance.label || instance.fingerprint?.slice(0, 8) || instance.id;
+            const label = baseName(s.cwd) || s.id.slice(0, 8);
+            return (
+              <div
+                key={`${instance.id}:${s.id}`}
+                role="none"
+                className={`session-menu-item ${s.connected === false ? 'is-idle' : 'is-running'}`}
+                title={`${host}: ${s.cwd || s.id}`}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="session-menu-select"
+                  aria-label={`リモート (${host}): ${s.cwd || s.id}`}
+                  onClick={() => { onOpenRemoteSession(entry); }}
+                >
+                  <span className="session-menu-item-top">
+                    <TabIcon type="terminal" app={s.app} shell={!!s.shell} />
+                    <span className="session-menu-label">{label}</span>
+                    {s.sandbox
+                      ? <span className="session-badge sandbox">sandbox</span>
+                      : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
+                  </span>
+                  <span className="session-menu-status">
+                    <span className="tab-remote-badge" title={`接続先: ${host}`}>⇄ {host}</span>
+                    <span className="session-menu-state">{appLabel(s)}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="tab-close session-menu-close"
+                  title="リモートセッションを終了する"
+                  aria-label={`リモートセッションを終了する: ${host} ${s.cwd || s.id}`}
+                  onClick={() => { onTerminateRemoteSession(entry); }}
+                >
+                  &#10005;
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
       {(unopenedGroups || []).length > 0 && (
@@ -231,7 +281,6 @@ export default function SessionList({
                     <span className="session-menu-label">{dirName}</span>
                   </span>
                   <span className="session-menu-status">
-                    {g.cwd && <span className="session-menu-path" title={g.cwd}>{baseName(g.cwd)}</span>}
                     <span className="session-menu-state">{liveText}</span>
                   </span>
                 </button>

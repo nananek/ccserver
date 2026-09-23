@@ -25,6 +25,23 @@ async function waitForShellPrompt(page) {
   await expect(page.locator('.terminal-container .xterm-rows')).toContainText(/[$#%>]/, { timeout: 15_000 });
 }
 
+// 下段 (未オープン) の先頭行の ✕ を押し、アプリ内の確認モーダルが出れば
+// 「セッションを終了」を押す (「次回以降確認しない」設定済みならモーダルは出ない)。
+// モーダルのクリックはポップアップ外の mousedown としてメニューを閉じるので、
+// 最後にメニューを開き直す。
+const lowerItems = (page) => sessionMenu(page).locator('[data-section="unopened"] .session-menu-item');
+async function closeFirstLowerAndConfirm(page, before) {
+  await lowerItems(page).first().locator('.session-menu-close').click();
+  const btn = page.locator('.resume-overlay', { hasText: 'セッションを終了しますか?' })
+    .getByRole('button', { name: 'セッションを終了', exact: true });
+  await expect.poll(async () => (await btn.isVisible()) || (await lowerItems(page).count()) < before, { timeout: 10_000 }).toBe(true);
+  if (await btn.isVisible()) {
+    await btn.click();
+    await expect(btn).toBeHidden({ timeout: 10_000 });
+  }
+  if ((await sessionMenu(page).count()) === 0) await hamburger(page).click();
+}
+
 // Terminate every session in the lower ("unopened") section. The shared e2e
 // server keeps sessions across tests in this file, so each test cleans up
 // after itself to stay isolated.
@@ -34,8 +51,7 @@ async function terminateAllLower(page) {
     const items = sessionMenu(page).locator('[data-section="unopened"] .session-menu-item');
     const before = await items.count();
     if (before === 0) break;
-    page.once('dialog', (d) => d.accept());
-    await items.first().locator('.session-menu-close').click();
+    await closeFirstLowerAndConfirm(page, before);
     // Wait for the list to shrink before the next iteration.
     await expect.poll(async () => items.count(), { timeout: 10_000 }).toBeLessThan(before);
   }
@@ -162,9 +178,8 @@ test('lower section shows a session left running after a reload, and X terminate
   const before = await sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').count();
   expect(before).toBeGreaterThanOrEqual(1);
 
-  // X on a lower item terminates that server-side session (window.confirm).
-  page.once('dialog', (d) => d.accept());
-  await sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').first().locator('.session-menu-close').click();
+  // X on a lower item terminates that server-side session (in-app confirm modal).
+  await closeFirstLowerAndConfirm(page, before);
   await expect
     .poll(async () => sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').count(), { timeout: 10_000 })
     .toBe(before - 1);
@@ -210,9 +225,9 @@ test('X on a lower item already gone server-side shows no error alert and the st
     d.accept().catch(() => {});
   });
 
-  // X on the now-stale lower item: window.confirm(), then a DELETE that
+  // X on the now-stale lower item: in-app confirm modal, then a DELETE that
   // gets a real 404 from the server.
-  await sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').first().locator('.session-menu-close').click();
+  await closeFirstLowerAndConfirm(page, await lowerItems(page).count());
   await expect(sessionMenu(page).locator('[data-section="unopened"] .session-menu-item')).toHaveCount(0, { timeout: 10_000 });
   expect(alerted).toBe(false);
 

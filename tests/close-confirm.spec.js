@@ -20,6 +20,16 @@ const sessionBadge = (page) => page.locator('.session-menu-count');
 const menuCloseButtons = (page) => sessionMenu(page).locator('[data-section="opened"] .session-menu-item .session-menu-close');
 const modal = (page) => page.locator('.resume-overlay', { hasText: 'タブを閉じますか?' });
 
+// 下段 (未オープン/リモート) の ✕ はアプリ内の確認モーダルを出す。
+// 「次回以降確認しない」設定済みならモーダルなしで即終了するため、
+// モーダル表示か件数減少のどちらかを待ち、出ていれば「セッションを終了」を押す。
+async function confirmTerminateIfPrompted(page, count, before) {
+  const btn = page.locator('.resume-overlay', { hasText: 'セッションを終了しますか?' })
+    .getByRole('button', { name: 'セッションを終了', exact: true });
+  await expect.poll(async () => (await btn.isVisible()) || (await count()) < before, { timeout: 10_000 }).toBe(true);
+  if (await btn.isVisible()) await btn.click();
+}
+
 async function badgeCount(page) {
   return sessionBadge(page).count();
 }
@@ -154,8 +164,10 @@ test('terminate button ends the session completely: tab closes and session is go
     const lowers = sessionMenu(page).locator('[data-section="unopened"] .session-menu-item');
     const before = await lowers.count();
     if (before === 0) break;
-    page.once('dialog', (d) => d.accept());
     await lowers.first().locator('.session-menu-close').click();
+    await confirmTerminateIfPrompted(page, () => lowers.count(), before);
+    // モーダルのクリックでポップアップが閉じるので開き直す。
+    if ((await sessionMenu(page).count()) === 0) await openMenu(page);
     await expect.poll(async () => sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').count(), { timeout: 10_000 }).toBeLessThan(before);
   }
   await page.keyboard.press('Escape').catch(() => {});
@@ -208,7 +220,7 @@ test('terminate button ignores double-click: single DELETE, no error alert', asy
   await page.unroute('**/api/sessions/*');
 });
 
-test('remote tab keeps the detach-only "閉じる" button and never issues a local DELETE', async ({ page }) => {
+test('remote tab offers "セッションを終了" and terminates through the federation relay, never a local DELETE', async ({ page }) => {
   await usePopupMode(page);
   await gotoApp(page);
 
@@ -224,38 +236,48 @@ test('remote tab keeps the detach-only "閉じる" button and never issues a loc
   await page.route('**/api/federation/instances', (route) => route.fulfill({
     json: { instances: [{ id: instanceId, status: 'active', label: 'FakePeer', fingerprint: 'aa:bb:cc:dd:ee', addr: '127.0.0.1:9999' }] },
   }));
+  let remoteSessions = [{ id: 'remote-sess-1', cwd: '/tmp/remote-project', app: 'claude', shell: false }];
   await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => route.fulfill({
-    json: { sessions: [{ id: 'remote-sess-1', cwd: '/tmp/remote-project', app: 'claude', shell: false }] },
+    json: { sessions: remoteSessions },
   }));
+  const federationDeletes = [];
+  await page.route(`**/api/federation/instances/${instanceId}/sessions/*`, (route) => {
+    if (route.request().method() !== 'DELETE') return route.continue();
+    const id = route.request().url().split('/').pop();
+    federationDeletes.push(id);
+    remoteSessions = remoteSessions.filter((s) => s.id !== id);
+    return route.fulfill({ json: { ok: true } });
+  });
   await page.route(`**/api/federation/instances/${instanceId}/groups`, (route) => route.fulfill({ json: { groups: [] } }));
 
   await page.locator('.tab-list').getByTitle('Remote').click();
   await page.getByTestId('remote-instance-header').waitFor();
   await page.locator('.sandbox-body', { hasText: '/tmp/remote-project' }).click();
 
-  // The remote terminal tab shows up in the hamburger menu's "opened"
-  // section like any other running terminal tab.
   await expect(sessionBadge(page)).toHaveText('1');
   await openMenu(page);
   await menuCloseButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
 
-  // No "セッションを終了" for a remote tab: a local DELETE would either 404
-  // or, worse, hit an unrelated local session that happens to share the id.
-  await expect(modal(page).getByRole('button', { name: 'セッションを終了', exact: true })).toHaveCount(0);
-  const closeBtn = modal(page).getByRole('button', { name: '閉じる', exact: true });
-  await expect(closeBtn).toBeVisible();
+  // Same layout as a local tab: terminate + cancel, no detach-only "閉じる".
+  await expect(modal(page)).toContainText('セッションを終了します。終了後は再接続できません。');
+  await expect(modal(page).getByRole('button', { name: '閉じる', exact: true })).toHaveCount(0);
+  const terminateBtn = modal(page).getByRole('button', { name: 'セッションを終了', exact: true });
+  await expect(terminateBtn).toBeVisible();
 
-  let deleteRequested = false;
+  // A local DELETE with the remote id would 404 or hit an unrelated local
+  // session that happens to share the id -- it must go through the relay.
+  let localDeleteRequested = false;
   await page.route('**/api/sessions/*', async (route) => {
-    if (route.request().method() === 'DELETE') deleteRequested = true;
+    if (route.request().method() === 'DELETE') localDeleteRequested = true;
     await route.continue();
   });
 
-  await closeBtn.click();
+  await terminateBtn.click();
   await expect(modal(page)).toBeHidden();
   await expect(sessionBadge(page)).toHaveCount(0);
-  expect(deleteRequested).toBe(false);
+  expect(federationDeletes).toEqual(['remote-sess-1']);
+  expect(localDeleteRequested).toBe(false);
 
   await page.unroute('**/api/sessions/*');
 });

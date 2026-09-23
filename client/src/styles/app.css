@@ -2440,6 +2440,8 @@ body {
 }
 
 .session-badge.gpg-vault-inactive {
+  filter: grayscale(1);
+  opacity: 0.6;
   color: var(--text-muted, #6c7086);
   background: rgba(108, 112, 134, 0.12);
   border: 1px solid rgba(108, 112, 134, 0.35);
@@ -3198,7 +3200,9 @@ body {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-weight: 600;
   padding: 4px 8px;
-  line-height: 1;
+  /* Match .header-icon's height so text buttons line up with the icon
+     buttons beside them (same padding/border). */
+  line-height: 18px;
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-muted);
@@ -3252,11 +3256,19 @@ body {
   justify-content: center;
   font-size: 13px;
   padding: 4px 8px;
-  line-height: 1;
+  /* Same 18px box as .header-icon so the frame matches the icon buttons. */
+  line-height: 18px;
+  min-width: calc(18px + 16px + 2px);
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-muted);
   border-radius: 4px;
+}
+
+.gpg-vault-indicator:not(.active) {
+  /* 🔑 is a color emoji -- `color` doesn't tint it, so gray it out. */
+  filter: grayscale(1);
+  opacity: 0.6;
 }
 
 .gpg-vault-indicator.active {
@@ -3497,6 +3509,15 @@ body {
    キャンセル/閉じる stay right-aligned. */
 .resume-actions .btn-left {
   margin-right: auto;
+}
+
+.close-confirm-target {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .close-confirm-checkbox {
@@ -3841,6 +3862,15 @@ body {
   .header-icon {
     width: 20px;
     height: 20px;
+  }
+
+  .auto-yes-toggle,
+  .gpg-vault-indicator {
+    line-height: 20px;
+  }
+
+  .gpg-vault-indicator {
+    min-width: calc(20px + 16px + 2px);
   }
 
   .tab-item {

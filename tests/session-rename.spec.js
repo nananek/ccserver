@@ -12,6 +12,16 @@ const unopenedItems = (page) => leftSidebar(page).locator('[data-section="unopen
 const contextMenu = (page) => page.locator('.session-context-menu');
 const renameDialog = (page) => page.locator('.resume-dialog', { hasText: 'セッション名を設定' });
 
+// 下段 (未オープン/リモート) の ✕ はアプリ内の確認モーダルを出す。
+// 「次回以降確認しない」設定済みならモーダルなしで即終了するため、
+// モーダル表示か件数減少のどちらかを待ち、出ていれば「セッションを終了」を押す。
+async function confirmTerminateIfPrompted(page, count, before) {
+  const btn = page.locator('.resume-overlay', { hasText: 'セッションを終了しますか?' })
+    .getByRole('button', { name: 'セッションを終了', exact: true });
+  await expect.poll(async () => (await btn.isVisible()) || (await count()) < before, { timeout: 10_000 }).toBe(true);
+  if (await btn.isVisible()) await btn.click();
+}
+
 async function gotoApp(page) {
   await page.goto('/');
   await expect(openTerminalBtn(page)).toBeVisible();
@@ -43,8 +53,8 @@ async function terminateAllLowerSidebar(page) {
   for (let i = 0; i < 15; i++) {
     const before = await unopenedItems(page).count();
     if (before === 0) break;
-    page.once('dialog', (d) => d.accept());
     await unopenedItems(page).first().locator('.session-menu-close').click();
+    await confirmTerminateIfPrompted(page, () => unopenedItems(page).count(), before);
     await expect.poll(async () => unopenedItems(page).count(), { timeout: 10_000 }).toBeLessThan(before);
   }
 }
