@@ -3,7 +3,21 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
-import { loadSandboxConfig, installedApps, selectableAppIds, APP_IDS } from './sandbox.js';
+import { loadSandboxConfig, installedApps, selectableAppIds, APP_IDS, _resetVikunjaWarningForTests } from './sandbox.js';
+
+// console.warn capture for the compatibility-warning tests below. Kept local
+// rather than global so an unrelated failing test still prints its own output.
+function captureWarnings(fn) {
+  const seen = [];
+  const real = console.warn;
+  console.warn = (...args) => { seen.push(args.map(String).join(' ')); };
+  try {
+    fn();
+  } finally {
+    console.warn = real;
+  }
+  return seen;
+}
 
 // loadSandboxConfig reads the file at CCSERVER_SANDBOX_CONFIG (else the
 // default server/sandbox.config.json). Point it at a temp file to exercise the
@@ -198,6 +212,52 @@ test('notify.vikunja is ignored, not an error, when left over in the config', ()
     assert.equal(cfg.configError, null, 'a leftover vikunja block must not make the config unreadable');
     assert.equal(cfg.notify.vikunja, undefined, 'the key is no longer surfaced');
     assert.equal(cfg.notify.discordWebhook, 'https://discord.example/hook', 'the rest of notify still parses');
+  });
+});
+
+// Review findings #2/#4/#5: the compatibility warning has to actually reach
+// the operator whose setup just went inert, and it has to be observable.
+test('a leftover notify.vikunja block warns exactly once per process', () => {
+  withConfig({ notify: { vikunja: { baseUrl: 'https://v.example', apiToken: 'tok' } } }, () => {
+    _resetVikunjaWarningForTests();
+    const warnings = captureWarnings(() => {
+      for (let i = 0; i < 5; i++) loadSandboxConfig();
+    });
+    assert.equal(warnings.length, 1, 'the latch must survive repeated reads (this runs on every session launch)');
+    assert.match(warnings[0], /notify\.vikunja/);
+    assert.match(warnings[0], /issue #207/);
+  });
+});
+
+test('a CCSERVER_VIKUNJA_* env with no config block still warns', () => {
+  // The old docs recommended passing the secret apiToken via the environment,
+  // so "env only, nothing in sandbox.config.json" was a supported setup -- and
+  // the one that would otherwise be switched off in complete silence.
+  withConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, () => {
+    process.env.CCSERVER_VIKUNJA_API_TOKEN = 'tok';
+    try {
+      _resetVikunjaWarningForTests();
+      const warnings = captureWarnings(() => loadSandboxConfig());
+      assert.equal(warnings.length, 1, 'an env-only Vikunja setup must not go unmentioned');
+      assert.match(warnings[0], /CCSERVER_VIKUNJA_\*/);
+    } finally {
+      delete process.env.CCSERVER_VIKUNJA_API_TOKEN;
+    }
+  });
+});
+
+test('a non-object vikunja leftover is flagged too', () => {
+  withConfig({ notify: { vikunja: true } }, () => {
+    _resetVikunjaWarningForTests();
+    const warnings = captureWarnings(() => loadSandboxConfig());
+    assert.equal(warnings.length, 1, 'the point is to prompt cleanup, whatever shape the leftover has');
+  });
+});
+
+test('no Vikunja leftovers means no warning at all', () => {
+  withConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, () => {
+    _resetVikunjaWarningForTests();
+    assert.deepEqual(captureWarnings(() => loadSandboxConfig()), []);
   });
 });
 

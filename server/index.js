@@ -390,6 +390,25 @@ try {
   if (notifyEnabled()) {
     await ensureNotifyBroker();
     fastify.log.info('ccserver-notify MCP broker started');
+  } else {
+    // Review finding #1: staying silent here is how an upgrade turns into a
+    // mystery. With no delivery target, shouldInjectNotify() is false and the
+    // `notify` tool is not injected into ANY session -- agents lose their only
+    // way to call a human, and nothing else in the process says so. That
+    // matters most for a deployment upgrading past the Vikunja channel's
+    // removal (issue #207): it may have had Vikunja as its ONLY real target,
+    // and the docs/example-config notes about this are things you read after
+    // you already suspect something is wrong. This log line is the one place
+    // that reaches an existing install on the restart that changes its
+    // behavior. (Symmetric with the info line above, which fires when it IS
+    // enabled.)
+    fastify.log.warn(
+      'ccserver-notify is DISABLED: no delivery target is configured, so the notify MCP tool will not be '
+      + 'injected into any session and agents have no way to call a human. Set notify.discordWebhook '
+      + '(or CCSERVER_DISCORD_WEBHOOK), or seed notify.subscriptions, in sandbox.config.json. '
+      + 'NOTE: the Vikunja channel was removed and no longer counts as a delivery target -- see '
+      + 'https://github.com/nananek/ccserver/issues/207',
+    );
   }
 } catch (err) {
   fastify.log.error({ err }, 'Failed to start ccserver-notify broker');

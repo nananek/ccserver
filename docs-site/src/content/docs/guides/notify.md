@@ -70,5 +70,6 @@ _from: myhost · myproject · group abc12345 · session 01234567
 かつて `notify` は呼び出しごとに Vikunja タスクを作成/更新していましたが、**削除されました**。「人間を呼ぶ (ping)」ことと「タスクを追跡する」ことは関心事が異なり、1 つの MCP ツールに同居させたのが良くなかったためです。あらためて**独立した MCP サーバーとして再実装**する予定です。
 
 - 追従 Issue: [#207 Vikunja 連携を ccserver-notify から切り出し、独立した MCP サーバーとして再実装する](https://github.com/nananek/ccserver/issues/207) — 削除した挙動 (タスク作成 / コメント追記 / status ラベル / Doing・To-Do バケット / `done` にはしない設計判断)、設定項目、使用していた REST エンドポイントをすべて記録してあります。
-- `sandbox.config.json` に `notify.vikunja` が残っていても**エラーにはなりません**。キーは無視され、起動時に警告ログが 1 度出るだけです。`CCSERVER_VIKUNJA_*` 環境変数も同様に無視されます。不要になったら削除してください。
+- `sandbox.config.json` に `notify.vikunja` が残っていても**エラーにはなりません**。キーは無視され、起動時に警告ログが 1 度出るだけです。`CCSERVER_VIKUNJA_*` 環境変数だけで設定していた場合 (旧ドキュメントが `apiToken` について推奨していた形) も同じ警告が出ます。不要になったら削除してください。
+- 状態ファイル `.saved-vikunja-tasks.json` (env `CCSERVER_VIKUNJA_TASKS_PATH` で移動していればその場所) も誰からも読まれなくなります。Vikunja 上のタスクとの対応表が入っているだけなので、[#207](https://github.com/nananek/ccserver/issues/207) で再実装したものに引き継ぐ予定が無ければ削除して構いません。
 - **Vikunja だけを配信先にしていた環境は、この削除で実配信先がゼロになります**。上の注意書きのとおり配信先ゼロだと notify MCP ごと注入されなくなるので、`notify.discordWebhook` か `notify.subscriptions` を設定してください (ブラウザへの PWA 通知 = Web Push は別途対応予定)。

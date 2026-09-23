@@ -62,6 +62,27 @@ test('notifyEnabled: discord-only, subscriptions-only, and neither', async () =>
   });
 });
 
+// Review finding #3: the "vikunja-only also enables notify" test was deleted
+// with the channel; its inverse has to take its place, or a change that
+// resurrects "a vikunja key counts as a delivery target" would pass unnoticed.
+// This is not a cosmetic difference: notifyEnabled() false means
+// shouldInjectNotify() false, which means the `notify` MCP tool is absent from
+// the session entirely -- the agent loses its only way to call a human.
+test('notifyEnabled: a leftover vikunja block is NOT a delivery target', async () => {
+  await withNotifyConfig(
+    { notify: { subscriptions: [], vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 } } },
+    async () => {
+      restoreNotify();
+      assert.equal(notifyEnabled(), false, 'the Vikunja channel is gone; its config must not enable notify');
+      assert.equal(
+        shouldInjectNotify({ shell: false, app: 'claude', groupId: null, groupRole: null, notifyEnabled: notifyEnabled() }),
+        false,
+        'and with nothing enabled, the notify tool is not injected at all',
+      );
+    },
+  );
+});
+
 test('shouldInjectNotify: standalone agents and combo orchestrators only', () => {
   const base = { shell: false, app: 'claude', groupId: null, groupRole: null, notifyEnabled: true };
   assert.equal(shouldInjectNotify(base), true, 'standalone agent session');

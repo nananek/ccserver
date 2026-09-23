@@ -598,6 +598,14 @@ export const APP_IDS = [...APPS];
 // warning has to be per-process rather than per-read.
 let warnedVikunjaConfig = false;
 
+// Test seam (review finding #4): the latch above is module state with no way
+// back, so a test that runs after anything else has already tripped it can
+// neither observe the warning nor assert it fires only once. Same shape as
+// federationIdentity.js's _resetIdentityCacheForTests().
+export function _resetVikunjaWarningForTests() {
+  warnedVikunjaConfig = false;
+}
+
 // Load the optional sandbox config. Path from CCSERVER_SANDBOX_CONFIG, else
 // server/sandbox.config.json (next to this module's parent). Shape:
 //   { "docker": true, "binds": [ { "src": "~/.ssh", "mode": "ro" }, ... ] }
@@ -712,12 +720,30 @@ export function loadSandboxConfig() {
   // sandbox.config.json must keep booting untouched. Say so once per process
   // so the operator knows the key is inert now (see the follow-up issue --
   // Vikunja is being re-cut as its own MCP server).
-  if (rawNotify.vikunja && typeof rawNotify.vikunja === 'object' && !warnedVikunjaConfig) {
+  //
+  // The condition covers two shapes the old feature actually shipped with:
+  //   - a `notify.vikunja` block of ANY type (review finding #5: `!= null`
+  //     rather than a typeof check, so a `"vikunja": true` leftover is
+  //     flagged for cleanup too -- it is inert either way),
+  //   - a CCSERVER_VIKUNJA_* environment variable with no config block at all
+  //     (review finding #2). That was not an edge case: the old docs
+  //     *recommended* passing the secret apiToken via the environment, and
+  //     baseUrl/projectId had env overrides too, so "env only, nothing in the
+  //     config file" was a fully supported setup -- and the one that would
+  //     otherwise be switched off in total silence.
+  const hasLegacyVikunjaEnv = Object.keys(process.env).some((k) => k.startsWith('CCSERVER_VIKUNJA_'));
+  if ((rawNotify.vikunja != null || hasLegacyVikunjaEnv) && !warnedVikunjaConfig) {
     warnedVikunjaConfig = true;
+    const where = rawNotify.vikunja != null
+      ? (hasLegacyVikunjaEnv
+        ? '"notify.vikunja" and the CCSERVER_VIKUNJA_* environment variables are set but no longer do anything'
+        : '"notify.vikunja" is set but no longer does anything')
+      : 'the CCSERVER_VIKUNJA_* environment variables are set but no longer do anything';
     console.warn(
-      '[config] "notify.vikunja" is set but no longer does anything: the Vikunja channel was removed from '
-      + 'ccserver-notify and is being re-cut as a separate MCP server. The key is ignored; remove it to silence this. '
-      + '(The CCSERVER_VIKUNJA_* environment variables are ignored too.)',
+      `[config] ${where}: the Vikunja channel was removed from `
+      + 'ccserver-notify and is being re-cut as a separate MCP server (issue #207). It is ignored, and it no '
+      + 'longer counts as a notify delivery target -- if it was your only one, the notify MCP tool is now '
+      + 'disabled entirely. Remove it to silence this.',
     );
   }
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
