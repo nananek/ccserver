@@ -22,6 +22,11 @@ function formatTime(ts) {
 // visible) -- the orchestrator's open_tab additions appear here after the
 // next poll. No sessionId is ever constructed client-side; the authorization
 // boundary lives server-side (groupManager.isSessionInGroup).
+//
+// `remote` ({ instanceId, label }): a paired peer's combo. Membership comes
+// from the federation members relay and every member terminal connects
+// through /ws/remote-terminal. Files / Docs / orchestrator restart are not
+// relayed by federation, so they are hidden for remote groups.
 export default function GroupTabView({
   groupId,
   initialMembers,
@@ -36,6 +41,7 @@ export default function GroupTabView({
   onCurrentTurnChange,
   tabId,
   onFocusTab,
+  remote = null,
 }) {
   const [members, setMembers] = useState(initialMembers || []);
   const [activeRole, setActiveRole] = useState(() => initialMembers?.[0]?.role || null);
@@ -117,6 +123,7 @@ export default function GroupTabView({
   // $HOME from /api/dirs/home, only for display: displayPath turns the prefix
   // into `~` in the project bar (same pattern as TerminalView).
   useEffect(() => {
+    if (remote) return; // the peer's $HOME is unknown here
     authFetch('/api/dirs/home')
       .then((r) => r.json())
       .then((data) => { if (data.home) setHomeDir(data.home); })
@@ -138,6 +145,18 @@ export default function GroupTabView({
       if (inFlight) return;
       inFlight = true;
       try {
+        if (remote) {
+          const res = await authFetch(`/api/federation/instances/${encodeURIComponent(remote.instanceId)}/groups/${encodeURIComponent(groupId)}/members`);
+          if (cancelled || !res.ok) return;
+          const data = await res.json();
+          if (cancelled) return;
+          const next = data.members || [];
+          if (JSON.stringify(next) !== JSON.stringify(membersRef.current)) {
+            setMembers(next);
+            setActiveRole((role) => (role && next.some((m) => m.role === role)) ? role : (next[0]?.role || null));
+          }
+          return;
+        }
         const res = await authFetch(`/api/groups/${groupId}`);
         // Check before any setState: a slow/stale response for a poll that
         // started before the tab switched away or the group changed must
@@ -181,7 +200,7 @@ export default function GroupTabView({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [visible, groupId]);
+  }, [visible, groupId, remote]);
 
   // Files polling (badge cadence: 10s while the modal is closed, 3s while open)
   const filesRefreshingRef = useRef(false);
@@ -203,12 +222,12 @@ export default function GroupTabView({
   }, [groupId]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || remote) return;
     fetchFiles();
     const interval = isFilesOpen ? 3000 : 10000;
     const timer = setInterval(fetchFiles, interval);
     return () => clearInterval(timer);
-  }, [visible, fetchFiles, isFilesOpen]);
+  }, [visible, fetchFiles, isFilesOpen, remote]);
 
   // Docs polling (same badge cadence as Files: 10s closed / 3s open)
   const docsRefreshingRef = useRef(false);
@@ -230,12 +249,12 @@ export default function GroupTabView({
   }, [groupId]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || remote) return;
     fetchDocs();
     const interval = isDocsOpen ? 3000 : 10000;
     const timer = setInterval(fetchDocs, interval);
     return () => clearInterval(timer);
-  }, [visible, fetchDocs, isDocsOpen]);
+  }, [visible, fetchDocs, isDocsOpen, remote]);
 
   const uploadFiles = useCallback(async (fileList) => {
     if (!fileList || fileList.length === 0) return;
@@ -399,6 +418,7 @@ export default function GroupTabView({
             </span>
           </div>
         ))}
+        {!remote && (<>
         <button
           className="group-files-trigger-btn"
           onClick={openFiles}
@@ -421,7 +441,11 @@ export default function GroupTabView({
           <span aria-hidden="true">📄</span> Docs
           {docs.length > 0 && <span className="group-docs-badge">{docs.length}</span>}
         </button>
-        {orchestrator?.exited && (
+        </>)}
+        {remote && (
+          <span className="tab-remote-badge" title={`接続先: ${remote.label}`}>⇄ {remote.label}</span>
+        )}
+        {!remote && orchestrator?.exited && (
           <button
             className="btn btn-secondary group-restart-orch-btn"
             onClick={restartOrchestrator}
@@ -485,6 +509,8 @@ export default function GroupTabView({
                 notifyEnabled={notifyEnabled}
                 notifyPermission={notifyPermission}
                 onToggleNotify={onToggleNotify}
+                remoteInstanceId={remote?.instanceId || null}
+                remoteInstanceLabel={remote?.label || null}
                 tabId={tabId}
                 onFocusTab={() => {
                   // Bring up this group tab AND the specific member whose

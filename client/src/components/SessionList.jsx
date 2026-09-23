@@ -142,6 +142,9 @@ export default function SessionList({
                     )}
                   </span>
                   <span className="session-menu-status">
+                    {tab.remote && (
+                      <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
+                    )}
                     <span className="session-menu-state">{statusText}</span>
                   </span>
                 </button>

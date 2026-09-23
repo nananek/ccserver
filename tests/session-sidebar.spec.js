@@ -394,8 +394,7 @@ test('remote combo is listed as a single group row, not one row per member', asy
     { id: 'rs-wb', cwd: '/home/peer/combo', app: 'codex', groupId, groupRole: 'workerB' },
     { id: 'rs-or', cwd: '/home/peer/combo', app: 'claude', groupId, groupRole: 'orchestrator' },
   ];
-  let groups = [{ groupId, cwd: '/home/peer/combo', memberCount: 3, liveCount: 3 }];
-  const deletedGroups = [];
+  const groups = [{ groupId, cwd: '/home/peer/combo', memberCount: 3, liveCount: 3 }];
   await page.route('**/api/federation/instances', (route) => route.fulfill({
     json: { instances: [{ id: instanceId, status: 'active', label: 'peerhost', fingerprint: 'aa:bb:cc:dd:ee' }] },
   }));
@@ -404,12 +403,6 @@ test('remote combo is listed as a single group row, not one row per member', asy
   await page.route(`**/api/federation/instances/${instanceId}/groups/${groupId}/members`, (route) => route.fulfill({
     json: { members: sessions.filter((s) => s.groupId).map((s) => ({ sessionId: s.id, role: s.groupRole, cwd: s.cwd, app: s.app })) },
   }));
-  await page.route(`**/api/federation/instances/${instanceId}/groups/${groupId}`, (route) => {
-    if (route.request().method() !== 'DELETE') return route.continue();
-    deletedGroups.push(groupId);
-    groups = [];
-    return route.fulfill({ json: { ok: true } });
-  });
   await gotoApp(page);
 
   // メンバーはリモートセッション欄に出ず、コンボはグループ1行になる。
@@ -421,10 +414,35 @@ test('remote combo is listed as a single group row, not one row per member', asy
   await expect(remoteGroupItems.first().locator('.session-menu-label')).toHaveText('combo');
   await expect(remoteGroupItems.first().locator('.tab-remote-badge')).toHaveText('⇄ peerhost');
 
-  // クリックで Remote タブが開き、そのグループが展開される。
+  // クリックでローカル同様グループタブとして開き、上段に1行で移る。
   await remoteGroupItems.first().locator('.session-menu-select').click();
-  await expect(page.locator('.remote-group-members li')).toHaveCount(3);
-  await expect(openedItems(page)).toHaveCount(0);
+  await expect(remoteGroupItems).toHaveCount(0);
+  await expect(openedItems(page)).toHaveCount(1);
+  const groupRow = openedItems(page).first();
+  await expect(groupRow).toHaveAttribute('data-tab-type', 'group');
+  await expect(groupRow.locator('.tab-remote-badge')).toHaveText('⇄ peerhost');
+  await expect(page.locator('.group-subtab-item')).toHaveCount(3);
+});
+
+test('remote combo lower-section ✕ destroys the group via federation', async ({ page }) => {
+  const instanceId = 'inst-remote-g2';
+  const groupId = 'grp-remote-2';
+  let groups = [{ groupId, cwd: '/home/peer/combo', memberCount: 3, liveCount: 3 }];
+  const deletedGroups = [];
+  await page.route('**/api/federation/instances', (route) => route.fulfill({
+    json: { instances: [{ id: instanceId, status: 'active', label: 'peerhost', fingerprint: 'aa:bb:cc:dd:ee' }] },
+  }));
+  await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => route.fulfill({ json: { sessions: [] } }));
+  await page.route(`**/api/federation/instances/${instanceId}/groups`, (route) => route.fulfill({ json: { groups } }));
+  await page.route(`**/api/federation/instances/${instanceId}/groups/${groupId}`, (route) => {
+    if (route.request().method() !== 'DELETE') return route.continue();
+    deletedGroups.push(groupId);
+    groups = [];
+    return route.fulfill({ json: { ok: true } });
+  });
+  await gotoApp(page);
+  const remoteGroupItems = leftSidebar(page).locator('[data-section="unopened-remote-groups"] .session-menu-item');
+  await expect(remoteGroupItems).toHaveCount(1);
 
   // ✕ は確認モーダル経由で federation の groups DELETE を呼ぶ。
   await remoteGroupItems.first().locator('.session-menu-close').click();
