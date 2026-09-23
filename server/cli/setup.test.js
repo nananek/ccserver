@@ -30,13 +30,22 @@ function roots() {
 }
 
 // Every spawn of the real wizard goes through spawnWizard(), which isolates
-// HOME as well as the XDG roots and ABORTS if either resolves outside the
-// temp tree. legacyDataRoot() is homedir()-based, so without that a `--yes`
-// here would migrate the operator's live DB, federation key and group-files
-// into caseDir -- which after() deletes.
-function runSetup(args = [], extraEnv = {}) {
-  return spawnWizard(caseDir, args, extraEnv);
+// HOME, the three XDG roots AND the eight registry entries whose legacy
+// location is inside the checkout, and ABORTS if any of them resolves outside
+// the temp tree. Without the first, a `--yes` here migrates the operator's
+// live DB, federation key and group-files into caseDir -- which after()
+// deletes. Without the second it does the same to their
+// server/sandbox.config.json and .saved-*.json, which is not fixable with
+// HOME alone because repoRoot() is import.meta.url-based.
+//
+// `opts.allowCheckoutMigration` drops the override for one entry, for the few
+// tests below whose whole point is migrating a repo-root file. Those seed
+// their own file and only when the checkout does not already have one.
+function runSetup(args = [], extraEnv = {}, opts = {}) {
+  return spawnWizard(caseDir, args, extraEnv, opts);
 }
+
+const CHECKOUT_CONFIG = join(REPO_ROOT, 'server', 'sandbox.config.json');
 
 function marker() {
   return JSON.parse(readFileSync(join(roots().config, 'layout.json'), 'utf-8'));
@@ -91,12 +100,25 @@ test('--yes writes the marker at v2 and creates all three roots at 0700', () => 
   }
 });
 
-test('★ the generated sandbox.config.json is MINIMAL and has no gpg key', () => {
+// seedSandboxConfig() deliberately does nothing when CCSERVER_SANDBOX_CONFIG
+// is set (an operator who pinned the path owns that file), so the two tests
+// that check what the wizard GENERATES have to run with the real
+// sandboxConfig entry -- which means the checkout's own copy is in scope. On
+// an un-migrated checkout that copy is the developer's live config, and
+// migrating it is both destructive and not what these tests are about, so
+// they skip instead. Same rule as seedLegacyState below.
+const SEEDS_CONFIG = { allowCheckoutMigration: ['sandboxConfig'] };
+
+test('★ the generated sandbox.config.json is MINIMAL and has no gpg key', (t) => {
   // Copying sandbox.config.example.json verbatim would set "gpg": true, and
   // sandbox.js reads that as `raw.gpg === true` -- absent means false. So a
   // verbatim copy would silently start forwarding the host's gpg-agent and
   // ~/.gnupg into every sandbox as a side effect of running a migration.
-  runSetup(['--yes']);
+  if (existsSync(CHECKOUT_CONFIG)) {
+    t.skip('this checkout has its own server/sandbox.config.json; not migrating it');
+    return;
+  }
+  runSetup(['--yes'], {}, SEEDS_CONFIG);
   const path = join(roots().config, 'sandbox.config.json');
   const text = readFileSync(path, 'utf-8');
   const parsed = JSON.parse(text);
@@ -106,8 +128,12 @@ test('★ the generated sandbox.config.json is MINIMAL and has no gpg key', () =
   assert.equal(statSync(path).mode & 0o777, 0o600);
 });
 
-test('--seed-example opts into the full annotated example instead', () => {
-  runSetup(['--yes', '--seed-example']);
+test('--seed-example opts into the full annotated example instead', (t) => {
+  if (existsSync(CHECKOUT_CONFIG)) {
+    t.skip('this checkout has its own server/sandbox.config.json; not migrating it');
+    return;
+  }
+  runSetup(['--yes', '--seed-example'], {}, SEEDS_CONFIG);
   const text = readFileSync(join(roots().config, 'sandbox.config.json'), 'utf-8');
   assert.equal(text, readFileSync(join(REPO_ROOT, 'server', 'sandbox.config.example.json'), 'utf-8'));
 });
@@ -146,7 +172,7 @@ test('a dry run lists the state files it would move, and moves none of them', ()
   const made = seedLegacyState(['.saved-notifications.json']);
   try {
     if (made.length === 0) return;         // the checkout already had one
-    const res = runSetup();
+    const res = runSetup([], {}, { allowCheckoutMigration: ['savedNotifications'] });
     assert.equal(res.status, 0, res.stderr);
     assert.match(res.stdout, /saved-notifications\.json/);
     assert.match(res.stdout, /移動するもの/);
@@ -161,7 +187,7 @@ test('--yes actually relocates a state file and drops the leading dot', () => {
   const made = seedLegacyState(['.saved-vikunja-tasks.json']);
   try {
     if (made.length === 0) return;
-    const res = runSetup(['--yes']);
+    const res = runSetup(['--yes'], {}, { allowCheckoutMigration: ['savedVikunjaTasks'] });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(existsSync(made[0]), false, 'the old path is emptied');
     const moved = join(roots().state, 'saved-vikunja-tasks.json');
@@ -179,11 +205,12 @@ test('a cross-filesystem move is announced as copy-delete before it runs', () =>
   const made = seedLegacyState(['.saved-group-docs.json']);
   try {
     if (made.length === 0) return;
-    const plan = JSON.parse(runSetup(['--json']).stdout);
+    const allow = { allowCheckoutMigration: ['savedGroupDocs'] };
+    const plan = JSON.parse(runSetup(['--json'], {}, allow).stdout);
     const step = plan.steps.find((s) => s.id === 'savedGroupDocs');
     assert.ok(step, 'the seeded file must appear as a step');
     if (step.mode !== 'copy-delete') return;
-    assert.match(runSetup().stdout, /別FS: コピー＋削除/);
+    assert.match(runSetup([], {}, allow).stdout, /別FS: コピー＋削除/);
   } finally {
     for (const p of made) rmSync(p, { force: true });
   }

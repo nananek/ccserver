@@ -1,46 +1,141 @@
 // Test-only support module (not imported by any production code path).
 //
-// Why this exists, and why it asserts instead of merely helping:
+// Why this exists, and why it asserts instead of merely helping.
 //
-// Isolating $XDG_CONFIG_HOME / $XDG_DATA_HOME / $XDG_STATE_HOME is NOT enough
-// to make a test that runs the setup wizard safe. server/paths.js's
-// legacyDataRoot() is deliberately built from homedir() and deliberately does
-// NOT honor $XDG_DATA_HOME (see its comment: every pre-#201 module hardcoded
-// ~/.local/share/ccserver-sandbox, so honoring XDG there would fail to name
-// the operator's real files). That means a child process with the real $HOME
-// resolves the operator's REAL legacy tree no matter what the XDG variables
-// say -- and `setup.js --yes` will dutifully migrate their live SQLite DB,
-// federation private key and group-files into the test's temp directory,
-// which the test then deletes in its `finally`.
+// server/cli/setup.js MOVES files. A test that runs it has to be certain that
+// everything the registry can name resolves inside the test's own scratch
+// directory -- and the registry names things in TWO places that no obvious
+// environment tweak relocates:
 //
-// That is not hypothetical: it was found by an attacker-perspective review of
-// this very branch, reproduced against a fake $HOME, and it destroyed the DB,
-// the federation key and the state files. `npm test` on any pre-#201 host
-// would have done it for real.
+//   1. $HOME. paths.js's legacyDataRoot() is built from homedir() on purpose
+//      and deliberately does NOT honor $XDG_DATA_HOME (see its comment: every
+//      pre-#201 module hardcoded ~/.local/share/ccserver-sandbox, so honoring
+//      XDG there would fail to name the operator's real files). Isolating the
+//      three XDG variables is therefore NOT enough: a child with the real
+//      $HOME still resolves the operator's live SQLite DB, GPG vault, mTLS
+//      federation key and group-files, and `setup.js --yes` dutifully
+//      migrates all of it into the test's temp directory, which the test then
+//      deletes in its `finally`.
 //
-// So every test that spawns the wizard, or a server that might run the
-// legacy-to-legacy DB hop, must build its child env through isolatedEnv(),
-// and anything that actually applies a migration must call
-// assertSafeToMigrate() first. The assertion is the point: a future test that
-// forgets HOME fails loudly instead of eating someone's data.
+//   2. THE CHECKOUT ITSELF. repoRoot() is import.meta.url-based, so it points
+//      at the real working tree no matter what the environment says, and
+//      eight registry entries have their legacy location there:
+//      server/sandbox.config.json plus the seven .saved-*.json /
+//      .scheduled-prompts.json state files at the repo root. On an
+//      un-migrated host sandbox.config.json is the LIVE config -- browseRoots,
+//      binds, webhook URLs -- so a developer running `npm test` in their own
+//      checkout lost it, along with their saved sessions, groups, group docs,
+//      group files, notification subscriptions, schedules and Vikunja tasks.
+//      Since no env var can move repoRoot(), the only way to keep the wizard
+//      away from them is to hand it an explicit CCSERVER_* override per entry,
+//      which turns each one into an `env-override` skip.
+//
+// Neither of these is hypothetical. (1) was found by an attacker-perspective
+// review of this branch, reproduced against a fake $HOME; (2) survived that
+// first fix and was found by the follow-up verification -- one run of
+// startup-setup-gate.test.js was enough to destroy all eight.
+//
+// So: every test that spawns the wizard goes through spawnWizard(), which
+// builds the env AND asserts on it, and anything that spawns a server goes
+// through isolatedEnv(). The assertion is the point -- a future test that
+// forgets fails loudly instead of eating someone's data.
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SETUP_CLI = join(dirname(fileURLToPath(import.meta.url)), 'cli', 'setup.js');
+const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
+const SETUP_CLI = join(SERVER_DIR, 'cli', 'setup.js');
+const REPO_ROOT = join(SERVER_DIR, '..');
+
+// Registry entries whose legacy location is inside the CHECKOUT (see the
+// header's point 2). Mirrors server/paths.js's `sandboxConfig` entry and its
+// STATE_FILES table; paths.test.js pins those spellings, and the test at the
+// bottom of testIsolation.test.js pins that this list still covers all of
+// them, so the two cannot drift apart silently.
+const CHECKOUT_ENTRIES = [
+  ['sandboxConfig', 'CCSERVER_SANDBOX_CONFIG', 'sandbox.config.json'],
+  ['savedSessions', 'CCSERVER_SAVED_SESSIONS_PATH', 'saved-sessions.json'],
+  ['scheduledPrompts', 'CCSERVER_SCHEDULES_PATH', 'scheduled-prompts.json'],
+  ['savedGroups', 'CCSERVER_GROUPS_PATH', 'saved-groups.json'],
+  ['savedGroupDocs', 'CCSERVER_GROUP_DOCS_PATH', 'saved-group-docs.json'],
+  ['savedGroupFiles', 'CCSERVER_GROUP_FILES_PATH', 'saved-group-files.json'],
+  ['savedNotifications', 'CCSERVER_NOTIFY_PATH', 'saved-notifications.json'],
+  ['savedVikunjaTasks', 'CCSERVER_VIKUNJA_TASKS_PATH', 'saved-vikunja-tasks.json'],
+];
+
+export const CHECKOUT_ENTRY_IDS = CHECKOUT_ENTRIES.map(([id]) => id);
+
+// Breadcrumbs the wizard drops (pathMigration.js's writeBreadcrumbs, R9). The
+// one under legacyDataRoot() lands inside the isolated HOME and goes away with
+// the scratch directory; this one lands in the real checkout, so spawnWizard
+// cleans it up rather than leaving litter behind after every run.
+const CHECKOUT_BREADCRUMB = join(REPO_ROOT, '.ccserver-state-moved.txt');
+
+// Resolves symlinks before comparing. A purely lexical check is defeated by a
+// symlink INSIDE the scratch directory: point <dir>/home at the real $HOME and
+// "is it under <dir>" is true while the wizard follows the link straight out
+// to the operator's data (reproduced). Real callers use mkdtemp and would not
+// do that, but a guard whose whole job is preventing data loss should not be
+// undone by the one filesystem feature it is guaranteed to meet.
+//
+// Only the leading, already-existing part of a path can be resolved -- the
+// XDG roots usually do not exist yet when this runs -- so walk up to the
+// nearest existing ancestor, realpath THAT, and re-attach the remainder.
+function realOrNearest(path) {
+  const abs = resolve(path);
+  let head = abs;
+  const tail = [];
+  for (;;) {
+    try {
+      const real = realpathSync(head);
+      return tail.length === 0 ? real : join(real, ...tail);
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return abs;      // nothing on this path exists
+      tail.unshift(basename(head));
+      head = parent;
+    }
+  }
+}
 
 function isUnder(path, root) {
-  const abs = resolve(path);
-  const base = resolve(root);
+  const abs = realOrNearest(path);
+  const base = realOrNearest(root);
   return abs === base || abs.startsWith(base + sep);
+}
+
+// The CCSERVER_* overrides that point the checkout-derived entries at `dir`
+// instead of at the real working tree. Exported so a test can compose it into
+// an env it builds itself, and so testIsolation.test.js can assert on it.
+//
+// `allow` names registry ids (see CHECKOUT_ENTRY_IDS) that are deliberately
+// left un-overridden because the test's whole point is to migrate that entry
+// out of the checkout. Naming one is an explicit acknowledgement: it makes the
+// test responsible for seeding and removing its own file.
+export function checkoutEnv(dir, { allow = [] } = {}) {
+  for (const id of allow) {
+    if (!CHECKOUT_ENTRY_IDS.includes(id)) {
+      throw new Error(`checkoutEnv: ${id} is not a checkout-derived registry entry (have: ${CHECKOUT_ENTRY_IDS.join(', ')})`);
+    }
+  }
+  const out = {};
+  for (const [id, envVar, name] of CHECKOUT_ENTRIES) {
+    if (allow.includes(id)) continue;
+    out[envVar] = join(dir, 'checkout', name);
+  }
+  return out;
 }
 
 // A child env with HOME and all three XDG roots pointed inside `dir`, and
 // every CCSERVER_* stripped so the runner's own environment cannot turn a
 // registry entry into an env-override and change what is being tested.
+//
+// This alone is the right env for spawning a SERVER, which never migrates
+// anything. Spawning the WIZARD needs the checkout overrides on top -- see
+// spawnWizard, which is how every test does it.
 export function isolatedEnv(dir, extra = {}) {
   if (!isUnder(dir, tmpdir())) {
     throw new Error(`isolatedEnv: ${dir} is not under ${tmpdir()} -- refusing to build a test env outside the temp tree`);
@@ -63,17 +158,18 @@ export function isolatedEnv(dir, extra = {}) {
 }
 
 // Call this immediately before anything that MOVES files (the wizard with
-// --yes). Throws unless HOME and all three XDG roots resolve inside `root`,
-// the scratch directory this test allocated.
+// --yes). Throws unless every place the registry can resolve to lands inside
+// `root`, the scratch directory this test allocated: HOME, the three XDG
+// roots, and each checkout-derived entry's override.
 //
 // Anchored on `root`, NOT on tmpdir(): "is it somewhere under /tmp" is a
-// property an attacker-shaped accident satisfies for free. A developer (or
-// CI image) whose $HOME is itself a directory under /tmp -- which is exactly
-// how this branch's own fake-HOME verification runs -- would pass a
+// property an attacker-shaped accident satisfies for free. A developer (or CI
+// image) whose $HOME is itself a directory under /tmp -- which is exactly how
+// this branch's own fake-HOME verification runs -- would pass a
 // tmpdir()-relative check while still pointing the wizard at that real home,
 // and the wizard would migrate it. Requiring the paths to be under the
 // specific directory the caller made has no such hole.
-export function assertSafeToMigrate(env, root) {
+export function assertSafeToMigrate(env, root, { allowCheckoutMigration = [] } = {}) {
   if (!root) throw new Error('assertSafeToMigrate: the scratch root is required');
   for (const key of ['HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) {
     const value = env[key];
@@ -84,11 +180,30 @@ export function assertSafeToMigrate(env, root) {
       );
     }
   }
+  // The checkout half. No environment variable moves repoRoot(), so the only
+  // thing standing between the wizard and the developer's live
+  // server/sandbox.config.json is an explicit override per entry.
+  for (const [id, envVar] of CHECKOUT_ENTRIES) {
+    if (allowCheckoutMigration.includes(id)) continue;
+    const value = env[envVar];
+    if (!value || !isUnder(value, root)) {
+      throw new Error(
+        `assertSafeToMigrate: ${envVar}=${value ?? '(unset)'} is outside the test scratch directory ${root}. `
+        + `Without it the wizard would migrate ${id} out of the real checkout `
+        + '(see testIsolation.js). Use checkoutEnv(root), or pass '
+        + `allowCheckoutMigration: ['${id}'] if the test really means to move it.`,
+      );
+    }
+  }
 }
 
 // In-process equivalent: points HOME and the XDG roots at `dir` for the
 // current process and returns a restore function. os.homedir() reads $HOME on
 // POSIX on every call, so this really does move legacyDataRoot().
+//
+// Does NOT cover the checkout-derived entries -- its callers plan and inspect,
+// they do not run the wizard over the whole registry. Anything that applies a
+// migration belongs in spawnWizard.
 export function withIsolatedHome(dir) {
   if (!isUnder(dir, tmpdir())) {
     throw new Error(`withIsolatedHome: ${dir} is not under ${tmpdir()}`);
@@ -110,16 +225,31 @@ export function withIsolatedHome(dir) {
 
 // The ONE sanctioned way for a test to run the real wizard as a child
 // process. Everything that spawns server/cli/setup.js goes through here, so
-// the isolation check cannot be skipped by forgetting to call it -- which is
-// the whole point. Relying on "remember to isolate HOME" as a convention is
-// what produced the data loss in the first place; this makes the convention
+// the isolation cannot be skipped by forgetting to call it -- which is the
+// whole point. Relying on "remember to isolate HOME" as a convention is what
+// produced the data loss in the first place; this makes the convention
 // mechanical.
 //
 // Checks the RESOLVED values immediately before spawning (not at env
-// construction time), so an `extra` override that reintroduces the real HOME
-// is caught too.
-export function spawnWizard(dir, args = [], extra = {}) {
-  const env = isolatedEnv(dir, { LC_ALL: 'C', PORT: '1', ...extra });
-  assertSafeToMigrate(env, dir);
-  return spawnSync(process.execPath, [SETUP_CLI, ...args], { env, encoding: 'utf8', timeout: 60000 });
+// construction time), so an `extra` override that reintroduces the real HOME,
+// or clears one of the checkout overrides, is caught too.
+export function spawnWizard(dir, args = [], extra = {}, { allowCheckoutMigration = [] } = {}) {
+  const env = isolatedEnv(dir, {
+    LC_ALL: 'C',
+    PORT: '1',
+    ...checkoutEnv(dir, { allow: allowCheckoutMigration }),
+    ...extra,
+  });
+  assertSafeToMigrate(env, dir, { allowCheckoutMigration });
+  const hadBreadcrumb = existsSync(CHECKOUT_BREADCRUMB);
+  try {
+    return spawnSync(process.execPath, [SETUP_CLI, ...args], { env, encoding: 'utf8', timeout: 60000 });
+  } finally {
+    // The wizard writes this into the real checkout whenever it moves
+    // anything. Gitignored, but litter -- and after a test run it names a
+    // migration that happened in a temp directory that no longer exists.
+    if (!hadBreadcrumb) {
+      try { rmSync(CHECKOUT_BREADCRUMB, { force: true }); } catch { /* best effort */ }
+    }
+  }
 }

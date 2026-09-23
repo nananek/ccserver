@@ -57,11 +57,17 @@ function shellQuote(s) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-// The schedules file lives at a fixed repo-root path (no env override for it
-// in sessionManager.js); tests back it up and restore it so the runner never
-// leaves test entries behind.
+// Ask the module where its schedules file is, rather than re-deriving it.
+// This used to be a hardcoded `<repo>/../../.scheduled-prompts.json` with a
+// comment explaining that sessionManager.js had no env override for it --
+// issue #201 added CCSERVER_SCHEDULES_PATH, so it does now, and a second
+// independent spelling of the same path is the exact defect that issue set
+// out to remove. It also meant these tests read and REWROTE the developer's
+// live .scheduled-prompts.json, backing it up and restoring it around every
+// case; with the path resolved through the registry they operate on the
+// throwaway file testEnvDefaults.js points every test process at.
 function schedulePath() {
-  return join(import.meta.dirname, '..', '..', '.scheduled-prompts.json');
+  return sessionManager.schedulesPath();
 }
 
 function readOptionalFile(path) {

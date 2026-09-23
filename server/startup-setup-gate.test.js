@@ -20,11 +20,10 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isolatedEnv, spawnWizard } from './testIsolation.js';
+import { isolatedEnv, checkoutEnv, spawnWizard } from './testIsolation.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, 'index.js');
-const REPO_ROOT = join(__dirname, '..');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -50,13 +49,19 @@ function getFreePort() {
   });
 }
 
-// HOME is isolated too, not just the XDG roots. legacyDataRoot() is
+// HOME is isolated, not just the XDG roots: legacyDataRoot() is
 // homedir()-based by design, so a child with the real $HOME resolves the
 // operator's real pre-#201 tree -- and runWizard() below would migrate it
-// into `dir`, which every test here deletes in its `finally`. See
-// testIsolation.js.
+// into `dir`, which every test here deletes in its `finally`.
+//
+// checkoutEnv() covers the other half. In the legacy layout the state files
+// resolve to the REAL checkout (repoRoot() is import.meta.url-based, so no
+// env var moves it), which means an un-gated write here would land in the
+// developer's working tree and the wizard would then migrate their live
+// server/sandbox.config.json out of it. With the overrides, everything this
+// server or wizard can touch is inside `dir`. See testIsolation.js.
 function childEnv(dir, extra = {}) {
-  return isolatedEnv(dir, { CCSERVER_HOST: '127.0.0.1', ...extra });
+  return isolatedEnv(dir, { CCSERVER_HOST: '127.0.0.1', ...checkoutEnv(dir), ...extra });
 }
 
 class Server {
@@ -221,8 +226,6 @@ test('★ F2: WS init and schedule_prompt are refused while gated, and write not
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-gate-ws-'));
   try {
     await withServer(dir, { CCSERVER_LAYOUT: 'legacy' }, async (server) => {
-      const legacyHome = join(dir, 'home');
-
       const init = await wsRequest(server, {
         type: 'init', cwd: '/tmp', cols: 80, rows: 24, shell: true,
       });
@@ -236,13 +239,18 @@ test('★ F2: WS init and schedule_prompt are refused while gated, and write not
       assert.equal(sched.code, 'SETUP_REQUIRED');
 
       // The state files F2 showed being written must not exist, in either
-      // layout's location. (The SQLite DB is deliberately NOT on this list:
-      // an un-migrated host legitimately opens/creates it at the legacy path
-      // on boot -- that is the layout it is running in, not a gate bypass.)
+      // layout's location. The legacy side is childEnv's checkoutEnv()
+      // override rather than the real repo root -- asserting on the real
+      // checkout would be confounded by whatever the developer already has
+      // sitting there, and the override is what makes "the server cannot
+      // write into the checkout" true in the first place. The XDG side is
+      // where they would land after a migration.
+      // (The SQLite DB is deliberately NOT on this list: an un-migrated host
+      // legitimately opens/creates it at the legacy path on boot -- that is
+      // the layout it is running in, not a gate bypass.)
       for (const p of [
-        join(legacyHome, '.scheduled-prompts.json'),
-        join(legacyHome, '.saved-sessions.json'),
-        join(REPO_ROOT, '.scheduled-prompts.json'),
+        join(dir, 'checkout', 'scheduled-prompts.json'),
+        join(dir, 'checkout', 'saved-sessions.json'),
         join(dir, 'state', 'ccserver', 'scheduled-prompts.json'),
         join(dir, 'state', 'ccserver', 'saved-sessions.json'),
       ]) {

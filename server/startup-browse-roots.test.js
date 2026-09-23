@@ -42,7 +42,8 @@ function getFreePort() {
 async function boot(dir, config, extraEnv = {}) {
   const configHome = join(dir, 'config');
   mkdirSync(join(configHome, 'ccserver'), { recursive: true });
-  writeFileSync(join(configHome, 'ccserver', 'sandbox.config.json'), JSON.stringify(config));
+  const configPath = join(configHome, 'ccserver', 'sandbox.config.json');
+  writeFileSync(configPath, JSON.stringify(config));
   // A migrated host: the marker is what makes the check use the three-root
   // form rather than the per-entry legacy one.
   writeFileSync(join(configHome, 'ccserver', 'layout.json'), JSON.stringify({ layoutVersion: 2, completedAt: Date.now() }));
@@ -55,6 +56,14 @@ async function boot(dir, config, extraEnv = {}) {
     cwd: __dirname,
     env: isolatedEnv(dir, {
       XDG_CONFIG_HOME: configHome,
+      // Pinned at the file this function just wrote, which is where the
+      // registry would resolve it anyway in the migrated layout. It matters
+      // for the CCSERVER_LAYOUT=legacy case at the bottom: without the pin
+      // that one resolves sandboxConfig to the REAL checkout's
+      // server/sandbox.config.json, so whatever the developer happens to have
+      // there -- a hiddenApps list that hides every app, a browseRoots of
+      // their own -- decides whether this test passes.
+      CCSERVER_SANDBOX_CONFIG: configPath,
       CCSERVER_HOST: '127.0.0.1',
       PORT: String(port),
       ...extraEnv,
