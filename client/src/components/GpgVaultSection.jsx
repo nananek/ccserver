@@ -102,8 +102,8 @@ export default function GpgVaultSection() {
     if (busy) return;
     const real = nameReal.trim();
     const email = nameEmail.trim();
-    if (real.length < 5) {
-      setActionError('名前は5文字以上で入力してください');
+    if (!real) {
+      setActionError('名前を入力してください');
       return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
