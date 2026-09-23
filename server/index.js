@@ -369,7 +369,11 @@ try {
       // The opt-in gh usage aggregate (issue #198). Inside browseRoots it is
       // a session cwd away from being rewritten by the very agents it counts,
       // so enforce "keep it out of sandbox-writable paths" with the guard
-      // that already exists rather than only documenting it.
+      // that already exists rather than only documenting it. Note this whole
+      // block is browseRoots-only: without browseRoots any directory can be a
+      // session cwd, so there is nothing to check the aggregate against and
+      // the operator has to place it outside the checkout themselves (the
+      // configuration guide says so).
       ...(ghUsageRecording.enabled ? [["gh usage aggregate (sandbox.config.json's ghUsageRecording.file)", ghUsageRecording.file]] : []),
     ];
     const exposed = internalPaths.filter(([, p]) => isContained(resolve(p), browseRoots));
