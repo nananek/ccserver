@@ -408,6 +408,25 @@ test('channels: naming discord delivers, an empty list delivers nothing', async 
   );
 });
 
+// Attacker review N4: the notification body is agent-authored, and a Discord
+// webhook pings @everyone/@here/roles found in `content` by default. Nothing
+// about the text is rewritten -- the mention is simply declared inert.
+test('deliver() sends allowed_mentions so an agent cannot ping @everyone', async () => {
+  await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
+    restoreNotify();
+    const realFetch = global.fetch;
+    let sent = null;
+    global.fetch = async (_url, opts) => { sent = JSON.parse(opts.body); return { ok: true }; };
+    try {
+      await sendNotification({ title: '@everyone', body: 'build failed @here <@&123>' });
+      assert.deepEqual(sent.allowed_mentions, { parse: [] });
+      assert.match(sent.content, /@everyone/, 'the text itself is left readable, just not a ping');
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+});
+
 // --- H4 SSRF guard (vuln_scan report) ---------------------------------------
 
 test('isPrivateOrReservedAddress: IPv4 private/loopback/link-local/reserved ranges', () => {

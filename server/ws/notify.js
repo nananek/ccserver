@@ -323,7 +323,15 @@ async function deliver(url, content) {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, username: 'ccserver' }),
+      // allowed_mentions: attacker review N4. `content` is agent-authored text
+      // (the notify MCP tool's arguments, and from Step 3 whatever an agent
+      // wrote to its pty), and a Discord webhook treats "@everyone"/"@here"/
+      // "<@&role>" in the body as real pings by default. An empty `parse` list
+      // turns every mention in the payload into inert text without altering
+      // what the human reads. Non-Discord webhooks just see one extra JSON key
+      // they ignore. Markdown itself is deliberately NOT escaped: agents use it
+      // on purpose, and it cannot ping anyone.
+      body: JSON.stringify({ content, username: 'ccserver', allowed_mentions: { parse: [] } }),
       signal: controller.signal,
       // H4: never silently follow a redirect -- a webhook host an agent
       // fully controls could otherwise 30x this POST at an internal

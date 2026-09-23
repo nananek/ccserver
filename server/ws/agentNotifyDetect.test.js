@@ -20,6 +20,8 @@ import {
   TITLE_MAX,
   BODY_MAX,
   KITTY_PENDING_TTL_MS,
+  KITTY_ENTRY_MAX_CHARS,
+  KITTY_PENDING_MAX,
 } from './agentNotifyDetect.js';
 
 const ESC = '\x1b';
@@ -385,4 +387,158 @@ test('reset clears both the carry buffer and pending kitty chunks', () => {
 test('no callback at all is tolerated', () => {
   const d = createNotifyDetector({});
   assert.doesNotThrow(() => d.feed(osc('777;notify;T;B')));
+});
+
+// --- attacker-review regressions (attack-review-notify-parser) ---------------
+//
+// Every case below reproduces a finding an attacker review demonstrated
+// against the first draft of this parser, using its own input shapes. They
+// exist because the parser is fed bytes an agent inside the sandbox chooses,
+// on the host's single event loop, with the output relayed to external
+// services -- so "it parses correctly" is not the whole bar.
+
+test('N1: a flood of BEL-terminated sequences stays linear, not quadratic', () => {
+  // The draft searched for the ST terminator across the entire remaining
+  // buffer per sequence, and re-sliced the buffer per sequence. With input
+  // that contains no ST at all, every one of those searches was a full miss:
+  // 1MiB took 19.2 SECONDS of host CPU, enough to stall every session on the
+  // server once this is wired into onData. The threshold here is deliberately
+  // loose (a fixed parser does ~100ms) -- it is a shape check for O(n^2), not
+  // a benchmark, so it will not flake on a slow CI box.
+  const one = `${ESC}]777;notify;;x${BEL}`;
+  const oneMiB = one.repeat(Math.floor((1024 * 1024) / one.length));
+  let events = 0;
+  const d = createNotifyDetector({ onNotification: () => { events += 1; } });
+  const started = process.hrtime.bigint();
+  d.feed(oneMiB);
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(events > 60_000, `the sequences must still be parsed (got ${events})`);
+  assert.ok(ms < 3000, `1MiB of BEL-terminated OSC took ${ms.toFixed(0)}ms (quadratic regression?)`);
+});
+
+test('N1: 64KiB chunks -- the pty-realistic worst case -- stay linear', () => {
+  const one = `${ESC}]777;notify;;x${BEL}`;
+  const chunk = one.repeat(Math.floor((64 * 1024) / one.length));
+  const d = createNotifyDetector({ onNotification: () => {} });
+  const started = process.hrtime.bigint();
+  for (let i = 0; i < 16; i++) d.feed(chunk);
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(ms < 3000, `~1MiB in 64KiB chunks took ${ms.toFixed(0)}ms (quadratic regression?)`);
+});
+
+test('N2: one kitty id cannot accumulate unbounded bytes', () => {
+  // The draft had no byte cap at all: 31.3MiB fed in left 31.7MiB retained.
+  // Each chunk here is under MAX_OSC_LEN so it exercises the per-entry cap
+  // rather than the runaway-sequence path.
+  const d = createNotifyDetector({ onNotification: () => {} });
+  for (let i = 0; i < 2000; i++) {
+    d.feed(osc(`99;i=v:d=0:p=body;${'A'.repeat(4000)}`, ST));
+  }
+  assert.ok(
+    d.pendingKittyChars() <= KITTY_ENTRY_MAX_CHARS,
+    `retained ${d.pendingKittyChars()} chars for one id (cap ${KITTY_ENTRY_MAX_CHARS})`,
+  );
+  assert.ok(d.stats().truncatedKitty > 0, 'the cap must be reported, not silently applied');
+});
+
+test('N2: total pending bytes are bounded across every open id', () => {
+  const d = createNotifyDetector({ onNotification: () => {} });
+  for (let id = 0; id < 200; id++) {
+    for (let i = 0; i < 4; i++) d.feed(osc(`99;i=${id}:d=0:p=body;${'B'.repeat(4000)}`, ST));
+  }
+  assert.ok(d.pendingKitty() <= KITTY_PENDING_MAX + 1, `open ids: ${d.pendingKitty()}`);
+  assert.ok(
+    d.pendingKittyChars() <= (KITTY_PENDING_MAX + 1) * KITTY_ENTRY_MAX_CHARS,
+    `total retained ${d.pendingKittyChars()} chars`,
+  );
+});
+
+test('N2: the TTL measures total lifetime, so appending cannot keep an entry alive', () => {
+  // The draft refreshed the deadline on every append, so an attacker who kept
+  // appending was never expired -- 10 simulated hours still held the entry.
+  let clock = 1_000_000;
+  const d = createNotifyDetector({ onNotification: () => {}, now: () => clock });
+  d.feed(osc('99;i=v:d=0:p=title;IMPORTANT', ST));
+  for (let i = 0; i < 10; i++) {
+    clock += KITTY_PENDING_TTL_MS - 1000; // always shorter than the TTL
+    d.feed(osc('99;i=v:d=0:p=body;x', ST));
+  }
+  // Whatever is pending now must be young: the original entry is long gone
+  // rather than kept alive by the drip of appends.
+  const events = [];
+  const d2 = createNotifyDetector({ onNotification: (e) => events.push(e), now: () => clock });
+  d2.feed(osc('99;i=v:d=0:p=title;IMPORTANT', ST));
+  clock += KITTY_PENDING_TTL_MS + 1;
+  d2.feed(osc('99;i=v:p=body;later', ST));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].title, null, 'the expired title must not resurface');
+  assert.equal(events[0].body, 'later');
+});
+
+test('N5: kitty d=2 completes the set instead of pending forever', () => {
+  const events = collect(osc('99;i=1:d=2:p=title;done-action', ST));
+  assert.deepEqual(events, [{
+    kind: 'notification', source: 'osc99', title: 'done-action', body: '',
+  }]);
+});
+
+test('N5: evicting an over-capacity kitty id is counted, not silent', () => {
+  const d = createNotifyDetector({ onNotification: () => {} });
+  for (let i = 0; i < 40; i++) d.feed(osc(`99;i=${i}:d=0:p=title;x`, ST));
+  assert.ok(d.stats().evictedKitty > 0, 'a dropped in-progress notification must be observable');
+});
+
+test('N4: invisible, bidi and line-separator characters are stripped', () => {
+  // U+2028 renders as a line break in some clients, which is how a forged
+  // second "_from:" footer would be made to look like a separate line; the
+  // bidi overrides reorder what follows them.
+  const nasty = 'A B C‮D​E⁦F﻿G­H';
+  const events = collect(osc(`777;notify;T;${nasty}`));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].body, 'ABCDEFGH');
+});
+
+test('N4: non-breaking spaces collapse, ideographic space is preserved', () => {
+  const events = collect(osc('777;notify;a  b;　日本語　'));
+  assert.equal(events[0].title, 'a b', 'NBSP runs collapse like ordinary spaces');
+  assert.equal(events[0].body, '　日本語　'.trim(), 'U+3000 is ordinary Japanese text, not a control');
+});
+
+test('N4: truncation never splits a surrogate pair', () => {
+  // '👍' is one code point but two UTF-16 units; a naive slice at TITLE_MAX
+  // units lands mid-pair and emits a lone surrogate, which downstream turns
+  // into a JSON error or U+FFFD.
+  const events = collect(osc(`777;notify;${'👍'.repeat(TITLE_MAX)};${'👍'.repeat(BODY_MAX)}`));
+  assert.equal(events.length, 1);
+  for (const field of ['title', 'body']) {
+    const text = events[0][field];
+    assert.equal(
+      JSON.parse(JSON.stringify(text)), text,
+      `${field} must survive a JSON round-trip (no lone surrogate)`,
+    );
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff) {
+        const next = text.charCodeAt(i + 1);
+        assert.ok(next >= 0xdc00 && next <= 0xdfff, `${field}: lone high surrogate at ${i}`);
+        i += 1;
+      } else {
+        assert.ok(!(c >= 0xdc00 && c <= 0xdfff), `${field}: lone low surrogate at ${i}`);
+      }
+    }
+  }
+});
+
+test('N4: code-point truncation still bounds the payload', () => {
+  const events = collect(osc(`777;notify;${'👍'.repeat(TITLE_MAX * 2)};x`));
+  assert.ok([...events[0].title].length <= TITLE_MAX, 'title is bounded in code points');
+});
+
+test('a runaway sequence is counted and resynchronized', () => {
+  const events = [];
+  const d = createNotifyDetector({ onNotification: (e) => events.push(e) });
+  d.feed(`${ESC}]777;notify;${'x'.repeat(MAX_OSC_LEN * 2)}`);
+  d.feed(osc('777;notify;T;B'));
+  assert.deepEqual(events, [{ kind: 'notification', source: 'osc777', title: 'T', body: 'B' }]);
+  assert.ok(d.stats().overflowed > 0, 'the skipped window must be observable');
 });

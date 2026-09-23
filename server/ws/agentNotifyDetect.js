@@ -26,6 +26,29 @@
 // turn runs. Treating those as notifications would fire a push per animation
 // frame, so 9;2 and 9;4 are dropped here (see parseOsc9).
 //
+// THREAT MODEL -- read before changing the scanner. Everything fed to feed()
+// is chosen by an agent inside the sandbox: it controls the bytes, where they
+// split, and how many arrive. This parser runs on the host, in ccserver's
+// single-threaded event loop, and its output is relayed to external services.
+// So the scanner is written against three attacks, all of which an attacker
+// review (attack-review-notify-parser) demonstrated against the first draft:
+//   N1 CPU: the draft re-scanned the whole remaining buffer for a terminator
+//      per sequence and re-sliced the buffer per sequence, which is O(n^2) --
+//      1MiB of `ESC]777;notify;;x BEL` took 19.2s of host CPU and would have
+//      stalled every session on the server. Fixed by scanning with a cursor
+//      (no per-sequence slicing) and bounding every terminator search to
+//      MAX_OSC_LEN (see findOscEnd/findDcsEnd).
+//   N2 memory: the draft accumulated kitty OSC 99 chunks per id with no byte
+//      cap, and refreshed the idle timer on every append so the TTL never
+//      fired -- 31.7MiB retained from 31.3MiB fed, at 167MiB/s. Fixed with a
+//      per-entry byte cap and a total-lifetime deadline (see handleOsc99).
+//   N4 content: the text ends up in a Discord payload / a Notification body,
+//      so sanitize() also strips invisible and bidi-control characters, and
+//      clamp() truncates by code point so a split surrogate pair can never
+//      reach a JSON encoder.
+// Rate limiting and attribution are deliberately NOT here -- they are the
+// bridge's job (Step 3), because they need session identity.
+//
 // Everything in this file is pure with respect to the server: it accumulates
 // its own carry buffer, never touches a session, and hands finished events to
 // the callback the caller supplied. Wiring lives in sessionManager (Step 3);
@@ -36,37 +59,74 @@
 // TerminalView never subscribes to onBell -- so passing them through costs
 // nothing and keeps session.outputBuffer byte-exact for replay).
 
-// A sequence longer than this is not a notification anyone meant to send --
-// bound the carry buffer so a peer that opens an OSC and never terminates it
-// cannot grow memory without limit (same posture as mcpServer.js's
-// MAX_TRANSPORT_BUFFER_CHARS).
+// A sequence longer than this is not a notification anyone meant to send. It
+// bounds two different things at once: the carry buffer (a peer that opens a
+// sequence and never terminates it) and the per-sequence terminator search
+// (so a stream of short sequences stays linear rather than quadratic).
 export const MAX_OSC_LEN = 8 * 1024;
 
 // Web Push and Discord both truncate long text anyway; cutting here keeps the
 // downstream payloads bounded regardless of what a CLI decides to emit.
+// Counted in code points, not UTF-16 units (see clamp).
 export const TITLE_MAX = 200;
 export const BODY_MAX = 2000;
 
 // kitty's OSC 99 splits one notification across several sequences keyed by
-// i=<id>. A chunk set that never completes (CLI killed mid-notification) must
-// not pin memory forever.
+// i=<id>. Three separate bounds, because an attacker can grow any one of them:
+// how many ids are open, how many bytes one id may accumulate, and how long an
+// unfinished id may stay open at all.
 export const KITTY_PENDING_TTL_MS = 10_000;
 export const KITTY_PENDING_MAX = 16;
+export const KITTY_ENTRY_MAX_CHARS = TITLE_MAX + BODY_MAX;
+
+// A tmux/screen passthrough wrapper can nest. Each level is unwrapped by a
+// recursive scan of a payload that is already bounded by MAX_OSC_LEN, so this
+// only exists to bound stack depth.
+const MAX_DCS_DEPTH = 8;
 
 const ESC = '\x1b';
 const BEL = '\x07';
+const CC_BEL = 0x07;
+const CC_ESC = 0x1b;
+const CC_BACKSLASH = 0x5c;
+
+// Returned by the terminator scanners when a sequence ran past MAX_OSC_LEN
+// without terminating: distinct from "need more bytes" (null), because the
+// caller resynchronizes instead of carrying.
+const OVERFLOW = Symbol('overflow');
 
 // C0 + DEL + C1. claude already maps these to spaces before emitting, but
-// nothing guarantees the other CLIs do, and these strings end up in a Discord
-// payload / a Notification title.
-const CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
+// nothing guarantees the other CLIs do.
+const CONTROL_RE = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f]', 'g');
+// Characters that render as nothing or reorder what follows them: soft hyphen,
+// Arabic letter mark, Mongolian vowel separator, zero-width space/joiners,
+// the LTR/RTL marks and embedding/override/isolate controls, the line and
+// paragraph separators (which some clients render as a line break -- handy for
+// forging a second "_from:" footer), word joiner / invisible operators, and
+// the BOM. Removed outright rather than spaced, since they carry no meaning
+// in a notification title.
+const INVISIBLE_RE = new RegExp('[\\u00ad\\u061c\\u180e\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u206f\\ufeff]', 'g');
+// Non-breaking / exotic spaces normalized to an ordinary space so the
+// run-collapsing below actually collapses them. U+3000 (ideographic space) is
+// deliberately NOT in here: it is ordinary text in Japanese.
+const ODD_SPACE_RE = new RegExp('[\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f]', 'g');
 
 function sanitize(text) {
-  return String(text).replace(CONTROL_RE, ' ').replace(/ {2,}/g, ' ').trim();
+  return String(text)
+    .replace(CONTROL_RE, ' ')
+    .replace(INVISIBLE_RE, '')
+    .replace(ODD_SPACE_RE, ' ')
+    .replace(/ {2,}/g, ' ')
+    .trim();
 }
 
+// Truncate by code point, never by UTF-16 unit: slicing mid-pair would emit a
+// lone surrogate, which downstream turns into a JSON encoding error or U+FFFD.
 function clamp(text, max) {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  if (text.length <= max) return text; // fast path: UTF-16 length bounds code points
+  const cps = Array.from(text);
+  if (cps.length <= max) return text;
+  return `${cps.slice(0, max - 1).join('')}…`;
 }
 
 function cleanTitle(text) {
@@ -103,12 +163,13 @@ function parseOsc777(rest) {
 // guessing wrong the other way is a notification storm.
 function parseOsc9(rest) {
   const sub = /^(\d+)(?:;|$)/.exec(rest);
+  let text = rest;
   if (sub) {
     const code = Number(sub[1]);
     if (code === 2 || code === 4) return null;
-    if (code === 0) rest = rest.slice(sub[0].length);
+    if (code === 0) text = rest.slice(sub[0].length);
   }
-  const body = cleanBody(rest);
+  const body = cleanBody(text);
   if (!body) return null;
   // No title is carried in this form (the iterm2 channel folds it into the
   // text as "<title>: <message>", which cannot be split back apart safely).
@@ -116,17 +177,6 @@ function parseOsc9(rest) {
   return { source: 'osc9', title: null, body };
 }
 
-// kitty's OSC 99: `99;<key=value:...>;<payload>`, several sequences per
-// notification, keyed by i=<id>. claude emits
-//   99;i=<id>:d=0:p=title;<title>
-//   99;i=<id>:p=body;<message>
-//   99;i=<id>:d=1:a=focus;
-// `d` is "done": 0 means more chunks follow, and per the kitty protocol its
-// default (absent) is "done". So a chunk with d absent or d=1 completes the
-// set -- which lands the emit on the body chunk above, exactly where the
-// content is complete. The trailing d=1:a=focus chunk then finds the entry
-// already flushed and carries no payload, so the "nothing accumulated" guard
-// drops it instead of firing an empty second notification.
 function parseKittyMeta(meta) {
   const out = {};
   for (const pair of meta.split(':')) {
@@ -137,10 +187,49 @@ function parseKittyMeta(meta) {
   return out;
 }
 
+// Bounded forward scan for an OSC terminator (BEL, or ST = ESC \) starting at
+// `from`. Returns { end, after }, null when more bytes are needed, or OVERFLOW
+// when MAX_OSC_LEN was scanned without finding one. Never looks past
+// MAX_OSC_LEN, which is what keeps a stream of short sequences linear.
+function findOscEnd(s, from) {
+  const hard = from + MAX_OSC_LEN;
+  const limit = Math.min(s.length, hard);
+  for (let i = from; i < limit; i++) {
+    const c = s.charCodeAt(i);
+    if (c === CC_BEL) return { end: i, after: i + 1 };
+    if (c === CC_ESC) {
+      if (i + 1 >= s.length) return null; // the next byte decides; wait for it
+      if (s.charCodeAt(i + 1) === CC_BACKSLASH) return { end: i, after: i + 2 };
+    }
+  }
+  return limit < hard ? null : OVERFLOW;
+}
+
+// Same, for DCS, respecting tmux/screen's ESC-doubling: inside a passthrough
+// payload every ESC was written twice, so the first literal "ESC \" can be the
+// second half of a doubled ESC followed by a backslash.
+function findDcsEnd(s, from) {
+  const hard = from + MAX_OSC_LEN;
+  const limit = Math.min(s.length, hard);
+  let i = from;
+  while (i < limit) {
+    if (s.charCodeAt(i) !== CC_ESC) { i++; continue; }
+    if (i + 1 >= s.length) return null;
+    const next = s.charCodeAt(i + 1);
+    if (next === CC_ESC) { i += 2; continue; } // doubled ESC: payload data
+    if (next === CC_BACKSLASH) return { end: i, after: i + 2 };
+    i++;
+  }
+  return limit < hard ? null : OVERFLOW;
+}
+
 export function createNotifyDetector({ onNotification, allowBell = false, now = Date.now } = {}) {
   let buf = '';
-  // id -> { title, body, at }
+  // id -> { title, body, chars, startedAt }
   const kitty = new Map();
+  let evictedKitty = 0;
+  let truncatedKitty = 0;
+  let overflowed = 0;
 
   function emit(event) {
     try {
@@ -151,18 +240,44 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
     }
   }
 
+  // Bells are counted in place, without slicing the buffer -- slicing per
+  // sequence is exactly what made the first draft quadratic.
+  function handleTextRange(s, start, end) {
+    if (!allowBell) return;
+    for (let i = start; i < end; i++) {
+      if (s.charCodeAt(i) === CC_BEL) emit({ kind: 'bell', source: 'bell', title: null, body: '' });
+    }
+  }
+
+  // Total-lifetime expiry, NOT idle expiry: the draft refreshed the deadline
+  // on every append, so an attacker who kept appending was never expired at
+  // all (attack review N2). `startedAt` is set once, when the id is opened.
   function expireKitty() {
     const cutoff = now() - KITTY_PENDING_TTL_MS;
     for (const [id, entry] of kitty) {
-      if (entry.at < cutoff) kitty.delete(id);
+      if (entry.startedAt < cutoff) kitty.delete(id);
     }
     // A stream that opens a new id per sequence would otherwise grow the map
     // between expiries; drop oldest-first (Map preserves insertion order).
     while (kitty.size > KITTY_PENDING_MAX) {
       kitty.delete(kitty.keys().next().value);
+      evictedKitty += 1;
     }
   }
 
+  // kitty's OSC 99: `99;<key=value:...>;<payload>`, several sequences per
+  // notification, keyed by i=<id>. claude emits
+  //   99;i=<id>:d=0:p=title;<title>
+  //   99;i=<id>:p=body;<message>
+  //   99;i=<id>:d=1:a=focus;
+  // `d` is "done"; only d=0 means "more chunks follow" (its default, when
+  // absent, is done). So anything that is not an explicit d=0 completes the
+  // set -- which lands the emit on the body chunk above, exactly where the
+  // content is complete, and also treats kitty's d=2 as terminal instead of
+  // leaving it pending forever (attack review N5). The trailing d=1:a=focus
+  // chunk then finds the entry already flushed and carries no payload, so the
+  // "nothing accumulated" guard drops it instead of firing a second, empty
+  // notification.
   function handleOsc99(rest) {
     const semi = rest.indexOf(';');
     const meta = parseKittyMeta(semi === -1 ? rest : rest.slice(0, semi));
@@ -176,14 +291,22 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
     }
     const id = meta.i ?? '';
     expireKitty();
-    const entry = kitty.get(id) ?? { title: '', body: '', at: now() };
+    const entry = kitty.get(id) ?? { title: '', body: '', chars: 0, startedAt: now() };
+
+    // Per-entry byte cap (attack review N2): everything past the point where
+    // the final title+body could still matter is dropped on arrival rather
+    // than accumulated and then thrown away at flush time.
+    const room = KITTY_ENTRY_MAX_CHARS - entry.chars;
+    if (payload.length > room) {
+      payload = payload.slice(0, Math.max(0, room));
+      truncatedKitty += 1;
+    }
+    entry.chars += payload.length;
     if (meta.p === 'body') entry.body += payload;
     else entry.title += payload; // kitty's default payload type is "title"
-    entry.at = now();
     kitty.set(id, entry);
 
-    const done = meta.d === undefined || meta.d === '1';
-    if (!done) return null;
+    if (meta.d === '0') return null;
     kitty.delete(id);
     const title = cleanTitle(entry.title);
     const body = cleanBody(entry.body);
@@ -191,7 +314,7 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
     return { source: 'osc99', title, body };
   }
 
-  // `body` is everything between "ESC ]" and the terminator.
+  // `oscBody` is everything between "ESC ]" and the terminator.
   function handleOsc(oscBody) {
     const semi = oscBody.indexOf(';');
     const code = semi === -1 ? oscBody : oscBody.slice(0, semi);
@@ -206,74 +329,44 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
     if (event) emit({ kind: 'notification', ...event });
   }
 
-  // Plain (non-escape) bytes. The only thing of interest here is a bare BEL,
-  // and only when the caller opted in: a terminal bell is emitted by shell
-  // completion, by `printf '\a'`, and by claude's own iterm2_with_bell
-  // channel, so on its own it is a very weak signal.
-  function handleText(text) {
-    if (!allowBell) return;
-    for (let i = text.indexOf(BEL); i !== -1; i = text.indexOf(BEL, i + 1)) {
-      emit({ kind: 'bell', source: 'bell', title: null, body: '' });
-    }
-  }
-
-  // A DCS terminator search that respects tmux/screen's ESC-doubling: inside
-  // the passthrough payload every ESC was written twice, so the first literal
-  // "ESC \" found by a naive indexOf can be the second half of a doubled ESC
-  // followed by a backslash. Walk it instead. Returns the index of the ESC
-  // that opens the terminator, or -1 when the payload is still incomplete.
-  function findDcsEnd(s, from) {
-    let i = from;
-    while (i < s.length) {
-      const e = s.indexOf(ESC, i);
-      if (e === -1 || e + 1 >= s.length) return -1;
-      if (s[e + 1] === ESC) { i = e + 2; continue; } // doubled ESC: payload data
-      if (s[e + 1] === '\\') return e;
-      i = e + 1;
-    }
-    return -1;
-  }
-
-  function feed(chunk) {
-    if (!chunk) return;
-    buf += chunk;
-
+  // The single scanner, used for both the streaming buffer and (recursively)
+  // for an already-complete DCS passthrough payload. Walks with a cursor and
+  // never slices per sequence -- only the one sequence body actually being
+  // parsed is materialized.
+  //
+  // Returns the index up to which `s` has been consumed. In streaming mode an
+  // incomplete trailing sequence stops the walk and its start index is
+  // returned, so the caller can carry exactly that tail; in non-streaming mode
+  // (a complete payload) an incomplete tail is simply discarded.
+  function scan(s, streaming, depth) {
+    let cursor = 0;
+    let i = 0;
     for (;;) {
-      const esc = buf.indexOf(ESC);
+      const esc = s.indexOf(ESC, i);
       if (esc === -1) {
-        handleText(buf);
-        buf = '';
-        return;
+        handleTextRange(s, cursor, s.length);
+        return s.length;
       }
-      if (esc > 0) handleText(buf.slice(0, esc));
-      const rest = buf.slice(esc);
-      if (rest.length < 2) { buf = rest; return; } // need the type byte
+      handleTextRange(s, cursor, esc);
+      if (esc + 2 > s.length) return streaming ? esc : s.length; // need the type byte
 
-      const type = rest[1];
+      const type = s[esc + 1];
 
       if (type === ']') {
-        // OSC: terminated by BEL or ST (ESC \). 8-bit ST (0x9c) is not
-        // produced by any emitter here and is not accepted, matching the
-        // ANSI_RE grammar the rest of the server already uses.
-        const bel = rest.indexOf(BEL, 2);
-        const st = rest.indexOf(`${ESC}\\`, 2);
-        let end = -1;
-        let after = -1;
-        if (bel !== -1 && (st === -1 || bel < st)) { end = bel; after = bel + 1; }
-        else if (st !== -1) { end = st; after = st + 2; }
-        if (end === -1) {
-          if (rest.length > MAX_OSC_LEN) {
-            // Runaway/unterminated: drop a window of it without scanning it
-            // for bells (it is sequence payload, not screen text) and resync
-            // on the next ESC.
-            buf = rest.slice(MAX_OSC_LEN);
-            continue;
-          }
-          buf = rest;
-          return;
+        const res = findOscEnd(s, esc + 2);
+        if (res === null) return streaming ? esc : s.length;
+        if (res === OVERFLOW) {
+          // Runaway sequence: skip the window we scanned without treating it
+          // as screen text (it is sequence payload, not output), and
+          // resynchronize on the next ESC after it.
+          overflowed += 1;
+          i = esc + 2 + MAX_OSC_LEN;
+          cursor = i;
+          continue;
         }
-        handleOsc(rest.slice(2, end));
-        buf = rest.slice(after);
+        handleOsc(s.slice(esc + 2, res.end));
+        i = res.after;
+        cursor = i;
         continue;
       }
 
@@ -281,28 +374,45 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
         // DCS. Only tmux/screen passthrough is unwrapped -- other DCS payloads
         // (sixel, DECRQSS replies) are consumed opaquely. A passthrough
         // payload is either "tmux;<doubled>" or, for screen, starts with the
-        // doubled ESC of the wrapped sequence itself.
-        const end = findDcsEnd(rest, 2);
-        if (end === -1) {
-          if (rest.length > MAX_OSC_LEN) { buf = rest.slice(MAX_OSC_LEN); continue; }
-          buf = rest;
-          return;
+        // doubled ESC of the wrapped sequence itself. The unwrapped payload is
+        // re-scanned in place rather than spliced back into the carry buffer:
+        // splicing would copy the whole remaining buffer per wrapper.
+        const res = findDcsEnd(s, esc + 2);
+        if (res === null) return streaming ? esc : s.length;
+        if (res === OVERFLOW) {
+          overflowed += 1;
+          i = esc + 2 + MAX_OSC_LEN;
+          cursor = i;
+          continue;
         }
-        let payload = rest.slice(2, end);
-        const tail = rest.slice(end + 2);
+        let payload = s.slice(esc + 2, res.end);
         if (payload.startsWith('tmux;')) payload = payload.slice(5);
-        else if (payload[0] !== ESC) payload = ''; // not a passthrough wrapper
-        // Un-double and re-scan: the unwrapped text is strictly shorter than
-        // what it replaced, so this cannot loop forever on nested wrappers.
-        buf = payload.replaceAll(`${ESC}${ESC}`, ESC) + tail;
+        else if (payload.charCodeAt(0) !== CC_ESC) payload = ''; // not a passthrough wrapper
+        if (payload && depth < MAX_DCS_DEPTH) {
+          scan(payload.replaceAll(`${ESC}${ESC}`, ESC), false, depth + 1);
+        }
+        i = res.after;
+        cursor = i;
         continue;
       }
 
       // Any other escape (CSI, charset selection, ...). Skipping just the ESC
       // byte is enough: the remainder is scanned as text, and no CSI/charset
       // sequence can contain a BEL or an "ESC ]".
-      buf = rest.slice(1);
+      i = esc + 1;
+      cursor = i;
     }
+  }
+
+  function feed(chunk) {
+    if (!chunk) return;
+    buf += chunk;
+    const consumed = scan(buf, true, 0);
+    buf = consumed >= buf.length ? '' : buf.slice(consumed);
+    // A carried tail can only ever be an unterminated sequence, which is
+    // bounded by MAX_OSC_LEN the next time it is scanned. Trim here too so a
+    // single huge chunk cannot leave more than that pinned between feeds.
+    if (buf.length > MAX_OSC_LEN) buf = '';
   }
 
   function reset() {
@@ -316,5 +426,11 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
     // Test/introspection seams only.
     pendingBytes: () => buf.length,
     pendingKitty: () => kitty.size,
+    pendingKittyChars: () => {
+      let total = 0;
+      for (const e of kitty.values()) total += e.chars;
+      return total;
+    },
+    stats: () => ({ evictedKitty, truncatedKitty, overflowed }),
   };
 }
