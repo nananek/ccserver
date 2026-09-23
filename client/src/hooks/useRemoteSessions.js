@@ -15,7 +15,8 @@ const POLL_MS = 5000;
 // グループメンバー (groupId != null) は一覧に載せない: ローカルの一覧
 // (App.jsx の fetchServerSessions) と同じ規則で、bare なタブで attach すると
 // グループの生きたソケットを奪い、✕でグループの一部だけを終了させてしまう
-// ため。リモートのグループメンバーを開く導線は Remote タブ側に残っている。
+// ため。コンボはメンバー単位ではなく groups 側の1行として返し、ローカル
+// 同様にグループタブで開く。
 export function useRemoteSessions(enabled = true) {
   const [entries, setEntries] = useState([]);
   const refreshingRef = useRef(false);
