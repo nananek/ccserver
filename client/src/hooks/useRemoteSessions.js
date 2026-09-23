@@ -25,7 +25,12 @@ export function useRemoteSessions(enabled = true) {
   const signatureRef = useRef(null);
 
   const refresh = useCallback(async () => {
-    if (refreshingRef.current) { refreshQueuedRef.current = true; return; }
+    // Regular polling ticks are deliberately dropped while a refresh is in
+    // flight. A federation request may wait up to the peer/RPC timeout, which
+    // is longer than POLL_MS; queueing every overlapping interval tick would
+    // otherwise make the finally block start another slow request immediately
+    // and keep polling continuously with no POLL_MS pause.
+    if (refreshingRef.current) return;
     refreshingRef.current = true;
     try {
       const res = await authFetch('/api/federation/instances');
@@ -74,6 +79,18 @@ export function useRemoteSessions(enabled = true) {
     }
   }, []);
 
+  // Unlike an ordinary polling tick, an explicit refresh after DELETE must
+  // not be lost behind an in-flight request: its older response may still
+  // contain the just-removed session. Coalesce any number of those explicit
+  // requests into the single follow-up consumed by refresh()'s finally block.
+  const refreshAfterMutation = useCallback(() => {
+    if (refreshingRef.current) {
+      refreshQueuedRef.current = true;
+      return;
+    }
+    refresh();
+  }, [refresh]);
+
   // 終了直後、次のポーリングを待たずに一覧から外す (タブを閉じた同じ tick で
   // 「リモートのセッション」に一瞬出るのを防ぐ)。
   const dropRemoteSession = useCallback((instanceId, sessionId) => {
@@ -84,5 +101,5 @@ export function useRemoteSessions(enabled = true) {
 
   useVisiblePolling(refresh, POLL_MS, enabled);
 
-  return { remoteSessions: entries, refreshRemoteSessions: refresh, dropRemoteSession };
+  return { remoteSessions: entries, refreshRemoteSessions: refreshAfterMutation, dropRemoteSession };
 }
