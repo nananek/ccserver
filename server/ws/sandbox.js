@@ -1052,6 +1052,36 @@ export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
   return { command, hostCommand: null, installDir: null, found: false };
 }
 
+// Whether the resolved opencode binary at `hostCommand` accepts --standalone
+// (added in opencode 2.0.0 alongside the machine-wide "managed background
+// service" singleton it opts out of -- see appLaunch.js's appStandaloneArgs
+// comment for why that flag matters to ccserver). Older opencode CLIs (1.x)
+// reject unknown flags outright (`yargs` strict mode: prints usage, exits 1,
+// never launches) -- verified against a cached opencode 1.18.29 binary --
+// so this must be checked per-install rather than assumed. `--version`
+// output has changed shape across releases ("1.18.29" vs "opencode v2.0.12"),
+// hence the loose regex instead of an exact parse. Spawning `--version` is
+// ~0.2-1s on this host, too slow to pay on every session launch, so results
+// are cached by resolved path + mtime (an in-place upgrade, e.g. via
+// pacman/npm to the same path, changes mtime and is picked up without a
+// ccserver restart).
+const opencodeStandaloneCache = new Map(); // hostCommand -> { mtimeMs, supported }
+export function opencodeSupportsStandalone(hostCommand) {
+  if (!hostCommand) return false;
+  let mtimeMs;
+  try { mtimeMs = statSync(hostCommand).mtimeMs; } catch { return false; }
+  const cached = opencodeStandaloneCache.get(hostCommand);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.supported;
+  let supported = false;
+  try {
+    const out = execFileSync(hostCommand, ['--version'], { encoding: 'utf8', timeout: 5000 });
+    const match = out.match(/(\d+)\.\d+\.\d+/);
+    supported = !!match && Number(match[1]) >= 2;
+  } catch { /* unreadable/unexpected output -- assume unsupported, stay safe */ }
+  opencodeStandaloneCache.set(hostCommand, { mtimeMs, supported });
+  return supported;
+}
+
 // Which agent CLIs are actually launchable on this host, keyed by app id.
 // Exposed via GET /dirs/home so the client can grey out (and the server can
 // refuse) launches of uninstalled apps. A few statSync calls per request --

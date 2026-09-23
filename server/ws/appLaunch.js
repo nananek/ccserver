@@ -75,6 +75,37 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
   return [];
 }
 
+// opencode >=2.0.0 introduced a machine-wide "managed background service"
+// singleton: every launched `opencode` process registers itself in
+// ~/.local/state/opencode/service.json and self-terminates the moment that
+// file no longer names it (upstream packages/cli/src/services/
+// service-registration.ts, added in v2.0.0 -- absent in the 1.18.x line
+// ccserver ran before). ccserver gives every session its own sandboxed
+// network namespace but bind-mounts that same state dir into all of them
+// (agentConfigDirs, sandbox.js), so two or more concurrent opencode sessions
+// (sandboxed or not, since an unsandboxed launch shares $HOME too) repeatedly
+// steal the registration from each other and restart in a loop -- visible in
+// ~/.local/share/opencode/log/opencode.log as "managed service registration
+// replaced; shutting down" every few seconds. `--standalone` makes the CLI
+// spawn a private child server instead of racing for that shared singleton
+// (conversation history/resume is unaffected: it lives in opencode's sqlite
+// db, not the ephemeral server process).
+//
+// The flag itself only exists from 2.0.0 onward: an opencode 1.x CLI is a
+// strict yargs parser that rejects an unknown --standalone outright (prints
+// usage, exits 1, never launches -- verified against a cached 1.18.29
+// binary), which would turn "restarts occasionally when 2+ tabs are open"
+// into "opencode never starts" on any host still running the 1.x line.
+// `opencodeStandalone` is therefore an explicit, caller-supplied capability
+// flag (see sandbox.js's opencodeSupportsStandalone, which probes the
+// resolved binary's own --version) rather than assumed true -- this file
+// does no I/O of its own (see the header comment), so it can't check the
+// installed version itself.
+export function appStandaloneArgs(app, { opencodeStandalone = false } = {}) {
+  if (app === 'opencode' && opencodeStandalone) return ['--standalone'];
+  return [];
+}
+
 // Whether the given app's CLI is known to accept `--model <provider/model>`.
 // Verified on this host:
 //   opencode --help -> `-m, --model <provider/model>`
@@ -135,13 +166,14 @@ export function appPermissionArgs(app, mode) {
   return [];
 }
 
-// Combines the three launch-arg helpers above in the exact order
-// sessionManager.createSession pushes them (resume, then model, then
-// permission). Shared by sessionManager and this file's own tests so a
-// reordering in the real launch path can't drift away from what's tested --
-// see PR#108 review.
-export function appLaunchArgs(app, { resumeId, resumeLast, model, permissionMode } = {}) {
+// Combines the launch-arg helpers above in the exact order
+// sessionManager.createSession pushes them (standalone, then resume, then
+// model, then permission). Shared by sessionManager and this file's own
+// tests so a reordering in the real launch path can't drift away from what's
+// tested -- see PR#108 review.
+export function appLaunchArgs(app, { resumeId, resumeLast, model, permissionMode, opencodeStandalone } = {}) {
   return [
+    ...appStandaloneArgs(app, { opencodeStandalone }),
     ...appResumeArgs(app, resumeId, { resumeLast }),
     ...appModelArgs(app, model),
     ...appPermissionArgs(app, permissionMode),

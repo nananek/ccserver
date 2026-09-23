@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, chmodSync, utimesSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveApp, installedApps, SANDBOX_PATH } from './sandbox.js';
+import { tmpdir } from 'node:os';
+import { resolveApp, installedApps, SANDBOX_PATH, opencodeSupportsStandalone } from './sandbox.js';
 
 // which() (used by resolveApp/resolveAgentCommand) resolves against
 // SANDBOX_PATH -- a fixed constant, not the calling process's own PATH -- so
@@ -144,5 +145,70 @@ test('installedApps mirrors resolveApp found flags for all supported apps', () =
   assert.deepEqual(Object.keys(installed).sort(), ['claude', 'codex', 'commandcode', 'copilot', 'opencode']);
   for (const app of ['claude', 'opencode', 'copilot', 'codex', 'commandcode']) {
     assert.equal(installed[app], resolveApp(app).found, `${app} flag must match resolveApp`);
+  }
+});
+
+// opencodeSupportsStandalone gates appLaunch.js's --standalone flag (see its
+// comment): an opencode <2.0.0 CLI is a strict yargs parser that rejects an
+// unrecognized --standalone outright (usage + exit 1, no launch at all) --
+// verified by hand against a cached 1.18.29 binary. These tests use small
+// fixture scripts instead of the host's real opencode install (which may be
+// absent, e.g. on CI, and whose version shifts over time) so the parsing and
+// caching logic itself is exercised deterministically everywhere.
+function fixtureBin(versionOutput) {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-opencode-fixture-'));
+  const path = join(dir, 'opencode-fixture');
+  writeFileSync(path, `#!/bin/sh\necho '${versionOutput}'\n`);
+  chmodSync(path, 0o755);
+  return { dir, path };
+}
+
+test('opencodeSupportsStandalone: true for 2.x version output ("opencode v2.0.12" style)', () => {
+  const { dir, path } = fixtureBin('opencode v2.0.12');
+  try {
+    assert.equal(opencodeSupportsStandalone(path), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('opencodeSupportsStandalone: false for 1.x version output (bare "1.18.29" style, no --standalone support)', () => {
+  const { dir, path } = fixtureBin('1.18.29');
+  try {
+    assert.equal(opencodeSupportsStandalone(path), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('opencodeSupportsStandalone: false for a missing binary and for unparseable --version output', () => {
+  assert.equal(opencodeSupportsStandalone('/no/such/opencode-xyz'), false);
+  assert.equal(opencodeSupportsStandalone(null), false);
+  const { dir, path } = fixtureBin('not a version at all');
+  try {
+    assert.equal(opencodeSupportsStandalone(path), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Cache correctness: results are memoized by resolved path + mtime (see the
+// sandbox.js comment -- --version is too slow, ~0.2-1s observed, to pay on
+// every session launch) but an in-place upgrade (pacman/npm overwriting the
+// same path, e.g. 1.x -> 2.x) changes mtime and must be picked up without a
+// ccserver restart.
+test('opencodeSupportsStandalone: an in-place binary upgrade (same path, new mtime) invalidates the cache', () => {
+  const { dir, path } = fixtureBin('1.18.29');
+  try {
+    assert.equal(opencodeSupportsStandalone(path), false, 'first read: old version, unsupported');
+    writeFileSync(path, `#!/bin/sh\necho 'opencode v2.0.12'\n`);
+    chmodSync(path, 0o755);
+    // Force a distinct mtime -- some filesystems have coarse timestamp
+    // resolution, and the write above could otherwise land in the same tick.
+    const bumped = new Date(Date.now() + 5000);
+    utimesSync(path, bumped, bumped);
+    assert.equal(opencodeSupportsStandalone(path), true, 'mtime changed: must re-probe and pick up the new version');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
