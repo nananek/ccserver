@@ -424,6 +424,36 @@ test('remote combo is listed as a single group row, not one row per member', asy
   await expect(page.locator('.group-subtab-item')).toHaveCount(3);
 });
 
+test('Remote tab combo row opens the same group tab as the sidebar', async ({ page }) => {
+  const instanceId = 'inst-remote-g3';
+  const groupId = 'grp-remote-3';
+  const members = [
+    { sessionId: 'rm-wa', role: 'workerA', cwd: '/home/peer/combo', app: 'claude' },
+    { sessionId: 'rm-wb', role: 'workerB', cwd: '/home/peer/combo', app: 'codex' },
+    { sessionId: 'rm-or', role: 'orchestrator', cwd: '/home/peer/combo', app: 'claude' },
+  ];
+  const groups = [{ groupId, cwd: '/home/peer/combo', memberCount: 3, liveCount: 3 }];
+  await page.route('**/api/federation/instances', (route) => route.fulfill({
+    json: { instances: [{ id: instanceId, status: 'active', label: 'peerhost', fingerprint: 'aa:bb:cc:dd:ee' }] },
+  }));
+  await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => route.fulfill({ json: { sessions: [] } }));
+  await page.route(`**/api/federation/instances/${instanceId}/groups`, (route) => route.fulfill({ json: { groups } }));
+  await page.route(`**/api/federation/instances/${instanceId}/groups/${groupId}/members`, (route) => route.fulfill({ json: { members } }));
+  await gotoApp(page);
+
+  await page.locator('.tab-list').getByTitle('Remote').click();
+  const row = page.locator('.remote-group-row .sandbox-body', { hasText: '/home/peer/combo' });
+  await row.click();
+  await expect(page.locator('.group-subtab-item')).toHaveCount(3);
+  await expect(openedItems(page)).toHaveCount(1);
+  await expect(openedItems(page).first()).toHaveAttribute('data-tab-type', 'group');
+
+  // 同じコンボを再度開いても新しいタブは増えない。
+  await page.locator('.tab-list').getByTitle('Remote').click();
+  await row.click();
+  await expect(openedItems(page)).toHaveCount(1);
+});
+
 test('remote combo lower-section ✕ destroys the group via federation', async ({ page }) => {
   const instanceId = 'inst-remote-g2';
   const groupId = 'grp-remote-2';

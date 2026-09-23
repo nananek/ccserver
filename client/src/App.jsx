@@ -1173,7 +1173,7 @@ export default function App() {
           <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} initialPath={lastDir} sandboxDefaults={sandboxDefaults} />
         </div>
         <div style={{ display: activeTabId === 'remote' ? 'flex' : 'none', height: '100%', flexDirection: 'column', overflow: 'auto' }}>
-          <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} />
+          <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} onOpenRemoteGroup={handleOpenRemoteGroup} visible={activeTabId === 'remote'} />
         </div>
         {tabs.some((t) => t.type === 'settings') && (
           <div style={{ display: activeTabId === 'settings' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
