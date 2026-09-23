@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifyGhUsage, formatGhUsageReport, recordGhUsage, resetGhUsage } from './ghUsageRecording.js';
@@ -46,4 +46,22 @@ test('gh usage reset removes all counters and classifier never retains argv valu
   recordGhUsage({ client: 'claude', ...classifyGhUsage(['issue', 'comment']), result: 'success' });
   resetGhUsage(file);
   assert.doesNotMatch(formatGhUsageReport(file), /count=/);
+});
+
+test('a broken aggregate path returns false instead of throwing (observability must never block gh)', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const notADir = join(dir, 'not-a-dir');
+  writeFileSync(notADir, 'regular file');
+  const file = join(notADir, 'aggregate.json');
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+  assert.equal(recordGhUsage({ client: 'codex', target: 'issue', operation: 'read', result: 'success' }), false);
+  assert.equal(resetGhUsage(file), false);
+});
+
+test('mutating gh subcommands are classified as mutations, never as reads', () => {
+  assert.deepEqual(classifyGhUsage(['pr', 'merge', '42']), { target: 'pr', operation: 'close' });
+  assert.deepEqual(classifyGhUsage(['pr', 'ready', '42']), { target: 'pr', operation: 'edit' });
 });

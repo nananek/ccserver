@@ -44,20 +44,37 @@ function readState(path) {
 
 function withLock(path, fn) {
   const lock = `${path}.lock`;
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  } catch {
+    return false; // observability must never block gh
+  }
   const deadline = Date.now() + 1000;
   let fd;
   while (Date.now() < deadline) {
     try { fd = openSync(lock, 'wx', 0o600); break; } catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); }
   }
   if (fd === undefined) return false; // observability must never block gh
-  try { return fn(); } finally {
+  try { return fn(); }
+  catch { return false; } // an unwritable/full aggregate must never fail the gh call
+  finally {
     try { closeSync(fd); } catch {}
     try { unlinkSync(lock); } catch {}
   }
 }
 
 function valid(value, set, fallback) { return set.has(value) ? value : fallback; }
+
+function writeState(path, state) {
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+    renameSync(tmp, path);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch {}
+    throw e;
+  }
+}
 
 export function recordGhUsage({ client, target, operation, result, denial } = {}) {
   if (!recordingEnabled()) return false;
@@ -70,18 +87,14 @@ export function recordGhUsage({ client, target, operation, result, denial } = {}
     const state = readState(path);
     const key = `${safeClient}\t${safeTarget}\t${safeOperation}\t${safeResult}`;
     state.counters[key] = (Number.isSafeInteger(state.counters[key]) ? state.counters[key] : 0) + 1;
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(state)}\n`, { mode: 0o600 });
-    renameSync(tmp, path);
+    writeState(path, state);
     return true;
   });
 }
 
 export function resetGhUsage(path) {
   return withLock(path, () => {
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(emptyState())}\n`, { mode: 0o600 });
-    renameSync(tmp, path);
+    writeState(path, emptyState());
     return true;
   });
 }
@@ -107,7 +120,13 @@ export function classifyGhUsage(argv) {
   const target = ({ issue: 'issue', pr: 'pr', repo: 'repository', workflow: 'workflow', run: 'workflow', release: 'release' })[top] || 'repository';
   if (top === 'workflow' || top === 'run') return { target, operation: 'workflow' };
   if (top === 'release') return { target, operation: 'release' };
-  const operation = ({ create: 'create', edit: 'edit', close: 'close', reopen: 'close', comment: 'comment', review: 'comment' })[sub] || 'read';
+  const operation = ({
+    create: 'create', edit: 'edit', close: 'close', reopen: 'close',
+    // `pr merge` closes the PR and `pr ready` flips its draft state -- both
+    // mutate, so neither may fall through to the read default.
+    merge: 'close', ready: 'edit',
+    comment: 'comment', review: 'comment',
+  })[sub] || 'read';
   return { target, operation };
 }
 
