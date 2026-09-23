@@ -532,6 +532,10 @@ export default function App() {
     // 満たす場合)。「次回以降確認しない」設定時は確認なしで終了する。
     // グループタブは3セッションを破棄するため、「次回以降確認しない」が
     // 設定されていない限り必ず確認する。
+    // リモートタブは「セッションを終了」と「切断」の2択があるため、確認
+    // スキップの対象外にする (スキップ設定のまま✕を押すと、切断のつもりが
+    // ピア側セッションの破棄になってしまう)。スキップはローカルタブの
+    // 従来挙動にだけ効かせる。
     const tab = tabs.find((t) => t.id === tabId);
     if (tab?.type === 'group') {
       if (skipCloseConfirm) {
@@ -548,7 +552,7 @@ export default function App() {
       return;
     }
     if (tab && tab.type === 'terminal' && !tab.exited) {
-      if (skipCloseConfirm) {
+      if (skipCloseConfirm && !tab.remote) {
         // 確認済み(次回以降確認しない)なら、削除可能なタブは即座に終了、
         // sessionId 未確立などの削除不能なタブは従来通りデタッチにフォールバックする。
         if (canTerminateTab(tab)) {
@@ -795,6 +799,17 @@ export default function App() {
     setCloseConfirm(null);
   }, [closeConfirm, dontAskAgain, setSkipCloseConfirmPersisted, terminateSessionById, terminateUnopened]);
 
+  // リモートタブの「切断」: タブを閉じるだけで DELETE は送らない。ピア側の
+  // セッションは残るので、次のポーリングで「リモートのセッション」に現れ、
+  // いつでも再接続できる (local のデタッチと同じ位置づけ)。
+  // 「次回以降確認しない」の永続化はしない: 非破壊的な操作で、破壊的な側
+  // (セッションを終了) の確認を黙らせてしまわないため。
+  const disconnectRemoteTab = useCallback(() => {
+    if (!closeConfirm) return;
+    doCloseTab(closeConfirm.tabId);
+    setCloseConfirm(null);
+  }, [closeConfirm, doCloseTab]);
+
   // セッション表示名 (右クリック改名): サーバー保存の customLabel を
   // sessionId で引くマップ。一覧の上段・ターミナルヘッダーで使う。
   // 下段 (未オープン) は serverSessions 要素の customLabel を直接使う。
@@ -884,11 +899,17 @@ export default function App() {
   const unopenedGroups = serverGroups.filter((g) => !openedGroupIds.has(g.groupId));
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  // Close-confirm dialog's "セッションを終了" availability: local terminal
-  // tabs with a known server-side session id only (group tabs destroy their
-  // members on close already; remote tabs belong to another instance).
+  // Close-confirm dialog's "セッションを終了" availability: terminal tabs with
+  // a known server-side session id (group tabs destroy their members via
+  // destroyGroupTab, so they keep the "閉じる" button instead), plus every
+  // kind 'unopened' target (the lower-section ✕).
   const closeConfirmTab = closeConfirm ? tabs.find((t) => t.id === closeConfirm.tabId) : null;
   const canTerminateCloseConfirm = closeConfirm?.kind === 'unopened' || canTerminateTab(closeConfirmTab);
+  // リモートタブの閉じる確認は「セッションを終了」と「切断 (タブを閉じるだけ)」の
+  // 2択。切断してもピア側セッションは残り、一覧から再接続できる。2択がある間は
+  // 「次回以降確認しない」も出さない (handleCloseTab のスキップ対象外と揃える)。
+  const isRemoteTabCloseConfirm = !!closeConfirmTab?.remote;
+  const canDetachCloseConfirm = isRemoteTabCloseConfirm && canTerminateTab(closeConfirmTab);
   let closeConfirmTargetText = null;
   if (closeConfirm?.kind === 'unopened') {
     const { target } = closeConfirm;
@@ -1268,19 +1289,23 @@ export default function App() {
             <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : closeConfirm.kind === 'unopened' ? 'セッションを終了しますか?' : 'タブを閉じますか?'}</h3>
             <p>{closeConfirm.kind === 'group'
               ? 'グループの3つのセッション（ワーカー2つとオーケストレーター）を終了します。'
-              : canTerminateCloseConfirm
-                ? 'セッションを終了します。終了後は再接続できません。'
-                : 'セッションは背後で動き続け、セッション一覧から再接続できます。'}</p>
+              : canDetachCloseConfirm
+                ? '「セッションを終了」はピア側のセッションも破棄します。「切断」はタブを閉じるだけで、セッションはリモート一覧から再接続できます。'
+                : canTerminateCloseConfirm
+                  ? 'セッションを終了します。終了後は再接続できません。'
+                  : 'セッションは背後で動き続け、セッション一覧から再接続できます。'}</p>
             {closeConfirmTargetText && <p className="close-confirm-target" title={closeConfirmTargetText}>{closeConfirmTargetText}</p>}
-            <label className="close-confirm-checkbox">
-              <input
-                type="checkbox"
-                checked={dontAskAgain}
-                disabled={isTerminatingSession}
-                onChange={(e) => setDontAskAgain(e.target.checked)}
-              />
-              次回以降確認しない
-            </label>
+            {!isRemoteTabCloseConfirm && (
+              <label className="close-confirm-checkbox">
+                <input
+                  type="checkbox"
+                  checked={dontAskAgain}
+                  disabled={isTerminatingSession}
+                  onChange={(e) => setDontAskAgain(e.target.checked)}
+                />
+                次回以降確認しない
+              </label>
+            )}
             <div className="resume-actions">
               {canTerminateCloseConfirm ? (
                 <button className="btn btn-danger btn-left" onClick={terminateSessionAndCloseTab} disabled={isTerminatingSession}>
@@ -1290,11 +1315,15 @@ export default function App() {
               <button className="btn btn-secondary" onClick={() => setCloseConfirm(null)} disabled={isTerminatingSession}>
                 キャンセル
               </button>
-              {!canTerminateCloseConfirm && (
+              {canDetachCloseConfirm ? (
+                <button className="btn btn-primary" onClick={disconnectRemoteTab} disabled={isTerminatingSession}>
+                  切断
+                </button>
+              ) : !canTerminateCloseConfirm ? (
                 <button className="btn btn-primary" onClick={confirmCloseTab} disabled={isTerminatingSession}>
                   閉じる
                 </button>
-              )}
+              ) : null}
             </div>
           </div>
         </div>

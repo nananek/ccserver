@@ -259,9 +259,15 @@ test('remote tab offers "セッションを終了" and terminates through the fe
   await menuCloseButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
 
-  // Same layout as a local tab: terminate + cancel, no detach-only "閉じる".
-  await expect(modal(page)).toContainText('セッションを終了します。終了後は再接続できません。');
+  // Remote tabs get the same terminate action as local ones, plus a
+  // non-destructive "切断" (close the tab, keep the peer's session) -- so no
+  // detach-only "閉じる", and no "次回以降確認しない" (the two actions can't
+  // share one skip preference; see App.jsx's handleCloseTab).
+  await expect(modal(page)).toContainText('「セッションを終了」はピア側のセッションも破棄します。');
+  await expect(modal(page)).toContainText('「切断」はタブを閉じるだけで');
   await expect(modal(page).getByRole('button', { name: '閉じる', exact: true })).toHaveCount(0);
+  await expect(modal(page).getByRole('button', { name: '切断', exact: true })).toBeVisible();
+  await expect(modal(page).locator('.close-confirm-checkbox')).toHaveCount(0);
   const terminateBtn = modal(page).getByRole('button', { name: 'セッションを終了', exact: true });
   await expect(terminateBtn).toBeVisible();
 
@@ -280,6 +286,51 @@ test('remote tab offers "セッションを終了" and terminates through the fe
   expect(localDeleteRequested).toBe(false);
 
   await page.unroute('**/api/sessions/*');
+});
+
+test('remote tab "切断" closes the tab without terminating the peer session', async ({ page }) => {
+  await usePopupMode(page);
+  // 「次回以降確認しない」が設定済みでも、リモートタブは終了/切断の2択が
+  // あるため必ず確認する (スキップで黙ってピア側セッションを破棄しない)。
+  await page.addInitScript(() => localStorage.setItem('ccserver-skip-close-confirm', '1'));
+  await gotoApp(page);
+
+  const instanceId = 'fake-remote-detach';
+  await page.route('**/api/federation/instances', (route) => route.fulfill({
+    json: { instances: [{ id: instanceId, status: 'active', label: 'FakePeer', fingerprint: 'aa:bb:cc:dd:ee', addr: '127.0.0.1:9999' }] },
+  }));
+  const remoteSessions = [{ id: 'remote-detach-1', cwd: '/tmp/remote-detach', app: 'claude', shell: false }];
+  await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => route.fulfill({
+    json: { sessions: remoteSessions },
+  }));
+  const federationDeletes = [];
+  await page.route(`**/api/federation/instances/${instanceId}/sessions/*`, (route) => {
+    if (route.request().method() === 'DELETE') federationDeletes.push(route.request().url().split('/').pop());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route(`**/api/federation/instances/${instanceId}/groups`, (route) => route.fulfill({ json: { groups: [] } }));
+
+  await page.locator('.tab-list').getByTitle('Remote').click();
+  await page.getByTestId('remote-instance-header').waitFor();
+  await page.locator('.sandbox-body', { hasText: '/tmp/remote-detach' }).click();
+  await expect(sessionBadge(page)).toHaveText('1');
+
+  await openMenu(page);
+  await menuCloseButtons(page).first().click();
+  const dlg = modal(page);
+  await expect(dlg).toBeVisible();
+  await expect(dlg).toContainText('「切断」はタブを閉じるだけで');
+  await expect(dlg.locator('.close-confirm-checkbox')).toHaveCount(0);
+
+  await dlg.getByRole('button', { name: '切断', exact: true }).click();
+  await expect(dlg).toBeHidden();
+  await expect(sessionBadge(page)).toHaveCount(0);
+  // ピア側のセッションは破棄しない (DELETE は一切飛ばない)。
+  expect(federationDeletes).toEqual([]);
+
+  // 残っているセッションは下段「リモートのセッション」に現れ、再接続できる。
+  if (await sessionMenu(page).count() === 0) await openMenu(page);
+  await expect(sessionMenu(page).locator('[data-section="unopened-remote"] .session-menu-item')).toHaveCount(1);
 });
 
 test('closing the last session tab falls back to the Files tab, not Settings', async ({ page }) => {
