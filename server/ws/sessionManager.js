@@ -11,6 +11,8 @@ import { setNetworkBrokerLists } from './network-broker.js';
 import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
+import { buildAgentNotifyArgsAndEnv, shouldCaptureNotifications } from './agentNotifyConfig.js';
+import { attachNotifyDetector } from './notifyBridge.js';
 import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
 import { shouldInjectReviewer, reviewerEnabled, getReviewerSockPath, reviewerBrokerRunning } from './reviewer.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
@@ -429,6 +431,12 @@ function buildSessionRecord(id, ptyProcess, meta) {
         console.warn(`[session-limit] session ${session.id} hit its limit, but a manual schedule already exists -- not overriding it`);
       }
     }
+
+    // Agent notification capture (plan-notify-bridge). Only sessions the
+    // bridge was armed for at launch carry a detector, so this is a property
+    // check for everyone else. The detector never throws and never blocks:
+    // delivery is dispatched off a resolved promise (see notifyBridge.js).
+    if (session.notifyDetector) session.notifyDetector.feed(data);
 
     // Keep the virtual screen model in parallel with the buffer: it only
     // stamps screenLastChangeAt when the visible screen actually changes,
@@ -966,6 +974,17 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     args.push(...injected.args);
   }
 
+  // Agent notification bridge (plan-notify-bridge): make the CLI emit the
+  // notification escape sequences the detector reads back off the pty. Returns
+  // nothing at all unless the feature is on AND this app was selected AND
+  // injectConfig is set, so a disabled bridge leaves the command line
+  // byte-for-byte as it was before the feature existed (see
+  // agentNotifyConfig.js's "OFF INVARIANT"). cfg was already read at the top of
+  // createSession -- do not re-read the config file here.
+  const notifyBridgeCfg = cfg.notify?.bridge || null;
+  const agentNotify = buildAgentNotifyArgsAndEnv(sessionApp, notifyBridgeCfg);
+  args.push(...agentNotify.args);
+
   // Optionally wrap the target in a filesystem sandbox (bwrap on Linux,
   // sandbox-exec on macOS) so it can only see the project directory plus
   // configured paths, with an isolated rootless docker inside on Linux.
@@ -1110,6 +1129,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       // scrolls natively, and its own drag-selection + copy-on-select writes
       // to the browser clipboard via OSC 52 (handled client-side).
       ...mcpEnv,
+      ...agentNotify.env,
       // /tmp being mounted noexec makes Bun fail to unpack + dlopen its
       // embedded libopentui.so, so opencode's TUI dies at startup (opencode
       // #26136/#27580). Direct host launches switch BUN_TMPDIR to
@@ -1165,6 +1185,16 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     rows,
     startedClaudeSessionId: claudeSessionId || null,
   });
+
+  // Arm the notification capture. Decided once, here, rather than per pty
+  // chunk: loadSandboxConfig() re-reads and re-parses the config file on every
+  // call, and onData is the hottest path in the server. A session launched
+  // with the bridge off simply has no detector, so the onData hook below costs
+  // one property check. (Delivery-side settings -- channels, rate limits --
+  // ARE re-read per notification, which is rare; see notifyBridge.js.)
+  if (shouldCaptureNotifications({ shell, app: sessionApp, bridge: notifyBridgeCfg })) {
+    attachNotifyDetector(session, notifyBridgeCfg);
+  }
 
   return { sessionId: id, session };
 }
