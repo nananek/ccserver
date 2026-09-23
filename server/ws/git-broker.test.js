@@ -259,7 +259,8 @@ test('gh usage recording: a gh spawn failure is broker-unavailable, not a denial
   assert.equal(Object.keys(counters).some((k) => k.includes('broker-denied')), false, `non-denial recorded as a denial: ${JSON.stringify(counters)}`);
 });
 
-test('startGitBroker returns null for non-git cwd (no dead wrapper)', () => {  const dir = join(root, 'not-a-repo2');
+test('startGitBroker returns null for non-git cwd (no dead wrapper)', () => {
+  const dir = join(root, 'not-a-repo2');
   mkdirSync(dir, { recursive: true });
   const b = startGitBroker({ cwd: dir });
   assert.equal(b, null);
