@@ -22,9 +22,15 @@ after(() => {
 });
 
 function run(args) {
+  const env = { ...process.env, CCSERVER_SANDBOX_CONFIG: cfgPath };
+  // Node's test runner marks the process running each test file with
+  // NODE_TEST_CONTEXT; a spawned node script inherits it and (Node 26) can
+  // start as a test-runner child with empty stdout instead of executing the
+  // CLI. Strip it so the child is a plain CLI invocation.
+  delete env.NODE_TEST_CONTEXT;
   return spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, CCSERVER_SANDBOX_CONFIG: cfgPath },
+    env,
   });
 }
 function writeConfig(obj) { writeFileSync(cfgPath, JSON.stringify(obj)); }
