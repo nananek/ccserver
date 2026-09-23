@@ -34,11 +34,18 @@ export const SCREEN_ROWS = 200;
 // sequence that takes seconds here stops the whole server, not one tab.
 //   - a CSI parameter is clamped, and its digit run is cut off, so
 //     `ESC[999999999999999999999B` can neither spin nor be rescanned forever
-//     (a parameter that long is malformed by any real terminal's reckoning);
+//     (a parameter that long is malformed by any real terminal's reckoning).
+//     The cut-off sequence is then discarded up to its final byte rather
+//     than abandoned mid-way, so its leftover parameters never land on the
+//     screen as text;
 //   - an unterminated escape keeps at most MAX_PENDING characters waiting for
 //     the rest, instead of accumulating every byte that follows it.
 const MAX_CSI_PARAM = 100_000;
-const MAX_CSI_PARAM_CHARS = 64;
+// Comfortably past anything real: a truecolor SGR run is ~36 characters and
+// a long chained one still under 64. Over-cap sequences are dropped whole
+// (see csiSkip), so the cost of a false positive is a discarded escape --
+// cheap for SGR, which this model ignores anyway -- but headroom is free.
+const MAX_CSI_PARAM_CHARS = 128;
 const MAX_PENDING = 256;
 
 export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {}) {
@@ -60,6 +67,11 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
   // out to be the first half of an ST.
   let oscSkip = false;
   let oscEsc = false;
+  // A CSI whose parameter run ran past MAX_CSI_PARAM_CHARS, waiting for the
+  // final byte that ends it. Same reason as oscSkip: the rest is dropped as
+  // it streams instead of being buffered or -- worse -- falling through to
+  // the screen as printable text.
+  let csiSkip = false;
   // Row indices touched since the last takeDirtyRowCount(). `version` counts
   // written CELLS, which scales with the terminal width and cannot tell a
   // one-line spinner redrawing 60 columns from real output; the number of
@@ -260,6 +272,18 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
     return OSC_NOT_FOUND;
   };
 
+  // Index just past the first CSI final byte (0x40-0x7E) at or after `from`,
+  // or -1 when this chunk does not contain one. Parameter and intermediate
+  // bytes are all below 0x40, so the first byte in that range ends the
+  // sequence.
+  const csiEnd = (s, from) => {
+    for (let j = from; j < s.length; j++) {
+      const c = s[j];
+      if (c >= '@' && c <= '~') return j + 1;
+    }
+    return -1;
+  };
+
   // Parse the escape sequence starting at input[start] (an ESC byte).
   // Returns { end } (exclusive) when complete, { needsMore: true } when it
   // runs off the end of the input (the caller keeps the tail pending).
@@ -270,10 +294,16 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
       const paramLimit = j + MAX_CSI_PARAM_CHARS;
       while (j < input.length && j < paramLimit && '0123456789;?'.includes(input[j])) j++;
       if (j === paramLimit) {
-        // No real terminal emits 64 characters of parameters. Treat it as
-        // malformed and consume what was scanned: holding it as a possible
-        // prefix would re-scan a growing buffer on every chunk.
-        return { end: j };
+        // No real terminal emits this many characters of parameters. Treat
+        // the sequence as malformed and swallow it up to its final byte --
+        // stopping at the cap instead would print the leftover parameters
+        // (`1;1;1;...m`) on screen as text. Holding it as a possible prefix
+        // is not an option either: that re-scans a growing buffer on every
+        // chunk.
+        const skipTo = csiEnd(input, j);
+        if (skipTo >= 0) return { end: skipTo };
+        csiSkip = true;
+        return { end: input.length };
       }
       if (j >= input.length) return { needsMore: true };
       const final = input[j];
@@ -311,6 +341,10 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
       if (oscSkip) {
         let from = 0;
         if (oscEsc) {
+          // An empty chunk decides nothing -- keep waiting rather than
+          // forgetting that an ESC is still pending, which would strand the
+          // parser inside the OSC and swallow everything after it.
+          if (input.length === 0) return;
           oscEsc = false;
           // The ESC that ended the previous chunk completes an ST only if
           // this one opens with a backslash.
@@ -328,6 +362,12 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
         } else {
           i = from;
         }
+      } else if (csiSkip) {
+        // Still inside an over-long CSI: drop bytes until its final one.
+        const end = csiEnd(input, 0);
+        if (end < 0) return;
+        csiSkip = false;
+        i = end;
       }
       while (i < input.length) {
         const ch = input[i];

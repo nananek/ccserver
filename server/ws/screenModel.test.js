@@ -289,3 +289,55 @@ test('an ESC inside an OSC that is not a terminator keeps the string open', () =
   s.feed('Xtle\x07b');
   assert.deepEqual(s.screenRows(), ['ab'], 'only BEL or ESC-backslash ends it');
 });
+
+test('an empty chunk inside an unterminated OSC does not strand the parser', () => {
+  // feed('') decides nothing, so it must not consume the remembered ESC that
+  // a following backslash would complete into a string terminator. Losing it
+  // left the parser inside the OSC forever, swallowing every later chunk.
+  const s = createScreenModel();
+  s.feed('\x1b]0;t\x1b');
+  s.feed('');
+  s.feed('\\VISIBLE');
+  assert.deepEqual(s.screenRows(), ['VISIBLE']);
+
+  // Several empty chunks in a row are no different.
+  const s2 = createScreenModel();
+  s2.feed('\x1b]0;t\x1b');
+  s2.feed('');
+  s2.feed('');
+  s2.feed('\\SEEN');
+  assert.deepEqual(s2.screenRows(), ['SEEN']);
+});
+
+test('an over-long CSI is discarded whole, not cut off mid-sequence', () => {
+  // Stopping at the parameter cap left the rest of the sequence to be parsed
+  // as text, so `ESC[1;1;1;...m` printed its own leftover parameters.
+  const s = createScreenModel();
+  s.feed(`\x1b[${'1;'.repeat(40)}mTEXT`);
+  assert.deepEqual(s.screenRows(), ['TEXT'], 'the parameters never reach the screen');
+});
+
+test('an over-long CSI split across chunks is still discarded whole', () => {
+  const s = createScreenModel();
+  s.feed(`\x1b[${'1;'.repeat(40)}`);
+  s.feed('mTEXT');
+  assert.deepEqual(s.screenRows(), ['TEXT']);
+
+  // ...and the discard stays bounded when the final byte never arrives.
+  const s2 = createScreenModel();
+  s2.feed(`\x1b[${'9'.repeat(4096)}`);
+  const started = Date.now();
+  for (let i = 0; i < 20; i++) s2.feed('9'.repeat(4096));
+  assert.ok(Date.now() - started < 2000);
+  assert.deepEqual(s2.screenRows(), [], 'nothing of the malformed sequence is drawn');
+  s2.feed('mAFTER');
+  assert.deepEqual(s2.screenRows(), ['AFTER'], 'the final byte ends the discard');
+});
+
+test('a realistic SGR run is not mistaken for an over-long one', () => {
+  // The cap has to sit above anything a real terminal emits: a truecolor SGR
+  // is ~36 characters of parameters and a long chained one still under 64.
+  const s = createScreenModel();
+  s.feed('\x1b[0;1;3;4;7;9;38;2;255;255;255;48;2;16;16;16mLONG');
+  assert.deepEqual(s.screenRows(), ['LONG']);
+});
