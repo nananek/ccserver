@@ -24,6 +24,18 @@ import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { classifyActivity } from './activity.js';
+
+// sessionManager.activitySnapshot is a thin wrapper around activity.js's pure
+// classifier; a fake session facade runs the REAL classifier over its fake
+// session object rather than hand-rolling the result shape. (activity.js is
+// safe to import at the top here -- it touches no env and no disk.)
+const fakeActivitySnapshot = (session) => classifyActivity({
+  app: session?.app ?? null,
+  live: !!session,
+  exited: !!session?.exited,
+  shell: !!session?.shell,
+});
 
 let runtimeDir;
 let groupManager;
@@ -475,6 +487,7 @@ test('listGroupMembers: live sessions report lastOutputAt/idleForMs; session-les
     destroySession: () => {},
     writeToSession: () => false,
     dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }),
+    activitySnapshot: fakeActivitySnapshot,
   };
   groupManager.setSessionApiForTests(fake);
   try {
@@ -489,6 +502,10 @@ test('listGroupMembers: live sessions report lastOutputAt/idleForMs; session-les
     assert.equal(orch.lastOutputAt, null, 'no live session -> no timestamp');
     assert.equal(orch.idleForMs, null);
     assert.equal(orch.autoYes, null, 'no live session -> autoYes null');
+    // The tab-colour reading rides along on the same listing (activity.js).
+    assert.equal(workerA.activity.level, 'idle', 'a live member with nothing drawn yet is the user\'s turn');
+    assert.equal(orch.activity.level, null, 'no live session -> no level to show');
+    assert.equal(orch.activity.reason, 'no-session');
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(gid);

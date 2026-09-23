@@ -16,13 +16,18 @@ import {
   BUSY_EXIT_ROWS_PER_SEC,
   MARKER_ROWS,
   QUIET_MS,
+  MAX_ROWS_PER_SAMPLE,
+  QUIET_UNVERIFIED_MS,
   RATE_HOLD_WINDOW_MS,
   RATE_WINDOW_MS,
+  REFERENCE_COLS,
+  SAMPLE_MS,
   appHasBusyMarker,
   changeRateFromSamples,
   classifyActivity,
   detectBusyMarker,
-  screenTailText,
+  normalizeRowsForWidth,
+  screenTailRows,
 } from './activity.js';
 
 // --- captured frames ---------------------------------------------------
@@ -118,25 +123,76 @@ test('detectBusyMarker: apps with no captured frames have no marker', () => {
 });
 
 test('detectBusyMarker: the phrase in the agent\'s own output is not a marker', () => {
-  // The worst false positive available: an agent printing a document about
-  // this very feature. The phrase is in the transcript, the footer says the
-  // session is idle -- anchoring the search to the footer keeps it idle.
+  // The worst false positive available, in its REALISTIC shape: an agent that
+  // just finished writing about this very feature, the phrase sitting on the
+  // last transcript row, directly above the idle footer. Claude Code's idle
+  // footer is only ~7 non-blank rows, so a generous window reaches straight
+  // into the transcript -- and a wrong yellow here would stick until the next
+  // output pushed the text off screen, i.e. for the whole time the user is
+  // trying to see whether it is their turn.
   const transcript = [
     '● Wrote the plan:',
     '',
     '  Claude Code shows "esc to interrupt" while a turn is running, so the',
     '  marker is the primary signal for the green/not-green decision.',
-    '',
   ];
-  const rows = [...transcript];
-  // Push the phrase out of the footer window with ordinary transcript rows.
-  for (let i = 0; i < MARKER_ROWS; i++) rows.push(`  line ${i} of follow-up output`);
-  rows.push(...CLAUDE_IDLE);
-  assert.equal(detectBusyMarker('claude', rows), null);
+  const rows = [...transcript, ...CLAUDE_IDLE];
+  assert.equal(detectBusyMarker('claude', rows), null, 'the transcript is not the footer');
+  assert.equal(
+    classifyActivity({ app: 'claude', screenRows: rows, screenIdleMs: 60_000, changeRate: 0 }).level,
+    'idle',
+    'a finished turn is the user\'s turn, whatever the transcript happens to say',
+  );
 
   // Same screen, still mid-turn: the footer decides, not the transcript.
   const running = [...transcript, ...CLAUDE_BUSY];
   assert.ok(detectBusyMarker('claude', running));
+});
+
+test('detectBusyMarker: prose about the key is not the footer field', () => {
+  // The footer lays its fields out with a separator ("· esc to interrupt");
+  // prose does not. Requiring it costs nothing on the captured frame and
+  // removes the most common wording an agent would actually emit.
+  for (const prose of [
+    'press esc to interrupt the build',
+    'Use esc to interrupt a running turn.',
+    '  you can hit esc to interrupt it',
+  ]) {
+    assert.equal(detectBusyMarker('claude', [prose]), null, prose);
+  }
+  assert.ok(detectBusyMarker('claude', ['⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt']));
+});
+
+test('detectBusyMarker: a missed marker degrades to movement, never to green', () => {
+  // If a future footer layout drops the separator the pattern anchors on, the
+  // marker is simply not found. That must not hand the tab to the user
+  // mid-turn: the screen is still moving because the spinner is redrawing, so
+  // the movement rule keeps it out of 'idle'.
+  const unrecognisedFooter = ['✻ Thinking…', '❯', '  auto mode on | esc interrupts'];
+  assert.equal(detectBusyMarker('claude', unrecognisedFooter), null);
+  const r = classifyActivity({ app: 'claude', screenRows: unrecognisedFooter, screenIdleMs: 200, changeRate: 3 });
+  assert.notEqual(r.level, 'idle', 'a redrawing spinner is never the user\'s turn');
+  assert.equal(r.reason, 'movement');
+});
+
+test('detectBusyMarker: an app id colliding with Object.prototype is not a marker table entry', () => {
+  // Group members can carry an app string straight out of a state file on
+  // disk, so a prototype-chain lookup here would be a TypeError waiting for a
+  // hand-edited .saved-sessions.json -- and it would disagree with
+  // appHasBusyMarker, which has always guarded correctly.
+  for (const app of ['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty']) {
+    assert.equal(appHasBusyMarker(app), false, `${app}: no entry`);
+    assert.equal(detectBusyMarker(app, CLAUDE_BUSY), null, `${app}: no match, no throw`);
+    assert.equal(classifyActivity({ app, screenRows: CLAUDE_BUSY, screenIdleMs: 100 }).level, 'low');
+  }
+});
+
+test('detectBusyMarker: a phrase split across two wrapped rows is not a match', () => {
+  // Rows are matched one at a time. Joining them and matching with \s+ would
+  // let a narrow terminal's line wrap assemble the phrase out of two
+  // unrelated rows.
+  assert.equal(detectBusyMarker('claude', ['... press · esc to', 'interrupt the build ...']), null);
+  assert.equal(detectBusyMarker('opencode', ['hit esc', 'interrupt now']), null);
 });
 
 test('detectBusyMarker: empty / missing screens never match', () => {
@@ -147,24 +203,34 @@ test('detectBusyMarker: empty / missing screens never match', () => {
 
 // --- screenTailText ----------------------------------------------------
 
-test('screenTailText: trailing blank rows do not push the footer out of range', () => {
+test('screenTailRows: trailing blank rows do not push the footer out of range', () => {
   // A TUI that leaves the bottom of the screen empty would otherwise hide its
   // own footer from a naive slice(-N).
   const rows = [...CLAUDE_BUSY, '', '', '', '', '', '', '', '', '', '', '', ''];
-  assert.match(screenTailText(rows), /esc to interrupt/);
+  assert.ok(screenTailRows(rows).some((r) => /esc to interrupt/.test(r)));
 });
 
-test('screenTailText: column gaps collapse so a laid-out footer still reads as words', () => {
+test('screenTailRows: column gaps collapse so a laid-out footer still reads as words', () => {
   // TUIs place footer fields with absolute column moves, so the rendered row
   // has wide runs of spaces between the words.
-  const text = screenTailText(['esc      to        interrupt']);
-  assert.equal(text, 'esc to interrupt');
+  assert.deepEqual(screenTailRows(['esc      to        interrupt']), ['esc to interrupt']);
 });
 
-test('screenTailText: only the last rowCount rows are considered', () => {
+test('screenTailRows: only the last rowCount rows are considered', () => {
   const rows = ['needle', 'a', 'b', 'c'];
-  assert.match(screenTailText(rows, 4), /needle/);
-  assert.doesNotMatch(screenTailText(rows, 3), /needle/);
+  assert.ok(screenTailRows(rows, 4).includes('needle'));
+  assert.ok(!screenTailRows(rows, 3).includes('needle'));
+});
+
+test('screenTailRows: the default window stays inside the footer of both captured frames', () => {
+  // The guard behind finding #1: in each captured frame the marker is on the
+  // last non-blank row, and the default window must not reach the transcript
+  // above the footer.
+  for (const [name, frame] of [['claude', CLAUDE_BUSY], ['opencode', OPENCODE_BUSY]]) {
+    const tail = screenTailRows(frame);
+    assert.ok(tail.length <= MARKER_ROWS, `${name}: window is ${MARKER_ROWS} rows`);
+    assert.ok(/esc/.test(tail[tail.length - 1]), `${name}: the marker is on the last non-blank row`);
+  }
 });
 
 // --- changeRateFromSamples ---------------------------------------------
@@ -259,6 +325,7 @@ test('classifyActivity: opencode reaches the same verdicts from its own footer',
 });
 
 test('classifyActivity: apps without a marker table still classify from movement', () => {
+  const unverifiedQuietMs = QUIET_UNVERIFIED_MS + 500;
   for (const app of ['codex', 'copilot', 'commandcode']) {
     const moving = classifyActivity({ app, screenRows: ['working on it'], screenIdleMs: movingMs, changeRate: busyRate });
     assert.equal(moving.level, 'busy', `${app}: a moving screen is not idle`);
@@ -268,9 +335,29 @@ test('classifyActivity: apps without a marker table still classify from movement
     const slow = classifyActivity({ app, screenRows: ['working on it'], screenIdleMs: movingMs, changeRate: lowRate });
     assert.equal(slow.level, 'low');
 
-    const still = classifyActivity({ app, screenRows: ['waiting'], screenIdleMs: quietMs, changeRate: 0 });
-    assert.equal(still.level, 'idle', `${app}: a still screen reads idle`);
+    const still = classifyActivity({ app, screenRows: ['waiting'], screenIdleMs: unverifiedQuietMs, changeRate: 0 });
+    assert.equal(still.level, 'idle', `${app}: a long-still screen is all the evidence there is`);
   }
+});
+
+test('classifyActivity: an app with no marker waits longer before claiming green', () => {
+  // The honest limit of this feature: for an app whose frames nobody
+  // captured, stillness is the ONLY evidence, so "the agent is thinking with
+  // a frozen screen" and "the agent is done" look identical. Those apps get a
+  // longer stillness requirement, so a spinner that ticks slower than the
+  // marker-backed threshold -- or a tool call that stops redrawing -- does
+  // not read as the user's turn.
+  const betweenThresholds = (QUIET_MS + QUIET_UNVERIFIED_MS) / 2;
+  assert.equal(
+    classifyActivity({ app: 'codex', screenRows: ['x'], screenIdleMs: betweenThresholds, changeRate: 0 }).level,
+    'low',
+    'still for longer than a marker-backed app would need, but not long enough without a marker',
+  );
+  assert.equal(
+    classifyActivity({ app: 'claude', screenRows: CLAUDE_IDLE, screenIdleMs: betweenThresholds, changeRate: 0 }).level,
+    'idle',
+    'a marker-backed app can trust the shorter wait, because the marker has already ruled running out',
+  );
 });
 
 test('classifyActivity: markerVerified reports which apps are marker-backed', () => {
@@ -425,4 +512,71 @@ test('hysteresis: previousLevel can never drag a session out of green', () => {
     });
     assert.notEqual(running.level, 'idle', `previousLevel=${previousLevel}: the marker still wins`);
   }
+});
+
+// --- rate arithmetic and terminal width --------------------------------
+
+test('changeRateFromSamples: the reported rate matches the real one', () => {
+  // Each sample is stamped when its slice CLOSED, so it already accounts for
+  // the SAMPLE_MS before its timestamp. Leaving that out of the denominator
+  // inflated every reading (a true 8 rows/s read as 9.1), and the gap the
+  // busy threshold lives in is only a few rows wide.
+  const now = 50_000;
+  const samples = [];
+  for (let i = 8; i >= 1; i--) samples.push({ at: now - (i - 1) * SAMPLE_MS, rows: 2 });
+  // 8 slices x 250ms = 2.0s of covered time, 16 rows -> exactly 8 rows/s.
+  assert.equal(changeRateFromSamples(samples, now, 4000), 8);
+
+  const four = [];
+  for (let i = 4; i >= 1; i--) four.push({ at: now - (i - 1) * SAMPLE_MS, rows: 5 });
+  // 4 slices x 250ms = 1.0s, 20 rows -> exactly 20 rows/s.
+  assert.equal(changeRateFromSamples(four, now), 20);
+});
+
+test('normalizeRowsForWidth: the same output measures closer across terminal widths', () => {
+  // Measured with 400 characters of output through the real screen model:
+  // 10 rows at 40 columns, 4 at 100, 2 at 200 -- a 5x spread that would put
+  // a wide terminal's streaming below the busy threshold and a narrow one's
+  // above it.
+  const raw = { 40: 10, 100: 4, 200: 2 };
+  const normalized = Object.entries(raw).map(([cols, rows]) => normalizeRowsForWidth(rows, Number(cols)));
+  const spread = Math.max(...normalized) / Math.min(...normalized);
+  const rawSpread = Math.max(...Object.values(raw)) / Math.min(...Object.values(raw));
+  assert.ok(spread < rawSpread / 2, `normalizing must more than halve the spread (${rawSpread} -> ${spread})`);
+  assert.ok(spread < 2.5, `and land near the calibration width (${spread})`);
+});
+
+test('normalizeRowsForWidth: the calibration width is left untouched', () => {
+  assert.equal(normalizeRowsForWidth(7, REFERENCE_COLS), 7);
+});
+
+test('normalizeRowsForWidth: a spinner stays a spinner at every width', () => {
+  // The other half of the trade-off: a one-row spinner must not be stretched
+  // into the busy band by a wide terminal.
+  for (const cols of [40, 80, 100, 160, 200]) {
+    const perSample = normalizeRowsForWidth(2, cols); // 2 rows per 250ms slice
+    assert.ok(perSample * (1000 / SAMPLE_MS) < BUSY_ENTER_ROWS_PER_SEC,
+      `cols=${cols}: a spinner must stay under the busy threshold (${perSample * 4} rows/s)`);
+  }
+});
+
+test('normalizeRowsForWidth: a missing or nonsense width is left alone', () => {
+  assert.equal(normalizeRowsForWidth(5, null), 5);
+  assert.equal(normalizeRowsForWidth(5, 0), 5);
+  assert.equal(normalizeRowsForWidth(5, NaN), 5);
+});
+
+test('MAX_ROWS_PER_SAMPLE: one whole-screen repaint cannot pin a tab red', () => {
+  // screenModel reports a clear or an alternate-screen switch as every row it
+  // holds, up to its 200-row scrollback cap. Banked unclamped that is 800
+  // rows/s in one slice -- one window resize would hold the tab red for the
+  // whole rate window.
+  const now = 10_000;
+  const clamped = changeRateFromSamples([{ at: now, rows: MAX_ROWS_PER_SAMPLE }], now, RATE_WINDOW_MS);
+  const unclamped = changeRateFromSamples([{ at: now, rows: 200 }], now, RATE_WINDOW_MS);
+  assert.ok(clamped < unclamped / 5, `the clamp must cut the spike (${unclamped} -> ${clamped})`);
+  // Still counted as activity -- a repaint is not nothing.
+  assert.ok(clamped >= BUSY_ENTER_ROWS_PER_SEC);
+  // And it ages out of the window instead of persisting.
+  assert.equal(changeRateFromSamples([{ at: now, rows: MAX_ROWS_PER_SAMPLE }], now + RATE_WINDOW_MS + 1, RATE_WINDOW_MS), 0);
 });

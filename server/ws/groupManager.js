@@ -23,7 +23,8 @@ export function setAgentPublishHookForTests(fn) {
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, setMemberCwdResolver, peekSavedSessions, dockerAvailability } from './sessionManager.js';
+import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, setMemberCwdResolver, peekSavedSessions, dockerAvailability, activitySnapshot } from './sessionManager.js';
+import { NO_ACTIVITY } from './activity.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
 import { loadSandboxConfig } from './sandbox.js';
@@ -386,6 +387,12 @@ export function listGroupMembers(groupId) {
       // sessionManager.dockerAvailability). A restored member has no live
       // dockerd/state to judge -- null/null (unknown), not a guess.
       ...(session ? sessionApi.dockerAvailability(session) : { dockerAvailable: null, dockerReason: null }),
+      // How hard this member's agent is working right now (see activity.js):
+      // { level: 'idle'|'low'|'busy'|null, reason, marker, markerVerified,
+      // screenIdleMs, changeRate }. This is what the group's sub-tabs colour
+      // themselves from, and a sharper stuck/busy signal for the orchestrator
+      // than raw idleForMs. A restored member has no pty to read -- level null.
+      activity: session ? sessionApi.activitySnapshot(session) : NO_ACTIVITY,
     });
   }
   // The orchestrator is always the first tab (UI default-active) and the first
@@ -592,7 +599,11 @@ export function restoreGroups() {
     for (const s of savedSessions) {
       if (s && s.groupId === group.id && typeof s.groupRole === 'string') {
         group.memberSaved.set(s.groupRole, {
-          app: typeof s.app === 'string' ? s.app : null,
+          // Validate rather than trust: this comes from a file on disk, and
+          // the value flows on into listGroupMembers -> per-app behaviour
+          // (activity.js's marker table, the client's icon choice). Every
+          // other app-id entry point already goes through isValidApp.
+          app: isValidApp(s.app) ? s.app : null,
           model: normalizeModel(s.model),
           cwd: typeof s.cwd === 'string' ? s.cwd : null,
           claudeSessionId: typeof s.claudeSessionId === 'string' ? s.claudeSessionId : null,
@@ -1855,6 +1866,7 @@ const defaultSessionApi = {
   writeToSession,
   waitUntilSettled,
   dockerAvailability,
+  activitySnapshot,
 };
 let sessionApi = defaultSessionApi;
 

@@ -192,3 +192,24 @@ test('takeDirtyRowCount: ED 0 counts the rows it drops below the cursor', () => 
   assert.deepEqual(s.screenRows(), ['x', 'y']);
   assert.equal(s.takeDirtyRowCount(), 3, 'the cursor row plus the two rows that went away');
 });
+
+test('takeDirtyRowCount: ED 1 counts the rows it clears above the cursor', () => {
+  // ED 1 (erase from the start of the screen to the cursor) is the one branch
+  // whose rows used to be cleared with no change recorded at all.
+  const s = createScreenModel();
+  s.feed('aaa\r\nbbb\r\nccc\r\nddd');
+  s.takeDirtyRowCount();
+  s.feed('\x1b[3;2H\x1b[1J'); // cursor to row 3, column 2, erase to that point
+  assert.deepEqual(s.screenRows(), ['', '', ' cc', 'ddd'], 'rows above are cleared, the cursor row keeps its tail');
+  assert.equal(s.takeDirtyRowCount(), 3, 'the two rows above plus the cursor row');
+});
+
+test('ED 1 still registers as a visible change for screenIdleMs', () => {
+  // sessionManager stamps screenLastChangeAt on any version() movement, so
+  // the branch must keep bumping it at least once.
+  const s = createScreenModel();
+  s.feed('aaa\r\nbbb\r\nccc');
+  const v = s.version();
+  s.feed('\x1b[2;2H\x1b[1J');
+  assert.ok(s.version() > v);
+});
