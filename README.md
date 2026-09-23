@@ -47,7 +47,16 @@
 git clone <repo-url> ccserver
 cd ccserver
 npm install
+npm run setup           # 何がどこに作られるか確認 (ドライラン)
+npm run setup -- --yes  # 実行
 ```
+
+`npm run setup` はホストごとに一度必要です (新規インストールでも)。設定・データ・状態を
+XDG のディレクトリ (`~/.config/ccserver`, `~/.local/share/ccserver`,
+`~/.local/state/ccserver`) に用意し、既存インストールではリポジトリ配下にあった設定・状態
+ファイルをそこへ移行します。実行するまで Web UI は新しいセッションやグループの作成を
+拒否します。既存環境ではサーバーを停止してから実行してください。
+詳細: [設定モデル](https://nananek.github.io/ccserver/reference/configuration-model/)
 
 **開発モード** (ターミナルを 2 つ開いて実行):
 

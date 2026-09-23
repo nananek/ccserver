@@ -7,13 +7,13 @@ description: エージェントが自分で呼べる通知用 MCP サーバー�
 
 配信先は最大 3 種類で、設定されているものすべてに**並行**配信されます。
 
-1. **Discord webhook** — `sandbox.config.json` の `notify.discordWebhook` (https のみ) または環境変数 `CCSERVER_DISCORD_WEBHOOK` (こちらが優先)。webhook URL は `.gitignore` 済みの `sandbox.config.json` に入れるため、リポジトリに混入しません。
+1. **Discord webhook** — `sandbox.config.json` の `notify.discordWebhook` (https のみ) または環境変数 `CCSERVER_DISCORD_WEBHOOK` (こちらが優先)。webhook URL は ccserver の設定ディレクトリ (`~/.config/ccserver/sandbox.config.json`) に入るため、リポジトリに混入しません。
 2. **ランタイム購読 (webhook URL)** — MCP ツール `subscribe` で登録した任意の webhook (`unsubscribe` で解除、`list_subscriptions` で一覧)。購読は `.saved-notifications.json` に永続化され、サーバー再起動後も生き残ります。
 3. **Vikunja タスク** — `notify.vikunja` (`baseUrl` + `apiToken`) を設定すると、`notify` 呼び出しごとに Vikunja タスクを作成/更新します。Discord は見逃されがちですが、Vikunja はタスクとして残るため「人間の対応待ち」を TODO として拾えます。詳細は [Vikunja 連携](#vikunja-連携) を参照。
 
 ## 設定例
 
-`server/sandbox.config.json` に追記します。
+`~/.config/ccserver/sandbox.config.json` に追記します ([設定ファイル](/ccserver/sandbox/configuration/) 参照)。
 
 ```json
 {

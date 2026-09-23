@@ -15,7 +15,7 @@ docker (rootless dind)・rtk・code-review-graph のプロビジョニングは�
 
 ## サンドボックスの再利用 (永続 HOME)
 
-既定ではサンドボックスの `HOME` は**プロジェクト毎に永続化**されます (`persistentHome`、既定 `true`)。パスの実体は `~/.local/share/ccserver-sandbox/home/<プロジェクト>` で、セッション中に `pip install --user` や `npm i -g` などで入れたツール・キャッシュ・シェル設定が**次回以降のセッションに引き継がれます** (以前は毎回まっさらな tmpfs のため再構築が必要でした)。隣接する他プロジェクトは引き続き見えません (bind はこの 1 ディレクトリのみ)。
+既定ではサンドボックスの `HOME` は**プロジェクト毎に永続化**されます (`persistentHome`、既定 `true`)。パスの実体は `~/.local/share/ccserver-sandbox/home/<プロジェクト>` で ([設定モデル](/ccserver/reference/configuration-model/) のとおり、このツリーは XDG 移行後も意図的にここに残ります)、セッション中に `pip install --user` や `npm i -g` などで入れたツール・キャッシュ・シェル設定が**次回以降のセッションに引き継がれます** (以前は毎回まっさらな tmpfs のため再構築が必要でした)。隣接する他プロジェクトは引き続き見えません (bind はこの 1 ディレクトリのみ)。
 
 サンドボックス内の `/tmp` も、この永続 HOME 配下 (`.ccserver-tmp`) への**プロジェクト毎の永続 bind** です。fresh tmpfs ではないため、エージェントが `/tmp` に展開したツール・キャッシュ (例: opencode の抽出した Node ランタイム) がセッションを跨いで引き継がれます。`persistentHome: false` の場合は従来どおり `/tmp` も毎回まっさらな tmpfs です。
 
@@ -27,7 +27,7 @@ docker (rootless dind)・rtk・code-review-graph のプロビジョニングは�
 
 コンボ起動のワーカー / オーケストレーターのサンドボックスにも永続 HOME の既定動作 (再利用) が適用されますが、ダイアログ・破棄操作の対象は**シングル起動のみ**です。workerA/workerB はそれぞれ別の git worktree (cwd) で起動するようになったため ([コンボ起動 > ロール別 git worktree](/ccserver/guides/combo-launch/#ロール別-git-worktree) 参照)、永続 HOME もロールごとに独立します — 以前はワーカー同士が同じ永続 HOME (同じ `~/.claude` 設定、npm キャッシュ等) を共有していました。
 
-永続 HOME を無効にするには `sandbox.config.json` で `"persistentHome": false`。既存の永続状態をリセットするには `~/.local/share/ccserver-sandbox/home/` 配下の該当ディレクトリを削除してください (ディスク消費の整理も兼ねます)。
+永続 HOME を無効にするには `~/.config/ccserver/sandbox.config.json` で `"persistentHome": false`。既存の永続状態をリセットするには `~/.local/share/ccserver-sandbox/home/` 配下の該当ディレクトリを削除してください (ディスク消費の整理も兼ねます)。
 
 :::caution[セキュリティノート]
 永続 HOME はサンドボックス内から書き込み可能な**ホスト上の永続ディレクトリ**です。侵害・暴走したセッションはこのディレクトリ内に `.bashrc` 等を仕込み、**同一プロジェクトの次回セッションで実行させる**ことができます (単発セッション内の挙動が次回以降に持ち越される点が tmpfs HOME との違いです)。対象はそのプロジェクトのディレクトリに閉じていますが、機密プロジェクトで `forceSandbox` を多層防御の一部として使う場合はこの点を考慮してください。

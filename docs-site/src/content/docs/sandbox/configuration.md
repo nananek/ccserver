@@ -3,14 +3,32 @@ title: 設定ファイルと内部の仕組み
 description: sandbox.config.json のキー一覧と、rootlesskit + bwrap + dockerd の内部構成
 ---
 
+## 動的設定と静的設定
+
+ccserver の設定は 2 つに分かれており、どちらに属するかは**「実行中のセッションの安全性がその値に依存するか」**で決まります。依存するなら静的です。
+
+- **動的** — Web UI から変更でき、再起動なしで反映される。SQLite の `settings` テーブルに入ります。
+- **静的** — 起動時に一度だけ読まれ、変更には再起動が必要。とくにセキュリティ境界 (`browseRoots` / `forceSandbox` / `allowUnsandboxedAgents` / `hiddenApps`) が該当します。このページで説明する `sandbox.config.json` に入ります。
+
+たとえば `browseRoots` を Web UI から変えられないのは実装をサボっているからではありません。実行中サンドボックスの bind マウントは**起動時点の** `browseRoots` から計算済みなので、動的にすると UI の表示と実際に動いているサンドボックスが守っている値が食い違います。
+
+原則の全文、全パスの一覧、環境変数の一覧は [設定モデル](/ccserver/reference/configuration-model/) にあります。
+
 ## 設定ファイル
 
 サーバー全体の既定値です。各フラグは [起動ガイド](/ccserver/guides/launching/) のモーダルでディレクトリ/ブラウザ単位に上書きできるものと (`gpg`/`sshAgent`/`defaultApp`)、この設定ファイルでしか変えられないものがあります。
 
+置き場所は `~/.config/ccserver/sandbox.config.json` です (`$XDG_CONFIG_HOME` を尊重します)。セットアップウィザードが雛形を作ります。
+
 ```bash
-cp server/sandbox.config.example.json server/sandbox.config.json
+npm run setup -- --yes
+$EDITOR ~/.config/ccserver/sandbox.config.json
 # 場所を変える場合: CCSERVER_SANDBOX_CONFIG=/path/to/config.json
 ```
+
+:::caution
+`server/sandbox.config.example.json` を**そのままコピーしないでください**。このファイルは全キーの既定値を解説するリファレンスであり、`"gpg": true` を含みます。実装は「ファイルが無ければ `false`」なので、丸ごとコピーするとホストの gpg-agent と `~/.gnupg` のサンドボックスへの転送が**黙って有効になります**。ウィザードが生成するのはコメント 1 行だけの最小ファイルです。どうしても全文が欲しい場合は `npm run setup -- --yes --seed-example` を使ってください。
+:::
 
 ```json
 {
@@ -61,7 +79,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `opencodeGoUsage` | `true` | Usage ポップオーバーの OpenCode Go タブを有効化するか。opencode CLI の有無とは独立 (Go 契約にバイナリは不要)。`false` でタブを強制非表示にし、キーの読み取りも外部リクエストもしません。`true` (既定) でも Go キーが無い間は自動で隠れ、キーがあるのに未契約 (403) の場合はタブ内にその旨を表示します。環境変数 `CCSERVER_OPENCODE_GO_USAGE` (`0/false/off/no` か `1/true/on/yes`) がこのファイルより優先されます。 |
 | `hiddenApps` | `[]` | 起動ピッカーから完全に除外するエージェント CLI (`"claude"`・`"opencode"`・`"copilot"`・`"codex"` の配列)。契約していない (=使わせたくない) CLI をサーバーにインストールされているかどうかに関わらず隠すための設定です。単発起動モーダル・コンボ起動のロール別選択・Worker プリセット管理・Usage ボタンのアプリタブ、4画面すべてに適用されます。**未インストールのため grey out されて表示され続けるものとは別の挙動**で、`hiddenApps` に入れたアプリは常に完全に除去されます (grey out のまま残すモードはありません)。不明な値は無視されます。この設定によってこのホストに実際にインストール済みのアプリが1つも選択できなくなる場合、サーバーは起動を拒否します (何も起動できない UI をサイレントに立ち上げないため)。ピッカーからの除外は UI 上の利便性に過ぎず、実際の防御は `createSession()` 側にもあります: WS/REST を直接叩く、あるいは Worker/Launch プリセット経由であっても、隠されたアプリでの新規セッション作成 (予約プロンプトの自動再開を含む) はサーバー側で拒否されます。 |
 | `usageMcp` | `false` | Claude セッションへ `ccserver-usage` MCP (`get_usage` ツール) を注入するか。安全のため既定はオフで、`true` の明示時だけ有効です。`showUsage` とは独立しています。 |
-| `browseRoots` | `[]` | `/api/files`・`/api/dirs`・`/ws/terminal` のアクセス範囲をこれらのディレクトリ (とそのサブツリー) 配下に制限する許可ルートの配列。`[]` (既定) は従来どおりホスト全域アクセス可能。設定すると: ファイルのダウンロード/プレビュー/アップロード先とディレクトリ閲覧/作成がこの配下に制限され、シェルセッションは常時サンドボックス強制 (オプトアウト不可) になり、エージェントセッションも既定でサンドボックス強制されます (`allowUnsandboxedAgents` 参照)。起動時に、`ccserver.sqlite3` や `sandbox.config.json` 自身などの内部状態ファイルがこの配下に入っていないか検証し、入っている場合は起動を拒否します。`~` はホームディレクトリに展開されます。**コンボ起動 (グループ) について**: ワーカー/オーケストレーターの実際のセッション cwd は常に `~/.local/share/ccserver-sandbox/{worktrees,orchestrator}/...` というサーバー内部の固定スクラッチ領域になり (プロジェクトディレクトリ自体ではありません)、この領域は browseRoots のチェック対象外です。ただしコンボ起動作成時 (`POST /api/groups`) のプロジェクト cwd 自体は browseRoots 配下でなければ拒否されるため、browseRoots 外のプロジェクトに対してコンボグループを作成すること自体はできません。 |
+| `browseRoots` | `[]` | `/api/files`・`/api/dirs`・`/ws/terminal` のアクセス範囲をこれらのディレクトリ (とそのサブツリー) 配下に制限する許可ルートの配列。`[]` (既定) は従来どおりホスト全域アクセス可能。設定すると: ファイルのダウンロード/プレビュー/アップロード先とディレクトリ閲覧/作成がこの配下に制限され、シェルセッションは常時サンドボックス強制 (オプトアウト不可) になり、エージェントセッションも既定でサンドボックス強制されます (`allowUnsandboxedAgents` 参照)。起動時に、ccserver 自身の設定・データ・状態ディレクトリ (`~/.config/ccserver` / `~/.local/share/ccserver` / `~/.local/state/ccserver` — SQLite DB、この設定ファイル、federation の秘密鍵、`saved-*.json`) がこの配下に入っていないか検証し、入っている場合は起動を拒否します。3 つとも browseRoots の外に置いてください。`~` はホームディレクトリに展開されます。**コンボ起動 (グループ) について**: ワーカー/オーケストレーターの実際のセッション cwd は常に `~/.local/share/ccserver-sandbox/{worktrees,orchestrator}/...` というサーバー内部の固定スクラッチ領域になり (プロジェクトディレクトリ自体ではありません)、この領域は browseRoots のチェック対象外です。ただしコンボ起動作成時 (`POST /api/groups`) のプロジェクト cwd 自体は browseRoots 配下でなければ拒否されるため、browseRoots 外のプロジェクトに対してコンボグループを作成すること自体はできません。 |
 | `allowUnsandboxedAgents` | `false` | `browseRoots` 設定時、エージェントセッション (shell ではない起動) がサンドボックスなしで起動することを明示的に許可するか。`true` にしても cwd は引き続き `browseRoots` 配下に制限されます。シェルセッションにはこのオプトアウトはありません。 |
 | `reviewerMcp` | `false` | コードレビュー用 MCP (`ccserver-reviewer`、`run_review`/`list_reviews`/`get_review`/`finish_review` ツール) を有効化するか。`true` の明示時、shell と copilot を除く全セッション (コンボのワーカーも含む、グループの有無は不問) へ注入されます。ローカルの任意 ref/ブランチ/PR/未コミット差分に対して使い捨ての git worktree 上でヘッドレスセッションを起動し `/code-review` を実行するため、既定はオフです。レビュージョブ自身のセッションには、このフラグの値に関わらず (ライブ編集で無効化された場合の完了検知破綻を防ぐため) `finish_review` を呼ぶための MCP が強制的に注入されます ([コードレビュー](/ccserver/guides/reviewer/) 参照)。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |

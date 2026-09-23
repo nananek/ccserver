@@ -17,7 +17,7 @@ CCSERVER_FEDERATION_PORT=3210 NODE_ENV=production node server/index.js
 
 ## 信頼モデル
 
-各インスタンスは初回起動時に自己署名 Ed25519 証明書を1組生成し (`openssl` が必要。無い環境では federation は無効のまま動作を継続します)、`~/.local/share/ccserver-sandbox/federation/{instance.key,instance.crt}` に `0600` で保存します (`CCSERVER_FEDERATION_HOME` で置き場を上書き可能)。federation ポートの TLS は **CA 検証を完全に無効化**しており、代わりに「ペアリング時に人間が承認して pin した証明書 fingerprint (`fingerprint256`) との完全一致」だけを信頼根拠とします。SSH のホスト鍵 + `known_hosts` と同じメンタルモデルです。
+各インスタンスは初回起動時に自己署名 Ed25519 証明書を1組生成し (`openssl` が必要。無い環境では federation は無効のまま動作を継続します)、`~/.local/share/ccserver/federation/{instance.key,instance.crt}` に `0600` で保存します (セットアップウィザード実行前は `~/.local/share/ccserver-sandbox/federation/`) (`CCSERVER_FEDERATION_HOME` で置き場を上書き可能)。federation ポートの TLS は **CA 検証を完全に無効化**しており、代わりに「ペアリング時に人間が承認して pin した証明書 fingerprint (`fingerprint256`) との完全一致」だけを信頼根拠とします。SSH のホスト鍵 + `known_hosts` と同じメンタルモデルです。
 
 ## 双方向承認が必須
 

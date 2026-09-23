@@ -7,7 +7,7 @@ description: 使い捨てのヘッドレスセッションでローカルの ref
 
 - **オプトイン**: 既定では無効です。設定ファイルで `reviewerMcp: true` を明示した場合のみ有効化されます ([設定ファイル](/ccserver/sandbox/configuration/) 参照)。
 - **注入対象が広い**: `ccserver-meta` とは異なり、shell と copilot を除く**全セッション**に注入されます。コンボのワーカー/オーケストレーターも対象です (グループの有無を問わず呼び出せる、という設計方針のため)。
-- **使い捨ての専用 worktree**: レビュー対象プロジェクトの worktree (`~/.local/share/ccserver-sandbox/review-worktrees/<projectHash>/<jobId>/`) をジョブごとに新規作成し、そこでヘッドレスセッションを起動して `/code-review` を実行します。呼び出し元セッションの作業ディレクトリや、コンボの各ロール用 worktree ([コンボ起動](/ccserver/guides/combo-launch/) 参照) とは完全に分離されており、レビュー中に元の作業を変更しても影響しません。ジョブ終了後は worktree ・セッション・(有効なら) 専用の永続 HOME を破棄します。
+- **使い捨ての専用 worktree**: レビュー対象プロジェクトの worktree (`~/.local/share/ccserver-sandbox/review-worktrees/<projectHash>/<jobId>/` — worktree なので XDG 移行後もここに残ります) をジョブごとに新規作成し、そこでヘッドレスセッションを起動して `/code-review` を実行します。呼び出し元セッションの作業ディレクトリや、コンボの各ロール用 worktree ([コンボ起動](/ccserver/guides/combo-launch/) 参照) とは完全に分離されており、レビュー中に元の作業を変更しても影響しません。ジョブ終了後は worktree ・セッション・(有効なら) 専用の永続 HOME を破棄します。
 
 ## ツール一覧
 
