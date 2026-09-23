@@ -131,3 +131,23 @@ test('PUT with a non-object body is a 400, not a crash', async () => {
   });
   assert.equal(res.statusCode, 400);
 });
+
+test('GET exposes the observability counters (review finding F4)', async () => {
+  const { stats } = (await get()).json();
+  // The bridge's own tally...
+  for (const k of ['delivered', 'throttled', 'deduped', 'capped', 'unreachable', 'failed']) {
+    assert.equal(typeof stats[k], 'number', `bridge stat ${k}`);
+  }
+  // ...and the detectors', aggregated across armed sessions.
+  for (const k of ['armed', 'evictedKitty', 'truncatedKitty', 'overflowed', 'aborted']) {
+    assert.equal(typeof stats[k], 'number', `detector stat ${k}`);
+  }
+});
+
+test('PUT names an unknown setting instead of silently ignoring it (F5)', async () => {
+  writeConfig({});
+  const res = await put({ enabeld: true });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.json().error, /unknown setting\(s\): enabeld/);
+  assert.equal((await get()).json().settings.enabled, false, 'and nothing was written');
+});

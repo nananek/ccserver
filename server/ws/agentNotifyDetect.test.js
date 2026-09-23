@@ -300,9 +300,19 @@ test('an OSC terminator BEL is not also counted as a bell', () => {
 
 // --- sanitizing and bounds ---------------------------------------------------
 
-test('control characters are flattened and runs of spaces collapsed', () => {
-  const events = collect(osc('777;notify;a\x01b;c\x02\x02d   e'));
+test('C1 controls are flattened and runs of spaces collapsed', () => {
+  // C0 controls can no longer appear raw inside an OSC -- they abort it (see
+  // the F2 cases below). C1 (0x80-0x9f) still can, and still gets flattened.
+  const events = collect(osc('777;notify;a\u0085b;c\u009b\u009bd   e'));
   assert.deepEqual(events, [{ kind: 'notification', source: 'osc777', title: 'a b', body: 'c d e' }]);
+});
+
+test('control characters arriving via base64 are still sanitized', () => {
+  // kitty's e=1 payloads are decoded AFTER the scanner, so this is the one
+  // path by which a C0 byte can still reach the sanitizer.
+  const b64 = (x) => Buffer.from(x, 'utf-8').toString('base64');
+  const events = collect(osc(`99;i=1:e=1;${b64('a\tb\nc')}`, ST));
+  assert.deepEqual(events, [{ kind: 'notification', source: 'osc99', title: 'a b c', body: '' }]);
 });
 
 test('title and body are truncated with an ellipsis', () => {
@@ -541,4 +551,58 @@ test('a runaway sequence is counted and resynchronized', () => {
   d.feed(osc('777;notify;T;B'));
   assert.deepEqual(events, [{ kind: 'notification', source: 'osc777', title: 'T', body: 'B' }]);
   assert.ok(d.stats().overflowed > 0, 'the skipped window must be observable');
+});
+
+// --- code-review regressions (review-notify-bridge) --------------------------
+
+test('F2: a CR or LF ends an unterminated OSC instead of swallowing the screen', () => {
+  // No attacker needed: a CLI that crashes mid-write, or a child process
+  // sharing the pty, leaves an OSC open. Before the fix the next 8KiB of
+  // ordinary output became the notification body.
+  const events = [];
+  const d = createNotifyDetector({ onNotification: (e) => events.push(e) });
+  d.feed(`${ESC}]9;start`);
+  d.feed('normal output line 1\r\nline2\r\n');
+  d.feed(`and a bell${BEL}`);
+  assert.deepEqual(events, [], 'screen output must not be relayed as a notification');
+  assert.ok(d.stats().aborted > 0, 'the abandoned sequence is counted');
+});
+
+test('F2: scanning resumes at the control byte, so later sequences still work', () => {
+  const events = collect(`${ESC}]777;notify;T\nplain text${osc('777;notify;Real;Body')}`);
+  assert.deepEqual(events, [{ kind: 'notification', source: 'osc777', title: 'Real', body: 'Body' }]);
+});
+
+test('F2: an ESC that does not open ST also ends the string', () => {
+  const events = collect(`${ESC}]9;abc${ESC}[0m${osc('777;notify;Real;Body')}`);
+  assert.deepEqual(events.map((e) => e.title), ['Real']);
+});
+
+test('F2: a legitimate notification is unaffected', () => {
+  assertSplitInvariant(osc('777;notify;Claude Code;Waiting for your input'));
+});
+
+test('F2: tmux passthrough still works (its payload carries a real BEL)', () => {
+  // The DCS scanner deliberately does NOT abort on C0: the wrapped sequence's
+  // own terminator lives inside the payload.
+  const events = collect(tmuxWrap(osc('777;notify;T;B')));
+  assert.deepEqual(events, [{ kind: 'notification', source: 'osc777', title: 'T', body: 'B' }]);
+});
+
+test('F3: OSC 9 subcodes are an allow-list, so ConEmu sequences are not notifications', () => {
+  assert.deepEqual(collect(osc('9;9;/home/u/proj')), [], 'ConEmu set-working-directory');
+  assert.deepEqual(collect(osc('9;1;hello')), [], 'an unknown subcode must not leak into the body');
+  assert.deepEqual(collect(osc('9;2;42')), [], 'badge');
+  assert.deepEqual(collect(osc('9;4;1;50')), [], 'progress');
+  // The two accepted forms still work.
+  assert.deepEqual(collect(osc('9;plain message')).map((e) => e.body), ['plain message']);
+  assert.deepEqual(collect(osc('9;0;explicit notify')).map((e) => e.body), ['explicit notify']);
+});
+
+test('F8: an empty OSC 777 fires nothing, like the other two parsers', () => {
+  assert.deepEqual(collect(osc('777;notify;;')), []);
+  assert.deepEqual(collect(osc('777;notify;')), []);
+  assert.deepEqual(collect(osc('777;notify')), []);
+  // ...and a payload with only a title still does fire.
+  assert.equal(collect(osc('777;notify;T')).length, 1);
 });

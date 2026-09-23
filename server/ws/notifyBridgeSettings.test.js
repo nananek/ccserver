@@ -11,8 +11,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   normalizeBridgeSettings,
@@ -22,6 +22,8 @@ import {
   BRIDGE_CHANNELS,
   BRIDGE_DEFAULTS,
   BRIDGE_LIMITS,
+  getBridgeSettingsCached,
+  invalidateBridgeSettingsCache,
 } from './notifyBridgeSettings.js';
 import { resolveSandboxConfigPath } from './networkAllowlist.js';
 import { loadSandboxConfig } from './sandbox.js';
@@ -281,4 +283,67 @@ test('sandbox.config.example.json documents exactly the code defaults', () => {
     normalizeBridgeSettings(undefined),
     'the example notify.bridge block must normalize to the built-in defaults',
   );
+});
+
+// --- attacker review F2 / code review F9: atomic writes ----------------------
+
+test('the config is replaced atomically, never truncated in place', () => {
+  // A plain writeFileSync truncates first, so a crash or ENOSPC mid-write
+  // leaves a partial JSON document -- and server/index.js refuses to BOOT on a
+  // config it cannot parse. The swap must be a rename.
+  withConfig({ docker: true, notify: { discordWebhook: 'https://discord.example/hook' } }, (p) => {
+    const before = readFileSync(p, 'utf-8');
+    assert.equal(updateBridgeSettings({ enabled: true }).ok, true);
+    const after = readBack(p);
+    assert.equal(after.notify.bridge.enabled, true);
+    assert.equal(after.notify.discordWebhook, 'https://discord.example/hook');
+    assert.notEqual(readFileSync(p, 'utf-8'), before);
+    // No temp file is left behind on success.
+    const leftovers = readdirSync(dirname(p)).filter((f) => f.includes('.tmp-'));
+    assert.deepEqual(leftovers, []);
+  });
+});
+
+test('a write that cannot land is reported, not half-applied', () => {
+  // Point the config at a path whose directory does not exist: the temp write
+  // itself fails, so there is nothing to rename and nothing to clean up. The
+  // caller must hear about it rather than believe the save succeeded.
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-bridge-fail-'));
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = join(dir, 'no-such-dir', 'sandbox.config.json');
+  try {
+    const res = updateBridgeSettings({ enabled: true });
+    assert.equal(res.ok, false);
+    assert.equal(res.code, 'internal');
+    assert.match(res.message, /could not write the sandbox config/);
+    assert.deepEqual(readdirSync(dir), [], 'no stray temp file');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// --- attacker review F1: the settings cache ----------------------------------
+
+test('the cached read does not touch the filesystem within its TTL', () => {
+  withConfig({ notify: { bridge: { enabled: true } } }, (p) => {
+    invalidateBridgeSettingsCache();
+    const first = getBridgeSettingsCached(1_000_000);
+    assert.equal(first.enabled, true);
+    // Change the file underneath: a cached read must not see it yet.
+    writeFileSync(p, JSON.stringify({ notify: { bridge: { enabled: false } } }));
+    assert.equal(getBridgeSettingsCached(1_000_500).enabled, true, 'still cached');
+    assert.equal(getBridgeSettingsCached(1_001_001).enabled, false, 'TTL expired, re-read');
+  });
+});
+
+test('a write invalidates the cache, so the GUI sees its own change immediately', () => {
+  withConfig({ notify: { bridge: { enabled: false } } }, () => {
+    invalidateBridgeSettingsCache();
+    assert.equal(getBridgeSettingsCached(2_000_000).enabled, false);
+    assert.equal(updateBridgeSettings({ enabled: true }).ok, true);
+    // Same millisecond, well inside the TTL -- the PUT path must not be stale.
+    assert.equal(getBridgeSettingsCached(2_000_000).enabled, true);
+  });
 });

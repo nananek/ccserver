@@ -95,6 +95,18 @@ const CC_BACKSLASH = 0x5c;
 // caller resynchronizes instead of carrying.
 const OVERFLOW = Symbol('overflow');
 
+// Returned when a string was ABANDONED mid-sequence: a real terminal ends an
+// OSC string at any C0 control, not just at its terminator, and so must this
+// (review finding F2). Without it an unterminated OSC swallows up to
+// MAX_OSC_LEN of ordinary screen output into the notification body -- and that
+// needs no attacker at all: a CLI crashing mid-write, or a child process
+// sharing the pty interleaving its own output, is enough. Observed before the
+// fix: feeding "ESC]9;start", then "normal output line 1\r\nline2\r\n", then
+// "and a bell BEL" produced ONE notification whose body was the whole screen
+// fragment. The abort index is where scanning resumes, so those bytes go back
+// to being ordinary text.
+const ABORTED = Symbol('aborted');
+
 // C0 + DEL + C1. claude already maps these to spaces before emitting, but
 // nothing guarantees the other CLIs do.
 const CONTROL_RE = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f]', 'g');
@@ -144,30 +156,39 @@ function cleanBody(text) {
 function parseOsc777(rest) {
   const parts = rest.split(';');
   if (parts[0] !== 'notify') return null;
-  return {
-    source: 'osc777',
-    title: cleanTitle(parts[1] ?? ''),
-    body: cleanBody(parts.slice(2).join(';')),
-  };
+  const title = cleanTitle(parts[1] ?? '');
+  const body = cleanBody(parts.slice(2).join(';'));
+  // Review finding F8: this was the one parser of the three that fired on an
+  // entirely empty payload. It was harmless (the bridge dropped it as
+  // 'empty'), but only after paying for the whole policy path -- and an
+  // inconsistency between three parsers of the same thing is a bug waiting
+  // for someone to rely on it.
+  if (!title && !body) return null;
+  return { source: 'osc777', title, body };
 }
 
-// OSC 9 (iTerm2-style): `9;<text>`, but sharing its opcode with the
-// ConEmu/Windows-Terminal progress extension and with a badge form. Claude's
-// own enum is { NOTIFY: 0, BADGE: 2, PROGRESS: 4 }:
-//   9;4;1;50  progress 50%      -> dropped (streams continuously)
-//   9;2;...   badge             -> dropped
-//   9;0;text  explicit NOTIFY   -> the leading "0;" is stripped
-//   9;text    plain notify      -> used as-is
-// A message that genuinely begins with "2;" or "4;" is indistinguishable from
-// the progress form and is dropped; no real emitter does that, and the cost of
-// guessing wrong the other way is a notification storm.
+// OSC 9 (iTerm2-style): `9;<text>`, but sharing its opcode with a whole
+// sub-namespace. claude's own enum is { NOTIFY: 0, BADGE: 2, PROGRESS: 4 },
+// and ConEmu/Windows Terminal add more (9;9;<cwd> sets the working directory,
+// 9;1;... and others exist).
+//
+// This is an ALLOW-list, not a deny-list (review finding F3): only a payload
+// with no numeric subcode, or with the explicit NOTIFY subcode 0, is treated
+// as a notification. The first cut dropped just 2 and 4, so ConEmu's
+// `9;9;/home/u/proj` arrived as a notification reading "9;/home/u/proj".
+//   9;text      plain notify (what iTerm2 emits)  -> used as-is
+//   9;0;text    explicit NOTIFY                   -> the "0;" is stripped
+//   9;<n>;...   anything else                     -> dropped
+// The cost is that a message literally beginning with "<digits>;" is dropped.
+// That is the same asymmetry the deny-list version reasoned about, applied
+// consistently: a missed notification is a nuisance, a per-animation-frame
+// notification storm is an outage.
 function parseOsc9(rest) {
   const sub = /^(\d+)(?:;|$)/.exec(rest);
   let text = rest;
   if (sub) {
-    const code = Number(sub[1]);
-    if (code === 2 || code === 4) return null;
-    if (code === 0) text = rest.slice(sub[0].length);
+    if (Number(sub[1]) !== 0) return null;
+    text = rest.slice(sub[0].length);
   }
   const body = cleanBody(text);
   if (!body) return null;
@@ -200,7 +221,15 @@ function findOscEnd(s, from) {
     if (c === CC_ESC) {
       if (i + 1 >= s.length) return null; // the next byte decides; wait for it
       if (s.charCodeAt(i + 1) === CC_BACKSLASH) return { end: i, after: i + 2 };
+      // An ESC that does not open ST starts something else entirely; the
+      // string is over (xterm treats it the same way).
+      return { aborted: ABORTED, at: i };
     }
+    // Any other C0 control -- CR and LF above all, but also CAN/SUB, which
+    // exist precisely to cancel a sequence. None of them can appear in a
+    // notification payload: claude and opencode both sanitize before emitting,
+    // and this parser would strip them anyway.
+    if (c < 0x20) return { aborted: ABORTED, at: i };
   }
   return limit < hard ? null : OVERFLOW;
 }
@@ -213,6 +242,10 @@ function findDcsEnd(s, from) {
   const limit = Math.min(s.length, hard);
   let i = from;
   while (i < limit) {
+    // NOTE: deliberately no C0-abort here, unlike findOscEnd. A tmux/screen
+    // passthrough payload carries the WRAPPED sequence verbatim, terminator
+    // included -- so a BEL inside it is data, not the end of the DCS. Only ST
+    // (or MAX_OSC_LEN) ends a DCS.
     if (s.charCodeAt(i) !== CC_ESC) { i++; continue; }
     if (i + 1 >= s.length) return null;
     const next = s.charCodeAt(i + 1);
@@ -230,6 +263,7 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
   let evictedKitty = 0;
   let truncatedKitty = 0;
   let overflowed = 0;
+  let aborted = 0;
 
   function emit(event) {
     try {
@@ -355,6 +389,12 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
       if (type === ']') {
         const res = findOscEnd(s, esc + 2);
         if (res === null) return streaming ? esc : s.length;
+        if (res?.aborted === ABORTED) {
+          aborted += 1;
+          i = res.at;      // resume AT the control byte: it is ordinary output
+          cursor = res.at;
+          continue;
+        }
         if (res === OVERFLOW) {
           // Runaway sequence: skip the window we scanned without treating it
           // as screen text (it is sequence payload, not output), and
@@ -379,6 +419,12 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
         // splicing would copy the whole remaining buffer per wrapper.
         const res = findDcsEnd(s, esc + 2);
         if (res === null) return streaming ? esc : s.length;
+        if (res?.aborted === ABORTED) {
+          aborted += 1;
+          i = res.at;
+          cursor = res.at;
+          continue;
+        }
         if (res === OVERFLOW) {
           overflowed += 1;
           i = esc + 2 + MAX_OSC_LEN;
@@ -431,6 +477,6 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
       for (const e of kitty.values()) total += e.chars;
       return total;
     },
-    stats: () => ({ evictedKitty, truncatedKitty, overflowed }),
+    stats: () => ({ evictedKitty, truncatedKitty, overflowed, aborted }),
   };
 }

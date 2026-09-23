@@ -62,8 +62,8 @@
 //     rather than from a server log they are not reading;
 //   - bridgeStats() exposes the running totals.
 
-import { loadSandboxConfig } from './sandbox.js';
-import { sendNotification } from './notify.js';
+import { getBridgeSettingsCached } from './notifyBridgeSettings.js';
+import { sendNotification, listSubscriptions, resolvedDiscordWebhook } from './notify.js';
 import { createNotifyDetector } from './agentNotifyDetect.js';
 import { basename } from 'node:path';
 import { appDisplayName } from './appLaunch.js';
@@ -82,6 +82,7 @@ const stats = {
   throttled: 0,
   deduped: 0,
   capped: 0,
+  unreachable: 0,
   failed: 0,
 };
 
@@ -103,7 +104,7 @@ function flowState(session, now) {
       count: 0,
       lastDeliveredAt: 0,
       recent: new Map(), // sanitized text -> last seen ms
-      warned: { throttled: false, deduped: false, capped: false },
+      warned: { throttled: false, deduped: false, capped: false, unreachable: false },
     };
     session.notifyFlow = st;
   }
@@ -140,6 +141,21 @@ export function buildBridgeTitle(session) {
   return project ? `${app} · ${project}` : app;
 }
 
+// Defang the one string that means something structural downstream: notify.js
+// ends every payload with "\n\n_from: <host> · <project> · session <id>".
+// The agent cannot open a new line (the detector's sanitizer sees to that), so
+// it cannot forge that LINE -- but an attacker review showed it can still write
+// a convincing "... _from: ayaka · trusted-project · session deadbeef" inline,
+// which reads as genuine to someone skimming. Dropping the leading underscore
+// costs nothing legible and makes the real marker unforgeable in either
+// position. Everything else in the agent's text is left exactly as written:
+// the line it sits on is already labelled by a title the agent could not set.
+const FOOTER_MARKER_RE = /_from\s*:/gi;
+
+function defangFooterMarker(text) {
+  return text.replace(FOOTER_MARKER_RE, 'from:');
+}
+
 // The agent's own title and body collapsed into one line. Both arrive already
 // sanitized and length-capped from the detector; joining them here is purely
 // presentational.
@@ -147,26 +163,32 @@ export function buildBridgeBody(event) {
   if (event.kind === 'bell') return 'Terminal bell';
   const title = event.title ? String(event.title) : '';
   const body = event.body ? String(event.body) : '';
-  if (title && body) return `${title} — ${body}`;
-  return title || body || '';
+  const joined = (title && body) ? `${title} — ${body}` : (title || body || '');
+  return defangFooterMarker(joined);
 }
 
-// Deliver, honoring the policy. Returns a small result object describing what
-// happened, which is what the tests assert on (and what makes "it was
-// suppressed" observable rather than a silent return).
-export async function handleAgentNotification(session, event, deps = {}) {
-  const now = deps.now ? deps.now() : Date.now();
-  const send = deps.sendNotification || sendNotification;
-  const bridge = (deps.settings || loadSandboxConfig().notify?.bridge) || null;
-
-  if (!bridge || !bridge.enabled) return { delivered: false, reason: 'disabled' };
-  if (event.kind === 'bell' && !bridge.captureBell) return { delivered: false, reason: 'bell-disabled' };
+// The policy decision, and it is deliberately SYNCHRONOUS and allocation-free
+// on the reject paths (attacker review F1).
+//
+// The first cut consulted the settings -- a readFileSync + JSON.parse -- and
+// then allocated a promise, for EVERY detected notification, including the
+// ~99.9% a burst gets suppressed. That handed an agent a cheaper DoS than the
+// parser bug it replaced: 64KiB of OSC 777 stalled the event loop for ~370ms.
+// Now a suppressed event costs a Map lookup and two integer compares, and
+// never reaches the microtask queue at all -- which also bounds that queue by
+// the rate limit itself (at most maxPerHour dispatches per session per hour)
+// rather than by how fast the agent can write.
+//
+// Returns { action: 'deliver' | 'notice' | 'drop', reason, body }.
+export function classifyNotification(session, event, bridge, now) {
+  if (!bridge || !bridge.enabled) return { action: 'drop', reason: 'disabled' };
+  if (event.kind === 'bell' && !bridge.captureBell) return { action: 'drop', reason: 'bell-disabled' };
   if (!Array.isArray(bridge.channels) || bridge.channels.length === 0) {
-    return { delivered: false, reason: 'no-channels' };
+    return { action: 'drop', reason: 'no-channels' };
   }
 
   const body = buildBridgeBody(event);
-  if (!body) return { delivered: false, reason: 'empty' };
+  if (!body) return { action: 'drop', reason: 'empty' };
 
   const st = flowState(session, now);
 
@@ -178,51 +200,100 @@ export async function handleAgentNotification(session, event, deps = {}) {
     stats.deduped += 1;
     warnOnce(session, st, 'deduped',
       `suppressing repeated notification "${body.slice(0, 60)}" (dedupeWindowMs=${bridge.dedupeWindowMs})`);
-    return { delivered: false, reason: 'deduped' };
+    return { action: 'drop', reason: 'deduped' };
   }
 
   if (st.lastDeliveredAt && now - st.lastDeliveredAt < bridge.minIntervalMs) {
     stats.throttled += 1;
     warnOnce(session, st, 'throttled',
       `dropping notifications closer together than minIntervalMs=${bridge.minIntervalMs}ms`);
-    return { delivered: false, reason: 'throttled' };
+    return { action: 'drop', reason: 'throttled' };
   }
 
   if (st.count >= bridge.maxPerHour) {
     stats.capped += 1;
+    if (st.warned.capped) return { action: 'drop', reason: 'capped' };
     // The one-shot notice: the human finds out from the channel they were
     // watching, not from a log. Bounded to one per session per hour by the
     // warned flag, which resets with the window.
-    if (!st.warned.capped) {
-      const resumesAt = new Date(st.windowStart + HOUR_MS).toISOString();
-      warnOnce(session, st, 'capped',
-        `hit maxPerHour=${bridge.maxPerHour}; further notifications are suppressed until ${resumesAt}`);
-      try {
-        await send({
-          title: buildBridgeTitle(session),
-          body: `Notification rate limit reached (${bridge.maxPerHour}/hour). Further notifications from this session are suppressed until ${resumesAt}.`,
-          level: 'warning',
-          channels: bridge.channels,
-        }, notifyIdentity(session));
-      } catch {
-        // The notice is best effort; never let it break the data path.
-      }
-    }
-    return { delivered: false, reason: 'capped' };
+    const resumesAt = new Date(st.windowStart + HOUR_MS).toISOString();
+    warnOnce(session, st, 'capped',
+      `hit maxPerHour=${bridge.maxPerHour}; further notifications are suppressed until ${resumesAt}`);
+    return {
+      action: 'notice',
+      reason: 'capped',
+      body: `Notification rate limit reached (${bridge.maxPerHour}/hour). Further notifications from this session are suppressed until ${resumesAt}.`,
+    };
   }
 
   st.count += 1;
   st.lastDeliveredAt = now;
   st.recent.set(body, now);
   while (st.recent.size > DEDUPE_MAX_KEYS) st.recent.delete(st.recent.keys().next().value);
+  return { action: 'deliver', reason: 'ok', body };
+}
+
+// Which of the configured channels can actually reach a human right now.
+// Checked here rather than in classifyNotification because it is the one part
+// of the policy that needs live state (the webhook config, the push
+// subscription count) -- and `dispatch` runs at most maxPerHour times an hour,
+// so paying for it here costs nothing a burst can amplify.
+function reachableChannels(bridge, deps) {
+  if (deps.reachableChannels) return deps.reachableChannels(bridge);
+  return bridge.channels.filter((ch) => {
+    if (ch === 'discord') return !!resolvedDiscordWebhook() || listSubscriptions().length > 0;
+    if (ch === 'webpush') return webpushReachable();
+    return false;
+  });
+}
+
+// Resolved lazily so this module does not depend on the push store existing
+// yet (Step 4/5). Returns false until it does.
+let webpushReachableFn = () => false;
+export function setWebpushReachable(fn) {
+  webpushReachableFn = typeof fn === 'function' ? fn : (() => false);
+}
+function webpushReachable() {
+  try {
+    return !!webpushReachableFn();
+  } catch {
+    return false;
+  }
+}
+
+// The async half: only ever reached for an event that is actually going out.
+async function dispatch(session, decision, bridge, deps) {
+  const send = deps.sendNotification || sendNotification;
+
+  // Review finding F5: a bridge configured with only a channel that nothing
+  // backs -- `channels: ["webpush"]` with no push subscription registered, say
+  // -- used to sail through, have sendNotification deliver to zero targets,
+  // and still report delivered:true. That is exactly the failure shape the
+  // "ccserver-notify is DISABLED" boot warning was added for: the feature
+  // looks configured, nothing arrives, and nothing says why.
+  const reachable = reachableChannels(bridge, deps);
+  if (reachable.length === 0) {
+    stats.unreachable += 1;
+    const st = session.notifyFlow;
+    if (st) {
+      warnOnce(session, st, 'unreachable',
+        `channels [${bridge.channels.join(', ')}] are selected but none is configured to reach anyone; `
+        + 'set notify.discordWebhook / notify.subscriptions, or register a Web Push subscription');
+    }
+    return { delivered: false, reason: 'no-reachable-channel' };
+  }
 
   try {
     const res = await send({
       title: buildBridgeTitle(session),
-      body,
-      level: bridge.level,
-      channels: bridge.channels,
+      body: decision.body,
+      // A rate-limit notice is ccserver speaking, not the agent, and it is the
+      // one thing the human must not miss -- so it goes out as a warning
+      // regardless of the configured level for agent traffic.
+      level: decision.action === 'notice' ? 'warning' : bridge.level,
+      channels: reachable,
     }, notifyIdentity(session));
+    if (decision.action === 'notice') return { delivered: false, reason: 'capped' };
     stats.delivered += 1;
     return { delivered: true, result: res };
   } catch (err) {
@@ -232,6 +303,17 @@ export async function handleAgentNotification(session, event, deps = {}) {
     console.warn(`[notify-bridge] ${sessionLabel(session)}: delivery failed: ${err?.message || err}`);
     return { delivered: false, reason: 'error' };
   }
+}
+
+// Classify + deliver. Kept as one call for tests and any future non-pty
+// producer; the pty path uses the two halves separately so a suppressed event
+// never becomes a promise (see attachNotifyDetector).
+export async function handleAgentNotification(session, event, deps = {}) {
+  const now = deps.now ? deps.now() : Date.now();
+  const bridge = deps.settings || getBridgeSettingsCached(now);
+  const decision = classifyNotification(session, event, bridge, now);
+  if (decision.action === 'drop') return { delivered: false, reason: decision.reason };
+  return dispatch(session, decision, bridge, deps);
 }
 
 // The per-connection attribution notify.js appends as "_from: host · project ·
@@ -254,10 +336,17 @@ export function attachNotifyDetector(session, bridge, deps = {}) {
   session.notifyDetector = createNotifyDetector({
     allowBell: !!bridge.captureBell,
     onNotification: (event) => {
-      // Fire-and-forget: the pty data handler must never await delivery.
+      // Everything up to the decision is synchronous and cheap, so a burst the
+      // rate limiter is going to reject costs no I/O and queues no microtask
+      // (attacker review F1). Only an event that is actually going out gets a
+      // promise -- and the pty data handler still never awaits one.
+      const now = deps.now ? deps.now() : Date.now();
+      const settings = deps.settings || getBridgeSettingsCached(now);
+      const decision = classifyNotification(session, event, settings, now);
+      if (decision.action === 'drop') return;
       Promise.resolve()
-        .then(() => handleAgentNotification(session, event, deps))
-        .catch(() => { /* handleAgentNotification already swallows its own */ });
+        .then(() => dispatch(session, decision, settings, deps))
+        .catch(() => { /* dispatch swallows its own */ });
     },
   });
   return session.notifyDetector;

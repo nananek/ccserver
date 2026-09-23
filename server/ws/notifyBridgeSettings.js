@@ -31,9 +31,9 @@
 // agentNotifyDetect.js, and attribution is attached later, in notifyBridge.js
 // (Step 3) -- neither is configurable, on purpose.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { APPS } from './appLaunch.js';
-import { resolveSandboxConfigPath } from './networkAllowlist.js';
+import { resolveSandboxConfigPath, writeSandboxConfigAtomic } from './networkAllowlist.js';
 
 // Which agent CLIs the detector is fed for. Not every app can be made to emit
 // a notification: claude needs `preferredNotifChannel` injected and opencode
@@ -56,6 +56,14 @@ export const BRIDGE_LEVELS = Object.freeze(['info', 'success', 'warning', 'error
 // one means "silently drop everything", both of which look like a broken
 // feature rather than a setting. Exported for the route's error messages and
 // for the GUI's input constraints.
+// Every key `updateBridgeSettings` accepts. Kept next to the schema so adding a
+// setting cannot forget to make it patchable (or, worse, make it unpatchable
+// while the GUI happily sends it).
+export const PATCHABLE_KEYS = Object.freeze([
+  'enabled', 'apps', 'injectConfig', 'channels', 'captureBell',
+  'minIntervalMs', 'dedupeWindowMs', 'maxPerHour', 'level',
+]);
+
 export const BRIDGE_LIMITS = Object.freeze({
   minIntervalMs: { min: 0, max: 600_000 },
   dedupeWindowMs: { min: 0, max: 3_600_000 },
@@ -151,6 +159,37 @@ export function getBridgeSettings() {
   return normalizeBridgeSettings(notify?.bridge);
 }
 
+// Cached read for the per-notification hot path (attacker review F1).
+//
+// getBridgeSettings() re-reads and re-parses sandbox.config.json every call,
+// which is right for a REST handler and catastrophic for a path an agent can
+// trigger at will: the bridge consulted it once per detected notification --
+// INCLUDING the ones it was about to suppress -- so a burst of OSC 777 turned
+// into thousands of synchronous readFileSync+JSON.parse calls. Measured at
+// 0.267ms per read, 64KiB of pty output stalled the whole event loop for
+// ~370ms, i.e. the parser's own O(n^2) DoS re-created one layer up.
+//
+// The fix is a short TTL rather than a snapshot taken at session launch,
+// because the delivery knobs are documented as taking effect immediately.
+// Within the TTL there is no syscall at all; the GUI's own PUT calls
+// invalidateBridgeSettingsCache() directly, so an operator's change is
+// instant and the TTL only bounds how stale a HAND EDIT of the file can be.
+const BRIDGE_CACHE_TTL_MS = 1000;
+let cached = null;
+let cachedAt = 0;
+
+export function getBridgeSettingsCached(now = Date.now()) {
+  if (cached && now - cachedAt < BRIDGE_CACHE_TTL_MS) return cached;
+  cached = getBridgeSettings();
+  cachedAt = now;
+  return cached;
+}
+
+export function invalidateBridgeSettingsCache() {
+  cached = null;
+  cachedAt = 0;
+}
+
 // Strict validators for the write path: unlike the read path above, a bad
 // value is reported rather than silently replaced, so the GUI can say what was
 // wrong instead of appearing to accept an edit it then discards.
@@ -173,6 +212,17 @@ function validateInt(value, limits, name) {
 export function updateBridgeSettings(patch = {}) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
     return { ok: false, code: 'validation', message: 'patch must be an object' };
+  }
+  // Attacker review F5: an unknown key used to be accepted with a 200 and then
+  // silently dropped, so a typo ("enabeld") looked like a successful save that
+  // did nothing. Reads stay lenient; writes name what they did not understand.
+  const unknown = Object.keys(patch).filter((k) => !PATCHABLE_KEYS.includes(k));
+  if (unknown.length > 0) {
+    return {
+      ok: false,
+      code: 'validation',
+      message: `unknown setting(s): ${unknown.join(', ')} (known: ${PATCHABLE_KEYS.join(', ')})`,
+    };
   }
   const { raw, corrupt } = readRawConfig();
   if (corrupt) {
@@ -224,7 +274,7 @@ export function updateBridgeSettings(patch = {}) {
   next.notify = notify;
 
   try {
-    writeFileSync(resolveSandboxConfigPath(), `${JSON.stringify(next, null, 2)}\n`);
+    writeSandboxConfigAtomic(next);
   } catch (err) {
     return {
       ok: false,
@@ -232,5 +282,6 @@ export function updateBridgeSettings(patch = {}) {
       message: `could not write the sandbox config (${resolveSandboxConfigPath()}): ${err.message}`,
     };
   }
+  invalidateBridgeSettingsCache();
   return { ok: true, settings: normalizeBridgeSettings(bridge) };
 }

@@ -1199,6 +1199,22 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   return { sessionId: id, session };
 }
 
+// Aggregate detector counters across every armed session (review finding F4:
+// these were incremented but unreachable -- documented as an observability
+// pillar with no way to observe them). Served by GET /api/notify-settings.
+// `armed` is how many sessions are actually being watched, which is the first
+// thing to check when notifications are not arriving.
+export function notifyDetectorStats() {
+  const total = { armed: 0, evictedKitty: 0, truncatedKitty: 0, overflowed: 0, aborted: 0 };
+  for (const session of sessions.values()) {
+    if (!session.notifyDetector) continue;
+    total.armed += 1;
+    const s = session.notifyDetector.stats();
+    for (const k of ['evictedKitty', 'truncatedKitty', 'overflowed', 'aborted']) total[k] += s[k] || 0;
+  }
+  return total;
+}
+
 export function getSession(id) {
   return sessions.get(id);
 }

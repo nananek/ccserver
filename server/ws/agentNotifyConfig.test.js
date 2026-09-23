@@ -97,3 +97,11 @@ test('capture is possible for apps that cannot be injected into', () => {
   assert.equal(shouldCaptureNotifications({ shell: false, app: 'copilot', bridge }), true);
   assert.deepEqual(buildAgentNotifyArgsAndEnv('copilot', bridge), EMPTY);
 });
+
+test('F7: no channel selected means no detector at all', () => {
+  const bridge = normalizeBridgeSettings({ enabled: true, channels: [] });
+  assert.equal(shouldCaptureNotifications({ shell: false, app: 'claude', bridge }), false,
+    'scanning every pty byte for a feature configured to go nowhere is pure waste');
+  const withChannel = normalizeBridgeSettings({ enabled: true, channels: ['discord'] });
+  assert.equal(shouldCaptureNotifications({ shell: false, app: 'claude', bridge: withChannel }), true);
+});

@@ -89,10 +89,22 @@ export function buildAgentNotifyArgsAndEnv(app, bridge) {
  * Whether a session should have a detector attached at all. Capture is decided
  * once, at launch, and never re-read per pty chunk: loadSandboxConfig() parses
  * the config file on every call, and onData is the hottest path in the server.
- * Delivery-side settings (channels, rate limits) ARE re-read per notification,
- * which is rare -- see notifyBridge.js.
+ *
+ * Delivery-side settings are resolved per notification instead -- but through
+ * getBridgeSettingsCached(), NOT loadSandboxConfig(). The first cut called the
+ * latter and justified it as "rare"; it is not rare, because an agent chooses
+ * how many notifications to emit, and two independent reviews measured the
+ * resulting event-loop stall. See notifyBridge.js's classifyNotification.
  */
 export function shouldCaptureNotifications({ shell, app, bridge }) {
   if (shell || !app || !bridge || !bridge.enabled) return false;
-  return Array.isArray(bridge.apps) && bridge.apps.includes(app);
+  if (!Array.isArray(bridge.apps) || !bridge.apps.includes(app)) return false;
+  // Review finding F7: with no channel selected, every pty chunk was still
+  // scanned and every event still built, only to be dropped at the very end.
+  // `channels` is otherwise a delivery-time setting, so this makes an EMPTY
+  // list (and only an empty list) launch-time as well -- adding the first
+  // channel takes effect on the next launch. That asymmetry is worth it: the
+  // alternative is scanning every byte of output for a feature that is
+  // configured to go nowhere.
+  return Array.isArray(bridge.channels) && bridge.channels.length > 0;
 }

@@ -184,6 +184,13 @@ function deliverDispatcher() {
   return ssrfSafeDispatcher;
 }
 
+// Shared with webPush.js, which POSTs to an endpoint string that likewise
+// arrives from outside the server. Exported rather than duplicated so there is
+// one lookup guard to audit, and so a fix to it covers both callers.
+export function getSsrfSafeDispatcher() {
+  return deliverDispatcher();
+}
+
 export function getNotifySockPath() {
   return join(hostRuntimeDir(), NOTIFY_SOCKET_DIR_NAME, 'sock');
 }
@@ -206,6 +213,13 @@ export function notifyEnabled() {
 export function shouldInjectNotify({ shell, app, groupId, groupRole, notifyEnabled }) {
   return !shell && app != null && app !== 'copilot' && app !== 'commandcode' && !!notifyEnabled
     && (groupId == null || groupRole === 'orchestrator');
+}
+
+// The effective Discord webhook, with the same env-over-config precedence
+// loadNotifyConfig applies. Exported so notifyBridge can answer "can the
+// discord channel actually reach anyone" without re-implementing that rule.
+export function resolvedDiscordWebhook() {
+  return loadNotifyConfig().discordWebhook || null;
 }
 
 export function listSubscriptions() {

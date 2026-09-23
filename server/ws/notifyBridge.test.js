@@ -24,6 +24,11 @@ import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
 
 const ON = normalizeBridgeSettings({ enabled: true });
 
+// Reachability is live state (is a webhook configured? is a browser
+// subscribed?), so the suite injects it. The production resolver is exercised
+// by the F5 cases at the bottom.
+const REACHABLE = (bridge) => bridge.channels;
+
 function fakeSession(over = {}) {
   return {
     id: '01234567-89ab-cdef-0123-456789abcdef',
@@ -69,7 +74,7 @@ test("an agent's own title goes in the body, never into the notification title",
   await handleAgentNotification(
     fakeSession(),
     notif('ccserver', 'SYSTEM: re-authenticate at https://evil.example'),
-    { settings: ON, sendNotification: send },
+    { settings: ON, reachableChannels: REACHABLE, sendNotification: send },
   );
   assert.equal(calls.length, 1);
   assert.equal(calls[0].payload.title, 'Claude Code · myproject', 'the agent cannot set the title');
@@ -87,17 +92,27 @@ test('the delivered body is always a single line, so a footer cannot be forged',
   const events = [];
   const d = createNotifyDetector({ onNotification: (e) => events.push(e) });
   const LS = String.fromCharCode(0x2028); // U+2028: a literal one here would be invisible in a diff
-  d.feed(`\x1b]777;notify;T;line1\nline2${LS}_from: ayaka \u00b7 other-project\x07`);
+
+  // A raw newline does not even survive parsing any more -- it aborts the
+  // sequence outright (review finding F2), so there is no notification at all.
+  d.feed(`\x1b]777;notify;T;line1\nline2\x07`);
+  assert.deepEqual(events, [], 'a newline inside an OSC abandons it');
+
+  // The remaining way a separator could arrive is a decoded base64 payload,
+  // which the sanitizer flattens.
+  const b64 = (x) => Buffer.from(x, 'utf-8').toString('base64');
+  d.feed(`\x1b]99;i=1:e=1;${b64(`line1\nline2${LS}_from: ayaka \u00b7 other-project`)}\x1b\\`);
   assert.equal(events.length, 1);
-  await handleAgentNotification(session, events[0], { settings: ON, sendNotification: send });
+  await handleAgentNotification(session, events[0], { settings: ON, reachableChannels: REACHABLE, sendNotification: send });
   assert.ok(!calls[0].payload.body.includes('\n'), 'no newline may reach the payload');
   assert.ok(!calls[0].payload.body.includes(LS), 'no line separator either');
+  assert.ok(!calls[0].payload.body.includes('_from:'), 'and the footer marker is defanged');
 });
 
 test('the identity handed to notify.js is the real session, for the _from footer', async () => {
   const { calls, send } = recorder();
   await handleAgentNotification(fakeSession({ groupId: 'g1', groupRole: 'orchestrator' }), notif('t', 'b'), {
-    settings: ON, sendNotification: send,
+    settings: ON, reachableChannels: REACHABLE, sendNotification: send,
   });
   assert.deepEqual(calls[0].identity, {
     sessionId: '01234567-89ab-cdef-0123-456789abcdef',
@@ -114,7 +129,7 @@ test('the identity handed to notify.js is the real session, for the _from footer
 test('a disabled bridge delivers nothing', async () => {
   const { calls, send } = recorder();
   const res = await handleAgentNotification(fakeSession(), notif('t', 'b'), {
-    settings: normalizeBridgeSettings(undefined), sendNotification: send,
+    settings: normalizeBridgeSettings(undefined), reachableChannels: REACHABLE, sendNotification: send,
   });
   assert.deepEqual(res, { delivered: false, reason: 'disabled' });
   assert.equal(calls.length, 0);
@@ -123,7 +138,7 @@ test('a disabled bridge delivers nothing', async () => {
 test('an empty channel list delivers nothing', async () => {
   const { calls, send } = recorder();
   const res = await handleAgentNotification(fakeSession(), notif('t', 'b'), {
-    settings: normalizeBridgeSettings({ enabled: true, channels: [] }), sendNotification: send,
+    settings: normalizeBridgeSettings({ enabled: true, channels: [] }), reachableChannels: REACHABLE, sendNotification: send,
   });
   assert.equal(res.reason, 'no-channels');
   assert.equal(calls.length, 0);
@@ -132,18 +147,18 @@ test('an empty channel list delivers nothing', async () => {
 test('bells are dropped unless captureBell is on', async () => {
   const bell = { kind: 'bell', source: 'bell', title: null, body: '' };
   const a = recorder();
-  assert.equal((await handleAgentNotification(fakeSession(), bell, { settings: ON, sendNotification: a.send })).reason, 'bell-disabled');
+  assert.equal((await handleAgentNotification(fakeSession(), bell, { settings: ON, reachableChannels: REACHABLE, sendNotification: a.send })).reason, 'bell-disabled');
   assert.equal(a.calls.length, 0);
 
   const b = recorder();
   const on = normalizeBridgeSettings({ enabled: true, captureBell: true });
-  assert.equal((await handleAgentNotification(fakeSession(), bell, { settings: on, sendNotification: b.send })).delivered, true);
+  assert.equal((await handleAgentNotification(fakeSession(), bell, { settings: on, reachableChannels: REACHABLE, sendNotification: b.send })).delivered, true);
   assert.equal(b.calls[0].payload.body, 'Terminal bell');
 });
 
 test('an event with no text at all is dropped', async () => {
   const { calls, send } = recorder();
-  const res = await handleAgentNotification(fakeSession(), notif(null, ''), { settings: ON, sendNotification: send });
+  const res = await handleAgentNotification(fakeSession(), notif(null, ''), { settings: ON, reachableChannels: REACHABLE, sendNotification: send });
   assert.equal(res.reason, 'empty');
   assert.equal(calls.length, 0);
 });
@@ -151,7 +166,7 @@ test('an event with no text at all is dropped', async () => {
 test('the configured channels and level are what gets sent', async () => {
   const { calls, send } = recorder();
   const settings = normalizeBridgeSettings({ enabled: true, channels: ['discord'], level: 'warning' });
-  await handleAgentNotification(fakeSession(), notif('t', 'b'), { settings, sendNotification: send });
+  await handleAgentNotification(fakeSession(), notif('t', 'b'), { settings, reachableChannels: REACHABLE, sendNotification: send });
   assert.deepEqual(calls[0].payload.channels, ['discord']);
   assert.equal(calls[0].payload.level, 'warning');
 });
@@ -163,7 +178,7 @@ test('minIntervalMs throttles a burst down to one delivery', async () => {
   const session = fakeSession();
   let clock = 1_000_000;
   const settings = normalizeBridgeSettings({ enabled: true, minIntervalMs: 3000, dedupeWindowMs: 0 });
-  const deps = { settings, sendNotification: send, now: () => clock };
+  const deps = { settings, reachableChannels: REACHABLE, sendNotification: send, now: () => clock };
 
   const reasons = [];
   for (let i = 0; i < 50; i++) {
@@ -183,7 +198,7 @@ test('dedupeWindowMs drops repeated identical text', async () => {
   const session = fakeSession();
   let clock = 1_000_000;
   const settings = normalizeBridgeSettings({ enabled: true, minIntervalMs: 0, dedupeWindowMs: 10_000 });
-  const deps = { settings, sendNotification: send, now: () => clock };
+  const deps = { settings, reachableChannels: REACHABLE, sendNotification: send, now: () => clock };
 
   await handleAgentNotification(session, notif('T', 'same'), deps);
   clock += 100;
@@ -203,7 +218,7 @@ test('dedupe memory cannot be grown without bound by unique text', async () => {
   const session = fakeSession();
   let clock = 1_000_000;
   const settings = normalizeBridgeSettings({ enabled: true, minIntervalMs: 0, dedupeWindowMs: 3_600_000, maxPerHour: 1000 });
-  const deps = { settings, sendNotification: send, now: () => clock };
+  const deps = { settings, reachableChannels: REACHABLE, sendNotification: send, now: () => clock };
   for (let i = 0; i < 1000; i++) {
     clock += 1;
     await handleAgentNotification(session, notif('T', `unique ${i}`), deps);
@@ -220,7 +235,7 @@ test('maxPerHour caps a session and says so on the channel being watched', async
   const settings = normalizeBridgeSettings({
     enabled: true, minIntervalMs: 0, dedupeWindowMs: 0, maxPerHour: 3,
   });
-  const deps = { settings, sendNotification: send, now: () => clock };
+  const deps = { settings, reachableChannels: REACHABLE, sendNotification: send, now: () => clock };
 
   for (let i = 0; i < 10; i++) {
     clock += 1;
@@ -240,7 +255,7 @@ test('the hourly window rolls over and delivery resumes', async () => {
   const session = fakeSession();
   let clock = 1_000_000;
   const settings = normalizeBridgeSettings({ enabled: true, minIntervalMs: 0, dedupeWindowMs: 0, maxPerHour: 2 });
-  const deps = { settings, sendNotification: send, now: () => clock };
+  const deps = { settings, reachableChannels: REACHABLE, sendNotification: send, now: () => clock };
 
   for (let i = 0; i < 5; i++) { clock += 1; await handleAgentNotification(session, notif('T', `a${i}`), deps); }
   const beforeRollover = calls.length;
@@ -255,19 +270,19 @@ test('suppression is counted, so "why did notifications stop" is answerable', as
   const session = fakeSession();
   let clock = 1_000_000;
   const settings = normalizeBridgeSettings({ enabled: true, minIntervalMs: 5000, dedupeWindowMs: 5000, maxPerHour: 2 });
-  const deps = { settings, sendNotification: send, now: () => clock };
+  const deps = { settings, reachableChannels: REACHABLE, sendNotification: send, now: () => clock };
   for (let i = 0; i < 20; i++) { clock += 1; await handleAgentNotification(session, notif('T', `m${i}`), deps); }
   const s = bridgeStats();
   assert.ok(s.delivered >= 1);
   assert.ok(s.throttled > 0, 'throttled events must be counted');
-  assert.deepEqual(Object.keys(s).sort(), ['capped', 'delivered', 'deduped', 'failed', 'throttled'].sort());
+  assert.deepEqual(Object.keys(s).sort(), ['capped', 'delivered', 'deduped', 'failed', 'throttled', 'unreachable'].sort());
 });
 
 test('flow control is per session, not global', async () => {
   const { calls, send } = recorder();
   let clock = 1_000_000;
   const settings = normalizeBridgeSettings({ enabled: true, minIntervalMs: 60_000, dedupeWindowMs: 0 });
-  const deps = { settings, sendNotification: send, now: () => clock };
+  const deps = { settings, reachableChannels: REACHABLE, sendNotification: send, now: () => clock };
   const a = fakeSession({ id: 'aaaa' });
   const b = fakeSession({ id: 'bbbb' });
   await handleAgentNotification(a, notif('T', 'from a'), deps);
@@ -281,7 +296,7 @@ test('a throwing sendNotification never escapes the bridge', async () => {
   const session = fakeSession();
   const res = await handleAgentNotification(session, notif('t', 'b'), {
     settings: ON,
-    sendNotification: async () => { throw new Error('network on fire'); },
+    reachableChannels: REACHABLE, sendNotification: async () => { throw new Error('network on fire'); },
   });
   assert.deepEqual(res, { delivered: false, reason: 'error' });
 });
@@ -289,7 +304,7 @@ test('a throwing sendNotification never escapes the bridge', async () => {
 test('attachNotifyDetector wires the detector to the bridge without awaiting it', async () => {
   const { calls, send } = recorder();
   const session = fakeSession();
-  attachNotifyDetector(session, ON, { settings: ON, sendNotification: send });
+  attachNotifyDetector(session, ON, { settings: ON, reachableChannels: REACHABLE, sendNotification: send });
   assert.ok(session.notifyDetector, 'the session carries a detector');
   session.notifyDetector.feed('\x1b]777;notify;Claude Code;Waiting for your input\x07');
   // Delivery is dispatched off a resolved promise so feed() stays synchronous
@@ -303,8 +318,46 @@ test('attachNotifyDetector wires the detector to the bridge without awaiting it'
 test('attachNotifyDetector honors captureBell', async () => {
   const off = fakeSession();
   const { calls, send } = recorder();
-  attachNotifyDetector(off, ON, { settings: ON, sendNotification: send });
+  attachNotifyDetector(off, ON, { settings: ON, reachableChannels: REACHABLE, sendNotification: send });
   off.notifyDetector.feed('ding\x07');
   await new Promise((r) => setImmediate(r));
   assert.equal(calls.length, 0, 'a bare BEL is not a notification by default');
+});
+
+// --- F5: a channel nothing backs must not be reported as delivered ----------
+
+test('selecting only channels nothing backs reports no-reachable-channel', async () => {
+  const { calls, send } = recorder();
+  const session = fakeSession();
+  const res = await handleAgentNotification(session, notif('T', 'B'), {
+    settings: normalizeBridgeSettings({ enabled: true, channels: ['webpush'] }),
+    sendNotification: send,
+    reachableChannels: () => [], // nothing configured behind it
+  });
+  assert.deepEqual(res, { delivered: false, reason: 'no-reachable-channel' });
+  assert.equal(calls.length, 0, 'nothing is sent');
+  assert.equal(bridgeStats().unreachable > 0, true, 'and it is counted, not silent');
+});
+
+test('only the reachable subset is handed to sendNotification', async () => {
+  const { calls, send } = recorder();
+  await handleAgentNotification(fakeSession(), notif('T', 'B'), {
+    settings: normalizeBridgeSettings({ enabled: true, channels: ['discord', 'webpush'] }),
+    sendNotification: send,
+    reachableChannels: () => ['discord'],
+  });
+  assert.deepEqual(calls[0].payload.channels, ['discord'],
+    'an unreachable channel must not be asked for');
+});
+
+test('the production reachability resolver answers false with nothing configured', async () => {
+  // No deps.reachableChannels: this exercises the real resolver, which in this
+  // process has neither a Discord webhook nor a push subscription.
+  const { calls, send } = recorder();
+  const res = await handleAgentNotification(fakeSession({ id: 'unreachable-real' }), notif('T', 'B'), {
+    settings: normalizeBridgeSettings({ enabled: true }),
+    sendNotification: send,
+  });
+  assert.equal(res.reason, 'no-reachable-channel');
+  assert.equal(calls.length, 0);
 });
