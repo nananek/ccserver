@@ -3,7 +3,11 @@
 // server/ws/sessionManager.js. Kept separate from its caller so the parsing
 // rules themselves stay directly testable.
 
-export const DEFAULT_SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2h: no viewer attached, pty still running
+// 12h: no viewer attached, pty still running. Long enough to survive an
+// overnight browser/peer disconnect; operators who want the previous 2h (or
+// anything else) set CCSERVER_SESSION_TIMEOUT_MS explicitly, and 0 disables
+// idle teardown entirely.
+export const DEFAULT_SESSION_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 // Raised from 30s: a pty that dies while nobody is attached used to take the
 // whole session with it half a minute later, so reopening the tab found
 // SESSION_NOT_FOUND and had to relaunch+resume with no way to see why the

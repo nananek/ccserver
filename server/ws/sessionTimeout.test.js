@@ -1,7 +1,8 @@
 // Session destroy timeouts are operator-tunable. Sessions used to be killed
-// after a hard-coded 2h with no client attached, and reaped 30s after their
-// pty exited, with no way to change either -- so a session that died while
-// the tab was closed was gone (and unexplained) by the time anyone looked.
+// after a hard-coded idle timeout with no client attached, and reaped 30s
+// after their pty exited, with no way to change either -- so a session that
+// died while the tab was closed was gone (and unexplained) by the time
+// anyone looked.
 //
 // This file runs with the idle timeout DISABLED and a 1s exited timeout, set
 // before sessionManager is imported (it resolves both at module load). Test
@@ -39,15 +40,15 @@ after(() => {
 
 test('resolveSessionTimeoutMs: env overrides, 0 disables, garbage falls back', () => {
   const { resolveSessionTimeoutMs } = sessionManager;
-  const TWO_HOURS = 2 * 60 * 60 * 1000;
+  const TWELVE_HOURS = 12 * 60 * 60 * 1000;
 
-  assert.equal(resolveSessionTimeoutMs({}), TWO_HOURS, 'unset keeps the historical 2h');
-  assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '' }), TWO_HOURS, 'empty is unset');
-  assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '   ' }), TWO_HOURS, 'blank is unset');
+  assert.equal(resolveSessionTimeoutMs({}), TWELVE_HOURS, 'unset keeps the 12h default');
+  assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '' }), TWELVE_HOURS, 'empty is unset');
+  assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '   ' }), TWELVE_HOURS, 'blank is unset');
   assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '86400000' }), 86400000);
   assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '0' }), 0, '0 disables');
   assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '-5' }), 0, 'negative also disables');
-  assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: 'forever' }), TWO_HOURS,
+  assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: 'forever' }), TWELVE_HOURS,
     'a non-number must not silently become 0 (that would disable teardown by typo)');
   assert.equal(resolveSessionTimeoutMs({ CCSERVER_SESSION_TIMEOUT_MS: '1500.7' }), 1500, 'truncated to ms');
   // setTimeout silently turns an over-32-bit delay into 1ms, so "keep sessions

@@ -43,7 +43,7 @@ PC:      120x40 ┐
 
 ## セッションの寿命
 
-**どの端末からも接続されていない**状態が一定時間続くと、セッションは破棄されます (PTY を kill)。既定は 2 時間です。
+**どの端末からも接続されていない**状態が一定時間続くと、セッションは破棄されます (PTY を kill)。既定は 12 時間です。
 
 PTY が既に終了しているセッションは、終了コードを後から確認できるよう別枠で 5 分間だけ残ります。
 
@@ -51,7 +51,7 @@ PTY が既に終了しているセッションは、終了コードを後から�
 
 | 環境変数 | 既定 | 説明 |
 |----------|------|------|
-| `CCSERVER_SESSION_TIMEOUT_MS` | `7200000` (2時間) | 接続ゼロのセッションを破棄するまでの時間。`0` 以下で**破棄しない** (明示的な終了操作か PTY 自身の終了まで生き続ける) |
+| `CCSERVER_SESSION_TIMEOUT_MS` | `43200000` (12時間) | 接続ゼロのセッションを破棄するまでの時間。`0` 以下で**破棄しない** (明示的な終了操作か PTY 自身の終了まで生き続ける) |
 | `CCSERVER_SESSION_EXITED_TIMEOUT_MS` | `300000` (5分) | PTY 終了後にセッションを保持する時間。プロセスが既に無いため無効化はできず、`0` 以下を指定しても 1 秒にクランプされます |
 
 systemd で常駐させている場合はユニットファイルに書きます ([systemd でバックグラウンド実行](/ccserver/deployment/systemd/))。
@@ -75,7 +75,7 @@ journalctl --user -u ccserver | grep '\[session\]'
 
 ```
 [session] <id> pty exited (code=1, signal=none, app=claude, cwd=/srv/proj, viewers=0, uptime=3600000ms)
-[session] <id> last viewer left; destroying in 7200000ms
+[session] <id> last viewer left; destroying in 43200000ms
 [session] <id> destroyed (reason=idle-timeout, app=claude, cwd=/srv/proj, uptime=10800000ms, ptyExited=false, viewers=0)
 ```
 
