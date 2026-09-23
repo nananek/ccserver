@@ -35,6 +35,9 @@
 
 import { getDb } from './db.js';
 
+// Names that are not ordinary properties when assigned to a plain object.
+const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 export function getSetting(scope, scopeId, key, fallback = undefined) {
   const row = getDb()
     .prepare('SELECT value FROM settings WHERE scope = ? AND scope_id = ? AND key = ?')
@@ -47,8 +50,22 @@ export function getScope(scope, scopeId) {
   const rows = getDb()
     .prepare('SELECT key, value FROM settings WHERE scope = ? AND scope_id = ? ORDER BY key')
     .all(scope, scopeId);
+  // Reserved key names are dropped (attack-test-201 F9). Keys come from the
+  // table, and `out['__proto__'] = value` on a plain object REPLACES the
+  // object's prototype instead of adding a property -- so a row with that
+  // name polluted the returned object. Skipping the three reserved names
+  // closes it while keeping an ordinary object as the return type; a
+  // null-prototype object would be safer still, but it breaks deepEqual and
+  // every other normal thing a caller does with the result, for a key nobody
+  // has a legitimate use for. Nothing can write arbitrary keys today (the
+  // table ships empty, #205 is its first writer), so this is closed before it
+  // is reachable rather than after.
   const out = {};
   for (const row of rows) {
+    if (RESERVED_KEYS.has(row.key)) {
+      console.warn(`[settings] ${scope}/${scopeId}/${row.key} uses a reserved key name; skipping`);
+      continue;
+    }
     const value = decode(row.value, `${scope}/${scopeId}/${row.key}`, undefined);
     if (value !== undefined) out[row.key] = value;
   }

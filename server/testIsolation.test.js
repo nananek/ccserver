@@ -61,8 +61,15 @@ test('isolatedEnv strips ambient CCSERVER_* and XDG_* so the runner cannot leak 
   });
 });
 
+// OUTSIDE is a path that is not under tmpdir() on any machine. homedir() is
+// deliberately NOT used for this: a developer (or CI image) whose $HOME is
+// itself under /tmp makes such an assertion silently vacuous -- and that is
+// not hypothetical, it is how this very file used to run the real wizard
+// against a fake home while appearing to pass.
+const OUTSIDE = '/definitely-not-a-temp-dir/ccserver-should-never-write-here';
+
 test('isolatedEnv refuses a directory outside the temp tree', () => {
-  assert.throws(() => isolatedEnv(homedir()), /not under/);
+  assert.throws(() => isolatedEnv(OUTSIDE), /not under/);
   assert.throws(() => isolatedEnv('/'), /not under/);
 });
 
@@ -71,15 +78,19 @@ test('★ assertSafeToMigrate rejects the exact env shape that caused the data l
     // XDG isolated, HOME left real -- what every spawning test in this
     // branch did before the fix.
     const unsafe = {
-      HOME: homedir(),
+      HOME: OUTSIDE,
       XDG_CONFIG_HOME: join(dir, 'config'),
       XDG_DATA_HOME: join(dir, 'data'),
       XDG_STATE_HOME: join(dir, 'state'),
     };
-    assert.throws(() => assertSafeToMigrate(unsafe), /HOME=.*is outside/);
+    assert.throws(() => assertSafeToMigrate(unsafe, dir), /HOME=.*is outside/);
+
+    // The real $HOME is rejected too, whatever it happens to be -- the check
+    // is anchored on the caller's scratch directory, not on tmpdir().
+    assert.throws(() => assertSafeToMigrate({ ...unsafe, HOME: homedir() }, dir), /HOME=.*is outside/);
 
     // And the fully isolated env passes.
-    assertSafeToMigrate(isolatedEnv(dir));
+    assertSafeToMigrate(isolatedEnv(dir), dir);
   });
 });
 
@@ -87,7 +98,7 @@ test('assertSafeToMigrate rejects an unset HOME as well as a real one', () => {
   withTmp((dir) => {
     const env = isolatedEnv(dir);
     delete env.HOME;
-    assert.throws(() => assertSafeToMigrate(env), /HOME=\(unset\)/);
+    assert.throws(() => assertSafeToMigrate(env, dir), /HOME=\(unset\)/);
   });
 });
 
@@ -102,7 +113,7 @@ test('★ the wizard with an isolated env leaves a decoy legacy tree under the r
     writeFileSync(join(legacy, 'ccserver.sqlite3'), 'PRECIOUS');
 
     const env = isolatedEnv(dir, { LC_ALL: 'C', PORT: '1' });
-    assertSafeToMigrate(env);
+    assertSafeToMigrate(env, dir);
     const res = spawnSync(process.execPath, [SETUP_CLI, '--yes'], { env, encoding: 'utf8', timeout: 60000 });
     assert.equal(res.status, 0, res.stdout + res.stderr);
 
@@ -135,11 +146,16 @@ test('withIsolatedHome moves homedir() in-process and restores it', () => {
 test('★ spawnWizard aborts instead of running when HOME is not isolated', () => {
   withTmp((dir) => {
     // The exact mistake: caller hands back the real HOME through `extra`.
-    assert.throws(
-      () => spawnWizard(dir, ['--yes'], { HOME: homedir() }),
-      /assertSafeToMigrate: HOME=.*is outside/,
-      'an un-isolated HOME must abort the test, not silently migrate real data',
-    );
+    // Both the real $HOME and an arbitrary outside path must abort. Under a
+    // fake home in /tmp the first of these is what a tmpdir()-relative check
+    // would have let through.
+    for (const home of [homedir(), OUTSIDE]) {
+      assert.throws(
+        () => spawnWizard(dir, ['--yes'], { HOME: home }),
+        /assertSafeToMigrate: HOME=.*is outside/,
+        `HOME=${home} must abort the test, not silently migrate real data`,
+      );
+    }
   });
 });
 
@@ -149,14 +165,14 @@ test('★ spawnWizard aborts when any single XDG root escapes the temp tree', ()
       assert.throws(
         () => spawnWizard(dir, ['--yes'], { [key]: join(homedir(), '.config') }),
         new RegExp(`assertSafeToMigrate: ${key}=.*is outside`),
-        `${key} escaping the temp tree must abort`,
+        `${key} escaping the scratch directory must abort`,
       );
     }
   });
 });
 
 test('spawnWizard refuses a working directory outside the temp tree outright', () => {
-  assert.throws(() => spawnWizard(homedir(), ['--yes']), /not under/);
+  assert.throws(() => spawnWizard(OUTSIDE, ['--yes']), /not under/);
 });
 
 test('spawnWizard runs normally once everything is isolated', () => {

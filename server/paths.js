@@ -144,10 +144,17 @@ export function setupRequired() { return layoutVersion() < CURRENT_LAYOUT_VERSIO
 // the legacy location. Authoritative on purpose: deciding "is it still
 // over there?" with existsSync on every call would make resolution race an
 // empty directory into existence at the new path.
+// Validated, not merely read (attack-test-201 F7): `at` has to be an
+// ABSOLUTE path string. A relative one used to be accepted verbatim, which
+// resolves against whatever cwd the service happened to start in -- so a
+// marker carrying "relative/evil" silently relocated the sandbox HOME root.
+// A marker restored from a backup or synced from another host can carry
+// anything, so a malformed record is ignored rather than trusted, and the
+// entry falls back to its normal XDG target.
 function keptAt(id) {
   const kept = readLayout()?.kept;
   if (!Array.isArray(kept)) return null;
-  const hit = kept.find((k) => k && k.id === id && typeof k.at === 'string');
+  const hit = kept.find((k) => k && k.id === id && typeof k.at === 'string' && k.at.startsWith('/'));
   return hit ? hit.at : null;
 }
 

@@ -149,3 +149,15 @@ test('a row holding invalid JSON reads as the fallback instead of throwing', () 
   setSetting('t', '', 'fine', 1);
   assert.deepEqual(getScope('t', ''), { fine: 1 }, 'one bad row must not poison the scope');
 });
+
+test('★ F9: a __proto__ row cannot pollute the object getScope returns', () => {
+  getDb().prepare('INSERT INTO settings (scope, scope_id, key, value, updated_at) VALUES (?,?,?,?,?)')
+    .run('t', '', '__proto__', JSON.stringify({ polluted: true }), Date.now());
+  setSetting('t', '', 'ok', 1);
+
+  const scope = getScope('t', '');
+  assert.equal(Object.getPrototypeOf(scope), Object.prototype, 'the prototype must be untouched');
+  assert.equal(scope.polluted, undefined);
+  assert.equal(({}).polluted, undefined, 'and nothing global may be affected');
+  assert.deepEqual(scope, { ok: 1 }, 'the reserved row is dropped, the real one survives');
+});

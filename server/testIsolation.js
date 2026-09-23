@@ -63,15 +63,24 @@ export function isolatedEnv(dir, extra = {}) {
 }
 
 // Call this immediately before anything that MOVES files (the wizard with
-// --yes). Throws unless HOME and the XDG roots are all inside the temp tree,
-// so a forgotten override cannot reach the operator's real data.
-export function assertSafeToMigrate(env) {
+// --yes). Throws unless HOME and all three XDG roots resolve inside `root`,
+// the scratch directory this test allocated.
+//
+// Anchored on `root`, NOT on tmpdir(): "is it somewhere under /tmp" is a
+// property an attacker-shaped accident satisfies for free. A developer (or
+// CI image) whose $HOME is itself a directory under /tmp -- which is exactly
+// how this branch's own fake-HOME verification runs -- would pass a
+// tmpdir()-relative check while still pointing the wizard at that real home,
+// and the wizard would migrate it. Requiring the paths to be under the
+// specific directory the caller made has no such hole.
+export function assertSafeToMigrate(env, root) {
+  if (!root) throw new Error('assertSafeToMigrate: the scratch root is required');
   for (const key of ['HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) {
     const value = env[key];
-    if (!value || !isUnder(value, tmpdir())) {
+    if (!value || !isUnder(value, root)) {
       throw new Error(
-        `assertSafeToMigrate: ${key}=${value ?? '(unset)'} is outside ${tmpdir()}. `
-        + 'Running the setup wizard with this env would migrate real host data into a test directory.',
+        `assertSafeToMigrate: ${key}=${value ?? '(unset)'} is outside the test scratch directory ${root}. `
+        + 'Running the setup wizard with this env could migrate real host data.',
       );
     }
   }
@@ -111,6 +120,6 @@ export function withIsolatedHome(dir) {
 // is caught too.
 export function spawnWizard(dir, args = [], extra = {}) {
   const env = isolatedEnv(dir, { LC_ALL: 'C', PORT: '1', ...extra });
-  assertSafeToMigrate(env);
+  assertSafeToMigrate(env, dir);
   return spawnSync(process.execPath, [SETUP_CLI, ...args], { env, encoding: 'utf8', timeout: 60000 });
 }

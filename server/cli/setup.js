@@ -19,14 +19,15 @@
 // create -wal/-shm sidecars moments before the move.
 
 import { connect } from 'node:net';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   allPaths, configRoot, dataRoot, stateRoot, layoutMarkerPath, readLayout,
   layoutVersion, resetLayoutCache, repoRoot, CURRENT_LAYOUT_VERSION,
 } from '../paths.js';
 import {
-  planMigration, applyMigration, ensureRoots, findLeftovers, writeBreadcrumbs, STICKY_REASON,
+  planMigration, applyMigration, ensureRoots, findLeftovers, writeBreadcrumbs,
+  writeFileNoFollow, STICKY_REASON,
 } from '../pathMigration.js';
 
 const KNOWN_FLAGS = new Set(['--yes', '--move-large', '--seed-example', '--force', '--json', '--help']);
@@ -62,7 +63,13 @@ if (asJson) {
     roots: { config: configRoot(), data: dataRoot(), state: stateRoot() },
     ...plan,
     leftovers,
-    willApply: apply,
+    // --json is always a dry run, even with --yes: a machine reading this
+    // must not conclude the migration happened (F8). Applying and emitting
+    // JSON at the same time would also mean the plan printed is not the plan
+    // executed if anything failed partway.
+    willApply: false,
+    dryRun: true,
+    note: apply ? '--json は常にドライランです。適用するには --json を外して実行してください。' : undefined,
   }, null, 2));
   process.exit(0);
 }
@@ -90,9 +97,10 @@ if (!apply) {
 
 // --- apply ------------------------------------------------------------------
 
+let applied;
 try {
   ensureRoots();
-  applyMigration(plan);
+  applied = applyMigration(plan);
 } catch (err) {
   console.error('');
   console.error(err.message);
@@ -100,9 +108,31 @@ try {
   process.exit(1);
 }
 
-seedSandboxConfig();
-if (plan.steps.length > 0) writeBreadcrumbs();
-writeMarker();
+// The marker is part of the migration, not a postscript (attack-test-201 F3).
+// Until it is written the server still resolves the OLD paths -- which, after
+// a successful applyMigration, are empty. A failure here (EISDIR on a
+// layout.json someone turned into a directory, EACCES, ENOSPC) used to leave
+// every file moved and the layout still v1, so ccserver booted as though it
+// had lost its DB, federation identity and every group. Rolling the moves
+// back returns the host to a state it can actually boot in.
+let breadcrumbs = [];
+try {
+  seedSandboxConfig();
+  if (plan.steps.length > 0) breadcrumbs = writeBreadcrumbs();
+  writeMarker();
+} catch (err) {
+  applied.rollback();
+  // The breadcrumbs say "these files moved to the XDG layout". After a
+  // rollback they did not, so leaving them would send the next person
+  // looking in the wrong place.
+  for (const path of breadcrumbs) {
+    try { rmSync(path, { force: true }); } catch { /* best effort */ }
+  }
+  console.error('');
+  console.error(`セットアップの記録に失敗したため、移動を元に戻しました: ${err.message}`);
+  console.error(`レイアウトは v${layoutVersion()} のままです。原因を解消してから再実行してください。`);
+  process.exit(1);
+}
 resetLayoutCache();
 
 // An explicit record of what actually moved, in the same output as the
@@ -162,7 +192,8 @@ function writeMarker() {
       ...leftovers.map((l) => ({ id: l.id, path: l.path }))],
   };
   mkdirSync(dirname(layoutMarkerPath()), { recursive: true, mode: 0o700 });
-  writeFileSync(layoutMarkerPath(), `${JSON.stringify(marker, null, 2)}\n`);
+  // Never written through a symlink (F5) -- see writeFileNoFollow.
+  writeFileNoFollow(layoutMarkerPath(), `${JSON.stringify(marker, null, 2)}\n`, 0o644);
 }
 
 // A fresh sandbox.config.json is a POINTER, not a copy of the example.
@@ -187,9 +218,9 @@ function seedSandboxConfig() {
   if (entry.overridden || existsSync(to)) return;
   mkdirSync(dirname(to), { recursive: true, mode: 0o700 });
   if (seedExample) {
-    writeFileSync(to, readFileSync(exampleConfigPath(), 'utf-8'));
+    writeFileNoFollow(to, readFileSync(exampleConfigPath(), 'utf-8'), 0o600);
   } else {
-    writeFileSync(to, `${JSON.stringify({
+    writeFileNoFollow(to, `${JSON.stringify({
       '//': 'ccserver の静的設定。全キーと既定値は ccserver checkout の '
         + 'server/sandbox.config.example.json を参照。ここの変更には ccserver の再起動が必要です。'
         + 'Web UI から変更できる設定は SQLite の settings テーブルにあります。',

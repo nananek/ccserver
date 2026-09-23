@@ -14,14 +14,15 @@
 // on demand from a normal test.
 
 import {
-  chmodSync, cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync,
-  statSync, writeFileSync,
+  chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync,
+  renameSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { allPaths, configRoot, dataRoot, stateRoot, legacyDataRoot, repoRoot } from './paths.js';
 
 export const nodeFs = {
-  existsSync, mkdirSync, renameSync, cpSync, rmSync, statSync, chmodSync, readdirSync, writeFileSync,
+  existsSync, mkdirSync, renameSync, cpSync, rmSync, statSync, lstatSync,
+  chmodSync, readdirSync, writeFileSync, linkSync, unlinkSync,
 };
 
 const ROOT_MODE = 0o700;
@@ -51,8 +52,15 @@ export function planMigration({ entries = allPaths(), deps = nodeFs } = {}) {
     }
 
     const target = entry.target;
-    const targetExists = deps.existsSync(target);
-    const present = entry.legacyPaths.filter((p) => deps.existsSync(p));
+    // Sidecars count for presence on BOTH sides (attack-test-201 F4b): a
+    // crash between moving ccserver.sqlite3 and its -wal left the WAL behind
+    // at the old path, and because only the main file was probed the next run
+    // reported "nothing to do", wrote the marker, and the server opened a DB
+    // whose committed-but-uncheckpointed transactions were still sitting in
+    // the orphaned WAL. SQLite treats a DB with no WAL as clean, so those
+    // commits vanish silently rather than as corruption.
+    const targetExists = anyPresent(target, entry.sidecars, deps);
+    const present = entry.legacyPaths.filter((p) => anyPresent(p, entry.sidecars, deps));
 
     // 2. Both occupied. Moving would clobber live data and merging could
     //    clobber it differently, so neither happens -- db.js:69-79's
@@ -87,7 +95,29 @@ export function planMigration({ entries = allPaths(), deps = nodeFs } = {}) {
       continue;
     }
 
-    // 4. Sticky trees: left in place, and the choice RECORDED (see the
+    // 4. Anything that is not a regular file / directory is refused rather
+    //    than carried across (attack-test-201 F6). A FIFO planted at a legacy
+    //    state path used to be migrated faithfully into the new state dir,
+    //    where restoreGroups()/restoreSchedules() then blocked forever inside
+    //    readFileSync -- reading a FIFO with no writer does not throw, it
+    //    waits -- leaving a server that never finishes booting AND ignores
+    //    SIGTERM, so systemd could only kill it after TimeoutStopSec.
+    //    Leaving the oddity at the old path means the new path is simply
+    //    absent, which every reader already handles.
+    const kind = fileKind(present[0], deps);
+    if (kind !== 'file' && kind !== 'dir') {
+      warnings.push({
+        id: entry.id,
+        label: entry.label,
+        reason: 'not-a-regular-file',
+        path: present[0],
+        message: `${entry.label} (${present[0]}) は通常のファイル/ディレクトリではありません (${kind})。`
+          + '移行せずにそのまま残します。不要なら手動で削除してください。',
+      });
+      continue;
+    }
+
+    // 5. Sticky trees: left in place, and the choice RECORDED (see the
     //    header of stickyReasons below for why we do not move them).
     if (entry.stickyLegacy) {
       kept.push({ id: entry.id, label: entry.label, at: present[0], reason: 'sticky-large' });
@@ -100,12 +130,37 @@ export function planMigration({ entries = allPaths(), deps = nodeFs } = {}) {
   return { steps, skips, warnings, kept };
 }
 
+// lstat, never stat: a symlink must be reported as a symlink rather than as
+// whatever it points at, or the check below could be walked straight past.
+function fileKind(path, deps) {
+  let st;
+  try {
+    st = deps.lstatSync ? deps.lstatSync(path) : deps.statSync(path);
+  } catch {
+    return 'unknown';
+  }
+  if (st.isFile()) return 'file';
+  if (st.isDirectory()) return 'dir';
+  if (st.isSymbolicLink()) return 'symlink';
+  if (st.isFIFO()) return 'FIFO';
+  if (st.isSocket()) return 'socket';
+  return 'special';
+}
+
+// True when the path itself or any of its sidecars exists.
+function anyPresent(path, sidecars, deps) {
+  if (deps.existsSync(path)) return true;
+  return (sidecars || []).some((suffix) => deps.existsSync(`${path}${suffix}`));
+}
+
 function buildStep(entry, from, to, deps) {
   // Sidecars are part of the same logical object: a SQLite WAL that ends up
   // in a different directory than its main file is corruption, not an
   // inconvenience. Only the ones that actually exist go in.
-  const items = [{ from, to }];
-  for (const suffix of entry.sidecars) {
+  // The main file may be absent while a sidecar lingers (an interrupted
+  // earlier run), so every component is tested individually.
+  const items = [];
+  for (const suffix of ['', ...entry.sidecars]) {
     if (deps.existsSync(`${from}${suffix}`)) items.push({ from: `${from}${suffix}`, to: `${to}${suffix}` });
   }
   return {
@@ -175,12 +230,6 @@ export function applyMigration(plan, { deps = nodeFs, onLog } = {}) {
     for (const step of plan.steps) {
       deps.mkdirSync(dirname(step.to), { recursive: true, mode: ROOT_MODE });
       for (const item of step.items) {
-        // Re-checked at apply time: the plan may be minutes old, and
-        // overwriting something that appeared in the meantime is the one
-        // unrecoverable mistake available here.
-        if (deps.existsSync(item.to)) {
-          throw new Error(`移行先に既にファイルがあります: ${item.to}`);
-        }
         undo.push(relocate(item.from, item.to, step.mode, deps));
       }
       applyModes(step, deps);
@@ -188,40 +237,111 @@ export function applyMigration(plan, { deps = nodeFs, onLog } = {}) {
       onLog?.(step);
     }
   } catch (err) {
-    for (const step of undo.reverse()) {
-      try { step(); } catch { /* best-effort rollback */ }
-    }
+    rollback(undo);
     throw new Error(
       `移行に失敗しました: ${err.message}\n`
       + `すでに移動した ${undo.length} 件は元の場所に戻しました。レイアウトは v1 のままです。`,
     );
   }
-  return { moved };
+  // The undo stack is handed back rather than discarded (attack-test-201 F3):
+  // the caller still has to write the layout marker, and until that lands the
+  // migration has not actually happened as far as the server is concerned. A
+  // failure there -- EISDIR on a layout.json someone turned into a directory,
+  // EACCES, ENOSPC -- used to leave every file moved and the marker absent,
+  // so the server resolved the now-empty OLD paths and booted as if it had
+  // lost everything. That is the "half-migrated" state this engine exists to
+  // prevent, reached through the back door.
+  return { moved, rollback: () => rollback(undo) };
+}
+
+function rollback(undo) {
+  for (const step of [...undo].reverse()) {
+    try { step(); } catch { /* best-effort rollback */ }
+  }
 }
 
 // Moves one path; returns the function that puts it back.
+//
+// Never overwrites: the destination is claimed atomically where the platform
+// allows it, rather than checked with existsSync and then written (F10 --
+// that check-then-act window let a concurrent writer's file be clobbered
+// silently). linkSync fails with EEXIST if the target appeared in between,
+// and cpSync is given errorOnExist so the copy path behaves the same way.
 function relocate(from, to, mode, deps) {
   if (mode === 'rename') {
     try {
-      deps.renameSync(from, to);
-      return () => deps.renameSync(to, from);
+      claimByLink(from, to, deps);
+      return () => { deps.renameSync(to, from); };
     } catch (err) {
-      // The device check was a prediction, not a guarantee (bind mounts,
-      // a racing mount). Fall through to the copy path rather than failing.
-      if (err.code !== 'EXDEV') throw err;
+      // The device check was a prediction, not a guarantee (bind mounts, a
+      // racing mount). Fall through to the copy path rather than failing.
+      if (err.code !== 'EXDEV') throw describeExists(err, to);
     }
   }
   // copy -> verify -> delete, in that order: until the source is unlinked
-  // nothing has been lost, so a failure mid-copy costs only the partial
-  // destination. verbatimSymlinks keeps a symlinked cache inside a
+  // nothing has been lost. verbatimSymlinks keeps a symlinked cache inside a
   // persistent HOME a symlink instead of silently inflating it into a copy.
-  deps.cpSync(from, to, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
+  //
+  // A failure mid-copy leaves a PARTIAL destination, and leaving it there is
+  // how F4 turned a full disk into data loss: the next run saw both sides
+  // occupied, reported a both-present warning, wrote the marker anyway, and
+  // the truncated copy became the official data. So the partial is removed
+  // on the way out.
+  // Whether the destination was already there decides what cleanup is even
+  // allowed: a partial copy WE created must be removed, but somebody else's
+  // pre-existing file must never be, or the cleanup becomes the data loss.
+  const preexisting = deps.existsSync(to);
+  try {
+    deps.cpSync(from, to, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true, errorOnExist: true, force: false });
+  } catch (err) {
+    if (!preexisting) {
+      try { deps.rmSync(to, { recursive: true, force: true }); } catch { /* nothing to clean */ }
+    }
+    throw describeExists(err, to);
+  }
   if (!deps.existsSync(to)) throw new Error(`コピーに失敗しました: ${from} -> ${to}`);
   deps.rmSync(from, { recursive: true, force: true });
   return () => {
     deps.cpSync(to, from, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
     deps.rmSync(to, { recursive: true, force: true });
   };
+}
+
+// Claim `to` without a check-then-act window. link(2) is atomic and fails
+// with EEXIST rather than replacing, which rename(2) would do. Directories
+// cannot be hard-linked, so those fall back to rename guarded by an explicit
+// existence check -- rename onto a non-empty directory fails with ENOTEMPTY
+// on its own, and an empty one being replaced is harmless.
+function claimByLink(from, to, deps) {
+  if (!deps.linkSync || isDirectory(from, deps)) {
+    if (deps.existsSync(to)) {
+      const err = new Error(`移行先に既にあります: ${to}`);
+      err.code = 'EEXIST';
+      throw err;
+    }
+    deps.renameSync(from, to);
+    return;
+  }
+  deps.linkSync(from, to);
+  deps.unlinkSync(from);
+}
+
+// Keeps the operator-facing wording for the one failure they are most
+// likely to hit, without losing the errno the caller may branch on.
+function describeExists(err, to) {
+  if (err.code !== 'EEXIST') return err;
+  const wrapped = new Error(`移行先に既にファイルがあります: ${to}`);
+  wrapped.code = 'EEXIST';
+  wrapped.cause = err;
+  return wrapped;
+}
+
+function isDirectory(path, deps) {
+  try {
+    return deps.lstatSync ? deps.lstatSync(path).isDirectory() : deps.statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 // Owner-only everywhere. The config carries federation pairing secrets, the
@@ -293,11 +413,39 @@ export function writeBreadcrumbs(deps = nodeFs) {
   for (const target of [join(legacyDataRoot(), 'MOVED-TO-XDG.txt'), join(repoRoot(), '.ccserver-state-moved.txt')]) {
     try {
       deps.mkdirSync(dirname(target), { recursive: true });
-      deps.writeFileSync(target, text);
+      writeFileNoFollow(target, text, 0o644, deps);
       written.push(target);
     } catch { /* a read-only checkout is fine -- this is a courtesy, not a step */ }
   }
   return written;
+}
+
+// Writes without following a symlink at `path` (attack-test-201 F5).
+//
+// One of these breadcrumbs lands in the repo root, which a sandboxed session
+// can have as its cwd -- so an agent could plant
+// `.ccserver-state-moved.txt -> ~/.ssh/authorized_keys` and wait for the
+// operator to run `npm run setup`, at which point a plain writeFileSync
+// follows the link and destroys whatever it points at. Same exposure for the
+// layout marker.
+//
+// 'wx' creates and fails with EEXIST if anything is already there, so an
+// existing symlink can never be followed; the replace path then unlinks the
+// entry (removing the LINK, not its target) and retries. lstat is checked
+// first so a pre-existing regular file is still replaceable normally.
+export function writeFileNoFollow(path, text, mode, deps = nodeFs) {
+  try {
+    deps.writeFileSync(path, text, { flag: 'wx', mode });
+    return;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+  }
+  // Whatever is there -- a regular file from a previous run, or a symlink /
+  // FIFO someone planted -- is removed as an ENTRY and recreated. rmSync
+  // unlinks the link itself, never its target, so the planted path's victim
+  // is untouched.
+  deps.rmSync(path, { force: true });
+  deps.writeFileSync(path, text, { flag: 'wx', mode });
 }
 
 // Legacy files the wizard did NOT move and does NOT reference any more, so

@@ -6,11 +6,12 @@
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { planMigration, applyMigration, nodeFs, findLeftovers, writeBreadcrumbs } from './pathMigration.js';
-import { resetLayoutCache } from './paths.js';
+import { planMigration, applyMigration, nodeFs, findLeftovers, writeBreadcrumbs, writeFileNoFollow } from './pathMigration.js';
+import { resetLayoutCache, repoRoot, legacyDataRoot } from './paths.js';
 import { withIsolatedHome } from './testIsolation.js';
 
 const ENV_VARS = ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'CCSERVER_LAYOUT'];
@@ -168,12 +169,14 @@ test('EXDEV: an unexpected EXDEV at apply time still falls through to copy-delet
   assert.equal(existsSync(e.legacyPaths[0]), false, 'the source is removed only after the copy landed');
 });
 
-test('a non-EXDEV rename error is NOT silently turned into a copy', () => {
+test('a non-EXDEV error while claiming the destination is NOT silently turned into a copy', () => {
   const e = entry();
   put(e.legacyPaths[0]);
+  // The same-device path claims the destination with link(2) (atomic, fails
+  // on EEXIST) rather than rename, so the injection goes there.
   const deps = {
     ...nodeFs,
-    renameSync: () => { const err = new Error('permission denied'); err.code = 'EACCES'; throw err; },
+    linkSync: () => { const err = new Error('permission denied'); err.code = 'EACCES'; throw err; },
   };
   const plan = planMigration({ entries: [e], deps: { ...nodeFs, statSync: () => ({ dev: 1 }) } });
   assert.throws(() => applyMigration(plan, { deps }), /permission denied/);
@@ -220,12 +223,19 @@ test('★ one failure rolls the WHOLE plan back, not just the failing item', () 
   // c's destination is occupied, which applyMigration refuses.
   put(c.target, 'OCCUPIED');
 
-  const plan = { steps: [a, b, c].map((e) => planMigration({ entries: [e] }).steps[0]).filter(Boolean) };
-  assert.equal(plan.steps.length, 2, 'c is a both-present warning, so build the failing case explicitly');
-
-  // Build c's step by hand: the plan was computed before the target appeared.
-  const cStep = { ...planMigration({ entries: [{ ...c, target: join(caseDir, 'new', 'c') }] }).steps[0] };
-  const full = { steps: [...plan.steps, { ...cStep, to: c.target, items: [{ from: c.legacyPaths[0], to: c.target }] }] };
+  // a and b plan normally; c does not (its target is occupied, so the
+  // planner emits a both-present warning). Build c's step by hand to model a
+  // STALE plan -- one computed before the occupant appeared -- which is
+  // exactly the case applyMigration has to refuse at execution time.
+  const plan = { steps: [a, b].map((e) => planMigration({ entries: [e] }).steps[0]) };
+  assert.equal(plan.steps.filter(Boolean).length, 2);
+  const full = {
+    steps: [...plan.steps, {
+      id: 'c', label: 'c', kind: 'state', type: 'file', mode: 'rename', fileMode: 0o600,
+      sidecars: [], from: c.legacyPaths[0], to: c.target,
+      items: [{ from: c.legacyPaths[0], to: c.target }],
+    }],
+  };
 
   assert.throws(() => applyMigration(full), /移行に失敗しました/);
   assert.equal(readFileSync(a.legacyPaths[0], 'utf-8'), 'A', 'a must be back where it started');
@@ -252,17 +262,22 @@ test('the rollback survives a failure in the middle of one item\'s sidecars', ()
   put(e.legacyPaths[0], 'main');
   put(`${e.legacyPaths[0]}-wal`, 'wal');
   const plan = planMigration({ entries: [e] });
-  let renames = 0;
+  // Fail on the SECOND component (the -wal), after the main file has already
+  // moved. Injected on linkSync because that is what claims the destination
+  // on the same-device path; renameSync is left real so the rollback works.
+  let links = 0;
   const deps = {
     ...nodeFs,
-    renameSync: (from, to) => {
-      if (++renames === 2) throw new Error('disk full');
-      return nodeFs.renameSync(from, to);
+    linkSync: (from, to) => {
+      if (++links === 2) throw new Error('disk full');
+      return nodeFs.linkSync(from, to);
     },
   };
   assert.throws(() => applyMigration(plan, { deps }), /disk full/);
   assert.equal(readFileSync(e.legacyPaths[0], 'utf-8'), 'main', 'the main file came back');
+  assert.equal(readFileSync(`${e.legacyPaths[0]}-wal`, 'utf-8'), 'wal', 'and so did the WAL');
   assert.equal(existsSync(e.target), false, 'nothing is left at the destination');
+  assert.equal(existsSync(`${e.target}-wal`), false);
 });
 
 test('applyMigration reports what it moved and calls onLog per step', () => {
@@ -318,4 +333,86 @@ test('breadcrumbs name the new roots so an old-branch boot leaves a trail', () =
     restore();
     resetLayoutCache();
   }
+});
+
+// --- non-regular files (attack-test-201 F6) ---------------------------------
+
+test('★ F6: a FIFO at a legacy path is refused, not migrated into the new state dir', () => {
+  // Migrating it faithfully was the bug: restoreGroups()/restoreSchedules()
+  // then blocked forever in readFileSync (a FIFO with no writer waits, it
+  // does not throw), so the server never finished booting and ignored
+  // SIGTERM. Leaving it behind makes the new path simply absent, which every
+  // reader already handles.
+  const e = entry();
+  mkdirSync(join(e.legacyPaths[0], '..'), { recursive: true });
+  try {
+    execFileSync('mkfifo', [e.legacyPaths[0]]);
+  } catch {
+    return; // no mkfifo on this platform
+  }
+  const plan = planMigration({ entries: [e] });
+  assert.equal(plan.steps.length, 0, 'a FIFO must never become a move step');
+  assert.equal(plan.warnings.length, 1);
+  assert.equal(plan.warnings[0].reason, 'not-a-regular-file');
+  assert.match(plan.warnings[0].message, /FIFO/);
+
+  applyMigration(plan);
+  assert.equal(existsSync(e.target), false, 'nothing may appear at the new path');
+  assert.equal(lstatSync(e.legacyPaths[0]).isFIFO(), true, 'and the oddity stays where it was');
+});
+
+test('F6: a symlink at a legacy path is refused too (it is not the file it points at)', () => {
+  const e = entry();
+  const real = put(join(caseDir, 'elsewhere'), 'payload');
+  mkdirSync(join(e.legacyPaths[0], '..'), { recursive: true });
+  symlinkSync(real, e.legacyPaths[0]);
+  const plan = planMigration({ entries: [e] });
+  assert.equal(plan.steps.length, 0);
+  assert.equal(plan.warnings[0].reason, 'not-a-regular-file');
+  assert.match(plan.warnings[0].message, /symlink/);
+});
+
+test('F6: ordinary files and directories are still migrated normally', () => {
+  const f = entry({ id: 'f' });
+  const d = entry({ id: 'd', type: 'dir' });
+  put(f.legacyPaths[0], 'payload');
+  mkdirSync(d.legacyPaths[0], { recursive: true });
+  const plan = planMigration({ entries: [f, d] });
+  assert.deepEqual(plan.steps.map((s) => s.id), ['f', 'd']);
+  assert.deepEqual(plan.warnings, []);
+});
+
+// --- symlink-safe writes (attack-test-201 F5) -------------------------------
+
+test('★ F5: writeBreadcrumbs does not write through a planted symlink', () => {
+  // A sandboxed session whose cwd is the ccserver checkout can create
+  // <repo>/.ccserver-state-moved.txt as a symlink to any file the operator
+  // can write, then wait for them to run `npm run setup`. Following the link
+  // destroyed the victim (~/.bashrc, ~/.ssh/authorized_keys, ...).
+  const restore = withIsolatedHome(caseDir);
+  try {
+    const victim = put(join(caseDir, 'victim.txt'), 'VICTIM-IMPORTANT-CONTENT');
+    const link = join(repoRoot(), '.ccserver-state-moved.txt');
+    if (existsSync(link)) return;              // never disturb a real checkout
+    symlinkSync(victim, link);
+    try {
+      writeBreadcrumbs();
+      assert.equal(readFileSync(victim, 'utf-8'), 'VICTIM-IMPORTANT-CONTENT',
+        'the symlink target must be untouched');
+      assert.equal(lstatSync(link).isSymbolicLink(), false,
+        'the planted link is replaced by a real file, not followed');
+    } finally {
+      rmSync(link, { force: true });
+      rmSync(join(legacyDataRoot(), 'MOVED-TO-XDG.txt'), { force: true });
+    }
+  } finally {
+    restore();
+    resetLayoutCache();
+  }
+});
+
+test('F5: writeFileNoFollow replaces an ordinary file normally', () => {
+  const path = put(join(caseDir, 'plain.txt'), 'old');
+  writeFileNoFollow(path, 'new', 0o600);
+  assert.equal(readFileSync(path, 'utf-8'), 'new');
 });
