@@ -23,6 +23,7 @@ import {
   buildVapidHeaders,
   audienceFor,
   deliverPush,
+  validateDeliveryEndpoint,
   b64u,
   unb64u,
   MAX_PAYLOAD_BYTES,
@@ -294,4 +295,54 @@ test('an unencryptable subscription fails without deleting it', async () => {
   assert.equal(res.gone, false);
   assert.match(res.error, /encrypt failed/);
   assert.equal(called, false, 'nothing is sent when the payload cannot be built');
+});
+
+// --- attacker-review regressions (attack-review-webpush-3fcddf7) -------------
+
+test('F5: a malformed VAPID private scalar is refused, not silently used', () => {
+  // A 1-byte "key" (d=1) used to produce a perfectly valid-looking signing
+  // identity -- guessable, and indistinguishable from a real one downstream.
+  for (const bad of ['AQ', '', b64u(Buffer.alloc(32)), b64u(Buffer.alloc(33, 1)), '!!!not-base64!!!']) {
+    assert.throws(() => vapidKeyPair(bad), /32-byte scalar|must not be zero|out of range/,
+      `d=${JSON.stringify(bad)} must be rejected`);
+  }
+  // The order itself is out of range (valid scalars are 1 .. n-1).
+  const order = Buffer.from('ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551', 'hex');
+  assert.throws(() => vapidKeyPair(b64u(order)), /out of range/);
+  // A real key still works.
+  assert.doesNotThrow(() => vapidKeyPair(generateVapidKeys().privateKey));
+});
+
+test('F3: verification returns false rather than throwing on a bad key', () => {
+  const offCurve = b64u(Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 1)]));
+  const keys = generateVapidKeys();
+  const jwt = buildVapidJwt({ audience: 'https://push.example.net', subject: 'mailto:a@b.c', privateKeyB64u: keys.privateKey });
+  assert.equal(verifyVapidJwt(jwt, offCurve), false, 'an off-curve key must not throw');
+  assert.equal(verifyVapidJwt(jwt, 'not-base64!!'), false);
+  assert.equal(verifyVapidJwt(null, keys.publicKey), false);
+});
+
+test('F3: exp and aud are checked when asked for', () => {
+  const keys = generateVapidKeys();
+  const now = 1_700_000_000_000;
+  const jwt = buildVapidJwt({
+    audience: 'https://push.example.net', subject: 'mailto:a@b.c', privateKeyB64u: keys.privateKey, now,
+  });
+  assert.equal(verifyVapidJwt(jwt, keys.publicKey), true, 'signature only, as before');
+  assert.equal(verifyVapidJwt(jwt, keys.publicKey, { now: now + 1000 }), true, 'still fresh');
+  assert.equal(verifyVapidJwt(jwt, keys.publicKey, { now: now + 13 * 60 * 60 * 1000 }), false, 'expired');
+  assert.equal(verifyVapidJwt(jwt, keys.publicKey, { audience: 'https://push.example.net' }), true);
+  assert.equal(verifyVapidJwt(jwt, keys.publicKey, { audience: 'https://evil.example' }), false);
+});
+
+test('F6: a recordSize that cannot hold the payload is refused', () => {
+  // The header advertises `rs`; a record that overflows it is unparseable for
+  // the receiver, so this used to produce a silently-broken message.
+  assert.throws(
+    () => encryptPayload({ payload: 'x'.repeat(500), p256dh: RFC8291.uaPublic, auth: RFC8291.authSecret, recordSize: 100 }),
+    /cannot hold a 500-byte payload/,
+  );
+  assert.doesNotThrow(
+    () => encryptPayload({ payload: 'x'.repeat(500), p256dh: RFC8291.uaPublic, auth: RFC8291.authSecret, recordSize: 517 }),
+  );
 });

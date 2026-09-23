@@ -41,7 +41,8 @@ import {
   sign as signRaw,
   verify as verifyRaw,
 } from 'node:crypto';
-import { getSsrfSafeDispatcher } from './notify.js';
+import { fetch as undiciFetch } from 'undici';
+import { getSsrfSafeDispatcher, isIpLiteralHost, isPrivateOrReservedAddress } from './notify.js';
 
 const CURVE = 'prime256v1';
 // RFC 8188's record size. 4096 matches the RFC 8291 example and is what every
@@ -94,8 +95,18 @@ function uncompressedPoint(jwk) {
 // recomputed from it (via ECDH's point multiplication) so only `d` has to be
 // persisted, and a mismatched stored public key can never silently sign with
 // the wrong identity.
+// P-256 group order. A private scalar must be in [1, n-1]; anything else is
+// not a key, and a short one (d=1 from a truncated DB row, say) would be
+// trivially guessable while still signing valid-looking tokens.
+const P256_ORDER = Buffer.from('ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551', 'hex');
+
 export function vapidKeyPair(privateKeyB64u) {
   const d = unb64u(privateKeyB64u);
+  // Attacker review F5: base64url decoding is lenient and createECDH accepts a
+  // 1-byte scalar, so garbage in the DB became a working (guessable) identity.
+  if (d.length !== 32) throw new Error('VAPID private key must be a 32-byte scalar');
+  if (d.every((b) => b === 0)) throw new Error('VAPID private key must not be zero');
+  if (Buffer.compare(d, P256_ORDER) >= 0) throw new Error('VAPID private key is out of range for P-256');
   const ecdh = createECDH(CURVE);
   ecdh.setPrivateKey(d);
   const point = ecdh.getPublicKey(); // uncompressed
@@ -131,20 +142,46 @@ export function buildVapidJwt({ audience, subject, privateKeyB64u, now = Date.no
   return `${signingInput}.${b64u(sig)}`;
 }
 
-export function verifyVapidJwt(token, publicKeyB64u) {
-  const parts = String(token).split('.');
-  if (parts.length !== 3) return false;
-  const point = unb64u(publicKeyB64u);
-  if (point.length !== 65 || point[0] !== 0x04) return false;
-  const key = createPublicKey({
-    key: {
-      kty: 'EC', crv: 'P-256',
-      x: b64u(point.subarray(1, 33)),
-      y: b64u(point.subarray(33, 65)),
-    },
-    format: 'jwk',
-  });
-  return verifyRaw('sha256', Buffer.from(`${parts[0]}.${parts[1]}`), { key, dsaEncoding: 'ieee-p1363' }, unb64u(parts[2]));
+/**
+ * Verify a VAPID JWT. ccserver only ever SIGNS these -- nothing here consumes
+ * a token from outside -- so this exists for the RFC-vector tests and for
+ * anyone debugging a rejected push.
+ *
+ * It checks the signature and, when `audience`/`now` are supplied, the `aud`
+ * and `exp` claims too. An attacker review pointed out that a function called
+ * "verify" which ignores `exp` is a trap for a future caller, and that an
+ * off-curve public key made it THROW rather than return false; both are fixed,
+ * but the narrow contract is stated here rather than implied by the name.
+ */
+export function verifyVapidJwt(token, publicKeyB64u, { audience = null, now = null } = {}) {
+  try {
+    const parts = String(token).split('.');
+    if (parts.length !== 3) return false;
+    const point = unb64u(publicKeyB64u);
+    if (point.length !== 65 || point[0] !== 0x04) return false;
+    const key = createPublicKey({
+      key: {
+        kty: 'EC', crv: 'P-256',
+        x: b64u(point.subarray(1, 33)),
+        y: b64u(point.subarray(33, 65)),
+      },
+      format: 'jwk',
+    });
+    const ok = verifyRaw(
+      'sha256', Buffer.from(`${parts[0]}.${parts[1]}`), { key, dsaEncoding: 'ieee-p1363' }, unb64u(parts[2]),
+    );
+    if (!ok) return false;
+    if (audience !== null || now !== null) {
+      const claims = JSON.parse(unb64u(parts[1]).toString('utf-8'));
+      if (audience !== null && claims.aud !== audience) return false;
+      if (now !== null && (typeof claims.exp !== 'number' || claims.exp * 1000 <= now)) return false;
+    }
+    return true;
+  } catch {
+    // A malformed key or token is "not verified", not an exception to handle
+    // at every call site.
+    return false;
+  }
 }
 
 // The `aud` of the JWT is the push service's ORIGIN, not the full endpoint --
@@ -175,6 +212,13 @@ export function encryptPayload({
   const plaintext = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload), 'utf-8');
   if (plaintext.length > MAX_PAYLOAD_BYTES) {
     throw new Error(`push payload is ${plaintext.length} bytes, over the ${MAX_PAYLOAD_BYTES}-byte limit for one record`);
+  }
+  // The header advertises `rs`; a record that does not fit inside it is
+  // unparseable for the receiver. Production only ever uses the default, but
+  // the parameter is injectable for the RFC vector, so it is checked rather
+  // than trusted (attacker review F6).
+  if (!Number.isInteger(recordSize) || recordSize < plaintext.length + 17 || recordSize > 0xffffffff) {
+    throw new Error(`recordSize ${recordSize} cannot hold a ${plaintext.length}-byte payload (needs >= ${plaintext.length + 17})`);
   }
   const uaPublic = unb64u(p256dh);
   const authSecret = unb64u(auth);
@@ -225,11 +269,44 @@ export function encryptPayload({
 // it gets the same two-layer treatment: https-only with literal private IPs
 // rejected at registration (see pushSubscriptions.js), and the SSRF-safe
 // dispatcher, which re-checks at actual connect time, here.
+// Re-validate an endpoint at delivery time. Deliberately stricter than a
+// generic URL check: a push service is always reached by hostname (FCM,
+// Mozilla autopush, WNS), so an IP literal is never legitimate here and is the
+// one shape the connect-time guard cannot see.
+export function validateDeliveryEndpoint(endpoint) {
+  let url;
+  try {
+    url = new URL(String(endpoint));
+  } catch {
+    return 'endpoint is not a valid URL';
+  }
+  if (url.protocol !== 'https:') return 'endpoint must be https';
+  if (isIpLiteralHost(url.hostname)) return 'endpoint must use a hostname, not an IP literal';
+  const bare = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
+  if (isPrivateOrReservedAddress(bare, bare.includes(':') ? 6 : 4)) {
+    return 'endpoint resolves to a private or reserved address';
+  }
+  return null;
+}
+
 export async function deliverPush({
   subscription, payload, vapidKeys, subject, ttl = 2419200, urgency = 'normal',
   now = Date.now(), fetchImpl = null,
 }) {
-  const doFetch = fetchImpl || globalThis.fetch;
+  // undici's own fetch, not globalThis.fetch: Node's built-in fetch rejects an
+  // Agent built by the `undici` package (see notify.js's deliverFetch).
+  const doFetch = fetchImpl || undiciFetch;
+
+  // Third layer of the SSRF defence (attacker review F1). The first two are
+  // registration-time validation and the dispatcher's connect-time lookup --
+  // but the lookup hook is NEVER called for an IP-literal host, so a literal
+  // that somehow got stored (an older row, a hand-edited DB, a classifier bug)
+  // would sail straight through. Re-check here, at the last moment before a
+  // socket is opened, and refuse literals outright.
+  const endpointError = validateDeliveryEndpoint(subscription.endpoint);
+  if (endpointError) {
+    return { ok: false, gone: false, status: 0, error: endpointError };
+  }
   let encrypted;
   try {
     encrypted = encryptPayload({ payload, p256dh: subscription.p256dh, auth: subscription.auth });

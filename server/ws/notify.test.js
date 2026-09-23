@@ -1,7 +1,7 @@
 // notify.js -- the server-global ccserver-notify registry + delivery. Tests
 // the pure decision and persistence paths (withConfig-style temp files, like
 // sandbox-config.test.js / groupManager.test.js) and the fetch delivery with a
-// mocked global.fetch. The broker lifecycle (Unix socket + MCP wire) is covered
+// a stubbed delivery fetch. The broker lifecycle (Unix socket + MCP wire) is covered
 // in mcpBroker.test.js.
 
 import { test } from 'node:test';
@@ -19,6 +19,8 @@ import {
   sendNotification,
   resolvedHostname,
   isPrivateOrReservedAddress,
+  _setDeliverFetchForTests,
+  _getDeliverFetch,
 } from './notify.js';
 
 // Point CCSERVER_SANDBOX_CONFIG + CCSERVER_NOTIFY_PATH at temp files and
@@ -182,12 +184,12 @@ test('sendNotification POSTs { content, username } to discord and every subscrip
       subscribe({ url: 'https://hook-b.example/x' });
 
       const calls = [];
-      const realFetch = global.fetch;
-      global.fetch = async (url, opts) => {
+      const realFetch = _getDeliverFetch();
+      _setDeliverFetchForTests(async (url, opts) => {
         calls.push({ url: String(url), opts });
         if (String(url).includes('hook-a')) throw new Error('unreachable');
         return { ok: true };
-      };
+      });
       try {
         const res = await sendNotification({ title: 'Build failed', body: 'details here', level: 'error' });
         assert.equal(res.ok, true);
@@ -206,7 +208,7 @@ test('sendNotification POSTs { content, username } to discord and every subscrip
         assert.equal(a.url, 'https://hook-a.example/x');
         assert.equal(b.url, 'https://hook-b.example/x');
       } finally {
-        global.fetch = realFetch;
+        _setDeliverFetchForTests(realFetch);
       }
     },
   );
@@ -215,20 +217,20 @@ test('sendNotification POSTs { content, username } to discord and every subscrip
 test('sendNotification never throws and an empty message sends nothing', async () => {
   await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
     restoreNotify();
-    const realFetch = global.fetch;
-    global.fetch = async () => { throw new Error('network down'); };
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async () => { throw new Error('network down'); });
     try {
       const res = await sendNotification({ title: 'x' });
       assert.equal(res.ok, true, 'a total delivery failure still returns ok (non-blocking)');
       assert.deepEqual(res.delivered, { discord: false, webhooks: 0, failed: 0 });
 
       let calls = 0;
-      global.fetch = async () => { calls++; return { ok: true }; };
+      _setDeliverFetchForTests(async () => { calls++; return { ok: true }; });
       const empty = await sendNotification({});
       assert.equal(calls, 0, 'no content -> no delivery attempted');
       assert.deepEqual(empty.delivered, { discord: false, webhooks: 0, failed: 0 });
     } finally {
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   });
 });
@@ -241,8 +243,8 @@ test('sendNotification appends an attribution footer from the connection identit
   await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
     restoreNotify();
     const calls = [];
-    const realFetch = global.fetch;
-    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; });
     const prevHost = process.env.CCSERVER_HOSTNAME;
     try {
       process.env.CCSERVER_HOSTNAME = 'test-host';
@@ -260,7 +262,7 @@ test('sendNotification appends an attribution footer from the connection identit
     } finally {
       if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
       else process.env.CCSERVER_HOSTNAME = prevHost;
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   });
 });
@@ -269,8 +271,8 @@ test('sendNotification without identity carries a host-only footer', async () =>
   await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
     restoreNotify();
     const calls = [];
-    const realFetch = global.fetch;
-    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; });
     const prevHost = process.env.CCSERVER_HOSTNAME;
     try {
       process.env.CCSERVER_HOSTNAME = 'test-host';
@@ -281,7 +283,7 @@ test('sendNotification without identity carries a host-only footer', async () =>
     } finally {
       if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
       else process.env.CCSERVER_HOSTNAME = prevHost;
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   });
 });
@@ -290,8 +292,8 @@ test('notify.attribution=false strips the footer entirely', async () => {
   await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook', attribution: false } }, async () => {
     restoreNotify();
     const calls = [];
-    const realFetch = global.fetch;
-    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; });
     const prevHost = process.env.CCSERVER_HOSTNAME;
     try {
       process.env.CCSERVER_HOSTNAME = 'test-host';
@@ -305,7 +307,7 @@ test('notify.attribution=false strips the footer entirely', async () => {
     } finally {
       if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
       else process.env.CCSERVER_HOSTNAME = prevHost;
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   });
 });
@@ -316,14 +318,14 @@ test('notify hostname precedence: env wins over config, config over os.hostname(
   const prevHost = process.env.CCSERVER_HOSTNAME;
   const assertFooterHost = async (payloadHost) => {
     const calls = [];
-    const realFetch = global.fetch;
-    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; });
     try {
       await sendNotification({ title: 'x', body: 'y' });
       const payload = JSON.parse(calls[0].opts.body);
       assert.equal(payload.content, `x\ny\n\n_from: ${payloadHost}`);
     } finally {
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   };
   try {
@@ -389,9 +391,9 @@ test('channels: naming discord delivers, an empty list delivers nothing', async 
     },
     async () => {
       restoreNotify();
-      const realFetch = global.fetch;
+      const realFetch = _getDeliverFetch();
       let calls = 0;
-      global.fetch = async () => { calls += 1; return { ok: true }; };
+      _setDeliverFetchForTests(async () => { calls += 1; return { ok: true }; });
       try {
         const named = await sendNotification({ title: 'x', body: 'y', channels: ['discord'] });
         assert.deepEqual(named.delivered, { discord: true, webhooks: 1, failed: 0 });
@@ -402,7 +404,7 @@ test('channels: naming discord delivers, an empty list delivers nothing', async 
         assert.deepEqual(none.delivered, { discord: false, webhooks: 0, failed: 0 });
         assert.equal(calls, 0, 'an empty channels list must not fall back to every channel');
       } finally {
-        global.fetch = realFetch;
+        _setDeliverFetchForTests(realFetch);
       }
     },
   );
@@ -414,15 +416,15 @@ test('channels: naming discord delivers, an empty list delivers nothing', async 
 test('deliver() sends allowed_mentions so an agent cannot ping @everyone', async () => {
   await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
     restoreNotify();
-    const realFetch = global.fetch;
+    const realFetch = _getDeliverFetch();
     let sent = null;
-    global.fetch = async (_url, opts) => { sent = JSON.parse(opts.body); return { ok: true }; };
+    _setDeliverFetchForTests(async (_url, opts) => { sent = JSON.parse(opts.body); return { ok: true }; });
     try {
       await sendNotification({ title: '@everyone', body: 'build failed @here <@&123>' });
       assert.deepEqual(sent.allowed_mentions, { parse: [] });
       assert.match(sent.content, /@everyone/, 'the text itself is left readable, just not a ping');
     } finally {
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   });
 });
@@ -449,7 +451,7 @@ test('isPrivateOrReservedAddress: IPv6 loopback/unspecified/link-local/ULA/mappe
 });
 
 test('H4: deliver() refuses to connect to a hostname that resolves to loopback, even with real (unmocked) fetch/DNS', async () => {
-  // No global.fetch mock here -- this exercises the real dispatcher's
+  // No delivery-fetch stub here -- this exercises the real dispatcher's
   // connect-time lookup guard. 'localhost' always resolves to a loopback
   // address without needing any network access, so this is fully hermetic
   // (mirrors vuln_scan/pocs/p4_notify_ssrf.mjs, which used a literal
@@ -468,4 +470,47 @@ test('H4: deliver() refuses to connect to a hostname that resolves to loopback, 
       unsubscribe(added.subscription.id);
     }
   });
+});
+
+// --- attacker review F1: IPv4-mapped IPv6 must not read as public ------------
+
+test('F1: every spelling of an IPv4-mapped private address is classified private', () => {
+  // The WHATWG URL parser normalizes all of these to the hex form, which the
+  // previous regex-based classifier read as a public address. An endpoint of
+  // https://[::ffff:169.254.169.254]/ -- the cloud metadata service -- was
+  // accepted, and the connect-time guard never sees an IP literal at all.
+  const mustBePrivate = [
+    '::ffff:127.0.0.1', '::ffff:7f00:1', '0:0:0:0:0:ffff:7f00:1',
+    '::ffff:169.254.169.254', '::ffff:a9fe:a9fe',
+    '::ffff:10.0.0.1', '::ffff:0a00:1',
+    '::ffff:192.168.1.1', '::ffff:c0a8:101',
+    '::127.0.0.1', '::7f00:1',
+    '64:ff9b::7f00:1', '2002:7f00:1::',
+    '::1', '::', 'fe80::1', 'febf::1', 'fc00::1', 'fdff::1', 'ff02::1', '100::1',
+  ];
+  for (const ip of mustBePrivate) {
+    assert.equal(isPrivateOrReservedAddress(ip, 6), true, `${ip} must be classified private/reserved`);
+  }
+  const mustBePublic = [
+    '2001:4860:4860::8888', '::ffff:8.8.8.8', '::ffff:0808:0808', '2002:0808:0808::',
+    '64:ff9b::0808:0808',
+  ];
+  for (const ip of mustBePublic) {
+    assert.equal(isPrivateOrReservedAddress(ip, 6), false, `${ip} must be classified public`);
+  }
+});
+
+test('F1: subscribe() rejects a mapped-IPv6 loopback/metadata webhook', () => {
+  // The same classifier backs the notify MCP's `subscribe` tool, which a
+  // sandboxed agent can call -- so this is the entry point that mattered most.
+  for (const url of [
+    'https://[::ffff:127.0.0.1]/hook',
+    'https://[::ffff:7f00:1]/hook',
+    'https://[::ffff:169.254.169.254]/hook',
+    'https://[0:0:0:0:0:ffff:7f00:1]/hook',
+    'https://[64:ff9b::7f00:1]/hook',
+    'https://[2002:7f00:1::]/hook',
+  ]) {
+    assert.equal(subscribe({ url }).error, 'invalid-url', `${url} must be refused`);
+  }
 });

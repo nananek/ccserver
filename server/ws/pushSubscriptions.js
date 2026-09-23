@@ -11,9 +11,9 @@
 // so it gets the same treatment. The connect-time half lives in webPush.js's
 // deliverPush, which uses notify.js's SSRF-safe dispatcher.
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createECDH } from 'node:crypto';
 import { getDb } from '../db.js';
-import { isPrivateOrReservedAddress } from './notify.js';
+import { isPrivateOrReservedAddress, isIpLiteralHost } from './notify.js';
 import { generateVapidKeys } from './webPush.js';
 
 // A label/user-agent is only ever shown back to the operator in the Settings
@@ -25,10 +25,23 @@ const ENDPOINT_MAX = 2048;
 // base64url of 65 and 16 raw bytes respectively, with a little slack.
 const P256DH_MAX = 128;
 const AUTH_MAX = 64;
+// Attacker review F4: an authenticated client could register unbounded
+// distinct endpoints. A human has a handful of devices; this is generous for
+// that and still bounds the table (and the fan-out of every notification).
+export const MAX_SUBSCRIPTIONS = 32;
+
+// Labels and user agents are rendered in the operator's settings list. React
+// escapes markup, but bidi overrides reorder what is displayed, so they are
+// stripped here alongside the control characters (attacker review F6).
+const INVISIBLE_RE = new RegExp('[\\u00ad\\u061c\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u206f\\ufeff]', 'g');
 
 function clean(value, max) {
   if (typeof value !== 'string') return null;
-  const t = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/ {2,}/g, ' ').trim();
+  const t = value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(INVISIBLE_RE, '')
+    .replace(/ {2,}/g, ' ')
+    .trim();
   if (!t) return null;
   return t.length > max ? t.slice(0, max) : t;
 }
@@ -45,11 +58,34 @@ export function validateEndpoint(endpoint) {
   } catch {
     return 'endpoint is not a valid URL';
   }
+  // Hostname only (attacker review F1). Every real push service -- FCM,
+  // Mozilla autopush, WNS -- is reached by name, so an IP literal is never
+  // legitimate here. It is also the exact shape the connect-time SSRF guard
+  // cannot see: undici never calls its `lookup` hook for a literal, so the
+  // registration check is the ONLY layer for those. Refusing them outright
+  // removes a whole class of bypass rather than trying to classify every
+  // spelling of every private range.
+  if (isIpLiteralHost(host)) return 'endpoint must use a hostname, not an IP literal';
   const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
   if (isPrivateOrReservedAddress(bare, bare.includes(':') ? 6 : 4)) {
     return 'endpoint must not be a private, loopback or reserved address';
   }
   return null;
+}
+
+// Attacker review F4: a 65-byte 0x04-prefixed blob is not necessarily a point
+// ON the curve. An off-curve key was stored happily and then failed every
+// single delivery afterwards, with the browser having been told it succeeded.
+// setPublicKey does the curve check OpenSSL already knows how to do.
+function isOnCurveP256(uncompressed) {
+  try {
+    const ecdh = createECDH('prime256v1');
+    ecdh.generateKeys();
+    ecdh.setPublicKey(uncompressed);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // base64url, decoding to exactly the length RFC 8291 requires. Checked here
@@ -62,7 +98,10 @@ function validateKey(value, name, rawLength, max) {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) return `${name} must be base64url`;
   const raw = Buffer.from(value, 'base64url');
   if (raw.length !== rawLength) return `${name} must decode to ${rawLength} bytes`;
-  if (name === 'p256dh' && raw[0] !== 0x04) return 'p256dh must be an uncompressed P-256 point';
+  if (name === 'p256dh') {
+    if (raw[0] !== 0x04) return 'p256dh must be an uncompressed P-256 point';
+    if (!isOnCurveP256(raw)) return 'p256dh is not a point on the P-256 curve';
+  }
   return null;
 }
 
@@ -136,6 +175,9 @@ export function addSubscription({ endpoint, p256dh, auth, label, userAgent }) {
   const db = getDb();
   const now = Date.now();
   const existing = db.prepare('SELECT id FROM push_subscriptions WHERE endpoint = ?').get(endpoint);
+  if (!existing && countSubscriptions() >= MAX_SUBSCRIPTIONS) {
+    return { ok: false, message: `at most ${MAX_SUBSCRIPTIONS} devices can be subscribed; remove one first` };
+  }
   if (existing) {
     db.prepare('UPDATE push_subscriptions SET p256dh = ?, auth = ?, label = ?, user_agent = ? WHERE id = ?')
       .run(p256dh, auth, clean(label, LABEL_MAX), clean(userAgent, UA_MAX), existing.id);

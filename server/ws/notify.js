@@ -28,7 +28,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Agent } from 'undici';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { loadSandboxConfig } from './sandbox.js';
 import { hostRuntimeDir } from './git-broker.js';
 
@@ -100,9 +100,8 @@ function ipv4ToInt(ip) {
   return ((nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3]) >>> 0;
 }
 
-function isPrivateIPv4(ip) {
-  const n = ipv4ToInt(ip);
-  if (n === null) return false; // not even a valid IPv4 literal -- let the hostname path handle it
+function isPrivateIPv4Int(n) {
+  if (n === null) return false;
   const inRange = (base, bits) => {
     const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
     return (n & mask) === (ipv4ToInt(base) & mask);
@@ -112,21 +111,99 @@ function isPrivateIPv4(ip) {
     .some((cidr) => { const [base, bits] = cidr.split('/'); return inRange(base, Number(bits)); });
 }
 
-// IPv6: loopback (::1), unspecified (::), link-local (fe80::/10), unique
-// local (fc00::/7), and an IPv4-mapped address (::ffff:a.b.c.d) unwrapped to
-// its embedded IPv4 and checked the same way. Textual forms only (dns.lookup
-// always returns a canonical textual address, never a compressed variant
-// that would need full parsing here).
+function isPrivateIPv4(ip) {
+  // not even a valid IPv4 literal -- let the hostname path handle it
+  return isPrivateIPv4Int(ipv4ToInt(ip));
+}
+
+// Parse a textual IPv6 address into its 8 hextets, or null when it is not one.
+//
+// This replaces a regex that only looked at the first hextet and at the dotted
+// `::ffff:a.b.c.d` spelling, which an attacker review broke trivially: the
+// WHATWG URL parser normalizes EVERY IPv4-mapped spelling to the hex form
+// (`::ffff:127.0.0.1` becomes `::ffff:7f00:1`), so by the time a URL's hostname
+// was classified, the one form the old code could recognize no longer existed.
+// `https://[::ffff:169.254.169.254]/` -- the cloud metadata service -- was
+// accepted as a public address.
+//
+// Parsing properly instead of pattern-matching is the only way this stays
+// correct: there are too many spellings of the same address to enumerate.
+function parseIPv6(text) {
+  let s = String(text).toLowerCase();
+  const zone = s.indexOf('%'); // fe80::1%eth0
+  if (zone !== -1) s = s.slice(0, zone);
+
+  // A trailing dotted quad (`::ffff:1.2.3.4`, `::1.2.3.4`) is rewritten into
+  // the two hextets it stands for, so the rest of the parser sees one form.
+  const lastColon = s.lastIndexOf(':');
+  if (lastColon !== -1 && s.slice(lastColon + 1).includes('.')) {
+    const n = ipv4ToInt(s.slice(lastColon + 1));
+    if (n === null) return null;
+    s = `${s.slice(0, lastColon + 1)}${((n >>> 16) & 0xffff).toString(16)}:${(n & 0xffff).toString(16)}`;
+  }
+
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 ? (halves[1] ? halves[1].split(':') : []) : null;
+
+  let groups;
+  if (tail === null) {
+    if (head.length !== 8) return null;
+    groups = head;
+  } else {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 1) return null; // "::" must stand for at least one zero group
+    groups = [...head, ...Array(fill).fill('0'), ...tail];
+  }
+  const out = [];
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    out.push(parseInt(g, 16));
+  }
+  return out;
+}
+
+// IPv6 classification over the parsed hextets. Every range that can carry a
+// packet somewhere an unauthenticated POST should not go:
+//   ::, ::1                 unspecified / loopback
+//   ::ffff:0:0/96           IPv4-mapped   -> classify the embedded IPv4
+//   ::/96                   IPv4-compatible (deprecated) -> same
+//   64:ff9b::/96            NAT64 well-known prefix      -> same
+//   2002::/16               6to4, embeds the IPv4 in hextets 1-2 -> same
+//   fe80::/10               link-local
+//   fc00::/7                unique local
+//   ff00::/8                multicast
+//   100::/64                discard-only
+// The embedded-IPv4 cases are the ones the previous regex missed, and they are
+// exactly the ones an attacker reaches for: ::ffff:169.254.169.254 is the
+// cloud metadata service wearing an IPv6 hat.
 function isPrivateIPv6(ip) {
-  const a = ip.toLowerCase();
-  if (a === '::1' || a === '::') return true;
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(a);
-  if (mapped) return isPrivateIPv4(mapped[1]);
-  const firstHextet = parseInt(a.split(':')[0] || '0', 16);
-  if (Number.isNaN(firstHextet)) return false;
-  if (firstHextet >= 0xfe80 && firstHextet <= 0xfebf) return true; // fe80::/10
-  if (firstHextet >= 0xfc00 && firstHextet <= 0xfdff) return true; // fc00::/7
+  const h = parseIPv6(ip);
+  if (!h) return false;
+  const leadingZeros = (n) => h.slice(0, n).every((x) => x === 0);
+  const embedded = (hi, lo) => isPrivateIPv4Int((((hi << 16) | lo) >>> 0));
+
+  if (leadingZeros(7) && (h[7] === 0 || h[7] === 1)) return true; // :: and ::1
+  if (leadingZeros(5) && (h[5] === 0xffff || h[5] === 0)) return embedded(h[6], h[7]);
+  if (h[0] === 0x0064 && h[1] === 0xff9b && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
+    return embedded(h[6], h[7]);
+  }
+  if (h[0] === 0x2002) return embedded(h[1], h[2]);
+  if ((h[0] & 0xffc0) === 0xfe80) return true; // fe80::/10
+  if ((h[0] & 0xfe00) === 0xfc00) return true; // fc00::/7
+  if ((h[0] & 0xff00) === 0xff00) return true; // ff00::/8
+  if (h[0] === 0x0100 && h[1] === 0 && h[2] === 0 && h[3] === 0) return true; // 100::/64
   return false;
+}
+
+// Whether a URL hostname is an IP literal at all (bracketed IPv6, or a dotted
+// quad). Used where only a real hostname makes sense -- see
+// pushSubscriptions.validateEndpoint for why that is worth enforcing.
+export function isIpLiteralHost(host) {
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  if (bare !== host) return true; // brackets only ever wrap an IPv6 literal
+  return ipv4ToInt(bare) !== null || parseIPv6(bare) !== null;
 }
 
 export function isPrivateOrReservedAddress(address, family) {
@@ -330,11 +407,33 @@ export function buildAttribution(identity, host) {
   return `\n\n_from: ${parts.join(' · ')}`;
 }
 
+// The fetch paired with our Agent. NOT globalThis.fetch: Node's built-in fetch
+// is backed by Node's OWN bundled undici, which refuses an Agent constructed by
+// the `undici` package we depend on ("UND_ERR_INVALID_ARG: invalid onError
+// method" on Node >= 24). An attacker review found that this made EVERY webhook
+// delivery fail with a bare "fetch failed" on modern Node, and -- worse --
+// turned the connect-time SSRF guard into dead code, since the request never
+// reached the dispatcher at all. Using undici's own fetch keeps the two halves
+// on the same implementation.
+//
+// Tests that stub delivery replace this via _setDeliverFetchForTests rather
+// than globalThis.fetch, precisely so they exercise the same seam production
+// uses instead of one that quietly diverged from it.
+let deliverFetch = undiciFetch;
+
+export function _setDeliverFetchForTests(fn) {
+  deliverFetch = fn || undiciFetch;
+}
+
+export function _getDeliverFetch() {
+  return deliverFetch;
+}
+
 async function deliver(url, content) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DELIVERY_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
+    const res = await deliverFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       // allowed_mentions: attacker review N4. `content` is agent-authored text

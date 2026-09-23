@@ -10,7 +10,7 @@
 //     rather than against the pure builder (agentNotifyConfig.test.js covers
 //     that separately).
 //   - the DELIVERY half: pty bytes -> detector -> bridge policy -> notify.js's
-//     delivery, with global.fetch stubbed so nothing leaves the machine.
+//     delivery, with the delivery fetch stubbed so nothing leaves the machine.
 //
 // CCSERVER_CLAUDE_BIN is what makes this possible without the real CLI: it is
 // the documented override for where `claude` lives (see sandbox.js).
@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { _setDeliverFetchForTests, _getDeliverFetch } from './notify.js';
 
 let runtimeDir;
 let sessionManager;
@@ -129,15 +130,15 @@ test('OFF: the agent emitting a notification anyway delivers nothing', async () 
   writeConfig({
     notify: { discordWebhook: 'https://discord.example/hook', bridge: { enabled: false } },
   });
-  const realFetch = global.fetch;
+  const realFetch = _getDeliverFetch();
   const posts = [];
-  global.fetch = async (url, opts) => { posts.push({ url: String(url), body: JSON.parse(opts.body) }); return { ok: true }; };
+  _setDeliverFetchForTests(async (url, opts) => { posts.push({ url: String(url), body: JSON.parse(opts.body) }); return { ok: true }; });
   const { sessionId } = await launch();
   try {
     await sleep(600); // the stub emits immediately; give the pty time to land
     assert.deepEqual(posts, [], 'nothing may be delivered while the bridge is off');
   } finally {
-    global.fetch = realFetch;
+    _setDeliverFetchForTests(realFetch);
     sessionManager.destroySession(sessionId, { keepSchedule: false });
   }
 });
@@ -160,9 +161,9 @@ test('ON: a notification the agent writes to its pty reaches the delivery channe
     notify: { discordWebhook: 'https://discord.example/hook', bridge: { enabled: true, channels: ['discord'] } },
   });
   notifyModule.restoreNotify();
-  const realFetch = global.fetch;
+  const realFetch = _getDeliverFetch();
   const posts = [];
-  global.fetch = async (url, opts) => { posts.push({ url: String(url), body: JSON.parse(opts.body) }); return { ok: true }; };
+  _setDeliverFetchForTests(async (url, opts) => { posts.push({ url: String(url), body: JSON.parse(opts.body) }); return { ok: true }; });
   const { sessionId, session } = await launch();
   try {
     assert.ok(session.notifyDetector, 'an enabled bridge attaches a detector');
@@ -180,7 +181,7 @@ test('ON: a notification the agent writes to its pty reaches the delivery channe
     // And @everyone-style pings are declared inert (attacker review N4).
     assert.deepEqual(got.body.allowed_mentions, { parse: [] });
   } finally {
-    global.fetch = realFetch;
+    _setDeliverFetchForTests(realFetch);
     sessionManager.destroySession(sessionId, { keepSchedule: false });
   }
 });
@@ -189,9 +190,9 @@ test('ON: a shell session is never captured, whatever it prints', async () => {
   writeConfig({
     notify: { discordWebhook: 'https://discord.example/hook', bridge: { enabled: true } },
   });
-  const realFetch = global.fetch;
+  const realFetch = _getDeliverFetch();
   const posts = [];
-  global.fetch = async () => { posts.push(1); return { ok: true }; };
+  _setDeliverFetchForTests(async () => { posts.push(1); return { ok: true }; });
   const res = await sessionManager.createSession({
     cwd: runtimeDir, cols: 80, rows: 24, shell: true, sandbox: false,
   });
@@ -201,7 +202,7 @@ test('ON: a shell session is never captured, whatever it prints', async () => {
     await sleep(600);
     assert.deepEqual(posts, [], 'a shell writing the sequence must not deliver anything');
   } finally {
-    global.fetch = realFetch;
+    _setDeliverFetchForTests(realFetch);
     sessionManager.destroySession(res.sessionId, { keepSchedule: false });
   }
 });

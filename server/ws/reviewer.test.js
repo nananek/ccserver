@@ -639,7 +639,7 @@ test('reviewNotificationBody: includes status, an optional focus line, and mode-
 
 // End-to-end: completeReviewJob (reached here via finish_review) actually
 // calls notify.js's sendNotification -- not just that the pure title/body
-// builders above produce the right text. Mocks global.fetch the same way
+// builders above produce the right text. Stubs notify's delivery fetch the same way
 // notify.test.js does (an ESM static-import binding for sendNotification
 // itself can't be swapped from outside the module, but fetch is a plain
 // global). This is exactly the wiring the original issue-#102 plan called
@@ -658,11 +658,11 @@ test('completeReviewJob sends a ccserver-notify notification with the PR/focus/p
   notify.restoreNotify();
 
   const calls = [];
-  const realFetch = global.fetch;
-  global.fetch = async (url, opts) => {
+  const realFetch = notify._getDeliverFetch();
+  notify._setDeliverFetchForTests(async (url, opts) => {
     calls.push({ url: String(url), opts });
     return { ok: true };
-  };
+  });
 
   dbMod.getDb().prepare(`INSERT INTO pr_reviews
       (id, project_cwd, base_ref, mode, pr_owner, pr_repo, pr_number, app, status, session_id, worktree_path, focus, created_at)
@@ -683,7 +683,7 @@ test('completeReviewJob sends a ccserver-notify notification with the PR/focus/p
     // test env -> checkPrCommentPosted fails closed to false either way.
     assert.ok(payload.content.includes('Not posted as a PR comment'), payload.content);
   } finally {
-    global.fetch = realFetch;
+    notify._setDeliverFetchForTests(realFetch);
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
     if (prevWebhook === undefined) delete process.env.CCSERVER_DISCORD_WEBHOOK;

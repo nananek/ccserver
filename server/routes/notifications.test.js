@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { notificationsRoute } from './notifications.js';
 import { closeDb } from '../db.js';
+import { _setDeliverFetchForTests, _getDeliverFetch } from '../ws/notify.js';
 import { BRIDGE_APPS, BRIDGE_CHANNELS, BRIDGE_DEFAULTS } from '../ws/notifyBridgeSettings.js';
 
 let tmpRoot;
@@ -208,7 +209,22 @@ test('re-subscribing the same browser updates in place rather than duplicating',
 test('a malformed subscription is refused with a reason', async () => {
   const cases = [
     [{ ...VALID_SUB, endpoint: 'http://push.example.net/p/x' }, /must be an https/],
-    [{ ...VALID_SUB, endpoint: 'https://127.0.0.1/p/x' }, /private, loopback or reserved/],
+    [{ ...VALID_SUB, endpoint: 'https://127.0.0.1/p/x' }, /hostname, not an IP literal/],
+    // Attacker review F1: every one of these was ACCEPTED before. The WHATWG
+    // URL parser normalizes them all to the hex form, which the old classifier
+    // read as a public address -- ::ffff:169.254.169.254 is the cloud metadata
+    // service in an IPv6 costume.
+    [{ ...VALID_SUB, endpoint: 'https://[::ffff:127.0.0.1]/p/x' }, /hostname, not an IP literal/],
+    [{ ...VALID_SUB, endpoint: 'https://[::ffff:7f00:1]/p/x' }, /hostname, not an IP literal/],
+    [{ ...VALID_SUB, endpoint: 'https://[0:0:0:0:0:ffff:7f00:1]/p/x' }, /hostname, not an IP literal/],
+    [{ ...VALID_SUB, endpoint: 'https://[::ffff:169.254.169.254]/p/x' }, /hostname, not an IP literal/],
+    [{ ...VALID_SUB, endpoint: 'https://[::1]/p/x' }, /hostname, not an IP literal/],
+    // ...and a public IP literal is refused too: a push service is always a
+    // hostname, so the literal form has no legitimate use here at all.
+    [{ ...VALID_SUB, endpoint: 'https://[2001:4860:4860::8888]/p/x' }, /hostname, not an IP literal/],
+    [{ ...VALID_SUB, endpoint: 'https://8.8.8.8/p/x' }, /hostname, not an IP literal/],
+    // Attacker review F4: a 65-byte blob is not necessarily on the curve.
+    [{ ...VALID_SUB, keys: { ...VALID_SUB.keys, p256dh: Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 1)]).toString('base64url') } }, /not a point on the P-256 curve/],
     [{ ...VALID_SUB, keys: { ...VALID_SUB.keys, auth: 'AAAA' } }, /auth must decode to 16 bytes/],
     [{ ...VALID_SUB, keys: { ...VALID_SUB.keys, p256dh: 'AAAA' } }, /p256dh must decode to 65 bytes/],
     [{ endpoint: VALID_SUB.endpoint }, /p256dh is required/],
@@ -230,9 +246,9 @@ test('a subscription can be removed, and an unknown id is a 404', async () => {
 
 test('the test-send endpoint reports what each channel did', async () => {
   writeConfig({ notify: { discordWebhook: 'https://discord.example/hook' } });
-  const realFetch = global.fetch;
+  const realFetch = _getDeliverFetch();
   let posted = 0;
-  global.fetch = async () => { posted += 1; return { ok: true }; };
+  _setDeliverFetchForTests(async () => { posted += 1; return { ok: true }; });
   try {
     const res = await app.inject({
       method: 'POST', url: '/api/notify-settings/test', payload: { channels: ['discord'] },
@@ -241,7 +257,7 @@ test('the test-send endpoint reports what each channel did', async () => {
     assert.equal(res.json().delivered.discord, true);
     assert.equal(posted, 1);
   } finally {
-    global.fetch = realFetch;
+    _setDeliverFetchForTests(realFetch);
   }
 });
 
