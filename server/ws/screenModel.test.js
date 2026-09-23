@@ -213,3 +213,79 @@ test('ED 1 still registers as a visible change for screenIdleMs', () => {
   s.feed('\x1b[2;2H\x1b[1J');
   assert.ok(s.version() > v);
 });
+
+// Hostile input. sessionManager feeds every pty chunk through this parser
+// synchronously, for every session, so a sequence that never finishes here
+// stops the whole server rather than one tab. These cases all used to hang or
+// grow without bound; each one asserts that the parser finishes AND that the
+// screen it leaves behind is still sane.
+
+test('a huge cursor-down parameter cannot spin (ESC[1000000000000000B)', () => {
+  const s = createScreenModel();
+  const started = Date.now();
+  s.feed('\x1b[1000000000000000B');
+  s.feed('landed');
+  assert.ok(Date.now() - started < 2000, 'must not walk a quadrillion rows one at a time');
+  // Everything that was on screen scrolled away; the cursor sits on the last row.
+  assert.equal(s.screenRows().length, 200);
+  assert.equal(s.screenRows()[199], 'landed');
+});
+
+test('a cursor parameter long enough to overflow to Infinity terminates', () => {
+  // Number('9'.repeat(400)) is Infinity, and `cursorRow--` never moves it --
+  // the original loop could not end at all.
+  const s = createScreenModel();
+  const started = Date.now();
+  s.feed(`\x1b[${'9'.repeat(400)}B`);
+  assert.ok(Date.now() - started < 2000);
+  assert.ok(s.screenRows().length <= 200);
+});
+
+test('a huge CUP row parameter cannot spin (ESC[999999999999;1H)', () => {
+  const s = createScreenModel();
+  const started = Date.now();
+  s.feed('\x1b[999999999999;1Hx');
+  assert.ok(Date.now() - started < 2000);
+  assert.equal(s.screenRows().length, 200);
+});
+
+test('an unterminated OSC discards its body instead of buffering it', () => {
+  // The body is thrown away anyway, so it is dropped as it streams. Holding
+  // it in `pending` and re-scanning that buffer on every chunk was quadratic:
+  // 12.5MiB took ~8 seconds of blocked event loop and 158MB of RSS.
+  const s = createScreenModel();
+  s.feed('\x1b]0;');
+  const chunk = 'A'.repeat(64 * 1024);
+  const started = Date.now();
+  for (let i = 0; i < 100; i++) s.feed(chunk);
+  assert.ok(Date.now() - started < 2000, 'must stay linear in the bytes fed');
+  assert.deepEqual(s.screenRows(), [], 'an OSC body never reaches the screen');
+  // And it still ends where it should.
+  s.feed('\x07visible');
+  assert.deepEqual(s.screenRows(), ['visible']);
+});
+
+test('an unterminated CSI parameter run does not accumulate', () => {
+  const s = createScreenModel();
+  s.feed('\x1b[');
+  const started = Date.now();
+  for (let i = 0; i < 20; i++) s.feed('9'.repeat(4096));
+  assert.ok(Date.now() - started < 2000);
+});
+
+test('an OSC terminator split across chunks still ends the string', () => {
+  // ESC and its backslash landing in different chunks is the case the
+  // discard path has to get right.
+  const s = createScreenModel();
+  s.feed('a\x1b]0;ti');
+  s.feed('tle\x1b');
+  s.feed('\\after');
+  assert.deepEqual(s.screenRows(), ['aafter']);
+});
+
+test('an ESC inside an OSC that is not a terminator keeps the string open', () => {
+  const s = createScreenModel();
+  s.feed('a\x1b]0;ti\x1b');
+  s.feed('Xtle\x07b');
+  assert.deepEqual(s.screenRows(), ['ab'], 'only BEL or ESC-backslash ends it');
+});

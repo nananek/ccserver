@@ -28,6 +28,19 @@
 export const SCREEN_COLS = 80;
 export const SCREEN_ROWS = 200;
 
+// Hostile-input bounds. The stream this parses comes from a pty that an agent
+// (or anything running in its shell) can write to at will, and feed() runs
+// synchronously inside sessionManager's onData for EVERY session -- so a
+// sequence that takes seconds here stops the whole server, not one tab.
+//   - a CSI parameter is clamped, and its digit run is cut off, so
+//     `ESC[999999999999999999999B` can neither spin nor be rescanned forever
+//     (a parameter that long is malformed by any real terminal's reckoning);
+//   - an unterminated escape keeps at most MAX_PENDING characters waiting for
+//     the rest, instead of accumulating every byte that follows it.
+const MAX_CSI_PARAM = 100_000;
+const MAX_CSI_PARAM_CHARS = 64;
+const MAX_PENDING = 256;
+
 export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {}) {
   const capCols = Math.max(cols, 1);
   const capRows = Math.max(rows, 1);
@@ -39,6 +52,14 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
   let alt = false;
   let version = 0;
   let pending = ''; // partial escape sequence awaiting the next chunk
+  // An OSC (ESC ]) whose terminator has not arrived. Its body is discarded
+  // anyway, so it is dropped as it streams rather than accumulated in
+  // `pending`: an OSC body has no length limit, and re-scanning a growing
+  // buffer once per chunk is quadratic (12.5MiB measured at ~8s of blocked
+  // event loop before this). oscEsc remembers a trailing ESC that may turn
+  // out to be the first half of an ST.
+  let oscSkip = false;
+  let oscEsc = false;
   // Row indices touched since the last takeDirtyRowCount(). `version` counts
   // written CELLS, which scales with the terminal width and cannot tell a
   // one-line spinner redrawing 60 columns from real output; the number of
@@ -70,7 +91,21 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
 
   // Grow rows until the cursor row exists, scrolling the oldest off the top
   // when the cap is reached (the cursor then stays at the same screen line).
+  //
+  // A cursor more than capRows below the bottom would scroll every existing
+  // row away, and landing capRows+1 or a billion rows down gives the same
+  // screen -- so that case is collapsed instead of stepped through one push/
+  // shift at a time. Without this, `ESC[999999999B` walks a billion
+  // iterations, and a parameter long enough to reach Infinity never
+  // terminates at all (cursorRow-- does not move Infinity), hanging the
+  // server's event loop for good.
   const ensureRow = () => {
+    if (cursorRow - lines.length >= capRows) {
+      lines.length = 0;
+      for (let r = 0; r < capRows; r++) lines.push('');
+      cursorRow = capRows - 1;
+      return;
+    }
     while (cursorRow >= lines.length) {
       lines.push('');
       if (lines.length > capRows) {
@@ -95,7 +130,17 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
 
   // --- control sequences ----------------------------------------------------
 
-  const csiParams = (body) => body.split(';').map((p) => (p === '' ? 0 : Number(p) || 0));
+  // Clamped: a parameter is only ever used as a row/column distance, and the
+  // screen is capRows x capCols, so anything past MAX_CSI_PARAM is the same
+  // instruction as MAX_CSI_PARAM. Non-finite values (a digit run long enough
+  // that Number() overflows to Infinity) clamp too rather than propagating.
+  const csiParam = (p) => {
+    if (p === '') return 0;
+    const n = Number(p);
+    if (!Number.isFinite(n)) return MAX_CSI_PARAM;
+    return n > MAX_CSI_PARAM ? MAX_CSI_PARAM : n;
+  };
+  const csiParams = (body) => body.split(';').map(csiParam);
 
   const eraseLine = (mode) => {
     ensureRow();
@@ -197,6 +242,24 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
     setChar(ch);
   };
 
+  // Scan for an OSC terminator (BEL, or ESC \\) from `from`. Returns the index
+  // just past it, OSC_NOT_FOUND when the chunk ends first, or OSC_ESC_TAIL
+  // when it ends on an ESC that the next chunk may complete into an ST.
+  const OSC_NOT_FOUND = -1;
+  const OSC_ESC_TAIL = -2;
+  const oscEnd = (s, from) => {
+    for (let j = from; j < s.length; j++) {
+      if (s[j] === '\x07') return j + 1;
+      if (s[j] === '\x1b') {
+        if (j + 1 >= s.length) return OSC_ESC_TAIL;
+        if (s[j + 1] === '\\') return j + 2;
+        // ESC followed by anything else is not a terminator here (same rule
+        // the original scan used) -- keep looking.
+      }
+    }
+    return OSC_NOT_FOUND;
+  };
+
   // Parse the escape sequence starting at input[start] (an ESC byte).
   // Returns { end } (exclusive) when complete, { needsMore: true } when it
   // runs off the end of the input (the caller keeps the tail pending).
@@ -204,7 +267,14 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
     const next = input[start + 1];
     if (next === '[') {
       let j = start + 2;
-      while (j < input.length && '0123456789;?'.includes(input[j])) j++;
+      const paramLimit = j + MAX_CSI_PARAM_CHARS;
+      while (j < input.length && j < paramLimit && '0123456789;?'.includes(input[j])) j++;
+      if (j === paramLimit) {
+        // No real terminal emits 64 characters of parameters. Treat it as
+        // malformed and consume what was scanned: holding it as a possible
+        // prefix would re-scan a growing buffer on every chunk.
+        return { end: j };
+      }
       if (j >= input.length) return { needsMore: true };
       const final = input[j];
       if (final >= '@' && final <= '~') {
@@ -214,10 +284,13 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
       return { end: j + 1 }; // malformed CSI -- skip the final byte
     }
     if (next === ']') {
-      let j = start + 2;
-      while (j < input.length && input[j] !== '\x07' && !(input[j] === '\x1b' && input[j + 1] === '\\')) j++;
-      if (j >= input.length) return { needsMore: true };
-      return { end: input[j] === '\x07' ? j + 1 : j + 2 };
+      const end = oscEnd(input, start + 2);
+      if (end >= 0) return { end };
+      // Terminator not in this chunk: switch to discard mode (see oscSkip)
+      // and swallow the rest rather than buffering it.
+      oscSkip = true;
+      oscEsc = end === OSC_ESC_TAIL;
+      return { end: input.length };
     }
     if (next === '(' || next === ')' || next === '=' || next === '>' || next === '#') {
       if (input.length < start + 3) return { needsMore: true };
@@ -232,12 +305,42 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
       const input = pending + (typeof data === 'string' ? data : decoder.decode(data, { stream: true }));
       pending = '';
       let i = 0;
+      // Still inside an OSC whose terminator has not arrived: drop payload
+      // until it does. Nothing here is ever kept, so the memory and the work
+      // both stay proportional to this chunk.
+      if (oscSkip) {
+        let from = 0;
+        if (oscEsc) {
+          oscEsc = false;
+          // The ESC that ended the previous chunk completes an ST only if
+          // this one opens with a backslash.
+          if (input[0] === '\\') {
+            oscSkip = false;
+            from = 1;
+          }
+        }
+        if (oscSkip) {
+          const end = oscEnd(input, from);
+          if (end === OSC_NOT_FOUND) return;
+          if (end === OSC_ESC_TAIL) { oscEsc = true; return; }
+          oscSkip = false;
+          i = end;
+        } else {
+          i = from;
+        }
+      }
       while (i < input.length) {
         const ch = input[i];
         if (ch === '\x1b') {
           const seq = escapeSequence(input, i);
           if (seq.needsMore) {
-            pending = input.slice(i);
+            const tail = input.slice(i);
+            // Everything that can legitimately wait for the next chunk is a
+            // few characters (a partial CSI, a two- or three-byte escape);
+            // the unbounded case, an OSC body, never reaches here. Anything
+            // longer is malformed, and keeping it would let a sender grow
+            // this buffer without limit.
+            pending = tail.length <= MAX_PENDING ? tail : '';
             return;
           }
           i = seq.end;

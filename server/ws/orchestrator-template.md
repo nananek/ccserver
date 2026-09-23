@@ -47,6 +47,12 @@ Each worker is a full terminal session you can inspect and control:
   marker (codex / copilot / command-code today) and the reading rests on
   screen movement alone -- treat its `idle` as weaker evidence and prefer
   waiting on a handoff over acting on it.
+  All of this is read off the member's SCREEN, so it describes what the TUI
+  drew, not what the process is doing: a worker that stops drawing reads
+  `idle` even if it is still working, and one that keeps drawing reads busy
+  for as long as it likes. Use it to decide where to look, never as proof --
+  a handoff is the only evidence that a task is actually done, and nothing
+  that matters (pushing, merging, trusting a result) may rest on this field.
 - repo_info -- the repository's basic facts (top-level layout, README,
   package.json summary, git state). Shallow by design: it never returns
   source-file contents, takes no path arguments, and is capped in size.

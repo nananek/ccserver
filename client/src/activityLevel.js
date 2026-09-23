@@ -11,7 +11,13 @@
 // Green-for-free / red-for-busy is also the opposite of the usual
 // green-means-good reading, which is another reason the words matter.
 
-const LEVELS = {
+// Object.create(null): these are looked up with a value that can come from
+// another ccserver instance over federation (the peer computes the level for
+// its own sessions and we render it). A plain object would answer
+// LEVELS['__proto__'] with Object.prototype -- truthy, so the "unknown level"
+// guard below would wave it through and the row would render with no class
+// and a title of "undefined — undefined / [object Object]".
+const LEVELS = Object.assign(Object.create(null), {
   idle: {
     className: 'is-idle',
     // "待機中" rather than "アイドル": the useful fact is that the agent is
@@ -29,18 +35,25 @@ const LEVELS = {
     label: '稼働中',
     detail: '出力が流れている',
   },
-};
+});
 
 // Why the level came out that way, for the tooltip. Keeping this visible
 // makes the thresholds tunable from real use instead of from guesses.
-const REASONS = {
+const REASONS = Object.assign(Object.create(null), {
   marker: '稼働中の表示を検出',
   movement: '画面が更新されている',
   quiet: '画面が静止している',
-};
+});
+
+// A level/reason is only trusted when it is one we actually defined. Anything
+// else -- an unknown string from a newer server, a hostile value from a
+// federation peer -- is dropped rather than rendered.
+function lookup(table, key) {
+  return typeof key === 'string' ? table[key] : undefined;
+}
 
 export function activityLabel(level) {
-  return LEVELS[level]?.label ?? null;
+  return lookup(LEVELS, level)?.label ?? null;
 }
 
 // Everything the UI needs for one session, or null when there is nothing to
@@ -48,11 +61,11 @@ export function activityLabel(level) {
 // reports level null for all three rather than guessing).
 export function activityInfo(activity) {
   const level = activity?.level;
-  const spec = LEVELS[level];
+  const spec = lookup(LEVELS, level);
   if (!spec) return null;
 
   const parts = [`${spec.label} — ${spec.detail}`];
-  const reason = REASONS[activity.reason];
+  const reason = lookup(REASONS, activity.reason);
   if (reason) parts.push(reason);
   if (typeof activity.changeRate === 'number' && activity.changeRate > 0) {
     parts.push(`画面更新 ${activity.changeRate} 行/秒`);

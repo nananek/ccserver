@@ -35,6 +35,27 @@
 //      screen rows changing per second (screenModel's takeDirtyRowCount). A
 //      spinner rewrites one or two rows over and over; real output paints
 //      many.
+//
+// WHAT "GREEN" DOES AND DOES NOT PROMISE
+//
+// This reads a terminal. Everything it knows comes from the bytes the app
+// chose to draw, so the guarantee is exactly:
+//
+//   green means the app is not advertising an interrupt key, its screen has
+//   not changed for QUIET_MS, and nothing has been drawn in the rate window.
+//
+// For a well-behaved CLI that is the same thing as "the turn is over", which
+// is the whole point. It is NOT a statement about the process: an agent that
+// controls its own pty output can stop drawing and erase the marker, and this
+// will read green while it keeps working; one that keeps drawing will read
+// busy forever. Both were demonstrated in review. Neither is fixable by
+// looking harder at the screen -- "quiet terminal" and "quiet agent" are the
+// same picture -- and the fix would have to come from a signal outside the
+// TUI (process or protocol level).
+//
+// So: this is a convenience indicator for a human watching their own tabs,
+// NOT a security boundary. Nothing may gate a privileged decision on it, and
+// the orchestrator template tells the orchestrator the same thing.
 
 export const ACTIVITY_LEVELS = ['idle', 'low', 'busy'];
 
@@ -278,18 +299,29 @@ export function classifyActivity({
   if (shell) return { ...base, level: null, reason: 'shell' };
 
   const hit = detectBusyMarker(app, screenRows);
-  // A screen that has never changed (null) has never drawn anything, so it
-  // counts as quiet rather than as "moved just now".
-  const quietAfter = markerVerified ? QUIET_MS : QUIET_UNVERIFIED_MS;
-  const quiet = screenIdleMs == null || screenIdleMs >= quietAfter;
-
-  // The green rule, and the one invariant worth stating out loud: 'idle'
-  // needs the marker absent AND the screen still. A spinner keeps the marker
-  // up (and the screen moving), so a thinking agent can never read as idle.
-  if (!hit && quiet) return { ...base, level: 'idle', reason: 'quiet' };
-
   const fast = Number.isFinite(changeRate) ? changeRate : 0;
   const slow = Number.isFinite(holdRate) ? holdRate : fast;
+
+  // A screen that has never changed (null) has never drawn anything, so it
+  // counts as still rather than as "moved just now".
+  const quietAfter = markerVerified ? QUIET_MS : QUIET_UNVERIFIED_MS;
+  const stillMs = screenIdleMs == null ? Infinity : screenIdleMs;
+
+  // The green rule. Three conditions, all required:
+  //   - the app is not advertising its interrupt key,
+  //   - the screen has not changed for quietAfter,
+  //   - and nothing was drawn inside the rate window.
+  // The third was added after review: the timer crosses QUIET_MS (1.5s)
+  // before the rate window (2s) has emptied, so without it a session could
+  // report "idle" while still carrying a rate of dozens of rows per second
+  // from half a second ago. Green now costs at most the rate window after the
+  // last paint, which is a small price for a reading that cannot contradict
+  // itself. A spinner keeps all three conditions false, so a thinking agent
+  // still never reads as idle -- within the limits stated at the top of this
+  // file.
+  if (!hit && stillMs >= quietAfter && !(fast > 0)) {
+    return { ...base, level: 'idle', reason: 'quiet' };
+  }
   // Already red: keep it until even the long window drops below EXIT.
   // Otherwise: only go red once the short window clears ENTER.
   const busy = previousLevel === 'busy'

@@ -288,10 +288,12 @@ test('classifyActivity: marker x quiet x rate', () => {
     // no marker: the screen decides.
     { name: 'no marker + moving + fast', rows: CLAUDE_IDLE, screenIdleMs: movingMs, changeRate: busyRate, level: 'busy', reason: 'movement' },
     { name: 'no marker + moving + slow', rows: CLAUDE_IDLE, screenIdleMs: movingMs, changeRate: lowRate, level: 'low', reason: 'movement' },
-    { name: 'no marker + quiet + slow', rows: CLAUDE_IDLE, screenIdleMs: quietMs, changeRate: lowRate, level: 'idle', reason: 'quiet' },
-    // Quiet wins over a stale rate: nothing has touched the screen for
-    // QUIET_MS, so whatever the window still remembers is over.
-    { name: 'no marker + quiet + fast', rows: CLAUDE_IDLE, screenIdleMs: quietMs, changeRate: busyRate, level: 'idle', reason: 'quiet' },
+    // Green needs the rate window empty as well as the timer expired: the
+    // timer crosses QUIET_MS before the window does, so a session with rows
+    // still in it was drawing moments ago and is not the user's turn yet.
+    { name: 'no marker + quiet + slow', rows: CLAUDE_IDLE, screenIdleMs: quietMs, changeRate: lowRate, level: 'low', reason: 'movement' },
+    { name: 'no marker + quiet + fast', rows: CLAUDE_IDLE, screenIdleMs: quietMs, changeRate: busyRate, level: 'busy', reason: 'movement' },
+    { name: 'no marker + quiet + nothing drawn', rows: CLAUDE_IDLE, screenIdleMs: quietMs, changeRate: 0, level: 'idle', reason: 'quiet' },
   ];
   for (const c of cases) {
     const r = classifyActivity({ app: 'claude', screenRows: c.rows, screenIdleMs: c.screenIdleMs, changeRate: c.changeRate });
@@ -503,7 +505,7 @@ test('hysteresis: previousLevel can never drag a session out of green', () => {
   // never the user's turn.
   for (const previousLevel of [null, 'idle', 'low', 'busy']) {
     const green = classifyActivity({
-      app: 'claude', screenRows: CLAUDE_IDLE, screenIdleMs: quietMs, changeRate: busyRate, holdRate: busyRate, previousLevel,
+      app: 'claude', screenRows: CLAUDE_IDLE, screenIdleMs: quietMs, changeRate: 0, holdRate: 0, previousLevel,
     });
     assert.equal(green.level, 'idle', `previousLevel=${previousLevel}: quiet + no marker is idle`);
 
@@ -579,4 +581,65 @@ test('MAX_ROWS_PER_SAMPLE: one whole-screen repaint cannot pin a tab red', () =>
   assert.ok(clamped >= BUSY_ENTER_ROWS_PER_SEC);
   // And it ages out of the window instead of persisting.
   assert.equal(changeRateFromSamples([{ at: now, rows: MAX_ROWS_PER_SAMPLE }], now + RATE_WINDOW_MS + 1, RATE_WINDOW_MS), 0);
+});
+
+// --- what green does and does not promise -------------------------------
+
+test('green requires an empty rate window, not just an expired timer', () => {
+  // Found by an attacker-perspective review: the stillness timer (QUIET_MS,
+  // 1.5s) expires BEFORE the rate window (2s) has emptied, so a session that
+  // stopped drawing half a second ago could report "your turn" while still
+  // carrying a rate of dozens of rows per second. Both figures are now
+  // required to agree.
+  const justStopped = classifyActivity({
+    app: 'claude', screenRows: CLAUDE_IDLE, screenIdleMs: QUIET_MS + 100, changeRate: 64, holdRate: 64,
+  });
+  assert.notEqual(justStopped.level, 'idle', 'rows in the window mean it was drawing moments ago');
+
+  const reallyStopped = classifyActivity({
+    app: 'claude', screenRows: CLAUDE_IDLE, screenIdleMs: QUIET_MS + 100, changeRate: 0, holdRate: 0,
+  });
+  assert.equal(reallyStopped.level, 'idle', 'once the window empties too, it is the user\'s turn');
+});
+
+test('green is a reading of the terminal, not a claim about the process', () => {
+  // The honest limit, asserted so it is visible rather than implied: an agent
+  // that controls its own pty output can stop drawing and leave no marker,
+  // and that is indistinguishable from a finished turn -- the two produce the
+  // same screen. This is why the module header says the indicator is a
+  // convenience signal and not a security boundary; nothing may gate a
+  // privileged decision on it.
+  const wipedAndSilent = classifyActivity({
+    app: 'claude',
+    screenRows: ['the footer is gone', 'and nothing is being drawn'],
+    screenIdleMs: 10 * 60 * 1000,
+    changeRate: 0,
+    holdRate: 0,
+  });
+  assert.equal(wipedAndSilent.level, 'idle');
+
+  // The mirror image: an agent that keeps painting reads busy for as long as
+  // it likes. Also by design -- it is doing exactly what a working agent does.
+  const neverQuiet = classifyActivity({
+    app: 'claude', screenRows: ['still going'], screenIdleMs: 10, changeRate: 40, holdRate: 40,
+  });
+  assert.equal(neverQuiet.level, 'busy');
+});
+
+test('a marker left on a still screen stays yellow rather than turning green', () => {
+  // The other direction of the same limit: a marker parked in the footer of a
+  // frozen screen holds 'low' indefinitely. Yellow-with-no-movement is the
+  // shape a real stall takes too, which is why the orchestrator template
+  // treats a long 'low' as an anomaly worth one read_output rather than as
+  // proof of progress.
+  const parked = classifyActivity({
+    app: 'claude',
+    screenRows: ['❯', '  auto mode on · esc to interrupt'],
+    screenIdleMs: 10 * 60 * 1000,
+    changeRate: 0,
+    holdRate: 0,
+  });
+  assert.equal(parked.level, 'low');
+  assert.equal(parked.reason, 'marker');
+  assert.equal(parked.screenIdleMs, 600000, 'the stillness is reported, so a caller can tell a stall from work');
 });

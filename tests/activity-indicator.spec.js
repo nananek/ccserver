@@ -33,6 +33,15 @@ const SESSIONS = [
     activity: { level: 'busy', reason: 'movement', marker: null, markerVerified: false, screenIdleMs: 30, changeRate: 31.5 },
   },
   {
+    // A hostile / broken value, the shape a malicious federation peer could
+    // return for one of its own sessions (the peer computes the level and we
+    // render it). It must not resolve through Object.prototype.
+    id: 'sess-hostile', cwd: '/srv/hostile', connected: false, viewers: 0, shell: false,
+    sandbox: true, sandboxOpts: null, gpgVaultActive: false, app: 'claude', model: null,
+    permissionMode: 'standard', groupId: null, groupRole: null, customLabel: 'hostile-one',
+    activity: { level: '__proto__', reason: 'constructor', marker: null, markerVerified: true, screenIdleMs: 0, changeRate: 0 },
+  },
+  {
     id: 'sess-shell', cwd: '/srv/shell', connected: false, viewers: 0, shell: true,
     sandbox: false, sandboxOpts: null, gpgVaultActive: false, app: null, model: null,
     permissionMode: 'standard', groupId: null, groupRole: null, customLabel: 'shell-one',
@@ -106,4 +115,21 @@ test('an unverified CLI is marked as a weaker reading, without shouting about it
   // 根拠は tooltip に書いてある。
   await expect(busyDot).toHaveAttribute('title', /未検証/);
   await expect(rowFor(page, 'low-one').locator('.session-activity')).toHaveAttribute('title', /稼働中の表示を検出/);
+});
+
+test('a level that is not one of ours is dropped, not resolved through the prototype', async ({ page }) => {
+  // activity は federation ピアが計算した値をそのまま描く経路があるため、
+  // 未知のレベルは既定値に落とす。plain object の索引だと
+  // LEVELS['__proto__'] が Object.prototype を返して truthy になり、
+  // class の付かない点と "undefined — undefined / [object Object]" という
+  // title が出てしまう (攻撃者レビュー F4)。
+  await stubSessions(page);
+  await openSidebar(page);
+
+  const row = rowFor(page, 'hostile-one');
+  await expect(row).toHaveCount(1);
+  await expect(row.locator('.session-activity')).toHaveCount(0);
+  const label = await row.getByRole('menuitem').getAttribute('aria-label');
+  expect(label).not.toContain('undefined');
+  expect(label).not.toContain('[object Object]');
 });
