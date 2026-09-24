@@ -1109,13 +1109,30 @@ export function pushHandoff(groupId, event) {
 // the next waiter whose connection is actually alive. The waiter itself is
 // left pending (it cannot consume anything) until superseded or timed out.
 //
+// opts.signal (an AbortSignal, optional): the MCP request's own cancellation
+// signal (#245). `isAlive` answers per CONNECTION, which is the wrong grain:
+// a client that cancels or abandons THIS request keeps the connection open,
+// so isAlive stays true, the zombie waiter happily claims the next event --
+// and the SDK then declines to send a response for a cancelled request, so
+// the event reaches no one and is gone from the queue. Aborting settles the
+// waiter immediately (reclaiming anything it had claimed), which both returns
+// the event to the queue and stops the zombie competing for the next one.
+//
 // Dequeue is not the same as delivery: the waiter claims an event, then
-// commits the delivery on the next macrotask. A supersede arriving in the
-// same turn can still reclaim the claimed event (its connection may have died
-// or its request been cancelled between the claim and the send), so the
-// event is re-queued instead of being lost with the stale waiter. The same
-// reclaim runs when the orchestrator exits (onOrchestratorExit) or a timeout
-// fires while an event is claimed.
+// commits the delivery on the next macrotask. Deliverability is re-checked at
+// BOTH points -- claim and commit -- because a connection can die, or a
+// request be cancelled, in between. A supersede arriving in the same turn can
+// likewise reclaim the claimed event, so the event is re-queued instead of
+// being lost with the stale waiter. The same reclaim runs when the
+// orchestrator exits (onOrchestratorExit) or a timeout fires while an event
+// is claimed.
+//
+// What this does NOT close: the slice between the commit-time check and the
+// SDK actually writing the response. mcpTools.waitForHandoff re-checks the
+// signal once more after this resolves and re-queues if it lost the race, but
+// an abort landing inside the SDK's own serialize-and-write is not observable
+// from here. Closing that needs an explicit ack from the orchestrator (a
+// protocol change, see #245).
 export function takeHandoff(groupId, timeoutMs, opts = {}) {
   const group = groups.get(groupId);
   if (!group) return Promise.resolve({ error: 'group-not-found' });
@@ -1126,10 +1143,23 @@ export function takeHandoff(groupId, timeoutMs, opts = {}) {
   return new Promise((resolve) => {
     const waiter = { consumed: null, finish: null, onHandoff: null };
     let settled = false;
+    // Can this waiter be expected to actually deliver right now? Both halves
+    // must hold, and both are re-read on every check: the connection is up,
+    // and this particular request has not been cancelled.
+    const deliverable = () => (!opts.isAlive || opts.isAlive())
+      && !(opts.signal && opts.signal.aborted);
+    const onAbort = () => {
+      // The client gave up on THIS request. Anything claimed goes back to the
+      // queue, and the waiter stops listening so it cannot eat the next event
+      // and strand it in a response the SDK will refuse to send.
+      reclaimConsumed(group, waiter);
+      finish({ timedOut: true });
+    };
     const finish = (val) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
       group.pendingTakes.delete(waiter);
       group.handoffEmitter.off('handoff', waiter.onHandoff);
       resolve(val);
@@ -1137,13 +1167,23 @@ export function takeHandoff(groupId, timeoutMs, opts = {}) {
     waiter.finish = finish;
     waiter.onHandoff = () => {
       if (group.handoffQueue.length === 0 || waiter.consumed) return;
-      if (opts.isAlive && !opts.isAlive()) return;
+      if (!deliverable()) return;
       waiter.consumed = group.handoffQueue.shift();
       // Commit the delivery on the next macrotask, not inline: a supersede
       // (a newer takeHandoff in the same turn) must be able to reclaim the
       // event from this waiter, so it is never delivered to a connection
       // whose request may already be gone.
-      setTimeout(() => finish(waiter.consumed), 0);
+      setTimeout(() => {
+        // Re-check: the connection may have died, or the request been
+        // cancelled, since the claim. Either way this waiter can no longer
+        // deliver, so the event goes back rather than out with it.
+        if (!deliverable()) {
+          reclaimConsumed(group, waiter);
+          finish({ timedOut: true });
+          return;
+        }
+        finish(waiter.consumed);
+      }, 0);
     };
     const timer = timeoutMs > 0
       ? setTimeout(() => {
@@ -1153,8 +1193,23 @@ export function takeHandoff(groupId, timeoutMs, opts = {}) {
       : null;
     group.pendingTakes.add(waiter);
     group.handoffEmitter.on('handoff', waiter.onHandoff);
+    if (opts.signal) {
+      if (opts.signal.aborted) { finish({ timedOut: true }); return; }
+      opts.signal.addEventListener('abort', onAbort, { once: true });
+    }
     waiter.onHandoff();
   });
+}
+
+// Put an event back at the FRONT of the queue. Used by mcpTools.waitForHandoff
+// when it finds the request was cancelled after takeHandoff already handed the
+// event over -- the last point at which we can still tell (#245).
+export function requeueHandoff(groupId, event) {
+  const group = groups.get(groupId);
+  if (!group || !event) return false;
+  if (!group.handoffQueue.includes(event)) group.handoffQueue.unshift(event);
+  group.handoffEmitter.emit('handoff');
+  return true;
 }
 
 // Give back an event a (still-pending) waiter claimed but has not committed:

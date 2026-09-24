@@ -206,8 +206,11 @@ export function buildControlMcpServer(deps) {
     'wait_for_handoff',
     'Block until a worker calls handoff_to_orchestrator, or the timeout elapses. Returns the structured handoff event (worker, summary, status) -- or {timedOut:true} on timeout, in which case simply call wait_for_handoff again. Handoffs are never lost: a handoff that arrives while no one is waiting stays queued, and even a connection that dies mid-wait does not consume it -- the next wait_for_handoff (after reconnect) receives it. Call this once per turn instead of polling read_output.',
     { timeoutMs: z.number().optional() },
-    async (args) => {
-      const result = await tools.waitForHandoff(deps, args);
+    // `extra` carries this request's AbortSignal. Forwarding it is what keeps
+    // a cancelled or abandoned wait from swallowing the next handoff (#245) --
+    // the connection stays up in that case, so connectionIsAlive cannot tell.
+    async (args, extra) => {
+      const result = await tools.waitForHandoff(deps, args, extra);
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     },
   );

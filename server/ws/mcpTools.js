@@ -409,10 +409,32 @@ export function getTabStatus(deps, { sessionId }) {
 // forwarded to takeHandoff: an event is never dequeued for a connection
 // whose socket is dead, so a handoff is never lost to a disconnected wait --
 // it stays queued and the next wait_for_handoff receives it.
-export function waitForHandoff(deps, { timeoutMs = 900000 }) {
+//
+// `extra` is the MCP SDK's per-request context. Only `extra.signal` is used,
+// and it is the other half of the same guarantee (#245): connection liveness
+// says nothing about a client that cancelled or abandoned THIS request while
+// keeping the socket open. Without it the cancelled wait still consumes the
+// next handoff, and the SDK then drops the response it was consumed for.
+//
+// The final re-check below covers the one slice takeHandoff cannot see: the
+// abort landing after its commit check but before this returns. Re-queueing
+// there costs a duplicate delivery at worst (the next wait gets it again),
+// which is the right way round -- a handoff arriving twice is recoverable,
+// one that never arrives is not.
+export function waitForHandoff(deps, { timeoutMs = 900000 }, extra = undefined) {
   const opts = {};
   if (typeof deps.connectionIsAlive === 'function') opts.isAlive = deps.connectionIsAlive;
-  return deps.groupManager.takeHandoff(deps.groupId, Math.max(Number(timeoutMs) || 0, 0), opts);
+  const signal = extra && extra.signal;
+  if (signal) opts.signal = signal;
+  const wait = deps.groupManager.takeHandoff(deps.groupId, Math.max(Number(timeoutMs) || 0, 0), opts);
+  if (!signal) return wait;
+  return wait.then((result) => {
+    if (signal.aborted && result && !result.timedOut && !result.error) {
+      deps.groupManager.requeueHandoff(deps.groupId, result);
+      return { timedOut: true };
+    }
+    return result;
+  });
 }
 
 // Handoff (worker-only): notify the orchestrator that the worker's task is

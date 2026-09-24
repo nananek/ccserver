@@ -259,6 +259,62 @@ test('a dead (isAlive:false) waiter never consumes; the next live waiter receive
   assert.deepEqual(resLive, { type: 'done', from: 'workerA', summary: 'survives death' });
 });
 
+// #245: liveness is re-read at COMMIT, not only at claim. A waiter claims the
+// event, then commits one macrotask later; a connection that dies inside that
+// gap would otherwise carry the event out with it into a socket nobody reads.
+// The issue lists this as the sibling of the cancellation path and never
+// reproduced it at the wire; here it is, deterministically.
+test('#245: a connection that dies between claim and commit gives the event back', async () => {
+  const gid = await makeGroup();
+
+  let alive = true;
+  const dying = groupManager.takeHandoff(gid, 0, { isAlive: () => alive });
+  // The claim happens synchronously inside pushHandoff's emit...
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'claimed then orphaned' });
+  // ...and the commit is a macrotask later. Kill the connection in between.
+  alive = false;
+
+  // Settle the dying waiter on its OWN before taking the next one: a second
+  // takeHandoff here would supersede it and reclaim the event that way, which
+  // would pass whether or not the commit re-check exists.
+  assert.deepEqual(await dying, { timedOut: true }, 'the dying waiter delivers nothing');
+  assert.deepEqual(await groupManager.takeHandoff(gid, 200),
+    { type: 'done', from: 'workerA', summary: 'claimed then orphaned' },
+    'and the event it had already claimed is back for the next waiter');
+});
+
+// #245: the same guarantee for a cancelled REQUEST rather than a dead
+// connection. takeHandoff takes the request's AbortSignal, so an abort both
+// returns anything claimed and retires the waiter -- otherwise it lingers for
+// the full timeoutMs as the group's sole consumer.
+test('#245: aborting a wait returns its claimed event and retires the waiter', async () => {
+  const gid = await makeGroup();
+
+  const ac = new AbortController();
+  const aborted = groupManager.takeHandoff(gid, 60000, { signal: ac.signal });
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'reclaimed on abort' });
+  ac.abort();
+
+  assert.deepEqual(await aborted, { timedOut: true });
+  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 0,
+    'an aborted waiter must not linger as a consumer');
+  const next = await groupManager.takeHandoff(gid, 200);
+  assert.deepEqual(next, { type: 'done', from: 'workerA', summary: 'reclaimed on abort' });
+});
+
+// An already-aborted signal must never register a consumer at all.
+test('#245: a wait whose signal is already aborted consumes nothing', async () => {
+  const gid = await makeGroup();
+
+  const ac = new AbortController();
+  ac.abort();
+  assert.deepEqual(await groupManager.takeHandoff(gid, 60000, { signal: ac.signal }), { timedOut: true });
+  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 0);
+
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'still here' });
+  assert.deepEqual(await groupManager.takeHandoff(gid, 200), { type: 'done', from: 'workerA', summary: 'still here' });
+});
+
 test('onOrchestratorExit settles pending waiters as timedOut (no 15-min zombie)', async () => {
   const gid = await makeGroup();
 
