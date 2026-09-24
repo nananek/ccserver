@@ -4,6 +4,7 @@
   "description": "Context & Coordination Server for browser-based AI CLI sessions",
   "private": true,
   "type": "module",
+  "//engines": "下限はサポートする最古の LTS (22.13 = Node 22 が LTS に入った版)。上限は置かない: engine-strict な環境で新しい Node の install を止めてしまうため。CI が実際に検証している範囲は .github/workflows/ci.yml のマトリクス (22/24/26) を参照。",
   "engines": {
     "node": ">=22.13"
   },
