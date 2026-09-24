@@ -275,12 +275,20 @@ function capture() {
       }
     }
 
-    // forceSandbox (sandbox.config.json) forbids launching the agent outside
-    // the sandbox, so the direct-launch fallback below is not allowed -- fail
-    // the capture with a clear error instead of running claude unsandboxed.
-    if (!sandboxed && loadSandboxConfig().forceSandbox) {
+    // A mandatory sandbox forbids launching the agent outside it, so the
+    // direct-launch fallback below is not allowed -- fail the capture with a
+    // clear error instead of running claude unsandboxed.
+    //
+    // The message names the ACTUAL cause. forceSandbox is effective, not
+    // literal (browseRoots implies it), so hard-coding '"forceSandbox": true'
+    // would tell an operator whose config has no such key to go turn it off.
+    const usageCfg = loadSandboxConfig();
+    if (!sandboxed && usageCfg.forceSandbox) {
       const { reason } = forceSandboxUnavailableReason();
-      resolve({ error: `Cannot read usage: "forceSandbox": true but the sandbox is unavailable (${reason})` });
+      const cause = usageCfg.forceSandboxReason === 'browseRoots'
+        ? '"browseRoots" is set, so every agent launch must be sandboxed,'
+        : '"forceSandbox": true';
+      resolve({ error: `Cannot read usage: ${cause} but the sandbox is unavailable (${reason})` });
       return;
     }
 

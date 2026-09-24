@@ -540,6 +540,15 @@ test('forceSandbox is effective: browseRoots implies it, and forceSandboxReason 
   withConfig({ browseRoots: [] }, () => {
     assert.equal(loadSandboxConfig().forceSandbox, false);
   });
+  // A browseRoots the operator MEANT but spelled wrong normalizes to [].
+  // That must read as "restricted but broken", not as "unrestricted" --
+  // otherwise the usage capture would direct-launch on exactly the config
+  // that was supposed to lock the host down.
+  withConfig({ browseRoots: '/srv/projects' }, () => {
+    const cfg = loadSandboxConfig();
+    assert.equal(cfg.browseRootsInvalid, true, 'a string browseRoots is invalid, not empty');
+    assert.equal(cfg.forceSandbox, true, 'an invalid browseRoots must fail closed');
+  });
   // Still strict-boolean on the explicit key.
   withConfig({ forceSandbox: 'true' }, () => {
     assert.equal(loadSandboxConfig().forceSandbox, false);

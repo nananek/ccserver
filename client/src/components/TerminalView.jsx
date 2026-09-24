@@ -649,16 +649,36 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         relX: x - anchorRect.x, relY: y - anchorRect.y,
       };
     };
+    // Two handle positions are the same when every coordinate matches.
+    // Identity is useless here: cellPixel() builds a fresh object each call,
+    // so an unchanged selection still produced a new object every time.
+    const samePoint = (a, b) => a.x === b.x && a.y === b.y && a.anchorY === b.anchorY
+      && a.relX === b.relX && a.relY === b.relY;
+    const sameHandles = (a, b) => {
+      if (a === b) return true;            // both null
+      if (!a || !b) return false;          // one appeared or disappeared
+      return samePoint(a.start, b.start) && samePoint(a.end, b.end);
+    };
+    // Only enqueue a React update when the value actually CHANGES (#253).
+    //
+    // term.onScroll fires once per rendered line and xterm scrolls on every
+    // new line of pty output, so with no selection -- the normal case while
+    // an agent streams -- this used to call setHandles(null) once per line.
+    // React does not bail out early here, so each call enqueued an Update
+    // object that sat in the pending queue until some OTHER state change
+    // forced a re-render: measured at roughly one object per line and about
+    // 0.5x the output's byte count retained, not freed by GC, and an agent
+    // controls both the content and the volume of that output. Comparing
+    // first makes the no-selection case a pure no-op.
     const updateHandles = () => {
-      if (!term.hasSelection()) {
-        handlesRef.current = null;
-        setHandles(null);
-        return;
+      let next = null;
+      if (term.hasSelection()) {
+        const pos = term.getSelectionPosition();
+        const start = pos ? cellPixel(pos.start.y, pos.start.x) : null;
+        const end = pos ? cellPixel(pos.end.y, pos.end.x) : null;
+        next = start && end ? { start, end } : null;
       }
-      const pos = term.getSelectionPosition();
-      const start = pos ? cellPixel(pos.start.y, pos.start.x) : null;
-      const end = pos ? cellPixel(pos.end.y, pos.end.x) : null;
-      const next = start && end ? { start, end } : null;
+      if (sameHandles(handlesRef.current, next)) return;
       handlesRef.current = next;
       setHandles(next);
     };

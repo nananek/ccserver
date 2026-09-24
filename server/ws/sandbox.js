@@ -902,7 +902,14 @@ export function loadSandboxConfig() {
   // an unsandboxed launch the server then overrode, and then displayed the
   // running session as unsandboxed (issue #251). Everything downstream now
   // reads this single field.
-  const forceSandbox = forceSandboxExplicit || browseRoots.length > 0;
+  // browseRootsInvalid is included deliberately: a browseRoots the operator
+  // wrote but spelled wrong normalizes to [], and without this a BROKEN
+  // restriction would read as NO restriction. Sessions already fail closed on
+  // it (createSession refuses them outright), but usage.js/codexUsage.js only
+  // consult forceSandbox -- so leaving it out would let the usage capture
+  // direct-launch an agent on the host on exactly the config the operator
+  // meant to lock down. Fail closed, consistently.
+  const forceSandbox = forceSandboxExplicit || browseRoots.length > 0 || browseRootsInvalid;
   // Which of the two causes is in effect -- for WORDING ONLY (refusal text,
   // UI notes). Never branch policy on it: that is what forceSandbox is for.
   const forceSandboxReason = !forceSandbox ? null : (forceSandboxExplicit ? 'config' : 'browseRoots');
