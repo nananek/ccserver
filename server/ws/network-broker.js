@@ -342,11 +342,13 @@ const PORT_FILE_SNIPPET_BYTES = 64;
 //
 // The snippet is quoted with JSON.stringify, which turns control bytes into
 // escapes. That matters more than it looks: this string is thrown, and the
-// error reaches a session-startup failure and the server log, so a terminal
-// escape or a newline reaching either verbatim would let the FILE's bytes
-// dress themselves up as log structure. The read is bounded too -- the cap
-// belongs on the read, not just on the output, so that whatever sits at the
-// path cannot decide how much is pulled into memory to describe it.
+// error surfaces to the user as a session-startup failure, so letting a
+// terminal escape or a newline through verbatim would hand the file we could
+// not read a say in how that message reads. (It does not reach the server log
+// -- fastify's logger does not carry the body -- so display is the whole of
+// it.) The read is bounded too -- the cap belongs on the read, not just on the
+// output, so that whatever sits at the path cannot decide how much is pulled
+// into memory to describe it.
 function describeUnreadablePortFile(portFile) {
   let fd;
   try {
