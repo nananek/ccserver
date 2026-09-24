@@ -25,7 +25,7 @@ import { chmod as chmodP, readdir as readdirP, rm as rmP, stat as statP } from '
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
@@ -776,6 +776,20 @@ export function loadSandboxConfig() {
   // sandboxed sessions (resource-consuming) on any caller's say-so, so it
   // must not exist unless explicitly enabled.
   const reviewerMcp = raw.reviewerMcp === true;
+  // Issue #198: the broker's privacy-preserving local aggregate is off unless
+  // the operator explicitly enables it and names a local state file. Keeping
+  // the path out of every report row avoids ever recording a project path.
+  // The path must be ABSOLUTE: a relative one would resolve against whatever
+  // cwd ccserver happened to be started from (usually the repo checkout) --
+  // i.e. exactly the sandbox-writable tree the aggregate has to stay out of,
+  // where a session could forge or suppress counts. index.js additionally
+  // refuses to boot when this file falls inside browseRoots.
+  const rawGhUsageRecording = (raw.ghUsageRecording && typeof raw.ghUsageRecording === 'object') ? raw.ghUsageRecording : {};
+  const ghUsageFile = typeof rawGhUsageRecording.file === 'string' && isAbsolute(rawGhUsageRecording.file) ? rawGhUsageRecording.file : null;
+  const ghUsageRecording = {
+    enabled: rawGhUsageRecording.enabled === true && ghUsageFile !== null,
+    file: ghUsageFile,
+  };
   // Launch options to hide from every picker (issue #105): apps the operator
   // hasn't contracted for. Server-side install detection alone can't tell
   // "not installed" apart from "installed but not contracted", so this is a
@@ -818,7 +832,7 @@ export function loadSandboxConfig() {
   // cannot drift apart -- see that function's header comment.
   const network = normalizeNetworkSettings(raw.network);
   return {
-    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, hiddenApps, browseRoots, browseRootsInvalid, configError, allowUnsandboxedAgents, network,
+    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, allowUnsandboxedAgents, network,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -1050,6 +1064,36 @@ export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
   // an absolute path for installs PATH can't see (e.g. systemd).
   if (r) return { command: r.command, hostCommand: r.path, installDir: appInstallDir(r.path), found: true };
   return { command, hostCommand: null, installDir: null, found: false };
+}
+
+// Whether the resolved opencode binary at `hostCommand` accepts --standalone
+// (added in opencode 2.0.0 alongside the machine-wide "managed background
+// service" singleton it opts out of -- see appLaunch.js's appStandaloneArgs
+// comment for why that flag matters to ccserver). Older opencode CLIs (1.x)
+// reject unknown flags outright (`yargs` strict mode: prints usage, exits 1,
+// never launches) -- verified against a cached opencode 1.18.29 binary --
+// so this must be checked per-install rather than assumed. `--version`
+// output has changed shape across releases ("1.18.29" vs "opencode v2.0.12"),
+// hence the loose regex instead of an exact parse. Spawning `--version` is
+// ~0.2-1s on this host, too slow to pay on every session launch, so results
+// are cached by resolved path + mtime (an in-place upgrade, e.g. via
+// pacman/npm to the same path, changes mtime and is picked up without a
+// ccserver restart).
+const opencodeStandaloneCache = new Map(); // hostCommand -> { mtimeMs, supported }
+export function opencodeSupportsStandalone(hostCommand) {
+  if (!hostCommand) return false;
+  let mtimeMs;
+  try { mtimeMs = statSync(hostCommand).mtimeMs; } catch { return false; }
+  const cached = opencodeStandaloneCache.get(hostCommand);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.supported;
+  let supported = false;
+  try {
+    const out = execFileSync(hostCommand, ['--version'], { encoding: 'utf8', timeout: 5000 });
+    const match = out.match(/(\d+)\.\d+\.\d+/);
+    supported = !!match && Number(match[1]) >= 2;
+  } catch { /* unreadable/unexpected output -- assume unsupported, stay safe */ }
+  opencodeStandaloneCache.set(hostCommand, { mtimeMs, supported });
+  return supported;
 }
 
 // Which agent CLIs are actually launchable on this host, keyed by app id.
@@ -2226,7 +2270,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   if (resolve(cwd) === '/') {
     throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
   }
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots, browseRootsInvalid } = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, ghUsageRecording, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots, browseRootsInvalid } = loadSandboxConfig();
   // Defense in depth behind sessionManager's browseRoots cwd check (issue
   // #189): same reasoning as the '/' guard just above. The scratch-tree
   // exemption is gated on the trusted `scratchCwd` flag (set only by
@@ -2381,7 +2425,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // null when commitMessageGuard is disabled, which the broker treats as
   // "no PR-body check", matching pre-plan8 behavior exactly.
   const gitBroker = gitBrokerEnabled
-    ? startGitBroker({ cwd, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null })
+    ? startGitBroker({ cwd, app, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null, ghUsageRecording })
     : null;
 
   // Commit-message guard (see commitGuard.js / startCommitGuard above):

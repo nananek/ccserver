@@ -14,6 +14,19 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { classifyActivity } from './activity.js';
+
+// sessionManager.activitySnapshot is a thin wrapper around activity.js's pure
+// classifier (which is why activity.js can be imported here at the top: it
+// touches no env and no disk, unlike sessionManager, which the tests below
+// import lazily on purpose). The fakes run the REAL classifier over their fake
+// session objects rather than hand-rolling the result shape.
+const fakeActivitySnapshot = (session) => classifyActivity({
+  app: session?.app ?? null,
+  live: !!session,
+  exited: !!session?.exited,
+  shell: !!session?.shell,
+});
 
 let runtimeDir;
 let groupManager;
@@ -376,7 +389,7 @@ test('getTabStatus: reports lastOutputAt and the derived idleForMs', async () =>
   const deps = {
     groupId: g,
     groupManager: groupManager.getGroupManagerApi(),
-    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false, dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }) },
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false, dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }), activitySnapshot: fakeActivitySnapshot },
   };
   const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
   assert.equal(r.error, undefined);
@@ -392,7 +405,7 @@ test('getTabStatus: no output yet (lastOutputAt null) yields idleForMs null', as
   const deps = {
     groupId: g,
     groupManager: groupManager.getGroupManagerApi(),
-    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false, dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }) },
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false, dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }), activitySnapshot: fakeActivitySnapshot },
   };
   const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
   assert.equal(r.lastOutputAt, null);
@@ -416,12 +429,22 @@ test('getTabStatus / listGroupSessions: dockerAvailable/dockerReason come from t
     const deps = {
       groupId: g,
       groupManager: groupManager.getGroupManagerApi(),
-      sessionManager: { getSession: sm.getSession, writeToSession: sm.writeToSession, dockerAvailability: sm.dockerAvailability },
+      sessionManager: { getSession: sm.getSession, writeToSession: sm.writeToSession, dockerAvailability: sm.dockerAvailability, activitySnapshot: sm.activitySnapshot },
     };
     const status = tools.getTabStatus(deps, { sessionId: res.sessionId });
     assert.deepEqual(
       { dockerAvailable: status.dockerAvailable, dockerReason: status.dockerReason },
       { dockerAvailable: null, dockerReason: 'not-sandboxed' },
+    );
+    // Same deal for the activity reading: it comes from the real
+    // sessionManager.activitySnapshot, not a stub. A shell session has no
+    // agent, so the graded question does not apply to it.
+    assert.ok(status.activity, 'get_tab_status carries the activity reading');
+    assert.equal(status.activity.level, null);
+    assert.equal(status.activity.reason, 'shell');
+    assert.ok(
+      tools.listGroupSessions(deps).members[0].activity,
+      'list_group_sessions carries it for every member too',
     );
 
     const { members } = tools.listGroupSessions(deps);
@@ -449,6 +472,7 @@ test('listGroupSessions: autoYes reflects each live session state', async () => 
     destroySession: () => {},
     writeToSession: () => false,
     dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }),
+    activitySnapshot: fakeActivitySnapshot,
   };
   groupManager.setSessionApiForTests(fake);
   try {
@@ -1037,7 +1061,7 @@ test('getTabStatus: reports screenIdleMs from the screen model', async () => {
   const deps = {
     groupId: g,
     groupManager: groupManager.getGroupManagerApi(),
-    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false, dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }) },
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false, dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }), activitySnapshot: fakeActivitySnapshot },
   };
   const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
   assert.equal(r.error, undefined);
