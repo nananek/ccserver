@@ -351,52 +351,51 @@ test('a link established by only one side dialing carries RPC in BOTH directions
 
 // Issue #237: `connected` is `!!this.live`, and _resolveCandidate adopts the
 // FIRST candidate unconditionally, swapping to the winner only when the second
-// one arrives. So `connected && connected` is true while a side may still be
-// holding the loser, and asserting right after it reads a state that has not
-// settled -- intermittently, because under load the two candidates' arrivals
-// spread apart. This waits for the resolution to be OVER instead.
+// one arrives. `connected && connected` is satisfied in that in-between state,
+// with a side still holding the loser; the original test asserted right after
+// it.
 //
-// The signal: a double dial creates exactly two physical connections, and
-// settling destroys one of them. So this waits for both sides to be
-// `connected` with exactly one of the two accepted sockets destroyed.
+// The condition here: both sides `connected`, with exactly one of the two
+// accepted sockets destroyed.
 //
-// Be clear about what that does NOT prove. Each of these lists holds ONE END
-// of a connection -- the end our listener accepted. Destroying that end says
-// nothing about the far end, which lives inside the peer's FederationLink: a
-// side that has not yet seen the close can still be `connected` while holding
-// its own end of the SAME losing connection. So "nobody holds the destroyed
-// socket" is true and "both sides are on the survivor" does not follow from
-// it. The condition is not logically closed, and a review built the
-// counterexample: hold the winner's accepting side in "sends its hello but
-// never reads" (pause() right after acceptInbound) and this wait goes true
-// 20/20 with both sides reading as the dialer -- i.e. sitting on two DIFFERENT
-// connections, exactly what the assertion's own message is about.
+// Three rounds of review found claims in this comment that outran the code, so
+// what follows is split into what was measured and what is not claimed. Nothing
+// here is stated as a consequence of anything else.
 //
-// What does hold it shut in a natural run is causal order, not logic. The
-// preferring dialer cannot resolve the winning connection until the peer's
-// hello arrives on it, and the peer sends that hello when it accepts -- by
-// which point it has a framer up, and OUR hello was written before that. So
-// the peer resolves the winning connection BEFORE we do, and is already off
-// the loser by the time we supersede and destroy it. Measured: no false
-// positive in 200 idle runs plus 300 under 16 CPU burners on 8 cores, polled
-// densely with setImmediate. Nothing reaches this state without being
-// constructed.
+// Measured:
+//   - Reverting to `connected && connected` makes the deterministic test below
+//     fail: 5 runs, 5 failures.
+//   - Applied where there is no double dial (a one-sided dial, a single
+//     connection): `accepted` stays below 2, the condition stays unmet, and the
+//     wait ends in a timeout rather than a pass.
+//   - When the condition is not met, `describe` prints the observed state with
+//     the timeout.
+//   - No false positive in 200 idle runs plus 300 under 16 CPU burners on 8
+//     cores, polled with setImmediate.
 //
-// So: a large reduction of the original window (which needed only "the second
-// candidate has not arrived at EITHER side"), not an airtight one.
-//
-// It does fail safe if misapplied: anything that is not a double dial leaves
-// `accepted` below 2, so this never goes true for a one-sided dial -- it times
-// out (with `describe`) rather than quietly passing.
-//
-// Deliberately NOT the assertion's own condition: this says "resolution
-// finished", the assertions say "it finished the way the fingerprint rule
-// requires". A real regression in the rule still settles, so it still fails as
-// an assertion with actual/expected -- not as a bare timeout. And whenever the
-// condition is simply never met, the wait times out with `describe` reporting
-// the observed state rather than just the word 'timeout'. (Which states leave
-// it unmet is exactly what the paragraph above says is not proven, so that is
-// the claim here, not a stronger one.)
+// Not claimed:
+//   - That this condition implies settlement. It does not follow. Each list
+//     holds ONE END of a connection -- the end our listener accepted -- and the
+//     far end lives inside the peer's FederationLink. A review constructed the
+//     counterexample: hold the winner's accepting side in "sends its hello but
+//     never reads" (pause() after acceptInbound), and the condition went true
+//     20/20 with both sides reading as the dialer, i.e. on two different
+//     connections.
+//   - That the 500 runs above make the state unreachable naturally. They are
+//     500 runs. There is an argument for why the orderings line up (the peer
+//     sends its hello when it accepts, after our hello was already written), but
+//     it is an argument, not a measurement of every ordering.
+//   - That a broken fingerprint rule reaches the orientation assertions.
+//     Measured, by changing `winningDialerIsSelf`: with both sides preferring
+//     self, both duplicate-dial tests time out at `accepted:6 dropped:6` and the
+//     assertions are never evaluated (each side discards the other's inbound,
+//     that discard closes the peer's live, the peer redials, and `accepted`
+//     keeps growing). With both sides preferring the peer, the original test
+//     times out and the deterministic one passes.
+//   - That this file covers the rule itself. It cannot: `aShouldBeDialer` is
+//     computed from the same `winningDialerIsSelf` the production path uses, so
+//     a change applied symmetrically to both is invisible here. The rule has its
+//     own pure-function test near the top of this file.
 function duplicateDialState() {
   const both = [...acceptedByA, ...acceptedByB];
   return {
