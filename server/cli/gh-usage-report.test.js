@@ -4,7 +4,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 
@@ -206,4 +206,38 @@ test('an aggregate past the read cap is repairable with reset --force', () => {
   const forced = run(['reset', '--force', '--file', big]);
   assert.equal(forced.status, 0, forced.stderr);
   assert.deepEqual(JSON.parse(readFileSync(big, 'utf8')).counters, {});
+});
+
+test('enable refuses a target that is not a plain file', () => {
+  // Accepting these was how an operator typo reached the recorder, which then
+  // renamed its aggregate onto the path -- and, before the obstruction rules
+  // were narrowed, deleted a real directory's contents to do it.
+  const asDir = join(tmpRoot, 'a-real-directory');
+  mkdirSync(asDir, { recursive: true });
+  writeFileSync(join(asDir, 'irreplaceable.txt'), 'DATA');
+  for (const target of [asDir, '/dev/null', '/']) {
+    writeConfig({ docker: false });
+    const res = run(['enable', '--file', target]);
+    assert.equal(res.status, 1, `enable ${target} -> exit ${res.status}: ${res.stdout}`);
+    assert.match(res.stderr, /not a file the aggregate can be written to/);
+    assert.deepEqual(readConfig(), { docker: false }, `enable ${target} mutated the config`);
+  }
+  assert.equal(readFileSync(join(asDir, 'irreplaceable.txt'), 'utf8'), 'DATA');
+});
+
+test('show says why a report is empty when the aggregate cannot be read', () => {
+  const big = join(tmpRoot, 'unreadable-aggregate.json');
+  writeFileSync(big, 'x'.repeat(1024 * 1024 + 1));
+  writeConfig({ docker: false });
+  const res = run(['show', '--file', big]);
+  assert.equal(res.status, 0, res.stderr);
+  // The report itself stays pasteable on stdout; the diagnosis goes to stderr.
+  assert.doesNotMatch(res.stdout, /count=|warning:/);
+  assert.match(res.stderr, /not a readable gh usage aggregate \(too-large\)/);
+
+  // A genuinely empty aggregate says nothing at all.
+  const fresh = join(tmpRoot, 'fresh-aggregate.json');
+  const ok = run(['show', '--file', fresh]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(ok.stderr, '', `a missing aggregate must not warn: ${ok.stderr}`);
 });

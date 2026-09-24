@@ -3,7 +3,7 @@
 // here uploads, opens a browser, or invokes gh.
 import { chmodSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { defaultRecordingPath, formatGhUsageReport, resetGhUsage, resetTargetStatus } from '../ghUsageRecording.js';
+import { aggregateStatus, defaultRecordingPath, formatGhUsageReport, resetGhUsage } from '../ghUsageRecording.js';
 // pathPolicy is dependency-free (node builtins only), so the CLI can reuse
 // the server's own containment rule without pulling in ws/sandbox.js.
 import { isCcserverScratchPath, isContained, normalizeBrowseRoots } from '../pathPolicy.js';
@@ -112,6 +112,15 @@ const file = resolve(fileArg || (typeof current.file === 'string' && current.fil
 // be a session cwd, which is why the docs ask for a path outside the
 // checkout regardless.
 if (command === 'enable') {
+  // Refuse anything that is not an absent path or a plain file, exactly as
+  // `reset` does. The recorder renames its aggregate onto this path, so a
+  // directory, device or "/" here is an operator typo that used to be accepted
+  // with exit 0 (and, until the fix in this same change, then had its contents
+  // deleted on the next gh call).
+  const targetStatus = aggregateStatus(file);
+  if (targetStatus === 'not-a-regular-file') {
+    die(`Refusing to enable: ${q(file)} is a directory, symlink, FIFO or device, not a file the aggregate can be written to.`);
+  }
   // Same two refusals index.js applies at boot, so the operator hears about
   // it now instead of as a server that will not start. The scratch tree is
   // sandbox-writable regardless of browseRoots (persistent HOME and combo
@@ -124,10 +133,19 @@ if (command === 'enable') {
     die(`Refusing to enable: ${q(file)} is inside browseRoots, so ccserver would refuse to start. Choose a path outside it.`);
   }
 }
-if (command === 'show') process.stdout.write(formatGhUsageReport(file, { includePeriod: !noPeriod }));
+if (command === 'show') {
+  process.stdout.write(formatGhUsageReport(file, { includePeriod: !noPeriod }));
+  // An unreadable or wrecked aggregate prints exactly the same empty report as
+  // one that simply has nothing in it yet, so say which it is. On stderr, so
+  // the report on stdout stays pasteable as-is.
+  const status = aggregateStatus(file);
+  if (status !== 'ok') {
+    console.error(`warning: ${q(file)} is not a readable gh usage aggregate (${status}), so this report is empty for that reason, not because nothing was recorded.`);
+  }
+}
 else if (command === 'reset') {
   if (!resetGhUsage(file, { force })) {
-    const status = resetTargetStatus(file);
+    const status = aggregateStatus(file);
     const why = {
       // A directory is deliberately not forceable here (an operator-typed
       // path must not become a recursive delete); say what to do instead.
