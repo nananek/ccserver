@@ -29,9 +29,10 @@ import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
-import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
+import {
+  restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled, setWebpushReachable,
+} from './ws/notify.js';
 import { ensureVapidKeys, countSubscriptions } from './ws/pushSubscriptions.js';
-import { setWebpushReachable } from './ws/notifyBridge.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/reviewer.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
@@ -496,13 +497,21 @@ const PORT = process.env.PORT || 3001;
 
 // Web Push (plan-notify-bridge): mint the host's VAPID identity on first boot
 // so the public key is ready before any browser asks to subscribe, and tell
-// the notification bridge how to find out whether the webpush channel can
-// actually reach anyone (a late binding, so notifyBridge does not have to
-// depend on the push store existing).
+// notify.js how to find out whether the webpush channel can actually reach
+// anyone (a late binding, so notify.js does not have to depend on the push
+// store existing). This one call answers for both paths that ask the question
+// -- notifyEnabled() / sendNotification() and the bridge (#234).
+// Whether the Web Push half of the remedy the DISABLED warning below offers
+// is actually available in THIS process. If the VAPID identity could not be
+// minted, setWebpushReachable is never wired, webpushReachable() answers false
+// for the life of the process, and "subscribe a browser" cannot help no matter
+// how many times the operator restarts -- so the warning must not offer it.
+let webpushRemedyAvailable = true;
 try {
   ensureVapidKeys();
   setWebpushReachable(() => countSubscriptions() > 0);
 } catch (err) {
+  webpushRemedyAvailable = false;
   fastify.log.error({ err }, 'Failed to initialize Web Push VAPID keys; push notifications are unavailable');
 }
 
@@ -531,7 +540,19 @@ try {
     fastify.log.warn(
       'ccserver-notify is DISABLED: no delivery target is configured, so the notify MCP tool will not be '
       + 'injected into any session and agents have no way to call a human. Set notify.discordWebhook '
-      + '(or CCSERVER_DISCORD_WEBHOOK), or seed notify.subscriptions, in sandbox.config.json. '
+      + '(or CCSERVER_DISCORD_WEBHOOK), or seed notify.subscriptions, in sandbox.config.json -- or '
+      + (webpushRemedyAvailable
+        ? 'subscribe a browser to Web Push from Settings > 通知, which counts as a delivery target too (#234). '
+        : 'NOTE: subscribing a browser to Web Push would also count as a delivery target (#234), but this '
+          + 'process failed to initialize its VAPID keys (see the error above), so that route is unavailable '
+          + 'here, and restarting will not help for as long as that error persists -- fix it first. (Some '
+          + 'causes are transient: the key pair is stored in SQLite, so a locked or full database fails this '
+          + 'and then succeeds once the cause clears.) ')
+      + 'ALL OF THESE TAKE EFFECT ON THE NEXT START: the notify MCP broker is created once, here at boot '
+      + '(ensureNotifyBroker), and sessions only get the tool while it is running -- so restart ccserver '
+      + 'after configuring one. Settings > 通知\'s "send a test" goes straight out over HTTP and needs no '
+      + 'broker, so it can succeed while the tool is still missing from every session; a green test is '
+      + 'NOT evidence that the tool is back. '
       + 'NOTE: the Vikunja channel was removed and no longer counts as a delivery target -- see '
       + 'https://github.com/nananek/ccserver/issues/207',
     );

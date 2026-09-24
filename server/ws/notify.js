@@ -271,12 +271,57 @@ export function getNotifySockPath() {
   return join(hostRuntimeDir(), NOTIFY_SOCKET_DIR_NAME, 'sock');
 }
 
-// Whether the notify feature is on at all: a Discord webhook configured, or a
-// non-empty subscription registry (seed + runtime).
+// Whether the webpush channel can reach anyone right now.
+//
+// Resolved lazily so this module does not depend on the push store -- and so
+// on the database -- existing yet: notify.js is imported far earlier than that
+// (sessionManager -> notify -> sandbox), and reading `push_subscriptions` from
+// here would break both the boot order and every test that exercises notify
+// without a DB. Returns false until server/index.js wires it.
+//
+// notifyBridge re-exports this rather than keeping its own copy: the whole of
+// #234 was the two paths answering "can Web Push reach anyone" differently, so
+// there is exactly one binding and index.js's single call answers for both.
+//
+// The DIRECTION is forced, not a preference: notifyBridge already imports
+// notify.js (sendNotification et al), so parking the binding over there and
+// having notify.js reach for it would close that edge into a cycle. Whoever
+// moves it back will find out the hard way -- it has to live here.
+let webpushReachableFn = () => false;
+export function setWebpushReachable(fn) {
+  webpushReachableFn = typeof fn === 'function' ? fn : (() => false);
+}
+export function webpushReachable() {
+  try {
+    return !!webpushReachableFn();
+  } catch {
+    return false;
+  }
+}
+
+// Which delivery channels can actually reach a human right now. `channels` is
+// sendNotification's argument of the same name: null/undefined means every
+// channel, a list restricts to the ones named.
+//
+// The single answer to "can this notification reach anyone" -- notifyEnabled,
+// sendNotification and notifyBridge all ask through here. #234 was two
+// implementations of this question disagreeing: the bridge counted Web Push
+// and notifyEnabled did not, so a host subscribed only through the browser was
+// told the feature was off and never got the `notify` tool at all.
+export function reachableChannels(channels) {
+  const wanted = (ch) => channels == null || channels.includes(ch);
+  const out = [];
+  if (wanted('discord') && (!!resolvedDiscordWebhook() || subscriptions.length > 0)) out.push('discord');
+  if (wanted('webpush') && webpushReachable()) out.push('webpush');
+  return out;
+}
+
+// Whether the notify feature is on at all: any channel that can reach someone
+// -- a Discord webhook, a non-empty subscription registry (seed + runtime), or
+// at least one subscribed browser.
 // When false, no MCP server is injected into sessions (see shouldInjectNotify).
 export function notifyEnabled() {
-  const cfg = loadNotifyConfig();
-  return !!(cfg.discordWebhook || subscriptions.length > 0);
+  return reachableChannels(null).length > 0;
 }
 
 // Pure injection decision for createSession:
@@ -342,6 +387,12 @@ export function restoreNotify() {
   const cfg = loadNotifyConfig();
   const seen = new Set();
   subscriptions = [];
+  // The registry is being rebuilt from scratch, so "have we already said
+  // nothing can receive this" is stale too -- the next outage after a restore
+  // is a new one and has to be reported. Without this the flag is the only
+  // notify state that survives a restore, which also makes the warn-once test
+  // depend on whichever earlier case happened to leave it false.
+  warnedUnreachable = false;
   const add = (url, name, id, createdAt) => {
     if (!isValidWebhookUrl(url) || seen.has(url)) return;
     seen.add(url);
@@ -574,6 +625,19 @@ async function deliver(url, content) {
   }
 }
 
+// Warned once per transition into "nothing can receive this" rather than on
+// every call: an agent in a loop would otherwise bury the log in the same
+// line. Reset as soon as a channel comes back, so the next outage is reported
+// again.
+let warnedUnreachable = false;
+function warnUnreachable(channels) {
+  if (warnedUnreachable) return;
+  warnedUnreachable = true;
+  const which = channels == null ? 'every channel is' : `channels [${channels.join(', ')}] are`;
+  console.warn(`[notify] ${which} selected but nothing is configured to reach anyone; `
+    + 'set notify.discordWebhook / notify.subscriptions, or subscribe a browser to Web Push');
+}
+
 // Dispatch to every configured channel (Discord webhook + each subscribed
 // webhook), all non-blocking. Returns the delivery tally for the MCP tool's
 // result payload; never throws. `identity` is the optional per-connection
@@ -605,6 +669,22 @@ export async function sendNotification({
   if (!content) {
     return { ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } };
   }
+  // #234: the same "can this reach anyone" check the bridge has done since its
+  // F5 finding, now on the MCP-tool path too. Without it a call with nothing
+  // configured -- or naming only a channel nothing backs -- fans out to zero
+  // targets and still reports ok:true, so neither the agent that called it nor
+  // the operator learns the notification died.
+  //
+  // Deliberately minimal: `delivered` keeps the shape every caller already
+  // reads, and the zero-target case is reported through ok/reason alone. The
+  // redesign of `delivered` (unset vs failed, Discord missing from `failed`)
+  // is #235 and is not touched here.
+  const reachable = reachableChannels(channels);
+  if (reachable.length === 0) {
+    warnUnreachable(channels);
+    return { ok: false, reason: 'no-reachable-channel', delivered: { discord: false, webhooks: 0, failed: 0 } };
+  }
+  warnedUnreachable = false;
   const wantDiscordChannel = channels == null || channels.includes('discord');
   const targets = [];
   if (wantDiscordChannel) {

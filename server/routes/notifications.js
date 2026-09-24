@@ -61,6 +61,37 @@ import { notifyDetectorStats } from '../ws/sessionManager.js';
 // covers the configured Discord webhook AND every runtime subscription
 // together (notify.js does not split them), matching the `notify` MCP tool's
 // own channel vocabulary.
+//
+// DO NOT fold this into notify.js's reachableChannels(). #234 collapsed the
+// two DELIVERY-side answers to "can this reach anyone" into one, and left this
+// one standing on purpose -- it is a third caller, not a third copy to clean
+// up, and a future inventory that "finishes the job" here would break it:
+//
+//   - This is the DIAGNOSTIC the operator reads when notifications have
+//     stopped. reachableChannels() answers webpush from a late binding that
+//     server/index.js wires at boot; if that wiring is what is broken, routing
+//     the diagnostic through it makes it tell the same lie as the thing being
+//     diagnosed. Counting the rows is independent ground truth, which is the
+//     property this particular function needs.
+//   - The reason notify.js holds the push store at arm's length does not
+//     apply here -- but the reason it does not apply is CALL-time, not
+//     load-time. This module is statically imported from server/index.js, so
+//     its body is evaluated BEFORE initDb(); what is safe is the CALL.
+//     channelsAvailable() only ever runs inside a route handler, and handlers
+//     only run once the server is listening, long after initDb().
+//     Keep it that way. getDb() opens AND migrates on first use, so a DB read
+//     hoisted to module scope here would do that work before initDb() ever
+//     runs -- outside the try/catch that exists to turn a bad migration into
+//     one clear line and exit(1) (server/index.js, db.js's "boot-time
+//     contract"). It would not go unnoticed: a failure there is an uncaught
+//     module-evaluation error, so the process still dies, just with a raw
+//     stack instead of the message that says what to do. And when it
+//     SUCCEEDS, the migration has simply run somewhere nothing is watching.
+//
+// That leaves the discord line below duplicating one boolean. Deliberate:
+// sharing only that half would produce a third shape -- discord via the shared
+// helper, webpush read directly -- which is harder to follow than either
+// consistent option.
 function channelsAvailable() {
   const notify = loadSandboxConfig().notify || {};
   return {

@@ -63,10 +63,20 @@
 //   - bridgeStats() exposes the running totals.
 
 import { getBridgeSettingsCached } from './notifyBridgeSettings.js';
-import { sendNotification, listSubscriptions, resolvedDiscordWebhook, defangFooterMarker } from './notify.js';
+import {
+  sendNotification, defangFooterMarker,
+  reachableChannels as notifyReachableChannels, setWebpushReachable,
+} from './notify.js';
 import { createNotifyDetector } from './agentNotifyDetect.js';
 import { basename } from 'node:path';
 import { appDisplayName } from './appLaunch.js';
+
+// Re-exported, not redefined: notify.js owns the single Web Push reachability
+// binding so notifyEnabled() and this bridge cannot drift apart again (#234).
+// index.js wires it through either name. Ownership sits over there because
+// this module already imports notify.js -- holding the binding here and
+// having notify.js read it would close that edge into a cycle.
+export { setWebpushReachable };
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -240,25 +250,7 @@ export function classifyNotification(session, event, bridge, now) {
 // so paying for it here costs nothing a burst can amplify.
 function reachableChannels(bridge, deps) {
   if (deps.reachableChannels) return deps.reachableChannels(bridge);
-  return bridge.channels.filter((ch) => {
-    if (ch === 'discord') return !!resolvedDiscordWebhook() || listSubscriptions().length > 0;
-    if (ch === 'webpush') return webpushReachable();
-    return false;
-  });
-}
-
-// Resolved lazily so this module does not depend on the push store existing
-// yet (Step 4/5). Returns false until it does.
-let webpushReachableFn = () => false;
-export function setWebpushReachable(fn) {
-  webpushReachableFn = typeof fn === 'function' ? fn : (() => false);
-}
-function webpushReachable() {
-  try {
-    return !!webpushReachableFn();
-  } catch {
-    return false;
-  }
+  return notifyReachableChannels(bridge.channels);
 }
 
 // The async half: only ever reached for an event that is actually going out.

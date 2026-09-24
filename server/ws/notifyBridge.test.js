@@ -19,6 +19,7 @@ import {
   attachNotifyDetector,
   bridgeStats,
   _resetBridgeStatsForTests,
+  setWebpushReachable,
 } from './notifyBridge.js';
 import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
 
@@ -360,4 +361,39 @@ test('the production reachability resolver answers false with nothing configured
   });
   assert.equal(res.reason, 'no-reachable-channel');
   assert.equal(calls.length, 0);
+});
+
+// #234, behaviourally. notify.test.js asserts that this module's
+// `setWebpushReachable` IS notify.js's -- but that identity is structure, not
+// behaviour: a bridge that keeps the re-export and then resolves webpush
+// through a second binding of its own passes that assertion and still drifts,
+// which is the exact bug #234 was. What actually has to hold is that the ONE
+// call server/index.js makes at boot reaches THIS module's production resolver
+// (no deps.reachableChannels below), so assert that end to end.
+test('the single Web Push binding index.js wires reaches the production resolver', async () => {
+  const webpushOnly = normalizeBridgeSettings({ enabled: true, channels: ['webpush'] });
+  const deliver = async (id) => {
+    const { calls, send } = recorder();
+    const res = await handleAgentNotification(fakeSession({ id }), notif('T', 'B'), {
+      settings: webpushOnly, sendNotification: send,
+    });
+    return { res, calls };
+  };
+
+  const before = await deliver('11111111-1111-1111-1111-111111111111');
+  assert.equal(before.res.reason, 'no-reachable-channel', 'baseline: unwired, so nobody is reachable');
+
+  // Exactly what index.js does: setWebpushReachable(() => countSubscriptions() > 0).
+  setWebpushReachable(() => true);
+  try {
+    const after = await deliver('22222222-2222-2222-2222-222222222222');
+    assert.equal(after.res.delivered, true, 'the bridge must see the binding index.js wired');
+    assert.deepEqual(after.calls[0].payload.channels, ['webpush'],
+      'and hand the now-reachable channel to sendNotification');
+  } finally {
+    setWebpushReachable(null);
+  }
+
+  const restored = await deliver('33333333-3333-3333-3333-333333333333');
+  assert.equal(restored.res.reason, 'no-reachable-channel', 'the last browser unsubscribing turns it off again');
 });
