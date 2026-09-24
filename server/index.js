@@ -535,6 +535,11 @@ try {
       + 'injected into any session and agents have no way to call a human. Set notify.discordWebhook '
       + '(or CCSERVER_DISCORD_WEBHOOK), or seed notify.subscriptions, in sandbox.config.json -- or '
       + 'subscribe a browser to Web Push from Settings > 通知, which counts as a delivery target too (#234). '
+      + 'ALL OF THESE TAKE EFFECT ON THE NEXT START: the notify MCP broker is created once, here at boot '
+      + '(ensureNotifyBroker), and sessions only get the tool while it is running -- so restart ccserver '
+      + 'after configuring one. Settings > 通知\'s "send a test" goes straight out over HTTP and needs no '
+      + 'broker, so it can succeed while the tool is still missing from every session; a green test is '
+      + 'NOT evidence that the tool is back. '
       + 'NOTE: the Vikunja channel was removed and no longer counts as a delivery target -- see '
       + 'https://github.com/nananek/ccserver/issues/207',
     );

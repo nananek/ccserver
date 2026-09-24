@@ -386,6 +386,12 @@ export function restoreNotify() {
   const cfg = loadNotifyConfig();
   const seen = new Set();
   subscriptions = [];
+  // The registry is being rebuilt from scratch, so "have we already said
+  // nothing can receive this" is stale too -- the next outage after a restore
+  // is a new one and has to be reported. Without this the flag is the only
+  // notify state that survives a restore, which also makes the warn-once test
+  // depend on whichever earlier case happened to leave it false.
+  warnedUnreachable = false;
   const add = (url, name, id, createdAt) => {
     if (!isValidWebhookUrl(url) || seen.has(url)) return;
     seen.add(url);

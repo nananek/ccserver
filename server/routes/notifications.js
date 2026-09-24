@@ -73,9 +73,17 @@ import { notifyDetectorStats } from '../ws/sessionManager.js';
 //     the diagnostic through it makes it tell the same lie as the thing being
 //     diagnosed. Counting the rows is independent ground truth, which is the
 //     property this particular function needs.
-//   - The reason notify.js CANNOT read the push store (it is imported long
-//     before the database is open) does not apply here: this module is only
-//     ever loaded once the DB exists.
+//   - The reason notify.js CANNOT read the push store does not apply here --
+//     but the reason it does not apply is CALL-time, not load-time. This
+//     module is statically imported from server/index.js, so its body is
+//     evaluated BEFORE initDb(); what is safe is the CALL. channelsAvailable()
+//     only ever runs inside a route handler, and handlers only run once the
+//     server is listening, long after initDb().
+//     Keep it that way. getDb() opens and migrates on first use, so a DB read
+//     hoisted to module scope here would not fail loudly -- it would quietly
+//     open the database ahead of initDb(), taking that fail-fast out of the
+//     boot path (db.js's refusal is what turns a bad migration into a clear
+//     log instead of a restart loop).
 //
 // That leaves the discord line below duplicating one boolean. Deliberate:
 // sharing only that half would produce a third shape -- discord via the shared
