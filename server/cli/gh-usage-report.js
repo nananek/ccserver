@@ -3,7 +3,7 @@
 // here uploads, opens a browser, or invokes gh.
 import { chmodSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { aggregateReadProblem, aggregateStatus, defaultRecordingPath, formatGhUsageReport, resetGhUsage } from '../ghUsageRecording.js';
+import { aggregateStatus, buildGhUsageReport, defaultRecordingPath, resetGhUsage } from '../ghUsageRecording.js';
 // pathPolicy is dependency-free (node builtins only), so the CLI can reuse
 // the server's own containment rule without pulling in ws/sandbox.js.
 import { isCcserverScratchPath, isContained, normalizeBrowseRoots } from '../pathPolicy.js';
@@ -134,7 +134,10 @@ if (command === 'enable') {
   }
 }
 if (command === 'show') {
-  process.stdout.write(formatGhUsageReport(file, { includePeriod: !noPeriod }));
+  // One read for both halves: reading twice let the report and the
+  // explanation of the report disagree if the file changed in between.
+  const { report, problem } = buildGhUsageReport(file, { includePeriod: !noPeriod });
+  process.stdout.write(report);
   // An unreadable or wrecked aggregate prints exactly the same empty report as
   // one that simply has nothing in it yet, so say which it is. On stderr, so
   // the report on stdout stays pasteable as-is.
@@ -143,7 +146,6 @@ if (command === 'show') {
   // the answer from aggregateStatus: that one is lstat-based for `reset`'s
   // sake, so a symlink to a healthy aggregate printed the counts and then
   // claimed the file could not be read.
-  const problem = aggregateReadProblem(file);
   if (problem) {
     console.error(`warning: ${q(file)} could not be read as a gh usage aggregate (${problem}), so this report is empty for that reason, not because nothing was recorded.`);
   }
@@ -157,6 +159,7 @@ else if (command === 'reset') {
       'not-a-regular-file': 'it is a directory, symlink, FIFO or device -- remove it yourself, or let the next recorded gh call replace it',
       'not-an-aggregate': 'it is not a gh usage aggregate -- pass --force to overwrite it anyway',
       'too-large': 'it is larger than a gh usage aggregate can be -- pass --force to overwrite it anyway',
+      'broken-symlink': 'it is a symlink whose target no longer exists',
       unreadable: 'the path is unusable or could not be read',
     }[status] || 'the write failed';
     die(`Refusing to reset ${q(file)}: ${why}.`);

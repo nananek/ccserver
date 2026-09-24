@@ -116,13 +116,18 @@ const WARN_KEYS_MAX = 32;
 // Quote the path: a warning goes to the broker's log, and a configured path
 // can contain newlines or escape sequences. The CLI already does this for the
 // paths it prints; the log had been left raw.
-function q(path) { return JSON.stringify(String(path)); }
+// JSON.stringify escapes C0 and the quote, but NOT U+2028/U+2029 -- which
+// end a line for anything that treats the log as JavaScript or as Unicode
+// lines, so they belong with the rest of the line-breaking characters.
+function q(path) {
+  return JSON.stringify(String(path)).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
 // `detail` is usually an errno message, which embeds paths raw -- so a path
 // with a newline in it split one warning across three log lines even after
 // the path argument itself was quoted. Quoting the whole sentence would be
 // unreadable, so just flatten the controls out of it.
 function oneLine(detail) {
-  return String(detail).replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
+  return String(detail).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim();
 }
 // Every warning in this module goes through here, including the ones that
 // report a *successful* recovery -- those had been raw console.warn calls and
@@ -195,7 +200,15 @@ function clearObstruction(path) {
 function openRegularFile(path) {
   let fd;
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK); }
-  catch (e) { return { problem: e.code === 'ENOENT' ? null : 'unreadable' }; }
+  catch (e) {
+    if (e.code !== 'ENOENT') return { problem: 'unreadable' };
+    // open(2) resolved to nothing. Either the path is genuinely absent -- an
+    // aggregate with nothing in it yet, which is not a fault -- or it is a
+    // symlink whose target is gone, which is, and which `show` otherwise
+    // reports with the same silence as an empty one.
+    try { lstatSync(path); return { problem: 'broken-symlink' }; }
+    catch { return { problem: null }; }
+  }
   let st;
   try { st = fstatSync(fd); }
   catch { try { closeSync(fd); } catch {} return { problem: 'unreadable' }; }
@@ -316,7 +329,21 @@ function watchFor(lock, now) {
   if (!w || now - w.windowStart >= WARN_REPEAT_MS) {
     w = { heldSince: 0, skips: 0, windowStart: now };
     lockWatch.set(lock, w);
-    while (lockWatch.size > WARN_KEYS_MAX) lockWatch.delete(lockWatch.keys().next().value);
+    // Both bounded maps evict, but they lose opposite things. warnedReasons
+    // only forgets WHEN it last warned, so the next event warns again --
+    // eviction there errs loud. This map holds the counters that do the
+    // noticing, so dropping an entry silently rewinds them: 99 recorded skips
+    // on one aggregate became 0 after touching 33 others, and the 100th skip
+    // no longer warned. Report what is being discarded rather than losing it,
+    // so eviction errs loud here too.
+    while (lockWatch.size > WARN_KEYS_MAX) {
+      const [oldestLock, oldest] = lockWatch.entries().next().value;
+      lockWatch.delete(oldestLock);
+      if (oldest.skips > 0) {
+        abandon('lock-contended', oldestLock,
+          `${oldest.skips} increments were dropped because the lock was busy, and this aggregate is being forgotten to stay within the tracking bound`);
+      }
+    }
   }
   return w;
 }
@@ -438,12 +465,14 @@ export function recordGhUsage({ client, target, operation, result, denial } = {}
   });
 }
 
-// What is actually sitting at an aggregate path. Used by `reset` to decide
-// what it may replace and by `show` to tell "nothing recorded yet" apart from
-// "could not be read" -- an empty report is the same either way, which left
-// an operator with a broken aggregate believing it was merely idle.
+// What is actually sitting at an aggregate path, by lstat -- i.e. WITHOUT
+// following a symlink. Used by `reset` and `enable`, which replace the path
+// by rename and so must not follow a link onto someone else's file. `show`
+// deliberately does NOT use this: it reports what the reader saw
+// (aggregateReadProblem, which does follow links), because saying "cannot be
+// read" about a file it just printed counts from is worse than saying nothing.
 //
-// For `reset`: absent or an existing aggregate is always fine; a directory,
+// Absent or an existing aggregate is always fine; a directory,
 // FIFO, device or symlink is never written; and any other regular file needs
 // --force, which also covers the one legitimate case this cannot recognise --
 // an aggregate too corrupt to parse, i.e. exactly what `reset` exists to
@@ -487,8 +516,18 @@ export function resetGhUsage(path, { force = false } = {}) {
   });
 }
 
-export function formatGhUsageReport(path, { includePeriod = true } = {}) {
-  const state = readState(path);
+// The report and the reason it is empty, from a SINGLE read. `show` used to
+// call formatGhUsageReport and aggregateReadProblem separately, which is two
+// reads of a file another process can replace in between -- the exact drift
+// between stdout and stderr this whole change exists to remove.
+export function buildGhUsageReport(path, opts) {
+  const { state, problem } = readAggregate(path);
+  return { report: renderReport(state, opts), problem };
+}
+
+export function formatGhUsageReport(path, opts) { return buildGhUsageReport(path, opts).report; }
+
+function renderReport(state, { includePeriod = true } = {}) {
   const lines = ['ccserver-gh-usage-report: 1'];
   if (includePeriod) lines.push(`period: ${state.startedOn}..${today()}`);
   lines.push('recording: opted-in-local-aggregate', '');

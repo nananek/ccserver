@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { aggregateReadProblem, aggregateStatus, classifyGhUsage, formatGhUsageReport, readCapped, recordGhUsage, resetGhUsage, resetGhUsageWarnings } from './ghUsageRecording.js';
+import { aggregateReadProblem, aggregateStatus, buildGhUsageReport, classifyGhUsage, formatGhUsageReport, readCapped, recordGhUsage, resetGhUsage, resetGhUsageWarnings } from './ghUsageRecording.js';
 
 let dir;
 let oldEnabled;
@@ -606,4 +606,97 @@ test('a warning for one aggregate does not silence another', () => {
   for (const f of paths) {
     assert.ok(w.seen.some((l) => l.includes(JSON.stringify(f))), `no warning named ${f}: ${w.seen.join('\n')}`);
   }
+});
+
+test('forgetting a contended aggregate reports the drops instead of losing them', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const call = { client: 'codex', target: 'pr', operation: 'read', result: 'success' };
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+
+  // A lock that is always "held", so every attempt is a silent skip.
+  const held = (d) => {
+    const f = join(d, 'aggregate.json');
+    writeFileSync(`${f}.lock`, '');
+    return f;
+  };
+  const skip = (f, n) => {
+    process.env.CCSERVER_GH_USAGE_RECORDING_FILE = f;
+    for (let i = 0; i < n; i++) {
+      const t = new Date();
+      utimesSync(`${f}.lock`, t, t);
+      assert.equal(recordGhUsage(call), false);
+    }
+  };
+
+  const a = held(mkdirSync(join(dir, 'a'), { recursive: true }) || join(dir, 'a'));
+  const w = armWarnings();
+  try {
+    skip(a, 99); // one short of the threshold
+    assert.deepEqual(w.seen, [], '99 skips must still be silent');
+    // Touching enough other aggregates evicts A's entry. The counters live in
+    // that entry, so dropping it silently rewound the 99 -- and A's 100th skip
+    // then warned about nothing.
+    for (let i = 0; i < 33; i++) {
+      const d = join(dir, `other${i}`);
+      mkdirSync(d, { recursive: true });
+      skip(held(d), 1);
+    }
+  } finally { w.restore(); }
+  const line = w.seen.find((l) => l.includes(JSON.stringify(`${a}.lock`)));
+  assert.ok(line, `A's 99 dropped increments were forgotten silently: ${w.seen.join('\n') || '(no warnings)'}`);
+  assert.match(line, /not recording \(lock-contended\)/);
+  assert.match(line, /99 increments were dropped/);
+});
+
+test('a line separator cannot end a warning line either', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  // JSON.stringify leaves U+2028/U+2029 literal, and they were missing from
+  // oneLine's class -- so they survived both the path and the detail path
+  // while \n and ESC were being stripped.
+  const odd = join(dir, `a${String.fromCharCode(0x2028)}b${String.fromCharCode(0x2029)}c`);
+  mkdirSync(odd);
+  const file = join(odd, 'aggregate.json');
+  mkdirSync(file);
+  writeFileSync(join(file, 'keep'), 'x');
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+  const w = armWarnings();
+  try { assert.equal(recordGhUsage({ client: 'codex', target: 'pr', operation: 'read', result: 'success' }), false); }
+  finally { w.restore(); }
+  assert.ok(w.seen.length > 0);
+  for (const line of w.seen) {
+    assert.doesNotMatch(line, new RegExp('[\\u2028\\u2029]'), `a line separator survived: ${JSON.stringify(line)}`);
+  }
+});
+
+test('a symlink whose target is gone is not reported as an empty aggregate', () => {
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const dangling = join(dir, 'dangling.json');
+  symlinkSync(join(dir, 'target-that-never-existed.json'), dangling);
+  // open(2) gives ENOENT for both this and a genuinely absent file, so the
+  // reader called both "empty" and said nothing about either.
+  assert.equal(aggregateReadProblem(dangling), 'broken-symlink');
+  assert.equal(aggregateReadProblem(join(dir, 'absent.json')), null, 'an absent aggregate is still not a fault');
+});
+
+test('the report and the reason for it come from one read', () => {
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const file = join(dir, 'aggregate.json');
+  writeFileSync(file, JSON.stringify({
+    version: 1, startedOn: '2026-01-01', counters: { 'codex\tpr\tread\tsuccess': 1 },
+  }));
+  const link = join(dir, 'link.json');
+  symlinkSync('aggregate.json', link);
+  for (const path of [file, link]) {
+    const { report, problem } = buildGhUsageReport(path);
+    assert.match(report, /count=1/, path);
+    assert.equal(problem, null, `${path} printed counts, so it must not also claim it is unreadable`);
+  }
+  const { report, problem } = buildGhUsageReport(join(dir, 'gone.json'));
+  assert.doesNotMatch(report, /count=/);
+  assert.equal(problem, null);
 });
