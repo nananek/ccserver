@@ -41,8 +41,10 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { allPaths } from '../paths.js';
+import { dirname, join, sep } from 'node:path';
+import { allPaths, repoRoot } from '../paths.js';
+
+const REPO_ROOT = repoRoot();
 
 const MANIFEST = process.env.CCSERVER_CANARY_MANIFEST || join(tmpdir(), 'ccserver-path-canary.json');
 const DECOY_NAME = '.ccserver-path-canary';
@@ -59,6 +61,21 @@ function decoyBody(label, path) {
 // Every host-side location the registry can name, both layouts. Resolved with
 // CCSERVER_* cleared so this reports the DEFAULTS -- the paths a test that
 // forgot its overrides would be handed.
+// Paths that are RECORDED but never seeded with a decoy.
+//
+// server/sandbox.config.json in the checkout is shared with the test suite:
+// setup.test.js's two "what does the wizard generate" tests skip when it
+// exists (the wizard moves it instead of seeding a template), so a decoy here
+// silently removed two tests from CI -- guarding the thing by reducing what is
+// checked about it (C2). It is still recorded and verified, which catches the
+// wizard moving a developer's real config; only the synthetic decoy is
+// withheld. The create-then-delete case a decoy would add does not apply: the
+// wizard only ever MOVES an existing config out of the checkout, and seeds
+// into the XDG target, never into the checkout.
+function seedable(id, path) {
+  return !(id === 'sandboxConfig' && path.startsWith(REPO_ROOT + sep));
+}
+
 function hostPaths() {
   const saved = {};
   for (const key of Object.keys(process.env)) {
@@ -110,7 +127,10 @@ function describe(path, type) {
   // sessionManager.test.js were doing to ~/.local/share/ccserver-sandbox/
   // worktrees/ -- found by hand, invisible to this script's first version.
   if (st.isDirectory()) return { state: 'dir', mtimeMs: st.mtimeMs, entries: listTree(path) };
-  if (!st.isFile()) return { state: 'special' };
+  // A FIFO/socket/device gets an identity rather than a bare label, so
+  // replacing one with another is visible (C1). Its contents cannot be read
+  // -- a FIFO read blocks -- so inode + mode is what there is.
+  if (!st.isFile()) return { state: 'special', ino: String(st.ino), mode: st.mode & 0o7777 };
   return { state: 'file', sha: sha(path), size: st.size };
 }
 
@@ -124,7 +144,7 @@ function place({ force }) {
   for (const { id, type, path } of hostPaths()) {
     const before = describe(path, type);
     let created = null;
-    if (before.state === 'absent') {
+    if (before.state === 'absent' && seedable(id, path)) {
       // Seed a decoy so DELETION is detectable. For a directory entry the
       // decoy is a file inside it, since the suite is what would create the
       // directory itself.
@@ -137,7 +157,14 @@ function place({ force }) {
         console.error(`path-canary: could not seed ${decoy}: ${err.message}`);
       }
     }
-    records.push({ id, type, path, before, created, after: created ? describe(created, 'file') : null });
+    // For a directory entry, record the DIRECTORY too, not just the decoy
+    // inside it. Checking only the decoy left a blind spot (C1): a test that
+    // created and removed a sibling under a directory this script had just
+    // brought into existence changed nothing about the decoy, so it passed --
+    // which is the same shape as the create-and-remove that hid in
+    // ~/.local/share/ccserver-sandbox/worktrees for three rounds.
+    const dirAfter = created && type === 'dir' ? describe(path, 'dir') : null;
+    records.push({ id, type, path, before, created, dirAfter, after: created ? describe(created, 'file') : null });
   }
   writeFileSync(MANIFEST, JSON.stringify({ at: Date.now(), records }, null, 2));
   const seeded = records.filter((r) => r.created).length;
@@ -157,6 +184,21 @@ function verify() {
       const now = describe(r.created, 'file');
       if (now.state !== 'file') violations.push(`${r.id}: decoy ${r.created} is now ${now.state} -- a test deleted or replaced it`);
       else if (now.sha !== r.after.sha) violations.push(`${r.id}: decoy ${r.created} was rewritten`);
+      // ...and nothing else may have come and gone in the directory we made.
+      if (r.dirAfter) {
+        const dirNow = describe(r.path, 'dir');
+        if (dirNow.state !== 'dir') {
+          violations.push(`${r.id}: ${r.path} is now ${dirNow.state}`);
+        } else {
+          const added = dirNow.entries.filter((e) => !r.dirAfter.entries.includes(e));
+          const gone = r.dirAfter.entries.filter((e) => !dirNow.entries.includes(e));
+          if (added.length) violations.push(`${r.id}: ${r.path} gained ${added.slice(0, 5).join(', ')}`);
+          if (gone.length) violations.push(`${r.id}: ${r.path} lost ${gone.slice(0, 5).join(', ')}`);
+          if (!added.length && !gone.length && dirNow.mtimeMs !== r.dirAfter.mtimeMs) {
+            violations.push(`${r.id}: ${r.path} has the same contents but a newer mtime -- something was created and removed inside it`);
+          }
+        }
+      }
       continue;
     }
     const now = describe(r.path, r.type);
@@ -174,6 +216,10 @@ function verify() {
       if (added.length) violations.push(`${r.id}: ${r.path} gained ${added.length} entries: ${added.slice(0, 5).join(', ')}`);
     } else if (r.before.state === 'dir' && now.state !== 'dir') {
       violations.push(`${r.id}: directory ${r.path} is now ${now.state}`);
+    } else if (r.before.state === 'special'
+      && (now.state !== 'special' || now.ino !== r.before.ino || now.mode !== r.before.mode)) {
+      // Not readable, but swapping one FIFO for another is still a change (C1).
+      violations.push(`${r.id}: the non-regular file at ${r.path} was replaced (${r.before.state} -> ${now.state})`);
     }
   }
   if (violations.length > 0) {
@@ -186,15 +232,28 @@ function verify() {
   console.log(`path-canary: OK -- ${records.length} host paths untouched by the suite.`);
 }
 
+// Removes only files this script created, and only while they still ARE the
+// decoy it wrote. The manifest is an ordinary JSON file in a temp directory;
+// deleting whatever paths it happens to name would make `clean` a delete-any
+// primitive driven by that file (C3). A path that no longer matches is left
+// alone and reported -- either a test replaced it (which `verify` reports) or
+// the manifest is not describing this tree.
 function clean() {
   if (!existsSync(MANIFEST)) return;
   const { records } = JSON.parse(readFileSync(MANIFEST, 'utf-8'));
+  let removed = 0;
+  const kept = [];
   for (const r of records) {
-    if (!r.created) continue;
-    try { rmSync(r.created, { force: true }); } catch { /* best effort */ }
+    if (!r.created || !r.after?.sha) continue;
+    const now = describe(r.created, 'file');
+    if (now.state !== 'file' || now.sha !== r.after.sha) { kept.push(r.created); continue; }
+    try { rmSync(r.created, { force: true }); removed += 1; } catch { /* best effort */ }
   }
   rmSync(MANIFEST, { force: true });
-  console.log('path-canary: removed the decoys it created.');
+  console.log(`path-canary: removed ${removed} decoys it created.`);
+  if (kept.length > 0) {
+    console.log(`  left ${kept.length} alone (no longer the decoy this script wrote): ${kept.slice(0, 5).join(', ')}`);
+  }
 }
 
 const args = process.argv.slice(2);

@@ -66,30 +66,21 @@ jobs:
       # sandbox.js's registry lookups, so if a migrated path were ever going
       # to be missing from the profile, this is where it would show.
       #
-      # The wizard gets the same per-entry overrides playwright.config.js
-      # passes it, for the same reason: without them it would migrate the
-      # canary decoys (and, on a developer's Mac, their real files) out of
-      # the checkout. Everything -- HOME, the three XDG roots, and the nine
-      # checkout-derived entries -- lands inside $T, so the test process may
-      # resolve defaults; the canary step below is what proves that held.
+      # The wizard's environment comes from server/tools/isolated-env.js, the
+      # one definition of it, rather than a copy written out here -- the two
+      # hand-written shell copies this replaces were both missing
+      # CCSERVER_DB_PATH, which is how the checkout-parent DB kept being
+      # migrated after the JS side was fixed. Without it the wizard would move
+      # the canary decoys (and, on a developer's Mac, their real files).
+      # Everything lands inside $T, so the test process may resolve defaults;
+      # the canary step below is what proves that held.
       - name: Migrate, then re-run the seatbelt unit tests on the XDG layout
         run: |
           set -euo pipefail
           T="$(mktemp -d "${RUNNER_TEMP:-/tmp}/ccserver-macos-xdg.XXXXXX")"
-          mkdir -p "$T/home" "$T/checkout"
-          xdg=(HOME="$T/home" XDG_CONFIG_HOME="$T/config"
-               XDG_DATA_HOME="$T/data" XDG_STATE_HOME="$T/state")
-          checkout=(CCSERVER_DB_PATH="$T/checkout/ccserver.sqlite3"
-                    CCSERVER_SANDBOX_CONFIG="$T/checkout/sandbox.config.json"
-                    CCSERVER_SAVED_SESSIONS_PATH="$T/checkout/saved-sessions.json"
-                    CCSERVER_SCHEDULES_PATH="$T/checkout/scheduled-prompts.json"
-                    CCSERVER_GROUPS_PATH="$T/checkout/saved-groups.json"
-                    CCSERVER_GROUP_DOCS_PATH="$T/checkout/saved-group-docs.json"
-                    CCSERVER_GROUP_FILES_PATH="$T/checkout/saved-group-files.json"
-                    CCSERVER_NOTIFY_PATH="$T/checkout/saved-notifications.json"
-                    CCSERVER_VIKUNJA_TASKS_PATH="$T/checkout/saved-vikunja-tasks.json")
-          env "${xdg[@]}" "${checkout[@]}" node server/cli/setup.js --yes
-          env "${xdg[@]}" node -e '
+          eval "$(node server/tools/isolated-env.js "$T")"
+          node server/cli/setup.js --yes
+          node -e '
             import("./server/paths.js").then((m) => {
               const v = m.layoutVersion();
               console.log("layoutVersion:", v, "dataRoot:", m.dataRoot());
@@ -99,9 +90,12 @@ jobs:
               }
             });
           '
+          # The CCSERVER_* overrides are deliberately dropped for the test
+          # itself, so path resolution really goes through the layout marker
+          # the wizard just wrote. HOME and the XDG roots are still inside $T.
+          for v in $(node server/tools/isolated-env.js "$T" | sed -n 's/^export \(CCSERVER_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
           cd server
-          env "${xdg[@]}" CCSERVER_ALLOW_DEFAULT_PATHS=1 \
-            node --test --test-timeout=60000 ws/sandbox-seatbelt.test.js
+          CCSERVER_ALLOW_DEFAULT_PATHS=1 node --test --test-timeout=60000 ws/sandbox-seatbelt.test.js
 
       # always(): a test failure must not hide a path violation, and the
       # violation is usually the more important of the two.

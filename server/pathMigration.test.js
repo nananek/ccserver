@@ -362,7 +362,17 @@ test('breadcrumbs name the new roots so an old-branch boot leaves a trail', () =
   // HOME is redirected for the duration: one breadcrumb goes to
   // legacyDataRoot(), which without this is the developer's real
   // ~/.local/share/ccserver-sandbox.
+  //
+  // The OTHER breadcrumb goes to repoRoot(), which no env var moves, so it is
+  // always the real checkout. This test used to write over whatever was there
+  // and then delete it -- an operator who had really migrated and still had
+  // their breadcrumb lost it to a test run. So its prior contents are saved
+  // and put back, and only a file this test created is removed.
   const restore = withIsolatedHome(caseDir);
+  const preexisting = new Map();
+  for (const path of [join(legacyDataRoot(), 'MOVED-TO-XDG.txt'), join(repoRoot(), '.ccserver-state-moved.txt')]) {
+    if (existsSync(path)) preexisting.set(path, readFileSync(path, 'utf-8'));
+  }
   try {
     const written = writeBreadcrumbs();
     assert.ok(written.length > 0);
@@ -370,9 +380,12 @@ test('breadcrumbs name the new roots so an old-branch boot leaves a trail', () =
       const text = readFileSync(path, 'utf-8');
       assert.match(text, /XDG/);
       assert.match(text, /古いブランチ/);
-      rmSync(path, { force: true });
     }
   } finally {
+    for (const path of [join(legacyDataRoot(), 'MOVED-TO-XDG.txt'), join(repoRoot(), '.ccserver-state-moved.txt')]) {
+      if (preexisting.has(path)) writeFileSync(path, preexisting.get(path));
+      else rmSync(path, { force: true });
+    }
     restore();
     resetLayoutCache();
   }

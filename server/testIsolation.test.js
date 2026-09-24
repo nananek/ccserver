@@ -23,7 +23,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
@@ -382,6 +382,95 @@ test('★ assertSafeToMigrate follows a DANGLING symlink too', () => {
       ...checkoutEnv(loop),
     }, loop), /HOME=.*is outside/);
   });
+});
+
+// --- every route to the wizard, enumerated ----------------------------------
+//
+// Four times on this branch, closing one way into the wizard left another
+// open: the checkout's state files, then the DB spelling one level above the
+// checkout (found by path-canary), then two tests that mkdir'd into the real
+// legacy worktrees/ with a hand-built homedir() path, then
+// playwright.config.js's webServer -- whose hand-written copy of the override
+// list was missing CCSERVER_DB_PATH while testIsolation.js's had it.
+//
+// Fixing them one at a time does not converge. So this test enumerates every
+// tracked file that reaches for server/cli/setup.js and requires each one to
+// be a route that is known to be isolated. A new entrance either gets added
+// here deliberately -- which is the moment to ask how it is isolated -- or
+// this fails.
+const WIZARD_ROUTES = {
+  'server/cli/setup.js': 'the wizard itself',
+  'server/testIsolation.js': 'spawnWizard(): the sanctioned route for JS callers',
+  'server/testIsolation.test.js': 'this file; its one direct spawn does its own isolation and asserts on it',
+  'server/tools/isolated-env.js': 'renders the isolation env for shell callers',
+  'package.json': '`npm run setup`: the operator-facing entry point, not a test',
+  'playwright.config.js': 'shell caller; must eval isolated-env.js',
+  '.github/workflows/sandbox-macos.yml': 'shell caller; must eval isolated-env.js',
+};
+// Shell callers cannot import testIsolation.js, so they are required to use
+// the generator rather than their own copy of the list.
+const SHELL_ROUTES = ['playwright.config.js', '.github/workflows/sandbox-macos.yml'];
+
+test('★ every route that launches the wizard is a known-isolated one', () => {
+  const root = repoRoot();
+  const tracked = execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' })
+    .split('\n').filter(Boolean);
+  const found = [];
+  for (const rel of tracked) {
+    if (rel.startsWith('docs-site/') || rel.endsWith('.md')) continue;   // prose, not a launcher
+    let text;
+    try { text = readFileSync(join(root, rel), 'utf8'); } catch { continue; }
+    if (/cli\/setup\.js|'setup\.js'/.test(text)) found.push(rel);
+  }
+  assert.ok(found.length > 0, 'sanity: the enumeration must find something');
+  for (const rel of found) {
+    assert.ok(
+      WIZARD_ROUTES[rel],
+      `${rel} reaches for server/cli/setup.js but is not a known-isolated route. `
+      + 'Add it to WIZARD_ROUTES with a note on how it is isolated -- and make sure it IS. '
+      + 'JS callers go through spawnWizard(); shell callers eval server/tools/isolated-env.js.',
+    );
+  }
+  // ...and the declared routes must still exist, so this list cannot rot into
+  // permitting a file that was renamed.
+  for (const rel of Object.keys(WIZARD_ROUTES)) {
+    assert.ok(found.includes(rel), `${rel} is declared a wizard route but no longer references the wizard`);
+  }
+});
+
+test('★ shell callers of the wizard use isolated-env.js, not their own copy of the list', () => {
+  const root = repoRoot();
+  for (const rel of SHELL_ROUTES) {
+    const text = readFileSync(join(root, rel), 'utf8');
+    assert.match(text, /isolated-env\.js/, `${rel} must get its isolation from server/tools/isolated-env.js`);
+    // A hand-written assignment of one of the PATH override vars is exactly
+    // the drift that moved the checkout-parent DB for three rounds: the copy
+    // here lacked CCSERVER_DB_PATH while testIsolation.js's list had it.
+    // Only those names are checked -- CCSERVER_HOST and friends are ordinary
+    // settings these files legitimately set.
+    const pathVars = Object.keys(checkoutEnv('/tmp/probe'));
+    const handWritten = pathVars.filter((v) => new RegExp(`${v}\\s*=`).test(text));
+    assert.deepEqual(
+      handWritten, [],
+      `${rel} assigns path override vars by hand (${handWritten.join(', ')}). `
+      + 'Use `eval "$(node server/tools/isolated-env.js "$T")"` so there is one definition.',
+    );
+  }
+});
+
+test('isolated-env.js emits exactly the entries testIsolation.js defines', () => {
+  // The generator and the JS path must not drift either.
+  const out = execFileSync(process.execPath,
+    [join(repoRoot(), 'server', 'tools', 'isolated-env.js'), '/tmp/enumerate-probe'],
+    { encoding: 'utf8' });
+  const emitted = [...out.matchAll(/^export (CCSERVER_[A-Z_]+)=/gm)].map((m) => m[1]).sort();
+  const expected = Object.values(checkoutEnv('/tmp/enumerate-probe')).length;
+  assert.equal(emitted.length, expected, 'every checkout entry must be emitted');
+  assert.deepEqual(emitted, Object.keys(checkoutEnv('/tmp/enumerate-probe')).sort());
+  assert.ok(emitted.includes('CCSERVER_DB_PATH'), 'the pre-#190 DB spelling must be covered');
+  for (const key of ['HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) {
+    assert.match(out, new RegExp(`^export ${key}=`, 'm'), `${key} must be isolated too`);
+  }
 });
 
 test('CHECKOUT_ENTRY_IDS covers every legacy path that HOME isolation does not reach', () => {
