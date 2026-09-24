@@ -43,7 +43,7 @@ import { warmCodexUsage } from './codexUsage.js';
 import { warmOpencodeUsage } from './opencodeUsage.js';
 import { initDb, dbPath } from './db.js';
 import { selectableAppIds, installedApps, loadSandboxConfig } from './ws/sandbox.js';
-import { isContained } from './pathPolicy.js';
+import { isCcserverScratchPath, isContained } from './pathPolicy.js';
 import { keyPath as federationKeyPath } from './ws/federationIdentity.js';
 import { verifySessionCookie } from './authSessions.js';
 import { resolveAuthMode } from './authMode.js';
@@ -342,7 +342,7 @@ try {
 // browseRootsInvalid), and a running server that keeps re-reading a broken
 // config would fail open at runtime too.
 {
-  const { browseRoots, browseRootsInvalid, configError, configPath } = loadSandboxConfig();
+  const { browseRoots, browseRootsInvalid, configError, configPath, ghUsageRecording } = loadSandboxConfig();
   if (configError) {
     fastify.log.error(
       `Refusing to start: sandbox.config.json (${configPath}) exists but could not be read/parsed: ${configError}. `
@@ -357,6 +357,20 @@ try {
     );
     process.exit(1);
   }
+  // The opt-in gh usage aggregate (issue #198) must not sit anywhere a
+  // sandboxed session can write, and the ccserver scratch tree is exactly
+  // that: pathPolicy exempts it from browseRoots precisely because combo
+  // worktrees and each session's persistent HOME live there and are rw-bound
+  // into the sandbox. So this check is unconditional -- unlike the
+  // browseRoots block below, it holds even in the default configuration.
+  if (ghUsageRecording.enabled && isCcserverScratchPath(resolve(ghUsageRecording.file))) {
+    fastify.log.error(
+      `Refusing to start: sandbox.config.json's ghUsageRecording.file (${ghUsageRecording.file}) is inside the `
+      + 'ccserver sandbox scratch tree, which sessions can write (persistent HOME and combo worktrees are rw-bound '
+      + 'from there). A session could forge or suppress its own usage counts. Move it outside that tree, then restart.',
+    );
+    process.exit(1);
+  }
   if (browseRoots.length > 0) {
     const internalPaths = [
       ['ccserver.sqlite3 (CCSERVER_DB_PATH)', dbPath()],
@@ -368,6 +382,14 @@ try {
       ['.saved-notifications.json (CCSERVER_NOTIFY_PATH)', notifyPath()],
       ['.saved-sessions.json (CCSERVER_SAVED_SESSIONS_PATH)', SAVED_SESSIONS_PATH],
       ['.scheduled-prompts.json', SCHEDULES_PATH],
+      // The aggregate again, this time against browseRoots: inside it, the
+      // file is a session cwd away from being rewritten by the very agents it
+      // counts. Note this block is browseRoots-only -- without browseRoots
+      // any directory can be a session cwd, so there is nothing general to
+      // check against and the operator has to place the file outside the
+      // checkout themselves (the configuration guide says so). The scratch
+      // tree above is the one case that can be checked unconditionally.
+      ...(ghUsageRecording.enabled ? [["gh usage aggregate (sandbox.config.json's ghUsageRecording.file)", ghUsageRecording.file]] : []),
     ];
     const exposed = internalPaths.filter(([, p]) => isContained(resolve(p), browseRoots));
     if (exposed.length > 0) {

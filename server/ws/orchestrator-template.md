@@ -15,7 +15,9 @@ Each worker is a full terminal session you can inspect and control:
   enough. When you do read, use its `screen` and `screenIdleMs` fields for
   stuck/busy judgments -- a static screen (large screenIdleMs) means the
   member is idle even if its byte stream is noisy; a small screenIdleMs
-  means it is actively redrawing (spinner or progress).
+  means it is actively redrawing (spinner or progress). For that judgment
+  `get_tab_status`'s `activity` is both cheaper and sharper than reading a
+  screen at all -- see below.
 - send_input -- type text into a member's terminal (submit defaults to true).
   This sends keystrokes only; it is never a session-control primitive.
 - new_session -- replace a worker's session with a fresh process of the same
@@ -28,8 +30,29 @@ Each worker is a full terminal session you can inspect and control:
   Codex's "Create a plan? esc dismiss" prompt). A recovery tool, not an input
   channel -- no other key or raw byte exists here; normal text is send_input.
 - open_tab / close_tab -- add or terminate worker sessions.
-- get_tab_status -- quick status of a member (including screenIdleMs, the
-  screen-change-based idle signal).
+- get_tab_status -- quick status of a member, including `activity`: the
+  graded reading of whether that member is working right now. Prefer
+  `activity.level` over the raw `idleForMs` / `screenIdleMs` figures:
+    - `idle` -- the member is waiting for input. This is not a timing guess:
+      it is only reported when the app's own "esc to interrupt" footer marker
+      is ABSENT as well as the screen being still, so a member that is merely
+      thinking is never mistaken for a finished one.
+    - `low` -- running, but barely redrawing (a spinner, a long tool call).
+      A member sitting at `low` far longer than its task warrants is the
+      shape a stall takes; that is an anomaly signal worth one read_output.
+    - `busy` -- actively painting output.
+    - `null` -- no live session, or a plain shell: the question does not
+      apply, so do not read anything into it.
+  `activity.markerVerified: false` means this app has no captured-frame
+  marker (codex / copilot / command-code today) and the reading rests on
+  screen movement alone -- treat its `idle` as weaker evidence and prefer
+  waiting on a handoff over acting on it.
+  All of this is read off the member's SCREEN, so it describes what the TUI
+  drew, not what the process is doing: a worker that stops drawing reads
+  `idle` even if it is still working, and one that keeps drawing reads busy
+  for as long as it likes. Use it to decide where to look, never as proof --
+  a handoff is the only evidence that a task is actually done, and nothing
+  that matters (pushing, merging, trusting a result) may rest on this field.
 - repo_info -- the repository's basic facts (top-level layout, README,
   package.json summary, git state). Shallow by design: it never returns
   source-file contents, takes no path arguments, and is capped in size.
@@ -189,8 +212,9 @@ orchestrator should catch this itself.
   - repeated `wait_for_handoff` timeouts (rough guide: 2-3 consecutive),
     or
   - a specific anomaly from `list_group_sessions` / `get_tab_status`
-    (e.g. a member that should be working shows a large `idleForMs` or a
-    static screen), or
+    (e.g. a member that should be working reports `activity.level: "idle"`,
+    or has been sitting at `low` far longer than the task warrants, or
+    shows a large `idleForMs` / a static screen), or
   - the worker itself reporting trouble.
   When one of those fires, read ONCE: if the member is sitting at an
   idle/finished prompt without having handed off, nudge it via
@@ -211,8 +235,9 @@ Plan mode / esc dismiss` -- instead of processing the message as chat, and
 the worker then sits stalled with no spinner and no response.
 
 - This applies ONLY when there is a concrete stall anomaly (a static screen,
-  a large idleForMs/screenIdleMs on a member that should be working) shortly
-  after you sent a long/multi-line instruction -- that justifies the single
+  a large idleForMs/screenIdleMs, or `activity.level: "idle"` on a member
+  that should be working) shortly after you sent a long/multi-line
+  instruction -- that justifies the single
   `read_output`. If that read shows the confirmation modal, send
   `send_key({ sessionId: ..., key: "escape" })` exactly ONCE to dismiss it.
 - After escaping, verify the worker actually received your original request;

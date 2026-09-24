@@ -1887,3 +1887,190 @@ test('createSessionViaApi: a launch without an existing cwd is refused', async (
   assert.equal(bad.ok, false);
   assert.equal(bad.code, 'validation', 'a launch without cwd is refused');
 });
+
+// --- activity (tab colour) wiring ---------------------------------------
+// activity.js decides the level; these cover the sessionManager side of it:
+// the dirty-row sampler that feeds the rate, the previous-level history the
+// hysteresis needs, and the field actually reaching listSessions().
+
+// Build a session-shaped object with a REAL screen model, the way
+// createSession does. A real agent session cannot be spawned in tests (no
+// agent CLI), but activitySnapshot only ever touches these fields.
+function activityFixtureSession(app = 'claude') {
+  return {
+    app,
+    cols: 100, // the width activity.js's thresholds were calibrated at
+    exited: false,
+    shell: false,
+    screen: null, // filled in by the caller after importing screenModel
+    screenLastChangeAt: null,
+    screenSamples: [],
+    screenSampleAt: null,
+    activityLevel: null,
+  };
+}
+
+test('activitySnapshot: a Claude Code turn in progress is not idle; the finished screen is', async () => {
+  const { createScreenModel } = await import('./screenModel.js');
+  // The two real footers captured from Claude Code v2.1.278 (see
+  // activity.test.js): mid-turn, then the same screen once the turn ended.
+  // The TUI repaints its whole frame, so the fixture does too -- appending a
+  // second footer under the first is not something a real TUI ever does.
+  const busyFooter = '  \u23f5\u23f5 auto mode on (shift+tab to cycle) \u00b7 esc to interrupt      \u25c9 xhigh';
+  const idleFooter = '  \u23f5\u23f5 auto mode on (shift+tab to cycle)                          \u25c9 xhigh';
+  const frame = (footer) => `\x1b[2J\x1b[1;1H\u25cf pong\r\n\r\n\u276f\r\n${footer}`;
+
+  const session = activityFixtureSession('claude');
+  session.screen = createScreenModel({ cols: 100, rows: 200 });
+  session.screen.feed(frame(busyFooter));
+  session.screenLastChangeAt = Date.now();
+
+  const busy = sessionManager.activitySnapshot(session);
+  assert.notEqual(busy.level, 'idle', 'the interrupt hint means the agent still has the turn');
+  assert.equal(busy.reason, 'marker');
+  assert.equal(busy.marker, 'esc to interrupt');
+
+  // The turn ends: the footer loses the hint and the screen goes still.
+  session.screen.feed(frame(idleFooter));
+  session.screenLastChangeAt = Date.now() - 5000;
+  const idle = sessionManager.activitySnapshot(session);
+  assert.equal(idle.level, 'idle');
+  assert.equal(idle.reason, 'quiet');
+});
+
+test('activitySnapshot: the dirty-row sampler separates a spinner from streaming output', async () => {
+  const { createScreenModel } = await import('./screenModel.js');
+  const footer = '  \u23f5\u23f5 auto mode on \u00b7 esc to interrupt';
+  // Slices are wall-clock windows, so the fixture has to spend real time --
+  // replaying eight frames inside one millisecond would bank eight slices
+  // into a single sample interval and report an absurd rate.
+  const SLICE_MS = 300;
+
+  // A spinner: the same row rewritten over and over, with the footer below.
+  const spinner = activityFixtureSession('claude');
+  spinner.screen = createScreenModel({ cols: 100, rows: 200 });
+  spinner.screen.feed(`\u276f\r\n${footer}`);
+  for (const g of '\u2736\u2737\u2738\u2739') {
+    spinner.screen.feed(`\x1b[1;1H\x1b[2K${g} Thinking\u2026`);
+    await sleep(SLICE_MS);
+    sessionManager.activitySnapshot(spinner);
+  }
+  spinner.screenLastChangeAt = Date.now();
+  const spinnerResult = sessionManager.activitySnapshot(spinner);
+  assert.equal(spinnerResult.level, 'low', `a spinner alone is the yellow case (rate ${spinnerResult.changeRate})`);
+
+  // Streaming: many fresh rows painted over the same number of slices.
+  const streaming = activityFixtureSession('claude');
+  streaming.screen = createScreenModel({ cols: 100, rows: 200 });
+  for (let i = 0; i < 4; i++) {
+    for (let r = 0; r < 12; r++) streaming.screen.feed(`output line ${i}-${r}\r\n`);
+    streaming.screen.feed(`${footer}`);
+    await sleep(SLICE_MS);
+    sessionManager.activitySnapshot(streaming);
+  }
+  streaming.screenLastChangeAt = Date.now();
+  const streamingResult = sessionManager.activitySnapshot(streaming);
+  assert.equal(streamingResult.level, 'busy', `painting many rows is the red case (rate ${streamingResult.changeRate})`);
+  assert.ok(
+    streamingResult.changeRate > spinnerResult.changeRate,
+    `streaming must measure busier than a spinner (${streamingResult.changeRate} vs ${spinnerResult.changeRate})`,
+  );
+});
+
+test('activitySnapshot: one whole-screen repaint does not pin the session red', async () => {
+  const { createScreenModel } = await import('./screenModel.js');
+  const { BUSY_ENTER_ROWS_PER_SEC } = await import('./activity.js');
+  // A resize makes the TUI clear and repaint. screenModel reports that as
+  // every row it holds (up to its 200-row scrollback cap), which unclamped
+  // would be ~800 rows/s -- tens of times the busy threshold, held for the
+  // whole rate window.
+  const session = activityFixtureSession('claude');
+  session.screen = createScreenModel({ cols: 100, rows: 200 });
+  for (let i = 0; i < 150; i++) session.screen.feed(`scrollback line ${i}\r\n`);
+  await sleep(300);
+  sessionManager.activitySnapshot(session); // bank the scrollback, start clean
+  session.screen.feed('\x1b[2J\x1b[1;1Hrepainted');
+  await sleep(300);
+  const r = sessionManager.activitySnapshot(session);
+  assert.ok(
+    r.changeRate < BUSY_ENTER_ROWS_PER_SEC * 10,
+    `a single repaint must not spike the rate (got ${r.changeRate} rows/s)`,
+  );
+});
+
+test('activitySnapshot: the previous level is remembered, so the hysteresis has a history', async () => {
+  const { createScreenModel } = await import('./screenModel.js');
+  const session = activityFixtureSession('claude');
+  session.screen = createScreenModel({ cols: 100, rows: 200 });
+  session.screen.feed('  esc to interrupt');
+  session.screenLastChangeAt = Date.now();
+  assert.equal(session.activityLevel, null);
+  const first = sessionManager.activitySnapshot(session);
+  assert.equal(session.activityLevel, first.level, 'the reading is written back for the next call');
+});
+
+test('activitySnapshot: no session at all is the shared NO_ACTIVITY reading', async () => {
+  const { NO_ACTIVITY } = await import('./activity.js');
+  assert.deepEqual(sessionManager.activitySnapshot(null), NO_ACTIVITY);
+  assert.equal(NO_ACTIVITY.level, null);
+  assert.equal(NO_ACTIVITY.reason, 'no-session');
+});
+
+test('listSessions: every session carries its activity reading', async () => {
+  const res = await sessionManager.createSession({ cwd: tmpdir(), cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(res.session, 'shell session should spawn');
+  try {
+    const entry = sessionManager.listSessions().find((s) => s.id === res.sessionId);
+    assert.ok(entry, 'the new session is listed');
+    assert.ok(entry.activity, 'listSessions carries the activity reading');
+    // A plain shell has no agent, so the question does not apply -- the UI
+    // shows no dot rather than guessing.
+    assert.equal(entry.activity.level, null);
+    assert.equal(entry.activity.reason, 'shell');
+  } finally {
+    sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+  }
+});
+
+// The red/yellow hysteresis needs a previous level to hold onto. It lives on
+// the SESSION (server side), not in any viewer, which is what makes these
+// three cases behave: switching browser tabs, two clients watching the same
+// session, and a session watched from another instance over federation (the
+// owning server computes the level; the viewer only renders it).
+
+test('activitySnapshot: two readers in a row agree -- the history is the session\'s, not the viewer\'s', async () => {
+  const { createScreenModel } = await import('./screenModel.js');
+  const session = activityFixtureSession('claude');
+  session.screen = createScreenModel({ cols: 100, rows: 200 });
+  session.screen.feed('❯\r\n  auto mode on · esc to interrupt');
+  session.screenLastChangeAt = Date.now();
+
+  // Reading twice back to back (a browser poll and an MCP get_tab_status
+  // landing together) must not make the second reader see a different
+  // session just because the first one wrote the level back.
+  const first = sessionManager.activitySnapshot(session);
+  const second = sessionManager.activitySnapshot(session);
+  assert.equal(second.level, first.level);
+  assert.equal(second.reason, first.reason);
+});
+
+test('activitySnapshot: a busy level does not survive a long gap between reads', async () => {
+  const { createScreenModel } = await import('./screenModel.js');
+  const { RATE_HOLD_WINDOW_MS } = await import('./activity.js');
+  const session = activityFixtureSession('claude');
+  session.screen = createScreenModel({ cols: 100, rows: 200 });
+  session.screen.feed('  auto mode on · esc to interrupt');
+  session.screenLastChangeAt = Date.now();
+  // Pretend the session was painting hard a moment ago and was last read
+  // while it still was, e.g. the sidebar was open then and is opening again
+  // now. Nothing has been drawn since.
+  session.activityLevel = 'busy';
+  const longAgo = Date.now() - RATE_HOLD_WINDOW_MS - 10_000;
+  session.screenSamples = [{ at: longAgo, rows: 40 }, { at: longAgo + 250, rows: 40 }];
+  session.screenSampleAt = longAgo + 250;
+
+  const r = sessionManager.activitySnapshot(session);
+  assert.equal(r.level, 'low', 'the stale burst has aged out of both windows, so red cannot stick');
+  // Still running, though -- the marker is up.
+  assert.equal(r.reason, 'marker');
+});
