@@ -90,7 +90,7 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
 | `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
-| `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 ([通知と Vikunja 連携](/ccserver/guides/notify/) 参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。`vikunja` は Vikunja タスク連携の設定 (`baseUrl`+`apiToken` で有効化)。 |
+| `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 ([通知](/ccserver/guides/notify/) 参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。`bridge` はエージェント通知ブリッジの設定 ([通知](/ccserver/guides/notify/) 参照、既定 `enabled: false`)。`vikunja` キーは廃止済み (残っていても無視され、起動時に警告が出るだけ)。 |
 | `federation` | `{}` | 拠点間ペアリング ([federation](/ccserver/guides/federation/) 参照) の設定。`requireTokenForPairing: true` でペアリング開始リクエストに `CCSERVER_TOKEN` の提示を必須化 (既定 `false`)。機能自体の有効/無効は `CCSERVER_FEDERATION_PORT` 環境変数で制御し、ここでは切り替えられません。 |
 | `network` | `{ isolate: false, initialState: "enforce", mode: "enforce", allowedHosts: [], deniedHosts: [] }` | ネットワーク隔離 ([下記](#ネットワーク隔離)参照)。`isolate` は機能全体の on/off (`true` で隔離が有効になる)。`initialState` は隔離を有効にして起動したセッションの開始state (`"enforce"`/`"open"`)、`mode` は `"enforce"`/`"audit"`、`allowedHosts`/`deniedHosts` は完全一致か先頭ドット (`.example.com`) のみの許可/拒否リスト (各最大200件)。設定 UI (設定 → ネットワーク隔離) からも編集可能で、`allowedHosts`/`deniedHosts` の保存は稼働中セッションへ自動反映されます。 |
 
@@ -108,6 +108,8 @@ ccserver を起動しているホスト上で、保存したいローカル絶�
 node server/cli/gh-usage-report.js enable \
   --file /absolute/path/gh-usage-recording.json
 ```
+
+`--file` に指定できるのは、存在しないパスか通常ファイルだけです (ディレクトリ・シンボリックリンク・FIFO・デバイスは拒否されます)。**既にある集計ファイルを指した場合は、その件数と開始日を引き継いで記録を続けます** — `disable` したあと同じパスで `enable` し直しても計数は失われません。一方、集計として読めない通常ファイル (無関係なテキスト等) を指した場合は、最初の記録時にその中身が集計ファイルで置き換えられます。
 
 このコマンドは `sandbox.config.json` の `ghUsageRecording` を次の形で更新します。反映されるのは新規セッションだけなので、記録を始める前に対象のサンドボックスセッションを起動し直してください。
 

@@ -523,7 +523,53 @@ export const MIGRATIONS = [
     },
   },
   {
-    // v10 (issue #201, decision D2): the landing pad for DYNAMIC settings.
+    // v10: Web Push (plan: plan-notify-bridge, Step 4). Both tables live in
+    // the host-singleton DB rather than a .saved-*.json sidecar for the same
+    // reason the GPG vault does: this is per-host state that must survive a
+    // `git clean`/reclone of the checkout, and one of the two columns is a
+    // private key.
+    version: 10,
+    up(db) {
+      db.exec(`
+        -- The server's own VAPID identity (RFC 8292): one P-256 keypair for
+        -- the whole host, generated on first use. The public key is handed to
+        -- browsers as the applicationServerKey and is not a secret; the
+        -- private key only ever signs the short-lived JWT in the
+        -- Authorization header, so unlike the GPG vault it is NOT encrypted
+        -- at rest -- it protects nothing the DB itself does not already hold,
+        -- and encrypting it would mean the push path could not work while the
+        -- vault is locked (which is most of the time, by design).
+        -- A single row, enforced by the CHECK.
+        CREATE TABLE push_vapid (
+          id           INTEGER PRIMARY KEY CHECK (id = 1),
+          public_key   TEXT NOT NULL,
+          private_key  TEXT NOT NULL,
+          created_at   INTEGER NOT NULL
+        );
+
+        -- One row per browser/device that opted in. endpoint is the push
+        -- service URL the browser handed us and is the natural identity of a
+        -- subscription (re-subscribing the same browser yields the same
+        -- endpoint), hence UNIQUE. p256dh/auth are that subscription's own
+        -- public key and shared auth secret, both base64url, used as RFC 8291
+        -- inputs. last_ok_at is the last successful delivery; a 404/410 from
+        -- the push service deletes the row outright (the endpoint is gone for
+        -- good, per RFC 8030).
+        CREATE TABLE push_subscriptions (
+          id          TEXT PRIMARY KEY,
+          endpoint    TEXT NOT NULL UNIQUE,
+          p256dh      TEXT NOT NULL,
+          auth        TEXT NOT NULL,
+          label       TEXT,
+          user_agent  TEXT,
+          created_at  INTEGER NOT NULL,
+          last_ok_at  INTEGER
+        );
+      `);
+    },
+  },
+  {
+    // v11 (issue #201, decision D2): the landing pad for DYNAMIC settings.
     // The boundary this table exists to establish:
     //   dynamic = changeable from the Web UI, effective without a restart
     //             -> here
@@ -545,7 +591,7 @@ export const MIGRATIONS = [
     //   ('network-profile','strict','allowedHosts','["github.com"]')
     // value is always JSON.stringify'd, even for a string or boolean, so
     // there is one decode path and json_extract() still works.
-    version: 10,
+    version: 11,
     up(db) {
       db.exec(`
         CREATE TABLE settings (

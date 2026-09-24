@@ -45,6 +45,11 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | GET | `/api/federation/pending` | 未承認 (双方向承認の途中) のペアリング一覧 |
 | POST | `/api/federation/pending/:id/decide` | `{ decision: 'approved' \| 'rejected' }` — このインスタンス側の人間の承認/却下を記録する |
 | GET/POST/DELETE | `/api/federation/instances/:id/{sessions,groups,dirs}` | `active` なペアへの薄いプロキシ。ボディ/レスポンス形状はそれぞれ `/api/sessions`・`/api/groups`・`/api/dirs` と同一 |
+| GET | `/api/notify-settings` | 通知ブリッジの設定 (`settings`)、GUI が描画に使う語彙 (`choices`)、このホストで実際に到達可能なチャネル (`channelsAvailable`)、Web Push の公開鍵 (`vapidPublicKey`)、購読中の端末一覧 (`pushSubscriptions`、endpoint は含まない)、可観測カウンタ (`stats`) |
+| PUT | `/api/notify-settings` | 通知ブリッジ設定の部分更新。未知のキー・範囲外の数値・未知の app/channel/level は 400 で名指し。設定ファイルが壊れている場合は 500 で内容を保持 |
+| POST | `/api/notify-settings/test` | 設定中のチャネルへテスト通知を1件送り、チャネルごとの結果を返す (`{ delivered, channels }`) |
+| POST | `/api/push/subscriptions` | PWA 通知の購読登録 (`{ endpoint, keys: { p256dh, auth }, label? }`)。https 必須・私有/ループバックアドレスは拒否。同じ endpoint の再登録は上書き |
+| DELETE | `/api/push/subscriptions/:id` | 購読を削除 (その端末には届かなくなる) |
 | GET | `/api/auth/mode` | `{ mode: 'none' \| 'token' \| 'passkey' }` — 現在の `CCSERVER_AUTH_MODE`。認証不要 (`token` モードのみ、他の `/api` と同様にトークン必須) |
 | GET | `/api/auth/session` | セッション Cookie の有効性確認専用 (200/401 のみが意味を持つ)。`passkey` モード限定 |
 | POST | `/api/auth/login-token` | `{ token }` — `node server/cli/issue-login-token.js` が発行したワンタイムトークンを検証し、セッション Cookie を発行する (`passkey` モード限定、use-once)。`--allow-passkey-registration` 付きで発行したトークンなら、そのセッションはパスキーを1つ登録できる |

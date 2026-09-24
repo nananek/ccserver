@@ -15,7 +15,8 @@
 - 複数 AI CLI の統一管理 (Claude Code / opencode / GitHub Copilot CLI / OpenAI Codex CLI / Command Code) — [起動ガイド](https://nananek.github.io/ccserver/guides/launching/)
 - `bwrap` + rootless docker によるプロジェクト単位の隔離サンドボックス実行 — [サンドボックス](https://nananek.github.io/ccserver/sandbox/overview/)
 - 予約プロンプト (指定時刻・利用制限解除時刻に自動でプロンプトを投入) — [詳細](https://nananek.github.io/ccserver/guides/scheduled-prompts/)
-- `ccserver-notify` MCP による Discord / webhook / Vikunja 通知 — [詳細](https://nananek.github.io/ccserver/guides/notify/)
+- `ccserver-notify` MCP による Discord / webhook / PWA (Web Push) 通知 — [詳細](https://nananek.github.io/ccserver/guides/notify/)
+- サンドボックス内の AI CLI が出すデスクトップ通知の転送 (端末のエスケープシーケンスを捕捉) — [詳細](https://nananek.github.io/ccserver/guides/notify/)
 - 使用量 (Usage) 表示 (Claude Code `/usage` / Codex レート制限) — [詳細](https://nananek.github.io/ccserver/guides/usage/)
 - 拠点間 (federation) ペアリングによる複数インスタンスのリモート操作 — [詳細](https://nananek.github.io/ccserver/guides/federation/)
 - 複数端末からのセッション共有 (PC とスマートフォンで同じセッションを同時操作、オプトイン) — [詳細](https://nananek.github.io/ccserver/guides/session-sharing/)
@@ -36,6 +37,7 @@
 ## 必要な環境
 
 - Node.js >= 22.13 / npm >= 9
+  - CI が実際に検証しているのは **Node 22 / 24 / 26** です (22 = Maintenance LTS、24 = Active LTS、26 = Current。26 は 2026-10-28 に Active LTS になります)。`engines` に上限を置いていないのは、より新しい Node で `npm install` が警告を出す/止まるのを避けるためで、未検証のバージョンが動く保証ではありません。
 - C++ コンパイラ (node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`)
 - 対応する AI CLI のいずれか 1 つ以上 (Claude Code / opencode / GitHub Copilot CLI / OpenAI Codex CLI / Command Code)。サーバーにインストールされている CLI だけを起動時に選べます。
 

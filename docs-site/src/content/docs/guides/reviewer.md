@@ -39,7 +39,7 @@ description: 使い捨てのヘッドレスセッションでローカルの ref
 
 ### 完了時の通知
 
-ジョブが完了する (`finish_review` 経由・フォールバックの `failed`/`timeout` 経由のいずれでも) たびに、`ccserver-notify` ([通知](/ccserver/guides/notify/) 参照) を使ってベストエフォートで人間へ通知します。新たな opt-in フラグは無く、`ccserver-notify` 自体が「チャンネル未設定なら実質 no-op」という性質を持つため、Discord webhook / 購読 webhook / Vikunja のいずれかが設定されていれば自動的に届きます。
+ジョブが完了する (`finish_review` 経由・フォールバックの `failed`/`timeout` 経由のいずれでも) たびに、`ccserver-notify` ([通知](/ccserver/guides/notify/) 参照) を使ってベストエフォートで人間へ通知します。新たな opt-in フラグは無く、`ccserver-notify` 自体が「チャンネル未設定なら実質 no-op」という性質を持つため、Discord webhook / 購読 webhook のいずれかが設定されていれば自動的に届きます。
 
 - **title**: PR モードは `Review done: <owner>/<repo>#<number>` 形式 (`status` が `failed`/`timeout` なら先頭が `Review failed:`/`Review timed out:` に変わる)。PR 無しモード (ブランチ/dirty) は `Review done: <headRef または "uncommitted changes"> (<プロジェクトの basename>)`。
 - **body**: `status`、`focus` (指定されていれば)、PR モードなら PR へのコメント投稿有無、非 PR モードなら `get_review(jobId)` で結果を見られる旨。

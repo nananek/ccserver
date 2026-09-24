@@ -5,6 +5,7 @@ import GeneralSection from './GeneralSection.jsx';
 import PasskeysSection from './PasskeysSection.jsx';
 import GpgVaultSection from './GpgVaultSection.jsx';
 import NetworkIsolationSection from './NetworkIsolationSection.jsx';
+import NotificationsSection from './NotificationsSection.jsx';
 
 // 左メニュー定義。項目追加時はここに1行＋対応コンポーネントの
 // 条件分岐を追加するだけで済む。選択状態は useState のみ
@@ -13,6 +14,7 @@ const SETTINGS_MENUS = [
   { key: 'general', label: '一般' },
   { key: 'sandboxes', label: '作成済みサンドボックス' },
   { key: 'network', label: 'ネットワーク隔離' },
+  { key: 'notifications', label: '通知' },
   { key: 'pairing', label: 'ペアリング済みインスタンス' },
   { key: 'passkeys', label: 'パスキー' },
   { key: 'gpgVault', label: 'GPG連携' },
@@ -87,6 +89,7 @@ export default function SettingsView({
           )}
           {activeKey === 'sandboxes' && <SandboxSection />}
           {activeKey === 'network' && <NetworkIsolationSection />}
+          {activeKey === 'notifications' && <NotificationsSection />}
           {activeKey === 'pairing' && <PairedInstancesSection />}
           {activeKey === 'passkeys' && <PasskeysSection />}
           {activeKey === 'gpgVault' && <GpgVaultSection />}

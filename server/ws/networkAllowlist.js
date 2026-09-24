@@ -11,13 +11,46 @@
 // `//` comment keys survive read-modify-write untouched (they are plain JSON
 // string keys); only formatting normalizes to 2-space + trailing newline.
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { normalizeAllowedHosts, MAX_ALLOWED_HOSTS, normalizeNetworkSettings } from './network-broker.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
 
 export function resolveSandboxConfigPath() {
   return resolvePath(PATH_IDS.sandboxConfig);
+}
+
+// Atomic whole-file replace (attacker review F2). A plain writeFileSync
+// truncates first, so a crash or ENOSPC mid-write leaves a partial JSON
+// document behind -- and server/index.js refuses to BOOT on a config it cannot
+// parse ("Refusing to start"). Writing to a sibling temp file and renaming
+// makes the swap a single atomic operation: a reader sees either the old
+// document or the new one, never half of one.
+//
+// The temp file is a sibling (same directory) so the rename cannot cross a
+// filesystem boundary, and 0600 because this file holds the Discord webhook
+// URL and, historically, API tokens.
+//
+// Shared by every writer of sandbox.config.json -- currently the network
+// settings below and notifyBridgeSettings.js -- so the two cannot drift into
+// one being atomic and the other not.
+export function writeSandboxConfigAtomic(next) {
+  const target = resolveSandboxConfigPath();
+  const tmp = `${target}.tmp-${process.pid}`;
+  // The config directory does not exist yet on a host that has not run the
+  // setup wizard (issue #201 R8), and the rename below would fail with ENOENT
+  // on the temp file's own directory. The reader already treats ENOENT as {},
+  // so creating it here makes the two symmetric instead of failing the
+  // Settings save. It belongs in this shared writer rather than at a call
+  // site: every writer of the file goes through here.
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  try {
+    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    renameSync(tmp, target);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    throw err;
+  }
 }
 
 function readRawConfig() {
@@ -115,12 +148,7 @@ export function updateNetworkSettings(patch = {}) {
   }
   next.network = net;
   try {
-    // The config directory does not exist yet on a host that has not run the
-    // setup wizard, and this is the only writer of the file (issue #201 R8).
-    // The reader already treats ENOENT as {}, so creating the directory here
-    // makes the two symmetric instead of failing the Settings save.
-    mkdirSync(dirname(resolveSandboxConfigPath()), { recursive: true, mode: 0o700 });
-    writeFileSync(resolveSandboxConfigPath(), `${JSON.stringify(next, null, 2)}\n`);
+    writeSandboxConfigAtomic(next);
   } catch (err) {
     return { ok: false, code: 'internal', message: `failed to write sandbox config: ${err.message}` };
   }

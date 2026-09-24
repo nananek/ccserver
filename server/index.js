@@ -20,6 +20,7 @@ import { groupDocsRoute } from './routes/groupDocs.js';
 import { sandboxRoute } from './routes/sandbox.js';
 import { sandboxesRoute } from './routes/sandboxes.js';
 import { networkAllowlistRoute } from './routes/networkAllowlist.js';
+import { notificationsRoute } from './routes/notifications.js';
 import { federationRoute } from './routes/federation.js';
 import { authRoute } from './routes/auth.js';
 import { gpgVaultRoute } from './routes/gpgVault.js';
@@ -29,6 +30,8 @@ import { remoteTerminalWs } from './ws/remoteTerminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
+import { ensureVapidKeys, countSubscriptions } from './ws/pushSubscriptions.js';
+import { setWebpushReachable } from './ws/notifyBridge.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/reviewer.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
@@ -317,6 +320,7 @@ await fastify.register(groupDocsRoute, { prefix: '/api' });
 await fastify.register(sandboxRoute, { prefix: '/api' });
 await fastify.register(sandboxesRoute, { prefix: '/api' });
 await fastify.register(networkAllowlistRoute, { prefix: '/api' });
+await fastify.register(notificationsRoute, { prefix: '/api' });
 await fastify.register(federationRoute, { prefix: '/api' });
 await fastify.register(authRoute, { prefix: '/api' });
 await fastify.register(gpgVaultRoute, { prefix: '/api' });
@@ -490,6 +494,18 @@ try {
 
 const PORT = process.env.PORT || 3001;
 
+// Web Push (plan-notify-bridge): mint the host's VAPID identity on first boot
+// so the public key is ready before any browser asks to subscribe, and tell
+// the notification bridge how to find out whether the webpush channel can
+// actually reach anyone (a late binding, so notifyBridge does not have to
+// depend on the push store existing).
+try {
+  ensureVapidKeys();
+  setWebpushReachable(() => countSubscriptions() > 0);
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to initialize Web Push VAPID keys; push notifications are unavailable');
+}
+
 // ccserver-notify: restore the subscription registry, then host the
 // process-global MCP socket if the feature is enabled (Discord webhook or
 // subscriptions). Started before the server accepts connections: bwrap's
@@ -500,6 +516,25 @@ try {
   if (notifyEnabled()) {
     await ensureNotifyBroker();
     fastify.log.info('ccserver-notify MCP broker started');
+  } else {
+    // Review finding #1: staying silent here is how an upgrade turns into a
+    // mystery. With no delivery target, shouldInjectNotify() is false and the
+    // `notify` tool is not injected into ANY session -- agents lose their only
+    // way to call a human, and nothing else in the process says so. That
+    // matters most for a deployment upgrading past the Vikunja channel's
+    // removal (issue #207): it may have had Vikunja as its ONLY real target,
+    // and the docs/example-config notes about this are things you read after
+    // you already suspect something is wrong. This log line is the one place
+    // that reaches an existing install on the restart that changes its
+    // behavior. (Symmetric with the info line above, which fires when it IS
+    // enabled.)
+    fastify.log.warn(
+      'ccserver-notify is DISABLED: no delivery target is configured, so the notify MCP tool will not be '
+      + 'injected into any session and agents have no way to call a human. Set notify.discordWebhook '
+      + '(or CCSERVER_DISCORD_WEBHOOK), or seed notify.subscriptions, in sandbox.config.json. '
+      + 'NOTE: the Vikunja channel was removed and no longer counts as a delivery target -- see '
+      + 'https://github.com/nananek/ccserver/issues/207',
+    );
   }
 } catch (err) {
   fastify.log.error({ err }, 'Failed to start ccserver-notify broker');

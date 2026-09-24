@@ -33,7 +33,7 @@ export default defineConfig({
 					items: [
 						{ label: '起動 (アプリ・サンドボックス)', slug: 'guides/launching' },
 						{ label: '予約プロンプト (タイマー)', slug: 'guides/scheduled-prompts' },
-						{ label: '通知 (ccserver-notify) と Vikunja 連携', slug: 'guides/notify' },
+						{ label: '通知 (MCP / ブリッジ / PWA)', slug: 'guides/notify' },
 						{ label: '認証 (ワンタイムトークン/パスキー)', slug: 'guides/auth' },
 						{ label: '使用量 (Usage)', slug: 'guides/usage' },
 						{ label: 'コードレビュー (ccserver-reviewer)', slug: 'guides/reviewer' },

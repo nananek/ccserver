@@ -56,7 +56,11 @@ function realOrSelf(p) {
 // not-yet-created path underneath it, while a symlink planted INSIDE an
 // allowed root that points outside it (an escape attempt) still resolves to
 // its real, out-of-bounds target once it exists.
-function realOrNearest(absPath) {
+//
+// Also exported for worktree.js, which must reconcile git's realpath
+// spelling of worktree paths with the lexical one it builds from
+// worktreeRoot()/HOME -- see its resolveMemberWorktree.
+export function realOrNearest(absPath) {
   try {
     return realpathSync(absPath);
   } catch {
