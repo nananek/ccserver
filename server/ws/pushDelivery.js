@@ -108,14 +108,28 @@ function buildPayload({ title, body, level, attribution, tag, url }) {
   // replaced, because slicing `over` units off the end can land in the middle
   // of a surrogate pair ('🎉'x1900 + 'a'x200 lost a low surrogate in 14 of 400
   // random bodies). Dropping whole code points cannot split a pair.
+  //
+  // But the AMOUNT to drop is a count of BYTES, and a later review caught this
+  // loop spending it as a count of CODE POINTS. Every Japanese character frees
+  // three bytes, so "drop `over` code points" over-trimmed threefold and then
+  // compounded across iterations: a 1900-character Japanese body came out at
+  // 110 characters, 1950 at 10, and anything past 1955 at the ellipsis alone --
+  // 87 bytes spent of a 3993-byte budget. Emoji (4 bytes) failed the same way
+  // from 1303 characters up. So measure each code point as it goes and stop as
+  // soon as the overshoot is covered.
+  //
+  // This cannot under-shoot: JSON escaping only ever makes a code point longer
+  // than its UTF-8 form (an unescaped non-ASCII character serializes as itself),
+  // so freeing `over` UTF-8 bytes removes at least `over` bytes of JSON. The
+  // outer loop is still a loop because appending the ellipsis adds bytes back.
   const ELLIPSIS = '…';
-  let cps = Array.from(payload.body);
+  const cps = Array.from(payload.body);
   let trimmed = false;
   while (Buffer.byteLength(json, 'utf-8') > MAX_PAYLOAD_BYTES && cps.length > 0) {
-    const over = Buffer.byteLength(json, 'utf-8') - MAX_PAYLOAD_BYTES;
-    // `over` is a BYTE overshoot and each code point is 1-4 bytes, so dropping
-    // `over` code points always converges and never under-shoots.
-    cps = cps.slice(0, Math.max(0, cps.length - Math.max(1, over)));
+    let over = Buffer.byteLength(json, 'utf-8') - MAX_PAYLOAD_BYTES;
+    while (over > 0 && cps.length > 0) {
+      over -= Buffer.byteLength(cps.pop(), 'utf-8');
+    }
     payload.body = cps.join('');
     trimmed = true;
     json = JSON.stringify({ ...payload, body: payload.body + ELLIPSIS });

@@ -327,15 +327,21 @@ export function createNotifyDetector({ onNotification, allowBell = false, now = 
     expireKitty();
     const entry = kitty.get(id) ?? { title: '', body: '', chars: 0, startedAt: now() };
 
-    // Per-entry byte cap (attack review N2): everything past the point where
+    // Per-entry cap (attack review N2): everything past the point where
     // the final title+body could still matter is dropped on arrival rather
     // than accumulated and then thrown away at flush time.
+    //
+    // Budgeted and cut in CODE POINTS, matching cleanTitle/cleanBody's clamp:
+    // cutting a chunk mid-surrogate-pair would hand the flush a lone surrogate
+    // that nothing downstream re-joins.
     const room = KITTY_ENTRY_MAX_CHARS - entry.chars;
-    if (payload.length > room) {
-      payload = payload.slice(0, Math.max(0, room));
+    let cps = Array.from(payload);
+    if (cps.length > room) {
+      cps = cps.slice(0, Math.max(0, room));
+      payload = cps.join('');
       truncatedKitty += 1;
     }
-    entry.chars += payload.length;
+    entry.chars += cps.length;
     if (meta.p === 'body') entry.body += payload;
     else entry.title += payload; // kitty's default payload type is "title"
     kitty.set(id, entry);

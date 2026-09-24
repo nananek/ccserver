@@ -432,10 +432,15 @@ function buildContent({ title, body, level }) {
   return `${prefix}${t}${b ? `\n${b}` : ''}`.trim();
 }
 
-// First 8 chars of a connection-scoped id (sessionId / groupId) for the
+// First 8 characters of a connection-scoped id (sessionId / groupId) for the
 // footer -- enough for tracing, short enough to not drown the payload.
+//
+// Code points, not UTF-16 units (attacker review L2r). ccserver's own ids are
+// UUIDs, but this value arrives in the notify broker's UNAUTHENTICATED identity
+// frame, so it is whatever the connecting process said it was -- an id of emoji
+// came out of here ending in half a surrogate pair.
 function shortId(id) {
-  return String(id).slice(0, 8);
+  return Array.from(String(id)).slice(0, 8).join('');
 }
 
 // The project label for the footer: the session's projectName (basename of
@@ -633,7 +638,7 @@ async function deliverWebpush({ title, body, level, identity, cfg }) {
       attribution: cfg.attribution ? buildAttribution(identity, cfg.hostname).replace(/^\n\n_from: /, '') : null,
       // One notification per session replaces the previous one for that
       // session instead of stacking, which is what makes a phone usable.
-      tag: identity?.sessionId ? `ccserver-${String(identity.sessionId).slice(0, 8)}` : 'ccserver',
+      tag: identity?.sessionId ? `ccserver-${shortId(identity.sessionId)}` : 'ccserver',
     });
     return res;
   } catch (err) {

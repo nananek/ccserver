@@ -560,13 +560,37 @@ test('F1: whitespace is handled where it renders identically, not mid-word', () 
   assert.match(defangFooterMarker('_fr\u00a0om:'), /_fr/, 'mid-word whitespace is out of scope by design');
 });
 
+const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 test('L2: the attribution cap never splits a surrogate pair', () => {
   // The same defect F3 fixed in pushDelivery's byte-trim, left behind here.
-  const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
   for (let n = 1; n <= 120; n++) {
     const footer = buildAttribution({ projectName: '\u{1F389}'.repeat(n), sessionId: '\u{1F389}'.repeat(n) }, 'h');
     assert.ok(!LONE.test(footer), `${n} emoji produced a lone surrogate`);
   }
+});
+
+test('L2r: shortId cuts the id in code points, at EVERY alignment', () => {
+  // Why L2r existed at all: the case above uses ids of nothing but emoji, and
+  // shortId cut 8 UTF-16 UNITS -- which for 2-unit code points lands exactly
+  // between pairs, every time. The cap looked clean while the bug was intact.
+  // An ODD number of leading 1-unit characters shifts the boundary INTO a
+  // pair, which is the case that has to be swept.
+  for (let lead = 0; lead <= 9; lead++) {
+    for (let n = 1; n <= 12; n++) {
+      const id = 'a'.repeat(lead) + '\u{1F389}'.repeat(n);
+      const footer = buildAttribution({ sessionId: id, groupId: id }, 'h');
+      assert.ok(!LONE.test(footer), `lead=${lead} n=${n} produced a lone surrogate: ${JSON.stringify(footer)}`);
+    }
+  }
+});
+
+test('L2r: a short id is 8 CODE POINTS, not 8 UTF-16 units', () => {
+  // The other half: code-point counting must not silently shorten the id in
+  // exchange for well-formedness. Eight emoji in, eight emoji out.
+  const footer = buildAttribution({ sessionId: '\u{1F389}'.repeat(20) }, 'h');
+  const shown = footer.slice(footer.indexOf('session ') + 'session '.length);
+  assert.equal(Array.from(shown).length, 8, `got ${JSON.stringify(shown)}`);
 });
 
 

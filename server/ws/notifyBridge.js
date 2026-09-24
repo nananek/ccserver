@@ -112,9 +112,18 @@ function flowState(session, now) {
 }
 
 // A short, stable label for logs: the same session identification the human
-// sees in the notification title.
+// sees in the notification title. session.id is a randomUUID we minted, so
+// there is no surrogate pair here for a UTF-16 slice to split.
 function sessionLabel(session) {
   return `${session.app || 'agent'}/${String(session.id).slice(0, 8)}`;
+}
+
+// An excerpt of AGENT-CONTROLLED text for a log line. Code points, not UTF-16
+// units -- a log is a poor place to be the one truncation in this path that
+// emits a lone surrogate.
+function logExcerpt(text, max) {
+  const cps = Array.from(text);
+  return cps.length > max ? `${cps.slice(0, max).join('')}…` : text;
 }
 
 // Log the first occurrence of each suppression kind per window. Deliberately
@@ -190,7 +199,7 @@ export function classifyNotification(session, event, bridge, now) {
   if (lastSeen !== undefined && now - lastSeen < bridge.dedupeWindowMs) {
     stats.deduped += 1;
     warnOnce(session, st, 'deduped',
-      `suppressing repeated notification "${body.slice(0, 60)}" (dedupeWindowMs=${bridge.dedupeWindowMs})`);
+      `suppressing repeated notification "${logExcerpt(body, 60)}" (dedupeWindowMs=${bridge.dedupeWindowMs})`);
     return { action: 'drop', reason: 'deduped' };
   }
 

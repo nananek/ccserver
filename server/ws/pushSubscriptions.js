@@ -43,7 +43,11 @@ function clean(value, max) {
     .replace(/ {2,}/g, ' ')
     .trim();
   if (!t) return null;
-  return t.length > max ? t.slice(0, max) : t;
+  // Code points, not UTF-16 units, like every other cap in the notification
+  // path: a device label of emoji must not come back to the operator's list
+  // ending in half a surrogate pair.
+  const cps = Array.from(t);
+  return cps.length > max ? cps.slice(0, max).join('') : t;
 }
 
 // Same rule as notify.js's isValidWebhookUrl, kept as its own function because
