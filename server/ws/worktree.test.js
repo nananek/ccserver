@@ -264,3 +264,71 @@ test('resolveMemberWorktree propagates the escape rejection instead of creating 
   assert.equal(existsSync(join(runtimeDir, 'escape')), false, 'nothing was created outside CCSERVER_WORKTREE_ROOT');
 });
 
+// --- hostile shared-metadata bounds (attacker view of issue #224) -----------
+//
+// Every sandboxed session sharing this repo can write the project's .git
+// (sandbox.js rw-binds the common dir), so <admin>/gitdir and a worktree's
+// .git must be treated as untrusted input: a FIFO there used to make git
+// (and the hand-rolled readFileSync scan) block the server's event loop
+// forever. Both tests run with a short git timeout override so the bound is
+// observable without the 30s production default.
+
+test('resolveMemberWorktree: a FIFO in .git/worktrees is bounded by the git timeout, not an event-loop hang', (t) => {
+  const fifoEntry = join(repo, '.git', 'worktrees', 'evil-fifo');
+  try {
+    mkdirSync(fifoEntry, { recursive: true });
+    execFileSync('mkfifo', [join(fifoEntry, 'gitdir')]);
+  } catch {
+    rmSync(fifoEntry, { recursive: true, force: true });
+    t.skip('mkfifo unavailable');
+    return;
+  }
+  const prev = process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS;
+  process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS = '500';
+  const path = worktree.worktreePathFor(repo, 'workerFifo');
+  try {
+    const started = Date.now();
+    let threw = false;
+    try { worktree.resolveMemberWorktree(repo, 'workerFifo'); } catch { threw = true; }
+    const elapsed = Date.now() - started;
+    // git list/add both hang on the FIFO; the timeout turns that into a
+    // (fail-closed) refusal within a second or two instead of a frozen
+    // process.
+    assert.ok(elapsed < 5000, `resolve must be bounded by the git timeout (took ${elapsed}ms, threw=${threw})`);
+    assert.ok(existsSync(fifoEntry), 'the hostile entry is left in place');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS;
+    else process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS = prev;
+    rmSync(fifoEntry, { recursive: true, force: true });
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+test("resolveMemberWorktree: a FIFO at a role checkout's .git cannot block the metadata read", (t) => {
+  // This one is read directly (worktreeGitdirTarget), not through git, so it
+  // pins readGitdirFile's O_NONBLOCK/fstat guard independently of the git
+  // timeout: a plain readFileSync would block forever on the FIFO.
+  const path = worktree.worktreePathFor(repo, 'workerFifoGit');
+  mkdirSync(path, { recursive: true });
+  writeFileSync(join(path, 'keep.txt'), 'stale non-empty dir');
+  try {
+    execFileSync('mkfifo', [join(path, '.git')]);
+  } catch {
+    rmSync(path, { recursive: true, force: true });
+    t.skip('mkfifo unavailable');
+    return;
+  }
+  const prev = process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS;
+  process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS = '500';
+  try {
+    const started = Date.now();
+    assert.throws(() => worktree.resolveMemberWorktree(repo, 'workerFifoGit'));
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 5000, `metadata read must not block on the FIFO (took ${elapsed}ms)`);
+    assert.ok(existsSync(join(path, 'keep.txt')), 'never removes a non-empty unrecognized directory');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS;
+    else process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS = prev;
+    rmSync(path, { recursive: true, force: true });
+  }
+});

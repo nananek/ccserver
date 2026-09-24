@@ -18,7 +18,7 @@
 // HEAD commit -- see plan section 2.3.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { realOrNearest } from '../pathPolicy.js';
@@ -53,12 +53,64 @@ export function worktreePathFor(projectCwd, role) {
   return path;
 }
 
+// Every git invocation is bounded. The metadata these calls scan is
+// rw-writable from inside the sandboxed sessions that share the repo
+// (sandbox.js's gitCommonDir bind), so a hostile sibling can plant entries
+// that make git block forever: a FIFO at .git/worktrees/<name>/gitdir makes
+// both `git worktree list` and `git worktree add` hang while scanning
+// (verified with git 2.55). execFileSync has no timeout by default, so that
+// would freeze this process's event loop instead of failing the launch.
+// 30s is far above any legitimate local worktree operation; the env
+// override exists so tests can exercise the bound without waiting.
+function gitTimeoutMs() {
+  const raw = Number(process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+}
+
 // stderr is piped (not inherited): a non-repo cwd or a routine "prunable"
 // state produces expected git stderr chatter ("fatal: not a git
 // repository", "Preparing worktree ...") that would otherwise look like a
 // real server error in the logs on every call.
 function git(cwd, args) {
-  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+  return execFileSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: gitTimeoutMs(),
+  });
+}
+
+// Reads a `gitdir`-style file (an admin entry's back-reference, or a
+// worktree's `.git` gitlink) without ever blocking on a hostile one. Both
+// live in metadata that sandboxed sessions can write: `.git/worktrees/*/`
+// through the common-dir rw bind, and the role's own `<worktree>/.git`
+// through its checkout bind. The git calls that scan this metadata are
+// bounded too (gitTimeoutMs above), but this module also parses it
+// directly -- and a plain readFileSync would follow a symlink into a device
+// (endless read / OOM) or block forever on a FIFO swapped in between that
+// scan and this read (verified: a FIFO at a role checkout's `.git` blocks
+// here with no git involvement at all). O_NONBLOCK keeps open() from
+// blocking on a FIFO, O_NOFOLLOW refuses a symlinked final component, and
+// the fstat/isFile + size cap reject devices and oversized files. Returns
+// null for anything that is not a small regular file.
+const GITDIR_FILE_MAX_BYTES = 4096;
+function readGitdirFile(file) {
+  let fd;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW || 0));
+  } catch {
+    return null;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > GITDIR_FILE_MAX_BYTES) return null;
+    const buf = Buffer.alloc(st.size);
+    if (st.size > 0) readSync(fd, buf, 0, st.size, 0);
+    return buf.toString('utf-8');
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function isDirectory(path) {
@@ -142,12 +194,8 @@ function commonDirOf(worktreePath) {
 // (resolved, so a relative gitdir also works), or null when `path/.git`
 // isn't a worktree-style gitlink (a plain repo, or nothing at all).
 function worktreeGitdirTarget(path) {
-  let content;
-  try {
-    content = readFileSync(join(path, '.git'), 'utf-8');
-  } catch {
-    return null;
-  }
+  const content = readGitdirFile(join(path, '.git'));
+  if (content === null) return null;
   const match = /^gitdir:\s*(.+?)\s*$/m.exec(content);
   return match ? resolve(path, match[1]) : null;
 }
@@ -191,15 +239,13 @@ function removeWorktreeRegistration(projectCwd, worktreePath) {
   // function exists for) through the nearest existing ancestor.
   const gitlink = join(realOrNearest(worktreePath), '.git');
   for (const name of names) {
-    let target;
-    try {
-      // The file holds the absolute path back to the worktree's `.git`
-      // gitlink; resolving against the worktrees dir keeps a relative value
-      // (never written by git itself) from resolving against process.cwd().
-      target = realOrNearest(resolve(worktreesDir, readFileSync(join(worktreesDir, name, 'gitdir'), 'utf-8').trim()));
-    } catch {
-      continue; // unreadable/non-entry -- nothing to remove
-    }
+    // A hostile sibling can leave anything at <name>/gitdir; skip whatever
+    // is not a small regular file instead of blocking/OOMing on it.
+    const content = readGitdirFile(join(worktreesDir, name, 'gitdir'));
+    if (content === null) continue;
+    // Resolving a relative value against the worktrees dir keeps it from
+    // resolving against process.cwd() (git itself writes absolute paths).
+    const target = realOrNearest(resolve(worktreesDir, content.trim()));
     if (target !== gitlink) continue;
     try { rmSync(join(worktreesDir, name), { recursive: true, force: true }); } catch { /* best effort */ }
   }
