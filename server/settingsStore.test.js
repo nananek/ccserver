@@ -40,7 +40,7 @@ beforeEach(() => {
   getDb().prepare('DELETE FROM settings').run();
 });
 
-test('v10 created the settings table with the (scope, scope_id, key) primary key', () => {
+test('v11 created the settings table with the (scope, scope_id, key) primary key', () => {
   const cols = getDb().prepare('PRAGMA table_info(settings)').all();
   assert.deepEqual(cols.map((c) => c.name), ['scope', 'scope_id', 'key', 'value', 'updated_at', 'updated_by']);
   assert.deepEqual(cols.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name),
