@@ -31,7 +31,7 @@ import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureVapidKeys, countSubscriptions } from './ws/pushSubscriptions.js';
-import { setWebpushReachable } from './ws/notifyBridge.js';
+import { setWebpushReachable } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/reviewer.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
@@ -496,9 +496,10 @@ const PORT = process.env.PORT || 3001;
 
 // Web Push (plan-notify-bridge): mint the host's VAPID identity on first boot
 // so the public key is ready before any browser asks to subscribe, and tell
-// the notification bridge how to find out whether the webpush channel can
-// actually reach anyone (a late binding, so notifyBridge does not have to
-// depend on the push store existing).
+// notify.js how to find out whether the webpush channel can actually reach
+// anyone (a late binding, so notify.js does not have to depend on the push
+// store existing). This one call answers for both paths that ask the question
+// -- notifyEnabled() / sendNotification() and the bridge (#234).
 try {
   ensureVapidKeys();
   setWebpushReachable(() => countSubscriptions() > 0);

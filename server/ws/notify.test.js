@@ -23,7 +23,9 @@ import {
   _getDeliverFetch,
   defangFooterMarker,
   buildAttribution,
+  setWebpushReachable,
 } from './notify.js';
+import { setWebpushReachable as bridgeSetWebpushReachable } from './notifyBridge.js';
 
 // Point CCSERVER_SANDBOX_CONFIG + CCSERVER_NOTIFY_PATH at temp files and
 // isolate from any CCSERVER_DISCORD_WEBHOOK leak from the environment.
@@ -84,6 +86,64 @@ test('notifyEnabled: a leftover vikunja block is NOT a delivery target', async (
         'and with nothing enabled, the notify tool is not injected at all',
       );
     },
+  );
+});
+
+// --- #234: Web Push is a delivery target too ---------------------------------
+//
+// notifyEnabled() false means shouldInjectNotify() false, which means the
+// `notify` MCP tool is absent from the session entirely -- the agent loses its
+// only way to call a human. A host subscribed ONLY through the browser landed
+// exactly there: sendNotification could reach it, but notifyEnabled() did not
+// count it, so the tool was never injected.
+//
+// The trap in testing this: asserting notifyEnabled() === true proves nothing
+// while a Discord webhook is configured, because that alone makes it true.
+// The config here deliberately has NOTHING else, so only Web Push can flip it.
+test('notifyEnabled: a Web Push subscription alone enables notify', async () => {
+  await withNotifyConfig({ notify: { subscriptions: [] } }, async () => {
+    restoreNotify();
+    assert.equal(notifyEnabled(), false, 'baseline: no webhook, no subscription, no browser -> disabled');
+    setWebpushReachable(() => true);
+    try {
+      assert.equal(notifyEnabled(), true, 'one subscribed browser is a delivery target');
+      assert.equal(
+        shouldInjectNotify({ shell: false, app: 'claude', groupId: null, groupRole: null, notifyEnabled: notifyEnabled() }),
+        true,
+        'and the agent gets the tool it can actually deliver through',
+      );
+    } finally {
+      setWebpushReachable(null);
+    }
+    assert.equal(notifyEnabled(), false, 'the last browser unsubscribing turns it off again');
+  });
+});
+
+// The reason this is a late binding rather than a direct read of the push
+// store: notify.js is imported long before the database is open (sessionManager
+// -> notify -> sandbox), so it must answer "nobody" rather than reach for a
+// table that does not exist yet -- and it must survive a resolver that throws.
+test('notifyEnabled: an unwired or throwing Web Push resolver reads as "nobody"', async () => {
+  await withNotifyConfig({ notify: { subscriptions: [] } }, async () => {
+    restoreNotify();
+    assert.equal(notifyEnabled(), false, 'unwired (boot order) -> nobody, not a crash');
+    setWebpushReachable(() => { throw new Error('push store is not open yet'); });
+    try {
+      assert.equal(notifyEnabled(), false, 'a throwing resolver must not escape notifyEnabled');
+    } finally {
+      setWebpushReachable(null);
+    }
+  });
+});
+
+// #234 is not a missing feature but a disagreement: the bridge counted Web
+// Push and notifyEnabled() did not. The fix is one binding both reach, so the
+// single call index.js makes at boot answers for both paths. Two bindings
+// would let them drift apart again.
+test('notifyEnabled: the bridge and the MCP tool share ONE Web Push binding', () => {
+  assert.equal(
+    bridgeSetWebpushReachable, setWebpushReachable,
+    'notifyBridge must re-export notify.js\'s binding rather than define a second one',
   );
 });
 
@@ -231,6 +291,73 @@ test('sendNotification never throws and an empty message sends nothing', async (
       const empty = await sendNotification({});
       assert.equal(calls, 0, 'no content -> no delivery attempted');
       assert.deepEqual(empty.delivered, { discord: false, webhooks: 0, failed: 0 });
+    } finally {
+      _setDeliverFetchForTests(realFetch);
+    }
+  });
+});
+
+// --- #234: a notification that can reach nobody must say so ------------------
+//
+// sendNotification used to return ok:true after fanning out to zero targets,
+// so neither the agent that called it nor the operator learned the
+// notification died. The bridge has caught this since its F5 review finding
+// (`{ delivered: false, reason: 'no-reachable-channel' }`); this is the same
+// judgement on the MCP-tool path.
+//
+// Scope: `delivered` keeps the exact shape every caller already reads -- its
+// redesign (unset vs failed, and Discord missing from `failed`) is #235.
+test('sendNotification: zero reachable targets is reported, not a silent ok', async () => {
+  await withNotifyConfig({ notify: { subscriptions: [] } }, async () => {
+    restoreNotify();
+    const realFetch = _getDeliverFetch();
+    let calls = 0;
+    _setDeliverFetchForTests(async () => { calls += 1; return { ok: true }; });
+    try {
+      const dead = await sendNotification({ title: 'x', body: 'y' });
+      assert.equal(dead.ok, false, 'nothing could receive it, so it is not ok');
+      assert.equal(dead.reason, 'no-reachable-channel', 'and the caller is told why');
+      assert.equal(calls, 0, 'nothing is even attempted when nothing can receive it');
+      assert.deepEqual(
+        dead.delivered, { discord: false, webhooks: 0, failed: 0 },
+        '`delivered` keeps the shape every caller already reads (its redesign is #235)',
+      );
+
+      // Web Push alone flips it back -- the same asymmetry as notifyEnabled,
+      // on the delivery side.
+      setWebpushReachable(() => true);
+      try {
+        const live = await sendNotification({ title: 'x', body: 'y' });
+        assert.equal(live.ok, true, 'a subscribed browser makes it reachable again');
+        assert.equal(live.reason, undefined, 'and no failure reason is attached');
+      } finally {
+        setWebpushReachable(null);
+      }
+    } finally {
+      _setDeliverFetchForTests(realFetch);
+    }
+  });
+});
+
+// Reachability is answered for the channels the CALLER asked for, not for the
+// host as a whole: naming a channel nothing backs is the F5 shape even when a
+// different channel would have worked.
+test('sendNotification: naming only an unbacked channel is reported too', async () => {
+  await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
+    restoreNotify();
+    const realFetch = _getDeliverFetch();
+    let calls = 0;
+    _setDeliverFetchForTests(async () => { calls += 1; return { ok: true }; });
+    try {
+      const res = await sendNotification({ title: 'x', body: 'y', channels: ['webpush'] });
+      assert.equal(res.ok, false, 'webpush has no subscriber, and discord was not asked for');
+      assert.equal(res.reason, 'no-reachable-channel');
+      assert.equal(calls, 0, 'the configured Discord webhook must NOT be used as a fallback');
+
+      // The control: the same host, asking for the channel that is backed.
+      const ok = await sendNotification({ title: 'x', body: 'y', channels: ['discord'] });
+      assert.equal(ok.ok, true, 'the backed channel still delivers normally');
+      assert.equal(calls, 1);
     } finally {
       _setDeliverFetchForTests(realFetch);
     }
