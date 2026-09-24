@@ -732,7 +732,18 @@ export function loadSandboxConfig() {
   //     baseUrl/projectId had env overrides too, so "env only, nothing in the
   //     config file" was a fully supported setup -- and the one that would
   //     otherwise be switched off in total silence.
-  const hasLegacyVikunjaEnv = Object.keys(process.env).some((k) => k.startsWith('CCSERVER_VIKUNJA_'));
+  //
+  // CCSERVER_VIKUNJA_TASKS_PATH is excluded: it is not connection config. It
+  // only relocates the `.saved-vikunja-tasks.json` state file -- which the
+  // notify guide tells operators they may keep for the re-cut server -- so a
+  // host that set only that one never had a Vikunja delivery target, and
+  // saying it lost one would be wrong. It is also a registry entry after
+  // issue #201, which means testEnvDefaults.js sets it in every test process
+  // to keep the suite off real host paths; treating it as "Vikunja is
+  // configured" would fire this warning on every single run.
+  const VIKUNJA_STATE_PATH_ENV = 'CCSERVER_VIKUNJA_TASKS_PATH';
+  const hasLegacyVikunjaEnv = Object.keys(process.env)
+    .some((k) => k.startsWith('CCSERVER_VIKUNJA_') && k !== VIKUNJA_STATE_PATH_ENV);
   if ((rawNotify.vikunja != null || hasLegacyVikunjaEnv) && !warnedVikunjaConfig) {
     warnedVikunjaConfig = true;
     const where = rawNotify.vikunja != null
