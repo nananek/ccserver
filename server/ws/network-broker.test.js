@@ -8,11 +8,11 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, connect as netConnect } from 'node:net';
 import { spawn as spawnFn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isHostAllowed, isHostDenied, isHostMatched, canonicalizeIPv4Literal, startNetworkBroker, setNetworkBrokerMode, setNetworkBrokerLists, networkBrokerProxyUrl, buildIsolatedProxyEnv } from './network-broker.js';
+import { isHostAllowed, isHostDenied, isHostMatched, canonicalizeIPv4Literal, startNetworkBroker, setNetworkBrokerMode, setNetworkBrokerLists, networkBrokerProxyUrl, buildIsolatedProxyEnv, writePortFileAtomic, readPortFile } from './network-broker.js';
 
 const NETWORK_BROKER_PATH = fileURLToPath(new URL('./network-broker.js', import.meta.url));
 
@@ -570,4 +570,65 @@ test('client RST after 403/407/400 does not kill the broker', async () => {
   const stillDenied = await rawConnect(broker.port, target, basicAuth(broker.token));
   assert.match(stillDenied.statusLine, /^HTTP\/1\.1 403/, 'same broker still answers after RSTs');
   stillDenied.sock.destroy();
+});
+
+// Issue #222: the port file was written with a plain writeFileSync, which
+// creates the file (O_CREAT) before the content lands. The parent's readiness
+// wait keyed on existsSync, so it could observe the file the instant it was
+// created and read it while still empty -- Number('') is 0, which the parse
+// rejects as 'malformed port file'. Intermittent, and whichever test started a
+// broker first in a parallel run was the one that paid.
+//
+// Both halves are pinned here: the writer must publish the value atomically
+// (nothing partial is ever visible at the destination), and the reader must
+// treat "exists but does not parse yet" as not-ready rather than as a failure.
+test('#222 writePortFileAtomic: the destination never holds a partial value', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-portfile-'));
+  try {
+    const portFile = join(dir, 'port');
+    writePortFileAtomic(portFile, 45678);
+    assert.equal(readFileSync(portFile, 'utf-8'), '45678');
+    // The temp file is gone: a leftover would be mistaken for scratch state by
+    // the runtime-dir cleanup and, worse, hide a failed publish.
+    assert.deepEqual(readdirSync(dir), ['port']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#222 writePortFileAtomic: replaces an existing (even empty) destination', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-portfile-'));
+  try {
+    const portFile = join(dir, 'port');
+    // The exact state the old code could leave behind mid-write.
+    writeFileSync(portFile, '');
+    writePortFileAtomic(portFile, 3000);
+    assert.equal(readPortFile(portFile), 3000);
+    assert.deepEqual(readdirSync(dir), ['port']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#222 readPortFile: an empty or unparseable file is not-ready, not a failure', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-portfile-'));
+  try {
+    const portFile = join(dir, 'port');
+    // Absent.
+    assert.equal(readPortFile(portFile), null);
+    // Created but not yet written -- the exact window issue #222 reported.
+    writeFileSync(portFile, '');
+    assert.equal(readPortFile(portFile), null, 'an empty port file must read as not-ready');
+    // Half a number is still not a port.
+    writeFileSync(portFile, '4');
+    assert.equal(readPortFile(portFile), 4, 'a complete small value is a value');
+    writeFileSync(portFile, 'nope');
+    assert.equal(readPortFile(portFile), null);
+    writeFileSync(portFile, '0');
+    assert.equal(readPortFile(portFile), null, 'port 0 is never what the child chose');
+    writeFileSync(portFile, '  45678\n');
+    assert.equal(readPortFile(portFile), 45678, 'surrounding whitespace is tolerated');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

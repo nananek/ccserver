@@ -57,7 +57,7 @@
 //     the toggle is instant and needs no sandbox restart.
 
 import { lookup as dnsLookup } from 'node:dns';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { createServer, request as httpRequest } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -288,6 +288,44 @@ export function buildIsolatedProxyEnv({ host = '127.0.0.1', port, token, noProxy
     NO_PROXY: noProxy,
     no_proxy: noProxy,
   };
+}
+
+// Issue #222: publish the chosen port atomically. A plain writeFileSync
+// creates the file before the content lands, and the parent's readiness wait
+// used to key on existsSync -- so it could open the file in that window and
+// read it empty, which the parse then rejected as 'malformed port file'. It
+// showed up as an intermittent startup failure, taken by whichever caller
+// started a broker first in a parallel run.
+//
+// Written inline rather than reused from networkAllowlist.js: that module's
+// atomic writer is hardcoded to the sandbox config path, so there is nothing
+// to import. Same technique, different destination.
+export function writePortFileAtomic(portFile, port) {
+  const tmp = `${portFile}.tmp-${process.pid}`;
+  try {
+    writeFileSync(tmp, String(port));
+    renameSync(tmp, portFile);
+  } catch (err) {
+    // A leftover temp file would be mistaken for scratch state later, and
+    // would hide the fact that the publish never completed.
+    try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    throw err;
+  }
+}
+
+// The reader half of the same contract: the port file is ready only when it
+// parses. Absent, empty, half-written or garbage all mean "not yet" -- they
+// are not failures, because the child may simply not have published yet.
+// Returns the port, or null when there is nothing usable to read.
+export function readPortFile(portFile) {
+  let raw;
+  try {
+    raw = readFileSync(portFile, 'utf-8');
+  } catch {
+    return null;
+  }
+  const port = Number(raw.trim());
+  return Number.isInteger(port) && port > 0 ? port : null;
 }
 
 function runServer({ allowlist, denylist, mode, portFile, state: initialState, adminToken }) {
@@ -563,7 +601,7 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState, a
   server.listen(0, '0.0.0.0', () => {
     const { port } = server.address();
     try {
-      writeFileSync(portFile, String(port));
+      writePortFileAtomic(portFile, port);
     } catch (e) {
       process.stderr.write(`[network-broker] failed to write port file: ${e.message}\n`);
       process.exit(1);
@@ -666,28 +704,25 @@ export async function startNetworkBroker(
   // stdin write above needs in order to actually flush, and every caller up
   // the chain -- buildSandboxSpawn -> createSession -- now awaits this
   // whole function).
+  // Wait until the port file PARSES, not until it merely exists (issue #222).
+  // The writer publishes atomically now, so the two are equivalent for a
+  // healthy child -- but keying on the value keeps this loop correct even if
+  // something else ever creates the path first, and it removes the empty-file
+  // window entirely rather than narrowing it.
   const deadline = Date.now() + 2000;
-  while (!existsSync(portFile) && Date.now() < deadline) {
+  let port = readPortFile(portFile);
+  while (port === null && Date.now() < deadline) {
     if (spawnError) break;
     if (proc.exitCode !== null || proc.signalCode !== null) break;
     await sleep(20);
+    port = readPortFile(portFile);
   }
 
-  if (spawnError || proc.exitCode !== null || proc.signalCode !== null || !existsSync(portFile)) {
+  if (spawnError || proc.exitCode !== null || proc.signalCode !== null || port === null) {
     const reason = spawnError ? spawnError.message : proc.exitCode !== null ? `exited code=${proc.exitCode}` : proc.signalCode ? `signal=${proc.signalCode}` : 'port file not ready within 2s';
     try { proc.kill('SIGKILL'); } catch { /* already dead */ }
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
     throw new Error(`network broker failed to start: ${reason}`);
-  }
-
-  let port;
-  try {
-    port = Number(readFileSync(portFile, 'utf-8').trim());
-    if (!Number.isInteger(port) || port <= 0) throw new Error('malformed port file');
-  } catch (e) {
-    try { proc.kill('SIGKILL'); } catch { /* already dead */ }
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-    throw new Error(`network broker failed to start: ${e.message}`);
   }
 
   const probed = await probeBroker(port);
