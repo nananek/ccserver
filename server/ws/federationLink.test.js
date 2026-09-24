@@ -536,6 +536,103 @@ test('#247 all three teardown paths fold an outstanding RPC', { skip }, async ()
   // held double dial, which cannot coexist with the one-sided setup here.
 });
 
+// The shared teardown folds three maps, and the RPC tests above only pin one of
+// them. A review confirmed that: deleting `channels.clear()` or
+// `outboundChannels.clear()` from _foldConnectionState left the whole file green
+// (15/15). These pin the other two on every path that takes a connection away.
+//
+// Both maps are checked by SIZE, not only by the callback firing: the fold
+// invokes the callbacks and THEN clears, so a missing `clear()` still fires
+// onClose and would slip past a callback-only assertion.
+
+// Opens one channel in each direction on `link` and returns a handle on the
+// outbound one's close callback. Inbound (`link.channels`) needs the PEER to
+// send TERMINAL_OPEN, which is what `peer.openTerminalChannel()` does.
+async function openChannelsBothWays(link, peer) {
+  const outbound = link.openTerminalChannel();
+  let outboundClosed = 0;
+  outbound.onClose(() => { outboundClosed += 1; });
+  peer.openTerminalChannel();
+  await waitFor(() => link.channels.size === 1, {
+    describe: () => `the peer's TERMINAL_OPEN never landed: channels=${link.channels.size}`,
+  });
+  assert.equal(link.outboundChannels.size, 1, 'precondition: one channel open in each direction');
+  return { closed: () => outboundClosed };
+}
+
+test('#247 close() and a dropped connection fold the open channels, not just the RPCs', { skip }, async () => {
+  const rowForBFromA = approve(pairing.recordOutboundRequest({
+    fingerprint: identityB.fingerprint, certPem: identityB.cert, hostnameClaimed: 'b', addr: `127.0.0.1:${serverB.address().port}`,
+  }));
+  const rowForAFromB = approve(pairing.recordInboundRequest({
+    fingerprint: identityA.fingerprint, certPem: identityA.cert, hostnameClaimed: 'a', addr: `127.0.0.1:${serverA.address().port}`,
+  }));
+
+  // Path 1: close(). One-sided dial, so exactly one connection exists.
+  linkA = new FederationLink(rowForBFromA, { selfIdentity: identityA });
+  linkB = new FederationLink(rowForAFromB, { selfIdentity: identityB });
+  inboundTargetB = linkB;
+  linkA.connect();
+  await waitFor(() => linkA.connected && linkB.connected);
+  let chans = await openChannelsBothWays(linkA, linkB);
+
+  linkA.close();
+  assert.equal(chans.closed(), 1, 'close(): the outbound channel must be told');
+  assert.equal(linkA.outboundChannels.size, 0, 'close(): outboundChannels must be cleared');
+  assert.equal(linkA.channels.size, 0, 'close(): channels must be cleared');
+  linkB.close();
+
+  // Path 2: the body of _onSocketClose -- the peer drops the live connection.
+  linkA = new FederationLink(rowForBFromA, { selfIdentity: identityA });
+  linkB = new FederationLink(rowForAFromB, { selfIdentity: identityB });
+  inboundTargetB = linkB;
+  linkA.connect();
+  await waitFor(() => linkA.connected && linkB.connected);
+  chans = await openChannelsBothWays(linkA, linkB);
+
+  acceptedByB.at(-1).destroy();
+  await waitFor(() => !linkA.connected, {
+    describe: () => 'the peer drop never reached linkA',
+  });
+  assert.equal(chans.closed(), 1, 'dropped connection: the outbound channel must be told');
+  assert.equal(linkA.outboundChannels.size, 0, 'dropped connection: outboundChannels must be cleared');
+  assert.equal(linkA.channels.size, 0, 'dropped connection: channels must be cleared');
+});
+
+test('#247 the supersede branch folds the open channels too', { skip }, async () => {
+  const { aShouldBeDialer } = await parkMidDuplicateDial();
+  const superseding = aShouldBeDialer ? linkA : linkB;
+  const peer = aShouldBeDialer ? linkB : linkA;
+  const ownLosingEnd = (aShouldBeDialer ? acceptedByA : acceptedByB).at(-1);
+  const peerWinningEnd = (aShouldBeDialer ? acceptedByB : acceptedByA).at(-1);
+  assert.equal(ownLosingEnd, superseding.live.socket, 'the socket we pause must be the live (losing) one');
+
+  // Channels first: the inbound one needs us to still be READING.
+  const chans = await openChannelsBothWays(superseding, peer);
+
+  // Now the same shape as the RPC test: stop reading on the loser so the request
+  // stays outstanding, and after releasing stop the peer reading on the winner so
+  // we are the side that resolves first. The reject message is what attributes
+  // the fold below to the supersede branch rather than to a close handler.
+  ownLosingEnd.pause();
+  const settled = superseding.rpc('sessions.list', {}, { timeoutMs: 15_000 })
+    .then(() => 'resolved', (e) => `rejected: ${e.message}`);
+  assert.equal(superseding.pendingRpc.size, 1);
+
+  releaseHeldAccepts();
+  peerWinningEnd.pause();
+
+  const outcome = await Promise.race([
+    settled,
+    new Promise((resolve) => setTimeout(() => resolve('STILL PENDING'), 4000)),
+  ]);
+  assert.match(outcome, /^rejected: federation link superseded/, 'the supersede branch is the path under test here');
+
+  assert.equal(chans.closed(), 1, 'supersede: the outbound channel must be told');
+  assert.equal(superseding.outboundChannels.size, 0, 'supersede: outboundChannels must be cleared');
+  assert.equal(superseding.channels.size, 0, 'supersede: channels must be cleared');
+});
+
 test('revoking the pair permanently closes the link and stops reconnecting', { skip }, async () => {
   const rowForBFromA = approve(pairing.recordOutboundRequest({
     fingerprint: identityB.fingerprint, certPem: identityB.cert, hostnameClaimed: 'b', addr: `127.0.0.1:${serverB.address().port}`,

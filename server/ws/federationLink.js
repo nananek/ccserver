@@ -542,6 +542,19 @@ export class FederationLink {
       // place that can still tell a caller its RPC is gone; and folding first
       // means the new connection is never adopted with the old one's leftovers
       // still on the link.
+      //
+      // What this order depends on (a review raised it): _foldConnectionState
+      // calls handleClose() and onClose() synchronously, and it clears each map
+      // right after iterating it. A callback that re-entered this link -- rpc()
+      // or openTerminalChannel() -- would put an entry into a map that has just
+      // been cleared, on a connection about to be destroyed, and nothing would
+      // fold it. Checked here, not assumed: the inbound handler's handleClose
+      // calls sessionManager's detachSocket (no link calls), and the outbound
+      // onClose used by remoteTerminal.js writes to the browser socket and
+      // closes it. Neither re-enters, so the window is not reachable today.
+      // That is a statement about these two callbacks as they are now, not a
+      // property of the ordering -- a future callback that calls back into the
+      // link would reopen it.
       this._foldConnectionState('federation link superseded by a duplicate connection');
       this._adopt(candidate);
       try { old.socket.destroy(); } catch { /* ignore */ }
