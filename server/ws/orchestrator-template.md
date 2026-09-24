@@ -178,8 +178,14 @@ another pass over what moved.
 
 1. Have the implementing worker push first (`git push -u origin "<branch>"`).
    Then have **workerA** -- not the implementing worker, and not you -- run
-   `git fetch origin && git rev-parse "origin/<branch>"` and report the
-   result. That hex SHA (40 characters, or 64 in a SHA-256 repository), not
+   the shared-config inspection from step 3 FIRST, and only then
+   `git -c protocol.ext.allow=never -c core.fsmonitor= -c core.sshCommand=
+   -c core.askpass= fetch origin && git rev-parse "origin/<branch>"`, and
+   report the result. The inspection leads here for the same reason it leads
+   in step 3: this is the first command in the gate that reads the shared
+   config, and a fetch is already an execution point -- inspecting after it
+   inspects a repository that has already run whatever was planted in it.
+   That hex SHA (40 characters, or 64 in a SHA-256 repository), not
    the branch name, is what this round is about: keep it, because steps 3, 5,
    6 and 7 all compare against it.
    You cannot run this yourself. You have no shell and `repo_info` returns
@@ -208,28 +214,57 @@ another pass over what moved.
      IMPLEMENTER something other than opencode (the reviewer stays opencode
      either way), and when it is opencode anyway, say so in the request so
      the finding document records the weaker independence.
-3. Have the reviewer take the SHA through three checks before it checks
-   anything out. `git checkout` is not an inert operation -- it runs whatever
-   the repository's config tells it to run -- and the roles in this group
-   share one `.git`, which the implementing worker can write to.
-   - **Validate the string.** Refuse to paste it anywhere unless it matches
-     `^[0-9a-f]{40}$` (or `^[0-9a-f]{64}$`), then confirm it resolves:
-     `git fetch origin && git rev-parse --verify "<sha>^{commit}"`. A value
-     that reached you as text is not a SHA because it was called one; one
+3. Have the reviewer take the SHA through three checks, IN THIS ORDER,
+   before it checks anything out. Neither `git fetch` nor `git checkout` is
+   an inert operation -- both run whatever the repository's config tells them
+   to run -- and the roles in this group share one `.git`, which the
+   implementing worker can write to.
+   - **Inspect the shared config FIRST, before any git command that reaches
+     a remote.** The inspection has to lead, because a fetch is itself an
+     execution point: inspecting afterwards only tells you what already ran.
+     `git config --list --show-origin --null`, and stop on any key that makes
+     git execute something, or that changes where git fetches from:
+     - execution: `filter.*` (`.clean`, `.smudge`, `.process`),
+       `core.fsmonitor`, `core.sshCommand`, `core.pager`, `core.editor`,
+       `core.askpass`, `core.gitProxy`, `diff.*.textconv`, `diff.*.command`,
+       `merge.*.driver`, `gpg.program`, `sequence.editor`, `alias.*`,
+       `init.templateDir`, and `core.hooksPath` from anywhere other
+       than `command line:` (the sandbox pins that one itself).
+     - redirection: `remote.*.url`, `url.*.insteadOf`, `protocol.*` -- above
+       all `protocol.ext.allow`, which is what turns an `ext::sh -c ...`
+       remote URL into a command git runs for you at fetch time -- and
+       `http.*` (`.proxy`, `.sslCAInfo`, `.extraHeader`). These do not look
+       like execution and are the reason the inspection has to precede the
+       fetch rather than the checkout.
+     - `credential.helper` ONLY when it is something other than the sandbox's
+       own shim from the home `.gitconfig`. That one is present in every
+       session and matches every time, so stopping on the bare key would stop
+       every run, and a check that fires on every run is one its operator
+       learns to wave through -- which costs you the whole inspection, not
+       just that line. What is actually anomalous is a SECOND helper: the key
+       is multi-valued, so one added in the shared `.git/config` runs in
+       addition to the sandbox's rather than replacing it.
+     Finding any of these is a finding in its own right: report it and do not
+     fetch or check out. A branch can carry a `.gitattributes` that selects
+     a filter, so a smudge filter planted in the shared config runs on
+     checkout, before the reviewer has read a single line of the diff. This
+     has been demonstrated (smudge and fsmonitor both executed).
+     `--null` is not decoration: a
+     config VALUE may contain a newline, so with the default line-oriented
+     output a planted value can print a forged `file:/...` origin line and
+     attribute itself to a file nobody can write.
+   - **Validate the string, then resolve it.** The regex is a pure string
+     check with no git in it, so it costs nothing to do before anything
+     touches the remote: refuse to paste the value anywhere unless it matches
+     `^[0-9a-f]{40}$` (or `^[0-9a-f]{64}$`). Only then fetch and confirm it
+     resolves: `git -c protocol.ext.allow=never -c core.fsmonitor= -c
+     core.sshCommand= -c core.askpass= fetch origin && git rev-parse --verify
+     "<sha>^{commit}"`. A value that reached you as text is not a SHA
+     because it was called one; one
      carrying `;` runs as a command in the checkout line below.
-   - **Inspect the shared config.** `git config --list --show-origin` and
-     stop on any key that makes git execute something: `filter.*` (`.clean`,
-     `.smudge`, `.process`), `core.fsmonitor`, `core.sshCommand`,
-     `core.pager`, `core.editor`, `core.askpass`, `credential.helper`,
-     `diff.*.textconv`, `diff.*.command`, `merge.*.driver`, `gpg.program`,
-     `sequence.editor`, `alias.*`, and `core.hooksPath` from anywhere other
-     than `command line:` (the sandbox pins that one itself). Finding any of
-     these is a finding in its own right: report it and do not check out.
-     A branch can carry a `.gitattributes` that selects a filter, so a smudge
-     filter planted in the shared config runs on checkout, before the
-     reviewer has read a single line of the diff. This has been demonstrated
-     (smudge and fsmonitor both executed).
-   - **Then check out, detached:** `git checkout --detach "<sha>"`.
+   - **Then check out, detached:** `git -c protocol.ext.allow=never -c
+     core.fsmonitor= -c core.sshCommand= -c core.askpass= checkout --detach
+     "<sha>"`.
      The implementing worker's worktree already has that branch checked out
      and git refuses a second checkout of the same branch; detaching
      sidesteps that. Detached is NOT read-only -- the worktree is writable
@@ -238,15 +273,34 @@ another pass over what moved.
      stop and report rather than improvising: a SHA that does not resolve
      means the revision you were given is not the revision that was pushed.
 
-   The inspection narrows this hole; it does not close it. The implementing
-   worker's session is live and can write the shared config in the window
-   between the inspection and the checkout. Reviewing in a fresh clone
-   (a clone has its own config, and the execution does not happen there)
-   removes the class outright, at the cost of the worktree's installed
-   dependencies -- prefer it when the change is worth that cost, and require
-   it when the inspection found anything. The real fix is not in this
-   template: it is issue #214, the sandbox sharing one writable `.git`
-   between roles.
+   The `-c` flags are a second layer, not a substitute for the inspection.
+   They pin those settings at the highest-precedence level for the duration
+   of the one command, so they still hold if the config is rewritten after
+   the inspection read it -- which closes the `ext::` remote-helper,
+   `fsmonitor`, `sshCommand` and `askpass` classes for that command. They do
+   NOT cover an in-tree `.gitattributes` selecting a `filter.*` from the
+   shared config: filters have no blanket off switch on the command line, so
+   that class is closed only by the inspection and by the fresh clone below.
+
+   Neither layer closes the hole. The inspection has a TOCTOU window -- the
+   implementing worker's session is live and can rewrite the shared config
+   between the inspection and the checkout -- and it can also shape what the
+   inspection prints, which is why the reviewer reads that output as a
+   report from an untrusted party rather than as ground truth. Reviewing in
+   a fresh clone (a clone has its own config, and the execution does not
+   happen there) removes the class outright, at the cost of the worktree's
+   installed dependencies -- prefer it when the change is worth that cost,
+   and require it when the inspection found anything.
+
+   **Do not describe this procedure as preventing arbitrary command
+   execution, here or in a finding document. It does not.** While the shared
+   repository's config is writable by the roles being reviewed, these steps
+   narrow the window; they do not shut it. The fix is not in this template:
+   issue #214 is this hole specifically, and the root remedy is issue #224's
+   mitigation 2 -- separating the shared `.git` at the mount layer, so that
+   what one role writes is not what another role's git reads. Until that
+   lands, treat every step in this section as raising the cost of an attack,
+   never as a guarantee that one is impossible.
 4. Spell these out in the request -- without them the review silently
    degrades into a static read-through:
    - **Actually run the attacks.** Reading the diff is not the deliverable.
@@ -315,7 +369,14 @@ Three things this gate is explicitly NOT:
   reads it next. Do not skip the gate on a judgment that a diff looks
   harmless.
 - **Not a technical boundary.** Nothing in the server enforces any of this.
-  `gh pr create` does not check for a finding document. The test that pins
+  `gh pr create` does not check for a finding document. The boundaries the
+  server DOES enforce are narrower than they look from in here: the git
+  credential allow-list is derived at launch from the session cwd's own
+  remotes in `.git/config` (see `server/ws/gitAllowlist.js`), which is the
+  same shared, writable config this section has you inspect -- so a planted
+  `remote.*.url` is not only a fetch redirect, it is a bid to widen which
+  repositories forwarded credentials reach the next time a session starts.
+  Report it on those grounds too, not just as a checkout risk. The test that pins
   this section catches the wording being deleted or weakened, and a handful
   of named exception phrasings, but it was measured against 18 ways of
   writing an exemption and 15 of them passed -- a synonym is enough. And an

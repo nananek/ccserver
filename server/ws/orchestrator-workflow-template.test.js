@@ -42,6 +42,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const template = readFileSync(join(import.meta.dirname, 'orchestrator-template.md'), 'utf-8');
+// Same text with every run of whitespace collapsed to one space. Assertions
+// about a whole sentence use this so that re-wrapping a paragraph -- which
+// changes nothing about what the template says -- does not fail the suite.
+// Assertions that are ABOUT layout (ordering, list structure) keep using
+// `template` itself.
+const flat = template.replace(/\s+/g, ' ');
 const mcpServerSource = readFileSync(join(import.meta.dirname, 'mcpServer.js'), 'utf-8');
 
 test('template: read_output is framed as not-a-progress-check with wait_for_handoff as the default', () => {
@@ -124,7 +130,8 @@ test('template: the attacker-perspective review gate is mandatory and fully spec
   // Push first, then review the recorded SHA detached (git refuses a second
   // checkout of the same branch).
   assert.match(template, /push first \(`git push -u origin "<branch>"`\)/);
-  assert.match(template, /git checkout --detach "<sha>"/);
+  // The checkout carries the hardening flags (pinned in full further down).
+  assert.match(flat, /checkout --detach "<sha>"/);
   assert.match(template, /git refuses a second checkout of the same branch; detaching/);
   // Detached is not read-only: the reviewer has to be able to build and run.
   assert.match(template, /Detached is NOT read-only/);
@@ -163,7 +170,8 @@ test('template: the review gate is pinned to the reviewed SHA, not the branch', 
 
   // Step 1 records the revision, and refuses a branch name that could carry
   // a shell payload into someone else's command line.
-  assert.match(template, /git fetch origin && git rev-parse "origin\/<branch>"/);
+  assert.match(flat, /the shared-config inspection from step 3 FIRST, and only then/);
+  assert.match(flat, /git -c protocol\.ext\.allow=never -c core\.fsmonitor= -c core\.sshCommand= -c core\.askpass= fetch origin && git rev-parse "origin\/<branch>"/);
   assert.match(template, /Then have \*\*workerA\*\* -- not the implementing worker, and not you -- run/);
   assert.match(template, /That hex SHA \(40 characters, or 64 in a SHA-256 repository\), not\s*\n\s+the branch name, is what this round is about/);
   // Rejecting the name is the instruction; check-ref-format is explicitly
@@ -205,26 +213,118 @@ test('template: the review gate is pinned to the reviewed SHA, not the branch', 
 // These pins keep the three pre-checkout checks from quietly going away.
 test('template: the reviewer hardens the checkout itself', () => {
   // 1. The relayed "SHA" is a string until it is validated as one.
-  assert.match(template, /\*\*Validate the string\.\*\*/);
+  assert.match(template, /\*\*Validate the string, then resolve it\.\*\*/);
   assert.match(template, /\^\[0-9a-f\]\{40\}\$/);
-  assert.match(template, /git rev-parse --verify "<sha>\^\{commit\}"/);
+  assert.match(flat, /git rev-parse --verify "<sha>\^\{commit\}"/);
   assert.match(template, /one\s*\n\s+carrying `;` runs as a command in the checkout line below/);
 
   // 2. The shared config is inspected for keys that make git execute.
-  assert.match(template, /\*\*Inspect the shared config\.\*\*/);
+  assert.match(flat, /\*\*Inspect the shared config FIRST, before any git command that reaches a remote\.\*\*/);
   assert.match(template, /git config --list --show-origin/);
-  assert.match(template, /`filter\.\*` \(`\.clean`,\s*\n\s+`\.smudge`, `\.process`\), `core\.fsmonitor`/);
-  assert.match(template, /`core\.hooksPath` from anywhere other\s*\n\s+than `command line:`/);
-  assert.match(template, /a smudge\s*\n\s+filter planted in the shared config runs on checkout/);
-  assert.match(template, /Finding any of\s*\n\s+these is a finding in its own right: report it and do not check out/);
+  assert.match(flat, /`filter\.\*` \(`\.clean`, `\.smudge`, `\.process`\), `core\.fsmonitor`/);
+  assert.match(flat, /`core\.hooksPath` from anywhere other than `command line:`/);
+  assert.match(flat, /a smudge filter planted in the shared config runs on checkout/);
+  assert.match(flat, /report it and do not fetch or check out/);
+
+  // The keys that redirect where git fetches FROM. These are the ones that
+  // make the ordering matter: none of them looks like execution, and
+  // protocol.ext.allow turns a remote URL into a command at fetch time.
+  for (const key of ['`remote.*.url`', '`url.*.insteadOf`', '`protocol.*`', '`http.*`',
+    '`core.gitProxy`', '`init.templateDir`']) {
+    assert.ok(template.includes(key), `the config inspection must list ${key}`);
+  }
+  assert.match(flat, /`protocol\.ext\.allow`, which is what turns an `ext::sh -c \.\.\.` remote URL into a command git runs for you at fetch time/);
+
+  // credential.helper is scoped to the anomalous case. The sandbox's own
+  // shim is in every session's ~/.gitconfig, so a rule keyed on the bare
+  // key fires on every single run -- and a check that always fires is one
+  // the operator learns to wave through.
+  assert.match(flat, /`credential\.helper` ONLY when it is something other than the sandbox's own shim from the home `\.gitconfig`/);
+  assert.match(flat, /a check that fires on every run is one its operator learns to wave through/);
+  assert.match(flat, /What is actually anomalous is a SECOND helper/);
+
+  // --show-origin alone can be spoofed by a config value containing a newline.
+  assert.match(flat, /`--null` is not decoration/);
 
   // 3. And a failed checkout stops the round instead of being worked around.
   assert.match(template, /If the checkout fails,\s*\n\s+stop and report rather than improvising/);
 
+  // Defence in depth: the git calls themselves disable the dangerous
+  // features, which survives a config rewritten after the inspection ran.
+  assert.match(flat, /git -c protocol\.ext\.allow=never -c core\.fsmonitor= -c core\.sshCommand= -c core\.askpass= checkout --detach "<sha>"/);
+  assert.match(flat, /The `-c` flags are a second layer, not a substitute for the inspection/);
+  // ...and it says which class the flags do NOT cover, rather than implying
+  // they cover everything.
+  assert.match(flat, /They do NOT cover an in-tree `\.gitattributes` selecting a `filter\.\*` from the shared config/);
+
   // The mitigation does not claim to be the fix.
-  assert.match(template, /The inspection narrows this hole; it does not close it/);
-  assert.match(template, /Reviewing in a fresh clone/);
-  assert.match(template, /it is issue #214, the sandbox sharing one writable `\.git`/);
+  assert.match(flat, /Neither layer closes the hole/);
+  assert.match(flat, /The inspection has a TOCTOU window/);
+  assert.match(flat, /it can also shape what the inspection prints/);
+  assert.match(flat, /Reviewing in a fresh clone/);
+  // No "this prevents RCE" claim, and both issues are named: #214 for the
+  // hole, #224's mitigation 2 for the root remedy.
+  assert.match(flat, /\*\*Do not describe this procedure as preventing arbitrary command execution, here or in a finding document\. It does not\.\*\*/);
+  assert.match(flat, /issue #214 is this hole specifically, and the root remedy is issue #224's mitigation 2/);
+  assert.match(flat, /separating the shared `\.git` at the mount layer/);
+});
+
+// ORDER, not just presence. This is the defect the checks above were written
+// to fix and the one a re-edit is most likely to undo, because every
+// individual sentence still reads correctly after the order is swapped.
+//
+// `git fetch` is an execution point in its own right: `protocol.ext.allow`
+// plus a `remote.*.url` of `ext::sh -c ...` runs a command at fetch time, and
+// `url.*.insteadOf` / `core.gitProxy` / `http.proxy` redirect where the fetch
+// goes. All of them live in the shared, worker-writable `.git/config`. So an
+// inspection placed after the fetch inspects a repository that has already
+// run whatever was planted in it -- the check is present, and worthless.
+// These assertions fail if the inspection is ever moved back below a fetch.
+test('template: the shared-config inspection comes BEFORE any fetch', () => {
+  const gate = template.slice(template.indexOf('## Attacker-perspective review stage'));
+  assert.ok(gate.length > 0, 'the attacker-perspective gate section must exist');
+
+  assert.ok(gate.includes('git config --list --show-origin'), 'the gate must inspect the shared config');
+  const checkout = gate.indexOf('checkout --detach');
+  assert.ok(checkout >= 0, 'the gate must check out the reviewed SHA');
+
+  // The gate fetches twice: step 1 pins the SHA, step 3 resolves it. BOTH are
+  // execution points, so each one must be preceded by an inspection -- either
+  // the inspection itself (step 3) or the instruction to run it first (step 1).
+  const marks = [/git config --list --show-origin/g, /shared-config inspection from step 3/g];
+  const inspections = marks.flatMap((re) => [...gate.matchAll(re)].map((m) => m.index));
+  assert.ok(inspections.length >= 2, 'both fetch sites must reference the inspection');
+  const fetches = [...gate.matchAll(/fetch origin/g)].map((m) => m.index);
+  assert.ok(fetches.length >= 2, 'the gate fetches in step 1 and step 3');
+  for (const at of fetches) {
+    assert.ok(inspections.some((i) => i < at),
+      'every `fetch origin` in the gate must be preceded by the shared-config '
+      + 'inspection: a fetch executes whatever remote.*.url / protocol.ext.allow say, '
+      + `so inspecting after it only reports what already ran (fetch at ${at})`);
+  }
+  assert.ok(Math.min(...fetches) < checkout, 'the SHA is fetched before it is checked out');
+
+  // Step 3 spells the ordering out rather than leaving it to the reading
+  // order of the bullets, so a later edit cannot reorder them innocently.
+  assert.match(flat, /take the SHA through three checks, IN THIS ORDER, before it checks anything out/);
+  assert.match(flat, /\*\*Inspect the shared config FIRST, before any git command that reaches a remote\.\*\*/);
+  assert.match(flat, /The inspection has to lead, because a fetch is itself an execution point: inspecting afterwards only tells you what already ran/);
+
+  // Within step 3, the inspection bullet precedes the validate/resolve
+  // bullet (which is the one that fetches).
+  const step3 = gate.slice(gate.indexOf('3. Have the reviewer take the SHA'));
+  assert.ok(step3.indexOf('**Inspect the shared config FIRST')
+    < step3.indexOf('**Validate the string, then resolve it.**'),
+  'inside step 3, the inspection bullet must come before the bullet that fetches');
+
+  // Step 1 has workerA fetch to pin the SHA; that fetch is subject to the
+  // same rule, and was the second place the old ordering was wrong.
+  const step1 = gate.slice(gate.indexOf('1. Have the implementing worker push first'),
+    gate.indexOf("2. Open a dedicated reviewer"));
+  assert.match(step1.replace(/\s+/g, ' '),
+    /the shared-config inspection from step 3 FIRST, and only then/);
+  assert.ok(step1.indexOf('inspection from step 3 FIRST') < step1.indexOf('fetch origin'),
+    "workerA's SHA-pinning fetch must also be preceded by the inspection");
 });
 
 // Guard against the failure mode the pins above CANNOT catch on their own.
