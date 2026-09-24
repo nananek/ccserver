@@ -341,12 +341,22 @@ const PORT_FILE_SNIPPET_BYTES = 64;
 // named no cause, so the reason has to carry the distinction.
 //
 // The snippet is quoted with JSON.stringify, which turns control bytes into
-// escapes. That matters more than it looks: this string is thrown, and the
-// error surfaces to the user as a session-startup failure, so letting a
-// terminal escape or a newline through verbatim would hand the file we could
-// not read a say in how that message reads. (It does not reach the server log
-// -- fastify's logger does not carry the body -- so display is the whole of
-// it.) The read is bounded too -- the cap belongs on the read, not just on the
+// escapes. That matters more than it looks, because this string is thrown and
+// then travels:
+//   - it surfaces to the user as a session-startup failure, so a terminal
+//     escape or a newline through verbatim would hand the file we could not
+//     read a say in how that message reads;
+//   - it can also reach the server log. createSession folds this into its
+//     `error` string, and the scheduler's auto-resume path console.warn's that
+//     (sessionManager.js's fireSchedule), where a raw newline could forge log
+//     structure.
+// Not through fastify's logger, though: that is `logger: true` with no
+// serializer, and these failures are returned rather than thrown. Whether any
+// OTHER path logs it has not been traced -- which is the point of quoting
+// rather than of enumerating destinations. The escaping is what makes the
+// question moot wherever it ends up.
+//
+// The read is bounded too -- the cap belongs on the read, not just on the
 // output, so that whatever sits at the path cannot decide how much is pulled
 // into memory to describe it.
 function describeUnreadablePortFile(portFile) {
