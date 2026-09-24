@@ -120,7 +120,12 @@ function ansiSequenceEnd(text, start) {
     if (j >= text.length) return -1;
     return text[j] === '\x07' ? j + 1 : j + 2;
   }
-  if (next === '(' || next === ')' || next === '=' || next === '>' || next === '#') {
+  // Two bytes, matching ANSI_RE's `[>=<]` -- DECKPAM/DECKPNM take no
+  // argument. Measuring them as three put the cut one byte inside the next
+  // sequence, leaking its body (`[31m`) into the text view as literal
+  // characters, which carry no ESC for stripAnsi to catch (#213).
+  if (next === '=' || next === '>') return start + 2;
+  if (next === '(' || next === ')' || next === '#') {
     if (text.length < start + 3) return -1;
     return start + 3;
   }

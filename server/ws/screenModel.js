@@ -333,7 +333,12 @@ export function createScreenModel({ cols = SCREEN_COLS, rows = SCREEN_ROWS } = {
       oscEsc = end === OSC_ESC_TAIL;
       return { end: input.length };
     }
-    if (next === '(' || next === ')' || next === '=' || next === '>' || next === '#') {
+    // DECKPAM / DECKPNM take no argument: two bytes, not three like the
+    // charset designators and DEC line attributes below. Consuming a third
+    // byte eats whatever follows -- usually the ESC opening the next
+    // sequence, whose remainder then lands on screen as text (#213).
+    if (next === '=' || next === '>') return { end: start + 2 };
+    if (next === '(' || next === ')' || next === '#') {
       if (input.length < start + 3) return { needsMore: true };
       return { end: start + 3 };
     }
