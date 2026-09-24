@@ -104,7 +104,12 @@ function listTree(path, depth = 0) {
 function describe(path, type) {
   if (!existsSync(path)) return { state: 'absent' };
   const st = lstatSync(path);
-  if (st.isDirectory()) return { state: 'dir', entries: listTree(path) };
+  // mtimeMs as well as the listing: a test that CREATES and then REMOVES a
+  // directory inside a host tree leaves the listing identical, so the listing
+  // alone cannot see it. That is exactly what pathPolicy.test.js and
+  // sessionManager.test.js were doing to ~/.local/share/ccserver-sandbox/
+  // worktrees/ -- found by hand, invisible to this script's first version.
+  if (st.isDirectory()) return { state: 'dir', mtimeMs: st.mtimeMs, entries: listTree(path) };
   if (!st.isFile()) return { state: 'special' };
   return { state: 'file', sha: sha(path), size: st.size };
 }
@@ -162,6 +167,9 @@ function verify() {
       const gone = r.before.entries.filter((e) => !now.entries.includes(e));
       const added = now.entries.filter((e) => !r.before.entries.includes(e));
       if (gone.length) violations.push(`${r.id}: ${r.path} lost ${gone.length} entries: ${gone.slice(0, 5).join(', ')}`);
+      if (gone.length === 0 && added.length === 0 && now.mtimeMs !== r.before.mtimeMs) {
+        violations.push(`${r.id}: ${r.path} has the same contents but a newer mtime -- something was created and removed inside it`);
+      }
       // 3. new host state is a violation too, not just destruction.
       if (added.length) violations.push(`${r.id}: ${r.path} gained ${added.length} entries: ${added.slice(0, 5).join(', ')}`);
     } else if (r.before.state === 'dir' && now.state !== 'dir') {

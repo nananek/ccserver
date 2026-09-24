@@ -462,14 +462,23 @@ test('createSession refuses a cwd outside browseRoots, for both shells and agent
 // itself -- see groupManager.js's addMember). That exemption is gated on the
 // TRUSTED scratchCwd parameter (only in-process callers that synthesize the
 // cwd pass it), never on the path alone -- see createSession's comment.
-// This integration-tests the exemption through createSession() itself,
-// against the REAL scratch root (not overridable via env var), using a
-// throwaway subdirectory cleaned up afterward.
+// Integration-tests the exemption through createSession() itself, against a
+// directory that really is inside a scratch root.
+//
+// It used to build that from homedir() literally -- the comment here said the
+// real root was "not overridable via env var", which was true when it was a
+// baked-in const. Since #201 scratchRoots() is [dataRoot(), legacyDataRoot()]
+// and dataRoot() follows $XDG_DATA_HOME, so a temp root works and `npm test`
+// stops creating and deleting directories in the operator's live
+// ~/.local/share/ccserver-sandbox/worktrees (measured: its mtime moved).
 test('createSession accepts a scratch-tree cwd only via the trusted scratchCwd flag', async () => {
   const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
   const cfgPath = join(cfgDir, 'sandbox.config.json');
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
-  const scratchDir = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'worktrees', `test-${randomUUID()}`);
+  const scratchHome = mkdtempSync(join(tmpdir(), 'ccserver-sess-scratchroot-'));
+  const prevData = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = scratchHome;
+  const scratchDir = join(scratchHome, 'ccserver', 'worktrees', `test-${randomUUID()}`);
   mkdirSync(scratchDir, { recursive: true });
   writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
   const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
@@ -504,6 +513,9 @@ test('createSession accepts a scratch-tree cwd only via the trusted scratchCwd f
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(scratchDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (prevData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = prevData;
+    try { rmSync(scratchHome, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 
@@ -541,7 +553,12 @@ test('createSession refuses a cwd that is a scratch-internal symlink pointing ou
   const cfgPath = join(cfgDir, 'sandbox.config.json');
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
   const outside = mkdtempSync(join(tmpdir(), 'ccserver-sess-outside-'));
-  const escapeLink = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'worktrees', `test-escape-${randomUUID()}`);
+  // A temp scratch root rather than the operator's real one -- see the
+  // scratchCwd test above.
+  const scratchHome = mkdtempSync(join(tmpdir(), 'ccserver-sess-scratchroot-'));
+  const prevData = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = scratchHome;
+  const escapeLink = join(scratchHome, 'ccserver', 'worktrees', `test-escape-${randomUUID()}`);
   mkdirSync(dirname(escapeLink), { recursive: true });
   symlinkSync(outside, escapeLink);
   writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
@@ -560,6 +577,9 @@ test('createSession refuses a cwd that is a scratch-internal symlink pointing ou
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(outside, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (prevData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = prevData;
+    try { rmSync(scratchHome, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 

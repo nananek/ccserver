@@ -26,14 +26,15 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import {
   isolatedEnv, checkoutEnv, assertSafeToMigrate, withIsolatedHome, spawnWizard,
   CHECKOUT_ENTRY_IDS,
 } from './testIsolation.js';
-import { allPaths, repoRoot, repoParentDir } from './paths.js';
+import { allPaths, repoRoot } from './paths.js';
 
 const SETUP_CLI = join(import.meta.dirname, 'cli', 'setup.js');
+const CHECKOUT_BREADCRUMB = join(repoRoot(), '.ccserver-state-moved.txt');
 
 function withTmp(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-isolation-'));
@@ -128,7 +129,15 @@ test('★ the wizard with an isolated env leaves a decoy legacy tree under the r
 
     const env = isolatedEnv(dir, { LC_ALL: 'C', PORT: '1', ...checkoutEnv(dir) });
     assertSafeToMigrate(env, dir);
+    // Spawned directly rather than through spawnWizard() on purpose: the
+    // point is that isolatedEnv + checkoutEnv are sufficient on their own.
+    // That means this call also skips spawnWizard's breadcrumb cleanup, so it
+    // does its own -- otherwise a run that moves anything leaves
+    // .ccserver-state-moved.txt in the real checkout, and the breadcrumb test
+    // below then silently skips itself on every subsequent run.
+    const hadBreadcrumb = existsSync(CHECKOUT_BREADCRUMB);
     const res = spawnSync(process.execPath, [SETUP_CLI, '--yes'], { env, encoding: 'utf8', timeout: 60000 });
+    if (!hadBreadcrumb) rmSync(CHECKOUT_BREADCRUMB, { force: true });
     assert.equal(res.status, 0, res.stdout + res.stderr);
 
     assert.equal(existsSync(join(legacy, 'ccserver.sqlite3')), true,
@@ -240,9 +249,15 @@ test('★ spawnWizard --yes leaves the real checkout\'s legacy files alone', () 
   }
 });
 
-test('spawnWizard cleans up the breadcrumb it drops in the checkout', () => {
-  const breadcrumb = join(repoRoot(), '.ccserver-state-moved.txt');
-  if (existsSync(breadcrumb)) return;              // someone else's; leave it
+test('spawnWizard cleans up the breadcrumb it drops in the checkout', (t) => {
+  // t.skip(), not a bare `return`: a silent skip here is how this test would
+  // go vacuous exactly when it matters -- a stray breadcrumb from some other
+  // run is the symptom it exists to catch.
+  if (existsSync(CHECKOUT_BREADCRUMB)) {
+    t.skip(`${CHECKOUT_BREADCRUMB} already exists; not touching someone else's file`);
+    return;
+  }
+  const breadcrumb = CHECKOUT_BREADCRUMB;
   withTmp((dir) => {
     // Something has to actually move for a breadcrumb to be written, so give
     // the isolated HOME a legacy tree to migrate.
@@ -314,19 +329,103 @@ test('★ assertSafeToMigrate resolves symlinks: a scratch home pointing outside
   });
 });
 
-test('CHECKOUT_ENTRY_IDS covers every registry entry with a legacy path outside $HOME', () => {
-  // The list in testIsolation.js is hand-maintained. If a future entry lands
-  // a legacy path in the repo -- or, like the DB's pre-#190 spelling, one
-  // level above it -- and is not added here, the wizard and the spawned
-  // servers would move it out of the developer's tree. So pin the two
-  // together. repoParentDir() is included because that is exactly the case
-  // three rounds of hand-placed decoys missed and the canary caught.
-  const outside = [repoRoot(), repoParentDir()];
-  const fromRegistry = allPaths()
-    .filter((e) => e.legacyPaths.some((p) => outside.some((root) => p.startsWith(root))))
-    .map((e) => e.id)
-    .sort();
-  assert.deepEqual([...CHECKOUT_ENTRY_IDS].sort(), fromRegistry);
-  assert.ok(fromRegistry.includes('sandboxConfig'), 'the live config must be covered');
-  assert.ok(fromRegistry.includes('db'), 'the pre-#190 DB location must be covered');
+test('★ assertSafeToMigrate follows a DANGLING symlink too', () => {
+  // The realpath fix closed <scratch>/home -> /existing/outside, but
+  // realpathSync throws the same way for a symlink whose target does not
+  // exist YET, and treating that as "absent" walked back up to
+  // <scratch>/home -- so the lexical hole survived for dangling links. The
+  // wizard creates its destination directories, so "the target does not
+  // exist yet" is the normal state, not an exotic one.
+  withTmp((dir) => {
+    const outside = join(dir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    const cases = [
+      ['existing', outside],
+      ['dangling', join(outside, 'not-created-yet')],
+    ];
+    for (const [label, target] of cases) {
+      const scratch = join(dir, label);
+      mkdirSync(scratch, { recursive: true });
+      symlinkSync(target, join(scratch, 'home'));
+      const env = {
+        HOME: join(scratch, 'home'),
+        XDG_CONFIG_HOME: join(scratch, 'config'),
+        XDG_DATA_HOME: join(scratch, 'data'),
+        XDG_STATE_HOME: join(scratch, 'state'),
+        ...checkoutEnv(scratch),
+      };
+      assert.throws(() => assertSafeToMigrate(env, scratch), /HOME=.*is outside/, `${label} symlink must be refused`);
+    }
+
+    // A symlink pointing INSIDE the scratch is legitimate and must still
+    // pass, or the guard would just be rejecting every symlink.
+    const ok = join(dir, 'ok');
+    mkdirSync(join(ok, 'real-home'), { recursive: true });
+    symlinkSync(join(ok, 'real-home'), join(ok, 'home'));
+    assertSafeToMigrate({
+      HOME: join(ok, 'home'),
+      XDG_CONFIG_HOME: join(ok, 'config'),
+      XDG_DATA_HOME: join(ok, 'data'),
+      XDG_STATE_HOME: join(ok, 'state'),
+      ...checkoutEnv(ok),
+    }, ok);
+
+    // A symlink cycle must fail closed rather than spin.
+    const loop = join(dir, 'loop');
+    mkdirSync(loop, { recursive: true });
+    symlinkSync(join(loop, 'home'), join(loop, 'home'));
+    assert.throws(() => assertSafeToMigrate({
+      HOME: join(loop, 'home'),
+      XDG_CONFIG_HOME: join(loop, 'config'),
+      XDG_DATA_HOME: join(loop, 'data'),
+      XDG_STATE_HOME: join(loop, 'state'),
+      ...checkoutEnv(loop),
+    }, loop), /HOME=.*is outside/);
+  });
+});
+
+test('CHECKOUT_ENTRY_IDS covers every legacy path that HOME isolation does not reach', () => {
+  // The list in testIsolation.js is hand-maintained, so pin it against the
+  // registry. The predicate is deliberately stated as a PROPERTY rather than
+  // as a list of known roots:
+  //
+  //   isolatedEnv() redirects $HOME, and legacyDataRoot() is the only thing
+  //   built from homedir(). So a legacy path under legacyDataRoot() is
+  //   covered for free, and EVERY OTHER legacy path needs an explicit
+  //   CCSERVER_* override.
+  //
+  // Writing it as `startsWith(repoRoot())` is what let the DB's pre-#190
+  // spelling -- repoParentDir()/ccserver.sqlite3, one level ABOVE the
+  // checkout -- slip through: the test shared the implementation's blind
+  // spot, so it could not catch it.
+  //
+  // The property is measured, not assumed: move $HOME the way isolatedEnv()
+  // does, then ask which legacy paths FOLLOWED it. Comparing against
+  // legacyDataRoot() computed from the real home looks equivalent and is not
+  // -- on a host whose checkout happens to sit inside
+  // ~/.local/share/ccserver-sandbox (every ccserver worktree does) every path
+  // is "under" it and the filter quietly matches nothing. Measuring cannot go
+  // vacuous like that, and the assertions below would catch it if it did.
+  withTmp((dir) => {
+    const restore = withIsolatedHome(dir);
+    let fromRegistry;
+    try {
+      const isolatedHome = join(dir, 'home');
+      fromRegistry = allPaths()
+        .filter((e) => e.legacyPaths.some((p) => !p.startsWith(isolatedHome + sep)))
+        .map((e) => e.id)
+        .sort();
+    } finally {
+      restore();
+    }
+    assert.deepEqual([...CHECKOUT_ENTRY_IDS].sort(), fromRegistry);
+    assert.ok(fromRegistry.includes('sandboxConfig'), 'the live config must be covered');
+    assert.ok(fromRegistry.includes('db'), 'the pre-#190 DB location, above the checkout, must be covered');
+    // ...and the property really does exclude the HOME-covered ones, so the
+    // deepEqual above is not vacuously comparing two empty lists.
+    assert.ok(fromRegistry.length > 0 && fromRegistry.length < allPaths().length,
+      `the split must be a real partition; got ${JSON.stringify(fromRegistry)}`);
+    assert.ok(!fromRegistry.includes('federationHome'));
+    assert.ok(!fromRegistry.includes('worktrees'));
+  });
 });

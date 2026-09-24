@@ -50,7 +50,7 @@
 // forgets fails loudly instead of eating someone's data.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -96,7 +96,16 @@ const CHECKOUT_BREADCRUMB = join(REPO_ROOT, '.ccserver-state-moved.txt');
 // Only the leading, already-existing part of a path can be resolved -- the
 // XDG roots usually do not exist yet when this runs -- so walk up to the
 // nearest existing ancestor, realpath THAT, and re-attach the remainder.
-function realOrNearest(path) {
+//
+// The walk-up has to tell two failures apart, or it reopens the hole it
+// closes. realpathSync throws for a path that does not exist AND for a
+// DANGLING symlink (one whose target does not exist yet). Treating both as
+// "not there" made <scratch>/home -> /outside/not-yet resolve back to
+// <scratch>/home and pass the containment check, which is the lexical bug
+// again wearing a different hat. So a symlink is followed explicitly --
+// lstat says it is one even when its target is missing -- and only a genuine
+// ENOENT walks up.
+function realOrNearest(path, hops = 0) {
   const abs = resolve(path);
   let head = abs;
   const tail = [];
@@ -104,12 +113,24 @@ function realOrNearest(path) {
     try {
       const real = realpathSync(head);
       return tail.length === 0 ? real : join(real, ...tail);
-    } catch {
-      const parent = dirname(head);
-      if (parent === head) return abs;      // nothing on this path exists
-      tail.unshift(basename(head));
-      head = parent;
+    } catch { /* absent, or a dangling symlink -- distinguished below */ }
+
+    let link = null;
+    try { if (lstatSync(head).isSymbolicLink()) link = readlinkSync(head); } catch { /* truly absent */ }
+    if (link !== null) {
+      // A dangling symlink still NAMES somewhere. Follow it to that name and
+      // keep resolving from there. The hop cap makes a symlink cycle return
+      // something outside any scratch root rather than spin forever, which
+      // fails closed.
+      if (hops > 32) return join('/__symlink-loop__', ...tail);
+      const target = resolve(dirname(head), link);
+      return realOrNearest(tail.length === 0 ? target : join(target, ...tail), hops + 1);
     }
+
+    const parent = dirname(head);
+    if (parent === head) return abs;      // nothing on this path exists
+    tail.unshift(basename(head));
+    head = parent;
   }
 }
 
