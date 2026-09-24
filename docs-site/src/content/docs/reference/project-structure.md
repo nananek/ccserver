@@ -22,13 +22,17 @@ ccserver/
 │   ├── authSessions.js             # passkey モードのセッション Cookie 管理 (Issue #141)
 │   ├── loginTokens.js              # SSH 発行ワンタイムログイントークンの生成/ハッシュ (Issue #141)
 │   ├── webauthnChallenges.js       # WebAuthn 登録/認証チャレンジ管理 + rpID/origin 解決 (Issue #141)
+│   ├── paths.js                    # 全内部パスのレジストリ + XDG 解決 + レイアウトマーカー (issue #201)
+│   ├── pathMigration.js            # 旧レイアウト → XDG の移行プラン算出と実行 (issue #201)
+│   ├── settingsStore.js            # 汎用 settings テーブルの read/write (動的設定の受け皿、issue #201)
 │   ├── pathPolicy.js               # browseRoots (issue #189) のパス正規化/containment 判定 (files.js/dirs.js/sessionManager.js/sandbox.js 共有)
 │   ├── usage.js                    # `claude --ax-screen-reader` を叩いて /usage をパース・キャッシュ
 │   ├── codexUsage.js               # `codex app-server` に JSON-RPC で account/rateLimits/read を投げてキャッシュ
-│   ├── sandbox.config.example.json
+│   ├── sandbox.config.example.json # 全キーの既定値リファレンス (実設定は ~/.config/ccserver/sandbox.config.json)
 │   ├── cli/
 │   │   ├── gpg-vault-reset.js      # GPG VaultをDB直接削除 (修正前ボルトの無効化からの復旧用、`--yes` で実行)
-│   │   └── issue-login-token.js    # `npm run login-token` — ワンタイムログイントークンをDB直接発行 (Issue #141、`--allow-passkey-registration` でパスキー登録権限付き)
+│   │   ├── issue-login-token.js    # `npm run login-token` — ワンタイムログイントークンをDB直接発行 (Issue #141、`--allow-passkey-registration` でパスキー登録権限付き)
+│   │   └── setup.js                # `npm run setup` — セットアップ/移行ウィザード (issue #201、既定ドライラン・`--yes` で実行)
 │   ├── routes/
 │   │   ├── dirs.js                 # GET/POST /api/dirs, GET /api/dirs/home
 │   │   ├── sessions.js             # GET/POST/DELETE /api/sessions (POST は単発セッション新規起動)

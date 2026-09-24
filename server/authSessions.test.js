@@ -22,16 +22,23 @@ import {
 
 let tmpRoot;
 const savedEnv = process.env.CCSERVER_DB_PATH;
+const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 
 before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-authsessions-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
+  // Own temp root for this file. The general guarantee is mechanical now --
+  // see server/testEnvDefaults.js and the test-process guard in
+  // server/paths.js.
+  process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
 });
 
 after(() => {
   closeDb();
   if (savedEnv === undefined) delete process.env.CCSERVER_DB_PATH;
   else process.env.CCSERVER_DB_PATH = savedEnv;
+  if (savedHomeRoot === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
+  else process.env.CCSERVER_SANDBOX_HOME_ROOT = savedHomeRoot;
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 

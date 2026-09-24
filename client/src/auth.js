@@ -79,6 +79,36 @@ export function onAuthRequired(cb) {
   authRequiredCb = cb;
 }
 
+// Registered by SetupGate.jsx (issue #201 Step5); called when authFetch
+// sees the gate's 503 + {"code":"SETUP_REQUIRED"}, i.e. the host has not
+// had `npm run setup` run on it yet. Same shape and same no-op-until-
+// mounted contract as onAuthRequired above.
+let setupRequiredCb = null;
+
+export function onSetupRequired(cb) {
+  setupRequiredCb = cb;
+}
+
+// Shared by both authFetch branches: the gate hook in server/index.js runs
+// for every mode, so a 503 from it must be recognized in the token/none
+// path exactly as in the passkey one. Cooldown-guarded for the same reason
+// as onAuthRequired -- half a dozen independent pollers would otherwise
+// each fire it on every request they make.
+let setupRequiredSuppressUntil = 0;
+
+async function checkSetupGate(res) {
+  if (res.status !== 503 || Date.now() < setupRequiredSuppressUntil) return;
+  // Reading the body would consume the stream the caller still owns, so
+  // check a clone -- a 503 from anywhere else must pass through untouched.
+  let body = null;
+  try {
+    body = await res.clone().json();
+  } catch { /* not JSON: some other 503, not the gate */ }
+  if (body?.code !== 'SETUP_REQUIRED') return;
+  setupRequiredSuppressUntil = Date.now() + PROMPT_SUPPRESS_MS;
+  setupRequiredCb?.();
+}
+
 // Both branches below need to collapse concurrent 401s from the several
 // independent pollers that call authFetch (ApprovalBanner,
 // PairingRequestBanner, RemoteInstanceView, useSystemStats, GroupTabView --
@@ -104,6 +134,7 @@ export async function authFetch(url, opts = {}) {
       authRequiredSuppressUntil = Date.now() + PROMPT_SUPPRESS_MS;
       authRequiredCb?.();
     }
+    await checkSetupGate(res);
     return res;
   }
 
@@ -112,6 +143,7 @@ export async function authFetch(url, opts = {}) {
     opts.headers = { ...opts.headers, Authorization: `Bearer ${cachedToken}` };
   }
   const res = await fetch(url, opts);
+  await checkSetupGate(res);
   if (res.status === 401) {
     if (Date.now() < suppressUntil) return res;
     if (!promptInFlight) {

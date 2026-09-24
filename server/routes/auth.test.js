@@ -32,10 +32,15 @@ let tmpRoot;
 let app;
 const savedDbPath = process.env.CCSERVER_DB_PATH;
 const savedAuthMode = process.env.CCSERVER_AUTH_MODE;
+const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 
 before(async () => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-auth-route-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
+  // Own temp root for this file. The general guarantee is mechanical now --
+  // see server/testEnvDefaults.js and the test-process guard in
+  // server/paths.js.
+  process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
   app = Fastify();
   await app.register(authRoute, { prefix: '/api' });
 });
@@ -45,6 +50,7 @@ after(async () => {
   closeDb();
   if (savedDbPath === undefined) delete process.env.CCSERVER_DB_PATH; else process.env.CCSERVER_DB_PATH = savedDbPath;
   if (savedAuthMode === undefined) delete process.env.CCSERVER_AUTH_MODE; else process.env.CCSERVER_AUTH_MODE = savedAuthMode;
+  if (savedHomeRoot === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT; else process.env.CCSERVER_SANDBOX_HOME_ROOT = savedHomeRoot;
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 

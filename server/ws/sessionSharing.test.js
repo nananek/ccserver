@@ -83,12 +83,19 @@ before(async () => {
   process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
   process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT = join(runtimeDir, 'orchestrator-generated');
   process.env.CCSERVER_SESSION_SHARING = '1';
+  // This file drives the real /ws/terminal dispatcher, whose `init` is
+  // refused while the #201 setup gate is up (an un-migrated host must not
+  // create sessions whose state lands in the pre-migration paths). Declaring
+  // the migrated layout keeps this file about session sharing; the gate
+  // itself is covered by startup-setup-gate.test.js.
+  process.env.CCSERVER_LAYOUT = 'xdg';
   sessionManager = await import('./sessionManager.js');
   terminal = await import('./terminal.js');
 });
 
 after(() => {
   sessionManager.destroyAllSessions();
+  delete process.env.CCSERVER_LAYOUT;
   try { rmSync(runtimeDir, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 

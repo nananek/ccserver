@@ -38,13 +38,70 @@ jobs:
           node --check server/ws/sandbox-seatbelt.exec.test.js
           node --check server/ws/sandbox-seatbelt.test.js
 
+      # Issue #201. This job used to call `node --test` directly, which meant
+      # the two safety mechanisms the Linux job gets did NOT apply here:
+      #   --import ./testEnvDefaults.js  points all 19 registry entries at a
+      #                                  per-process scratch dir, so no test
+      #                                  resolves a real host path;
+      #   path-canary                    fails the build if one did anyway.
+      # Both of these files' headers say the same thing: a convention that is
+      # only wired into some entry points is not a mechanism. These tests
+      # import ./sandbox.js, which resolves every path through the registry,
+      # so they are exactly the shape that needs it.
+      - name: Seed host-path canaries
+        run: node server/tools/path-canary.js place
+
       - name: Run seatbelt unit tests (no exec)
-        run: node --test --test-timeout=60000 ws/sandbox-seatbelt.test.js
+        run: node --test --import ./testEnvDefaults.js --test-timeout=60000 ws/sandbox-seatbelt.test.js
         working-directory: server
 
       - name: Run seatbelt exec tests (real sandbox-exec)
-        run: node --test --test-timeout=60000 ws/sandbox-seatbelt.exec.test.js
+        run: node --test --import ./testEnvDefaults.js --test-timeout=60000 ws/sandbox-seatbelt.exec.test.js
         working-directory: server
+
+      # The steps above run in the PRE-migration layout, because no layout
+      # marker exists on a fresh runner -- so until this step, nothing on
+      # macOS had ever exercised the XDG layout that #201 introduces. The
+      # seatbelt profile takes its writable trees as arguments from
+      # sandbox.js's registry lookups, so if a migrated path were ever going
+      # to be missing from the profile, this is where it would show.
+      #
+      # The wizard's environment comes from server/tools/isolated-env.js, the
+      # one definition of it, rather than a copy written out here -- the two
+      # hand-written shell copies this replaces were both missing
+      # CCSERVER_DB_PATH, which is how the checkout-parent DB kept being
+      # migrated after the JS side was fixed. Without it the wizard would move
+      # the canary decoys (and, on a developer's Mac, their real files).
+      # Everything lands inside $T, so the test process may resolve defaults;
+      # the canary step below is what proves that held.
+      - name: Migrate, then re-run the seatbelt unit tests on the XDG layout
+        run: |
+          set -euo pipefail
+          T="$(mktemp -d "${RUNNER_TEMP:-/tmp}/ccserver-macos-xdg.XXXXXX")"
+          eval "$(node server/tools/isolated-env.js "$T")"
+          node server/cli/setup.js --yes
+          node -e '
+            import("./server/paths.js").then((m) => {
+              const v = m.layoutVersion();
+              console.log("layoutVersion:", v, "dataRoot:", m.dataRoot());
+              if (v < m.CURRENT_LAYOUT_VERSION) {
+                console.error("the wizard did not record the migration; the step below would be a no-op");
+                process.exit(1);
+              }
+            });
+          '
+          # The CCSERVER_* overrides are deliberately dropped for the test
+          # itself, so path resolution really goes through the layout marker
+          # the wizard just wrote. HOME and the XDG roots are still inside $T.
+          for v in $(node server/tools/isolated-env.js "$T" | sed -n 's/^export \(CCSERVER_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+          cd server
+          CCSERVER_ALLOW_DEFAULT_PATHS=1 node --test --test-timeout=60000 ws/sandbox-seatbelt.test.js
+
+      # always(): a test failure must not hide a path violation, and the
+      # violation is usually the more important of the two.
+      - name: Verify the canaries survived
+        if: always()
+        run: node server/tools/path-canary.js verify
 
       - name: Upload seatbelt temp dirs on failure
         if: failure()

@@ -11,16 +11,13 @@
 // `//` comment keys survive read-modify-write untouched (they are plain JSON
 // string keys); only formatting normalizes to 2-space + trailing newline.
 
-import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { normalizeAllowedHosts, MAX_ALLOWED_HOSTS, normalizeNetworkSettings } from './network-broker.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolvePath, PATH_IDS, configRoot } from '../paths.js';
 
 export function resolveSandboxConfigPath() {
-  return process.env.CCSERVER_SANDBOX_CONFIG
-    || join(__dirname, '..', 'sandbox.config.json');
+  return resolvePath(PATH_IDS.sandboxConfig);
 }
 
 // Atomic whole-file replace (attacker review F2). A plain writeFileSync
@@ -40,6 +37,22 @@ export function resolveSandboxConfigPath() {
 export function writeSandboxConfigAtomic(next) {
   const target = resolveSandboxConfigPath();
   const tmp = `${target}.tmp-${process.pid}`;
+  // ccserver's own config directory does not exist yet on a host that has not
+  // run the setup wizard (issue #201 R8), and the temp write below would fail
+  // with ENOENT on its parent. The reader already treats a missing file as
+  // {}, so the first Settings save should create the directory rather than
+  // report a failure. This lives in the shared writer rather than at a call
+  // site because every writer of the file goes through here.
+  //
+  // Scoped to OUR directory deliberately. When the operator has pointed
+  // CCSERVER_SANDBOX_CONFIG elsewhere, a missing parent is a typo in that
+  // value, and silently building a tree for it would turn a loud, correctable
+  // mistake into a config written where nobody will look for it. That case
+  // still fails, which is what 'a write that cannot land is reported, not
+  // half-applied' pins.
+  if (dirname(target) === configRoot()) {
+    mkdirSync(configRoot(), { recursive: true, mode: 0o700 });
+  }
   try {
     writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
     renameSync(tmp, target);

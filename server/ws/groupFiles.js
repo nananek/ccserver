@@ -6,13 +6,10 @@
 // All path generation is server-controlled; upload filenames are never used as
 // path components.
 
-import { homedir } from 'node:os';
-import { basename, dirname, extname, join, resolve } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 import { mkdirSync, statSync, realpathSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 // Limits (plan section 2): per-file, per-group count, per-group bytes.
 export const MAX_FILE_BYTES = 50 * 1024 * 1024;
@@ -22,15 +19,17 @@ export const MAX_GROUP_BYTES = 200 * 1024 * 1024;
 // Fixed in-sandbox path where each live member's group-file root is read-only bound.
 export const SANDBOX_GROUP_FILES_PATH = '/ccserver-group-files';
 
-// Blob root (host) and manifest path, both overridable for tests.
+// Blob root (host) and manifest path, both from the registry (issue #201)
+// and both still overridable via CCSERVER_GROUP_FILES_ROOT /
+// CCSERVER_GROUP_FILES_PATH. groupManager.js used to resolve the manifest
+// env var a second time, at import, and could disagree with this one; it
+// now imports getGroupFilesManifestPath() instead.
 export function getGroupFilesRoot() {
-  return process.env.CCSERVER_GROUP_FILES_ROOT
-    || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'group-files');
+  return resolvePath(PATH_IDS.groupFiles);
 }
 
 export function getGroupFilesManifestPath() {
-  return process.env.CCSERVER_GROUP_FILES_PATH
-    || join(__dirname, '..', '..', '.saved-group-files.json');
+  return resolvePath(PATH_IDS.savedGroupFiles);
 }
 
 export function getGroupFilesDir(groupId) {

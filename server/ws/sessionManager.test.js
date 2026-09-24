@@ -57,11 +57,17 @@ function shellQuote(s) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-// The schedules file lives at a fixed repo-root path (no env override for it
-// in sessionManager.js); tests back it up and restore it so the runner never
-// leaves test entries behind.
+// Ask the module where its schedules file is, rather than re-deriving it.
+// This used to be a hardcoded `<repo>/../../.scheduled-prompts.json` with a
+// comment explaining that sessionManager.js had no env override for it --
+// issue #201 added CCSERVER_SCHEDULES_PATH, so it does now, and a second
+// independent spelling of the same path is the exact defect that issue set
+// out to remove. It also meant these tests read and REWROTE the developer's
+// live .scheduled-prompts.json, backing it up and restoring it around every
+// case; with the path resolved through the registry they operate on the
+// throwaway file testEnvDefaults.js points every test process at.
 function schedulePath() {
-  return join(import.meta.dirname, '..', '..', '.scheduled-prompts.json');
+  return sessionManager.schedulesPath();
 }
 
 function readOptionalFile(path) {
@@ -456,14 +462,23 @@ test('createSession refuses a cwd outside browseRoots, for both shells and agent
 // itself -- see groupManager.js's addMember). That exemption is gated on the
 // TRUSTED scratchCwd parameter (only in-process callers that synthesize the
 // cwd pass it), never on the path alone -- see createSession's comment.
-// This integration-tests the exemption through createSession() itself,
-// against the REAL scratch root (not overridable via env var), using a
-// throwaway subdirectory cleaned up afterward.
+// Integration-tests the exemption through createSession() itself, against a
+// directory that really is inside a scratch root.
+//
+// It used to build that from homedir() literally -- the comment here said the
+// real root was "not overridable via env var", which was true when it was a
+// baked-in const. Since #201 scratchRoots() is [dataRoot(), legacyDataRoot()]
+// and dataRoot() follows $XDG_DATA_HOME, so a temp root works and `npm test`
+// stops creating and deleting directories in the operator's live
+// ~/.local/share/ccserver-sandbox/worktrees (measured: its mtime moved).
 test('createSession accepts a scratch-tree cwd only via the trusted scratchCwd flag', async () => {
   const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
   const cfgPath = join(cfgDir, 'sandbox.config.json');
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
-  const scratchDir = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'worktrees', `test-${randomUUID()}`);
+  const scratchHome = mkdtempSync(join(tmpdir(), 'ccserver-sess-scratchroot-'));
+  const prevData = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = scratchHome;
+  const scratchDir = join(scratchHome, 'ccserver', 'worktrees', `test-${randomUUID()}`);
   mkdirSync(scratchDir, { recursive: true });
   writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
   const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
@@ -498,6 +513,9 @@ test('createSession accepts a scratch-tree cwd only via the trusted scratchCwd f
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(scratchDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (prevData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = prevData;
+    try { rmSync(scratchHome, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 
@@ -535,7 +553,12 @@ test('createSession refuses a cwd that is a scratch-internal symlink pointing ou
   const cfgPath = join(cfgDir, 'sandbox.config.json');
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
   const outside = mkdtempSync(join(tmpdir(), 'ccserver-sess-outside-'));
-  const escapeLink = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'worktrees', `test-escape-${randomUUID()}`);
+  // A temp scratch root rather than the operator's real one -- see the
+  // scratchCwd test above.
+  const scratchHome = mkdtempSync(join(tmpdir(), 'ccserver-sess-scratchroot-'));
+  const prevData = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = scratchHome;
+  const escapeLink = join(scratchHome, 'ccserver', 'worktrees', `test-escape-${randomUUID()}`);
   mkdirSync(dirname(escapeLink), { recursive: true });
   symlinkSync(outside, escapeLink);
   writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
@@ -554,6 +577,9 @@ test('createSession refuses a cwd that is a scratch-internal symlink pointing ou
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(outside, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (prevData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = prevData;
+    try { rmSync(scratchHome, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 

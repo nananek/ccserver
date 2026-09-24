@@ -27,15 +27,13 @@
 
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 import { deriveWrappingKey, aesGcmEncrypt, aesGcmDecrypt, generateVaultKey } from '../gpgVaultCrypto.js';
 import * as gpgVaultDb from '../gpgVaultDb.js';
 import { getDb } from '../db.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 const GEN_TIMEOUT_MS = 30_000;
 const EXPORT_TIMEOUT_MS = 10_000;
@@ -176,7 +174,7 @@ export function gpgVaultToolsAvailable() {
 // `raw.gpgVault === true`, a plain boolean, so nesting an object under the
 // same key would make one of the two readers see the wrong shape.
 function resolveSandboxConfigPath() {
-  return process.env.CCSERVER_SANDBOX_CONFIG || join(__dirname, '..', 'sandbox.config.json');
+  return resolvePath(PATH_IDS.sandboxConfig);
 }
 
 function idleTimeoutMinutes() {

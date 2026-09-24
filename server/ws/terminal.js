@@ -16,6 +16,7 @@ import {
   buildScheduleStateMsg as scheduleStateMsg,
 } from './sessionManager.js';
 import { setNetworkBrokerMode } from './network-broker.js';
+import { setupRequired } from '../paths.js';
 
 // Shared message shape for the network-isolation globe toggle (see
 // TerminalView.jsx): `armed` is fixed for the session's whole life (whether
@@ -43,10 +44,49 @@ function networkIsolationStateMsg(session) {
 // Behavior is unchanged from before this refactor -- every case body below is
 // the same logic that used to close over the route handler's local `socket`
 // variable, just parameterized as `chan`.
+// WS messages refused while the #201 setup gate is up.
+//
+// index.js gates /api by method (writes 503, reads through) but lets all of
+// /ws/ past, because blocking the WebSocket would cut every RUNNING session
+// off from its browser -- and DEFAULT_SESSION_TIMEOUT_MS (12h) would then
+// reap them, causing exactly the outage that not restarting the server was
+// meant to avoid. An attacker-perspective review (attack-test-201 F2) showed
+// the obvious consequence: the gate was trivially bypassed by talking WS
+// instead of HTTP, and `init` happily created sessions whose state landed in
+// the pre-migration paths the operator was about to migrate out from under.
+//
+// So the gate moves down to the message level, applying the same rule the
+// HTTP side uses -- stop NEW state being created in the WRONG PLACE, without
+// stopping anyone reaching what is already running:
+//
+//   init             creates a session and persists saved-sessions.json.
+//                    REFUSED. This is NOT the re-attach path: TerminalView
+//                    sends `attach` whenever it has a sessionId and only
+//                    falls back to `init` for a genuinely new session (or
+//                    after SESSION_NOT_FOUND). Refusing it leaves every live
+//                    session reachable.
+//   schedule_prompt  writes scheduled-prompts.json. REFUSED.
+//
+// Everything else stays open on purpose: attach/input/resize/ping are the
+// re-attach path itself; set_auto_yes and set_network_isolation mutate only
+// in-memory session fields and a running broker's mode; cancel_schedule only
+// REMOVES an entry (it can never create a state file that was not already
+// there), and leaving it reachable lets an operator defuse a prompt that
+// would otherwise fire into a gated host and try to launch a session.
+const SETUP_GATED_MESSAGES = new Set(['init', 'schedule_prompt']);
+
 export function attachTerminalHandler(chan) {
   let currentSessionId = null;
 
   async function handleMessage(msg) {
+    if (SETUP_GATED_MESSAGES.has(msg.type) && setupRequired()) {
+      chan.send(JSON.stringify({
+        type: 'error',
+        message: 'Setup is not complete on this host: run `npm run setup` and restart ccserver.',
+        code: 'SETUP_REQUIRED',
+      }));
+      return;
+    }
     switch (msg.type) {
       case 'init': {
         if (currentSessionId) {

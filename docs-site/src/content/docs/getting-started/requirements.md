@@ -3,7 +3,7 @@ title: 必要な環境
 description: ccserver の実行に必要な環境と対応 AI CLI
 ---
 
-- Node.js >= 22.13 / npm >= 9 (組み込みの `node:sqlite` を使用。サーバーは起動時に SQLite (`ccserver.sqlite3`) を open し、migration 失敗時は明示的なログとともに起動を拒否します)
+- Node.js >= 22.13 / npm >= 9 (組み込みの `node:sqlite` を使用。サーバーは起動時に SQLite (`~/.local/share/ccserver/ccserver.sqlite3`) を open し、migration 失敗時は明示的なログとともに起動を拒否します)
 - C++ コンパイラ (node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`)
 - 対応する AI CLI のいずれか 1 つ以上 — Claude Code、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`)、[OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) の各 CLI は個別に任意です。サーバーにインストールされている CLI だけを起動時に選べます。
 

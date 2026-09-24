@@ -4,6 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
+# The ccserver checkout. Config, data and state do NOT live here: they are
+# under $XDG_CONFIG_HOME/ccserver, $XDG_DATA_HOME/ccserver and
+# $XDG_STATE_HOME/ccserver (issue #201). Run `npm run setup` once per host
+# before starting this unit, and again after each upgrade.
 WorkingDirectory=/path/to/ccserver
 Environment=NODE_ENV=production
 Environment=PORT=3001

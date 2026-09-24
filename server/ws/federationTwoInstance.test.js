@@ -132,6 +132,7 @@ function instanceOpts(tmpRoot, label, httpPort, federationPort) {
   return {
     httpPort,
     federationPort,
+    dir,
     dbPath: join(dir, 'test.sqlite3'),
     sandboxHomeRoot: join(dir, 'home'),
     federationHome: join(dir, 'federation'),
@@ -164,6 +165,14 @@ class Instance {
       ...process.env,
       PORT: String(this.opts.httpPort),
       CCSERVER_FEDERATION_PORT: String(this.opts.federationPort),
+      // Each instance gets its own XDG triple as well as its own
+      // CCSERVER_* overrides: the #201 gate needs CCSERVER_LAYOUT=xdg to let
+      // these two real servers past, and the XDG roots keep whatever the
+      // overrides do not cover (federation identity aside) apart too.
+      XDG_CONFIG_HOME: join(this.opts.dir, 'config'),
+      XDG_DATA_HOME: join(this.opts.dir, 'data'),
+      XDG_STATE_HOME: join(this.opts.dir, 'state'),
+      CCSERVER_LAYOUT: 'xdg',
       CCSERVER_DB_PATH: this.opts.dbPath,
       CCSERVER_SANDBOX_HOME_ROOT: this.opts.sandboxHomeRoot,
       CCSERVER_FEDERATION_HOME: this.opts.federationHome,

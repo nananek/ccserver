@@ -5,6 +5,7 @@ import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { dbPath, migrateLegacyDbFile, getDb, initDb, closeDb, migrate, safeDb, MIGRATIONS } from './db.js';
+import { resetLayoutCache } from './paths.js';
 
 let tmpRoot;
 const savedEnv = process.env.CCSERVER_DB_PATH;
@@ -13,10 +14,13 @@ const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-db-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
-  // The v2 importLegacy reads sandbox.js's legacy sidecar index under
-  // CCSERVER_SANDBOX_HOME_ROOT. Without this override a host that still has a
-  // real .index.json would leak its entries into every fresh test DB -- and
-  // postApply would RENAME the user's real index as a test side effect.
+  // Redundant with server/testEnvDefaults.js, which now points every registry
+  // entry at a scratch directory for every test process; kept because this
+  // file wants its OWN temp root. It is no longer load-bearing, and there is
+  // deliberately no warning comment here any more: the long one that used to
+  // be at this spot explained the hazard well and still did not reach
+  // settingsStore.test.js when that was written, which is why the guard moved
+  // into paths.js + testEnvDefaults.js. Read those, not a comment.
   process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
 });
 
@@ -156,15 +160,41 @@ test('initDb() resolves the same singleton as getDb()', () => {
 });
 
 test('dbPath() defaults under ~/.local/share/ccserver-sandbox and honors CCSERVER_DB_PATH', () => {
+  // With no layout marker (issue #201) this is still the pre-#201 default,
+  // byte for byte. See the XDG sibling below.
   const saved = process.env.CCSERVER_DB_PATH;
+  // Asserting the DEFAULT is this test's subject, so it opts out of the
+  // test-process guard in paths.js (see that file). It only reads the path.
+  process.env.CCSERVER_ALLOW_DEFAULT_PATHS = '1';
   try {
     delete process.env.CCSERVER_DB_PATH;
     assert.equal(dbPath(), join(homedir(), '.local', 'share', 'ccserver-sandbox', 'ccserver.sqlite3'));
     process.env.CCSERVER_DB_PATH = '/tmp/somewhere/x.sqlite3';
     assert.equal(dbPath(), '/tmp/somewhere/x.sqlite3');
   } finally {
+    delete process.env.CCSERVER_ALLOW_DEFAULT_PATHS;
     if (saved === undefined) delete process.env.CCSERVER_DB_PATH;
     else process.env.CCSERVER_DB_PATH = saved;
+  }
+});
+
+test('dbPath() moves to $XDG_DATA_HOME/ccserver once the layout marker says v2 (issue #201)', () => {
+  const savedDb = process.env.CCSERVER_DB_PATH;
+  const savedLayout = process.env.CCSERVER_LAYOUT;
+  const savedData = process.env.XDG_DATA_HOME;
+  process.env.CCSERVER_ALLOW_DEFAULT_PATHS = '1';   // see the test above
+  try {
+    delete process.env.CCSERVER_DB_PATH;
+    process.env.XDG_DATA_HOME = join(tmpRoot, 'xdg-data');
+    process.env.CCSERVER_LAYOUT = 'xdg';
+    resetLayoutCache();
+    assert.equal(dbPath(), join(tmpRoot, 'xdg-data', 'ccserver', 'ccserver.sqlite3'));
+  } finally {
+    delete process.env.CCSERVER_ALLOW_DEFAULT_PATHS;
+    if (savedDb === undefined) delete process.env.CCSERVER_DB_PATH; else process.env.CCSERVER_DB_PATH = savedDb;
+    if (savedLayout === undefined) delete process.env.CCSERVER_LAYOUT; else process.env.CCSERVER_LAYOUT = savedLayout;
+    if (savedData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = savedData;
+    resetLayoutCache();
   }
 });
 
@@ -298,5 +328,29 @@ test('v9 migration: an existing vault becomes legacy; existing sessions/tokens g
   assert.equal(session.stepup_at, null);
   assert.equal(session.registration_grant, 0);
   assert.equal(db.prepare('SELECT allow_passkey_registration FROM login_tokens').get().allow_passkey_registration, 0);
+  db.close();
+});
+
+// Issue #201 Step4 (decision D2). The settings table is the landing pad for
+// dynamic configuration; it ships empty, so what matters here is that
+// arriving at it from a populated v9 DB costs nothing. It is v11 rather than
+// v10 because the Web Push VAPID/subscription tables landed on v10 first.
+test('v11 migration: a populated v9 DB gains the settings table and loses no rows', () => {
+  const path = join(tmpRoot, 'v9-to-v11.sqlite3');
+  const upToV9 = MIGRATIONS.filter((m) => m.version <= 9);
+  const db = new DatabaseSync(path);
+  migrate(db, upToV9);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 9);
+  db.prepare('INSERT INTO worker_presets (id, name, role, app, model, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
+    .run('keep-me', 'n', 'workerX', 'claude', null, 1, 1);
+
+  migrate(db, MIGRATIONS);
+
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 11);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM worker_presets').get().c, 1, 'existing rows survive');
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM settings').get().c, 0, 'the table ships empty');
+  db.prepare('INSERT INTO settings (scope, scope_id, key, value, updated_at) VALUES (?,?,?,?,?)')
+    .run('global', '', 'k', '"v"', 1);
+  assert.equal(db.prepare('SELECT value FROM settings').get().value, '"v"');
   db.close();
 });

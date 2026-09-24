@@ -44,8 +44,22 @@ jobs:
       - name: Validate sandbox.config.example.json
         run: node -e "JSON.parse(require('fs').readFileSync('server/sandbox.config.example.json', 'utf-8'))"
 
+      # Issue #201. Seeds a decoy at every location server/paths.js can name on
+      # this runner -- both the pre-migration paths and the XDG targets -- so a
+      # test that resolves a REAL host path instead of a scratch one fails the
+      # build instead of going unnoticed. Six test files did exactly that on the
+      # #201 branch, and every one was found by doing this by hand.
+      - name: Seed host-path canaries
+        run: node server/tools/path-canary.js place
+
       - name: Run unit tests
         run: npm test
+
+      # always(): a suite failure must not hide a path violation, and a path
+      # violation is usually the more important of the two.
+      - name: Verify the canaries survived
+        if: always()
+        run: node server/tools/path-canary.js verify
 
   # Matrixed too: the build toolchain (vite/rollup/esbuild) is where a new Node
   # breaks first, and at ~20s a leg the whole matrix costs less than a minute.

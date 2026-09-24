@@ -24,7 +24,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
 import { createSession, getSession, isInfrastructureError, retireSessionForReuse } from '../ws/sessionManager.js';
 import { sandboxAvailable, sandboxUnavailableReason, loadSandboxConfig } from '../ws/sandbox.js';
@@ -32,8 +31,11 @@ import { isValidApp } from '../ws/appLaunch.js';
 import { projectHashForCwd } from '../ws/projectHash.js';
 import { normalizePresetInput } from '../ws/workerPresets.js';
 import { isContained } from '../pathPolicy.js';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
-const ORCHESTRATOR_ROOT = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'orchestrator');
+// Was a hardcoded literal with no env override at all; now a registry
+// entry (CCSERVER_ORCHESTRATOR_ROOT, issue #201) resolved per call.
+function orchestratorRoot() { return resolvePath(PATH_IDS.orchestrator); }
 
 // Initial workers per group: MAX_GROUP_MEMBERS includes the orchestrator, so
 // the canonical workers[] payload accepts at most that many minus one.
@@ -46,7 +48,7 @@ export const MAX_WORKERS = groupManager.MAX_GROUP_MEMBERS - 1;
 // CLAUDE.md/AGENTS.md themselves are never persisted here (see the header
 // comment above); only the dir itself is reused.
 export function orchestratorDirForCwd(cwd) {
-  return join(ORCHESTRATOR_ROOT, projectHashForCwd(cwd));
+  return join(orchestratorRoot(), projectHashForCwd(cwd));
 }
 
 // Pure duplicate-project detection for POST /groups: two groups for the same
@@ -197,7 +199,7 @@ export function orchestratorRestartSessionOpts({ group, app, model = null, sandb
     mcpToken,
     orchestratorClaudeMdSrc,
     // orchestratorDir is server-synthesized under the scratch tree (see
-    // ORCHESTRATOR_ROOT) -- the trusted in-process flag that skips the
+    // orchestratorRoot()) -- the trusted in-process flag that skips the
     // browseRoots cwd check (the group's PROJECT cwd was already validated
     // against browseRoots at group creation).
     scratchCwd: true,

@@ -22,7 +22,7 @@ Browser (xterm.js) <── WebSocket ──> Fastify <── node-pty ──> AI
 
 ## Requirements
 
-- Node.js >= 22.13 and npm >= 9 (uses the built-in `node:sqlite`; the server opens SQLite (`ccserver.sqlite3`) at startup and refuses to boot with a clear log when a migration fails)
+- Node.js >= 22.13 and npm >= 9 (uses the built-in `node:sqlite`; the server opens SQLite (`~/.local/share/ccserver/ccserver.sqlite3`) at startup and refuses to boot with a clear log when a migration fails)
 - A C++ compiler for building `node-pty` (`base-devel` on Arch, `build-essential` on Ubuntu)
 - At least one supported AI CLI installed on the server. Only installed CLIs can be selected.
 - Optional: `bwrap` (bubblewrap), rootless Docker, `rootlesskit`, `uidmap`, and `slirp4netns` for the full sandbox features
@@ -35,7 +35,15 @@ Install the CLIs separately by following their official documentation. Claude Co
 git clone <repo-url> ccserver
 cd ccserver
 npm install
+npm run setup           # dry run: shows where config/state will live
+npm run setup -- --yes  # create them
 ```
+
+`npm run setup` is required once per host, including on a fresh install. It creates
+`~/.config/ccserver`, `~/.local/share/ccserver` and `~/.local/state/ccserver` (XDG), and on an
+existing installation it migrates config and state out of the repository tree. Until it has run,
+the Web UI refuses to create new sessions or groups. Run it with the server stopped. See
+[Configuration](#configuration).
 
 ### Development
 
@@ -70,9 +78,9 @@ Open <http://localhost:3001>. Change the port with `PORT`, for example `PORT=808
 
 The selected application and launch options are remembered in the browser's `localStorage`. Combo sessions can run two workers and an orchestrator. Combo sessions support Claude Code, opencode, and OpenAI Codex. Copilot CLI cannot be used in combos because it cannot receive ccserver's MCP tools through CLI arguments or environment variables (file-based config only). Codex is injected per-process via `-c mcp_servers...` without touching `~/.codex/config.toml`.
 
-**Worker presets**: launch templates combining a display name, a technical role (`workerImplement`, ... -- the identifier used for MCP handoffs, git worktrees and session ids), a CLI and a model can be stored server-side in SQLite (`ccserver.sqlite3`, overridable with `CCSERVER_DB_PATH`) and selected together in the combo modal's "Worker プリセット" section. Create/edit/delete them through the プリセット管理 dialog: changes only affect future selections, because selections are expanded into a snapshot at launch time. If the preset API is unavailable, the classic workerA/workerB drafts keep working. Group tabs display members with a name as `実装担当（workerImplement）`, falling back to the role label.
+**Worker presets**: launch templates combining a display name, a technical role (`workerImplement`, ... -- the identifier used for MCP handoffs, git worktrees and session ids), a CLI and a model can be stored server-side in SQLite (`~/.local/share/ccserver/ccserver.sqlite3`, overridable with `CCSERVER_DB_PATH`) and selected together in the combo modal's "Worker プリセット" section. Create/edit/delete them through the プリセット管理 dialog: changes only affect future selections, because selections are expanded into a snapshot at launch time. If the preset API is unavailable, the classic workerA/workerB drafts keep working. Group tabs display members with a name as `実装担当（workerImplement）`, falling back to the role label.
 
-Scheduled prompts can be created with the clock button in the terminal header. They are persisted on disk in `.scheduled-prompts.json` and can fire after the browser is closed or the server restarts. The time is interpreted in the server's timezone.
+Scheduled prompts can be created with the clock button in the terminal header. They are persisted on disk in `~/.local/state/ccserver/scheduled-prompts.json` (overridable with `CCSERVER_SCHEDULES_PATH`) and can fire after the browser is closed or the server restarts. The time is interpreted in the server's timezone.
 
 **Session sharing** (opt-in, `CCSERVER_SESSION_SHARING=1`): a session can be open on several devices at once -- opening it from a phone does not disconnect the desktop, and input and output are shared by all of them (like a shared tmux session). A pty has a single size, so while sharing is enabled it runs at the smallest viewport among the attached clients; roomier screens show unused margin and every client stays readable. This is off by default: attaching a second client instead takes over the session from the first, exactly like ccserver did before this feature existed -- a background/hidden client's viewport has no reliable way to signal "not actually on screen," so an invisible client left in the size negotiation can otherwise pin every real viewer's screen to a small size indefinitely. A session with no client attached is destroyed after `CCSERVER_SESSION_TIMEOUT_MS` (default 2 hours; `0` disables destruction entirely), and one whose pty has exited is kept for `CCSERVER_SESSION_EXITED_TIMEOUT_MS` (default 5 minutes) so its exit code can still be read. Session teardown is logged with its reason -- `journalctl -u ccserver | grep '[session]'` answers "why did my session end?". See the [session sharing guide](https://nananek.github.io/ccserver/guides/session-sharing/).
 
@@ -88,7 +96,7 @@ Scheduled prompts can be created with the clock button in the terminal header. T
 
 Choosing **Launch in sandbox** starts the CLI under `bwrap`. Only the selected project and explicitly allowed configuration directories are visible; neighboring projects are not exposed. When available, rootless Docker runs inside the sandbox as well.
 
-Sandbox HOME directories are persistent per project by default, under `~/.local/share/ccserver-sandbox/home/`. Set `persistentHome: false` for a fresh temporary HOME on every session. Persistent HOME directories can contain tools, caches, and shell configuration, so treat them as writable state belonging to that project.
+Sandbox HOME directories are persistent per project by default, under `~/.local/share/ccserver-sandbox/home/`. This tree deliberately stays where it is after the XDG migration (persistent HOMEs and git worktrees contain absolute paths; see [Configuration](#configuration)). Set `persistentHome: false` for a fresh temporary HOME on every session. Persistent HOME directories can contain tools, caches, and shell configuration, so treat them as writable state belonging to that project.
 
 For Docker support on Debian/Ubuntu:
 
@@ -100,11 +108,28 @@ GPG forwarding, SSH-agent forwarding, and the git/`gh` broker are independent op
 
 ## Configuration
 
+ccserver splits its settings in two, and which half a setting belongs to is decided by one test:
+**does the safety of an already running session depend on it?** If yes, it is static.
+
+- **Dynamic** -- changeable from the Web UI, effective immediately: stored in the SQLite
+  `settings` table.
+- **Static** -- read once at startup, requires a restart, notably the security boundaries
+  (`browseRoots`, `forceSandbox`, `allowUnsandboxedAgents`, `hiddenApps`): stored in
+  `~/.config/ccserver/sandbox.config.json`.
+
+`npm run setup` creates that file for you:
+
 ```bash
-cp server/sandbox.config.example.json server/sandbox.config.json
+npm run setup -- --yes
+$EDITOR ~/.config/ccserver/sandbox.config.json
 # Optional alternate path:
 # CCSERVER_SANDBOX_CONFIG=/path/to/config.json
 ```
+
+The generated file is minimal on purpose. Copying `server/sandbox.config.example.json` verbatim
+would enable `"gpg": true`, silently forwarding the host gpg-agent and `~/.gnupg` into every
+sandbox; use `npm run setup -- --yes --seed-example` if you want the full annotated example
+anyway. `server/sandbox.config.example.json` documents every key and its default.
 
 Example:
 
@@ -126,6 +151,11 @@ Example:
 ```
 
 Important options include `docker`, `persistentHome`, `gpg`, `sshAgent`, `gitBroker`, `forceSandbox`, `defaultApp`, `showUsage`, `usageMcp`, `binds`, and `env`. See the Japanese README for the complete option reference and security limitations.
+
+Every path ccserver uses can be overridden with an environment variable
+(`CCSERVER_DB_PATH`, `CCSERVER_GROUPS_PATH`, `CCSERVER_SCHEDULES_PATH`, ...); a path with an
+override set is never touched by `npm run setup`. The full list, and the reasoning behind the
+dynamic/static split, is in the documentation site under Reference -> 設定モデル.
 
 ## API
 
@@ -157,16 +187,32 @@ Terminal I/O and session management use the WebSocket endpoint `/ws/terminal`.
 
 ## Running with systemd
 
-Build the client, then install the included unit file:
+Build the client, run the setup wizard, then install the included unit file:
 
 ```bash
 npm run build --workspace=client
+npm run setup -- --yes
 mkdir -p ~/.config/systemd/user
 cp docs/ccserver.service ~/.config/systemd/user/ccserver.service
 systemctl --user daemon-reload
 systemctl --user enable --now ccserver
 systemctl --user status ccserver
 ```
+
+### Upgrading
+
+```bash
+systemctl --user stop ccserver     # migrate with the server stopped
+git pull
+npm ci
+npm run build --workspace=client
+npm run setup                      # review the plan first
+npm run setup -- --yes
+systemctl --user start ccserver
+```
+
+After migrating, always start ccserver from a checkout that includes this layout. Older
+branches resolve the pre-migration paths and would start with empty state.
 
 ## HTTPS with Tailscale Serve
 

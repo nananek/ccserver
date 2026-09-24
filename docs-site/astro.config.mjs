@@ -53,6 +53,7 @@ export default defineConfig({
 				{
 					label: 'リファレンス',
 					items: [
+						{ label: '設定モデル (動的/静的)', slug: 'reference/configuration-model' },
 						{ label: 'プロジェクト構成', slug: 'reference/project-structure' },
 						{ label: 'API', slug: 'reference/api' },
 					],

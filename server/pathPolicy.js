@@ -7,6 +7,7 @@
 import { resolve, sep, dirname, basename, join } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { scratchRoots } from './paths.js';
 
 const HOME = homedir();
 
@@ -120,8 +121,22 @@ export function resolveWithinRoots(requestedPath, roots, fallback = '/') {
 // such a link -- its persistent HOME is rw-bound under this same tree -- so
 // the exemption additionally requires the path's real location to be inside
 // the (real) scratch tree.
-const CCSERVER_SANDBOX_SCRATCH_ROOT = resolve(join(HOME, '.local', 'share', 'ccserver-sandbox'));
+//
+// BOTH scratch roots, always (issue #201): the pre-#201 tree
+// (~/.local/share/ccserver-sandbox) and the XDG one
+// ($XDG_DATA_HOME/ccserver). A session launched before the migration has
+// its cwd under the legacy root and must not lose the exemption in flight;
+// one launched after lives under the new root. Narrowing this to whichever
+// root is "current" would break whichever set of sessions is on the other
+// side -- and losing the exemption means a legitimate combo worktree cwd
+// gets rejected as outside browseRoots, not a security failure but a very
+// confusing outage. scratchRoots() therefore returns both forever.
+//
+// This is also why #201 does NOT leave a compatibility symlink from the old
+// tree to the new one: realOrNearest() would resolve it, so the lexical
+// check would match one root while the realpath check matched the other.
 export function isCcserverScratchPath(absPath) {
-  if (!withinRoots(absPath, [CCSERVER_SANDBOX_SCRATCH_ROOT])) return false;
-  return withinRoots(realOrNearest(absPath), [realOrSelf(CCSERVER_SANDBOX_SCRATCH_ROOT)]);
+  const roots = scratchRoots().map((r) => resolve(r));
+  if (!withinRoots(absPath, roots)) return false;
+  return withinRoots(realOrNearest(absPath), roots.map((r) => realOrSelf(r)));
 }

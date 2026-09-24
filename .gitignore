@@ -3,6 +3,9 @@ client/dist/
 *.log
 test-results/
 playwright-report/
+# Legacy state locations (pre-issue #201). `npm run setup` moves these to
+# $XDG_STATE_HOME/ccserver, but an un-migrated checkout -- or a host still
+# mid-migration -- writes them here, so these entries stay forever.
 .saved-sessions.json
 .scheduled-prompts.json
 .saved-groups.json
@@ -12,6 +15,7 @@ playwright-report/
 # Legacy: the Vikunja channel was removed from ccserver-notify (see issue #207).
 # Kept so an existing deployment's leftover state file still can't be committed.
 .saved-vikunja-tasks.json
+# Legacy config location (pre-#201). Now ~/.config/ccserver/sandbox.config.json.
 server/sandbox.config.json
 /tmp/
 # Stray sandbox HOME trees: buildSeatbeltLaunch's throwaway HOME is `<launch
@@ -19,6 +23,10 @@ server/sandbox.config.json
 # persistent HOME / agent config dirs under the repo. Never commit either.
 /home/
 .claude/
+# Legacy DB location (pre-#190: one directory above the repo; a stray copy
+# can still land here). The current default is $XDG_DATA_HOME/ccserver.
 ccserver.sqlite3
 ccserver.sqlite3-wal
 ccserver.sqlite3-shm
+# Breadcrumb the setup wizard leaves behind (issue #201 R9).
+.ccserver-state-moved.txt

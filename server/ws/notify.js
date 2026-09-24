@@ -26,20 +26,18 @@ import { randomUUID } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { basename, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join } from 'node:path';
 import { Agent, fetch as undiciFetch } from 'undici';
 import { loadSandboxConfig } from './sandbox.js';
 import { hostRuntimeDir } from './git-broker.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 // Persisted subscription registry (same pattern as .saved-groups.json /
 // .saved-sessions.json). Read at each use (like loadSandboxConfig's env
 // override) so tests can point it at a temp file without touching the real
 // repo-root state file.
 export function notifyPath() {
-  return process.env.CCSERVER_NOTIFY_PATH || join(__dirname, '..', '..', '.saved-notifications.json');
+  return resolvePath(PATH_IDS.savedNotifications);
 }
 
 // Issue #143 problem 1: a dedicated directory holding only `sock`, bound into

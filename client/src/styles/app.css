@@ -4691,3 +4691,96 @@ body {
 .login-token-form button {
   width: 100%;
 }
+
+/* Setup gate (issue #201): reuses .login-view/.login-card, but the content
+   is a command block plus a potentially long list of file moves, so the
+   card is wider and scrolls rather than overflowing the viewport. */
+.setup-gate-card {
+  max-width: 560px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.setup-gate-commands {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  margin: 14px 0;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.setup-gate-heading {
+  font-size: 13px;
+  margin: 20px 0 8px;
+  color: var(--text-secondary);
+}
+
+.setup-gate-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.setup-gate-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.setup-gate-label {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.setup-gate-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.setup-gate-path-to {
+  color: var(--text-secondary);
+}
+
+.setup-gate-note {
+  color: var(--text-muted);
+  font-style: normal;
+}
+
+/* Banner form of the gate, used while sessions are running (issue #201):
+   the app stays fully usable, so this sits above it rather than replacing
+   it, and cannot be dismissed. */
+.setup-banner {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+.setup-banner-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.setup-banner-text {
+  flex: 1;
+  color: var(--text-secondary);
+}
+
+.setup-banner-btn {
+  flex: none;
+}
+
+.setup-banner-details {
+  margin-top: 10px;
+  max-height: 50vh;
+  overflow-y: auto;
+}

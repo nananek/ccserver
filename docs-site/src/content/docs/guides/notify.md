@@ -7,7 +7,7 @@ description: エージェントが自分で呼べる通知用 MCP サーバー�
 
 配信先は 3 種類で、設定されているものすべてに**並行**配信されます。
 
-1. **Discord webhook** — `sandbox.config.json` の `notify.discordWebhook` (https のみ) または環境変数 `CCSERVER_DISCORD_WEBHOOK` (こちらが優先)。webhook URL は `.gitignore` 済みの `sandbox.config.json` に入れるため、リポジトリに混入しません。
+1. **Discord webhook** — `sandbox.config.json` の `notify.discordWebhook` (https のみ) または環境変数 `CCSERVER_DISCORD_WEBHOOK` (こちらが優先)。webhook URL は ccserver の設定ディレクトリ (`~/.config/ccserver/sandbox.config.json`) に入るため、リポジトリに混入しません。
 2. **ランタイム購読 (webhook URL)** — MCP ツール `subscribe` で登録した任意の webhook (`unsubscribe` で解除、`list_subscriptions` で一覧)。購読は `.saved-notifications.json` に永続化され、サーバー再起動後も生き残ります。
 3. **PWA 通知 (Web Push)** — ブラウザ/スマートフォンへの push。タブを閉じていても届きます。設定 &gt; 通知 から端末ごとに購読します。詳細は [PWA 通知 (Web Push)](#pwa-通知-web-push)。
 
@@ -19,7 +19,7 @@ description: エージェントが自分で呼べる通知用 MCP サーバー�
 
 ## 設定例
 
-`server/sandbox.config.json` に追記します。
+`~/.config/ccserver/sandbox.config.json` に追記します ([設定ファイル](/ccserver/sandbox/configuration/) 参照)。
 
 ```json
 {

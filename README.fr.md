@@ -22,7 +22,7 @@ Navigateur (xterm.js) <── WebSocket ──> Fastify <── node-pty ──>
 
 ## Prérequis
 
-- Node.js >= 22.13 et npm >= 9 (utilise `node:sqlite` intégré ; le serveur ouvre SQLite (`ccserver.sqlite3`) au démarrage et refuse de démarrer avec un journal clair en cas d'échec de migration)
+- Node.js >= 22.13 et npm >= 9 (utilise `node:sqlite` intégré ; le serveur ouvre SQLite (`~/.local/share/ccserver/ccserver.sqlite3`) au démarrage et refuse de démarrer avec un journal clair en cas d'échec de migration)
 - Un compilateur C++ pour construire `node-pty` (`base-devel` sur Arch, `build-essential` sur Ubuntu)
 - Au moins une CLI d'IA prise en charge installée sur le serveur. Seules les CLI installées sont sélectionnables.
 - Facultatif : `bwrap` (bubblewrap), Docker rootless, `rootlesskit`, `uidmap` et `slirp4netns` pour toutes les fonctions du bac à sable
@@ -35,7 +35,15 @@ Installez les CLI séparément en suivant leur documentation officielle. Claude 
 git clone <repo-url> ccserver
 cd ccserver
 npm install
+npm run setup           # simulation : affiche où iront config et état
+npm run setup -- --yes  # création
 ```
+
+`npm run setup` doit être exécuté une fois par hôte, y compris pour une installation neuve. Il crée
+`~/.config/ccserver`, `~/.local/share/ccserver` et `~/.local/state/ccserver` (XDG) et, sur une
+installation existante, déplace la configuration et l'état hors de l'arborescence du dépôt. Tant
+qu'il n'a pas été exécuté, l'interface web refuse de créer de nouvelles sessions ou de nouveaux
+groupes. Exécutez-le serveur arrêté. Voir [Configuration](#configuration).
 
 ### Développement
 
@@ -70,9 +78,9 @@ Ouvrez <http://localhost:3001>. Le port peut être modifié avec `PORT`.
 
 L'application et les options de lancement sont mémorisées dans le `localStorage` du navigateur. Les sessions combo peuvent utiliser deux workers et un orchestrateur. Elles prennent en charge Claude Code, opencode et OpenAI Codex. Copilot CLI ne peut pas être utilisé en combo car il ne peut pas recevoir les outils MCP de ccserver via les arguments CLI ou les variables d'environnement (configuration par fichier uniquement). Codex est injecté par processus via `-c mcp_servers...` sans modifier `~/.codex/config.toml`.
 
-**Préréglages de workers** : des modèles de lancement combinant nom affiché, rôle technique (`workerImplement`, ... -- l'identifiant utilisé pour les handoffs MCP, les git worktrees et les ids de session), CLI et modèle peuvent être stockés côté serveur dans SQLite (`ccserver.sqlite3`, remplaçable par `CCSERVER_DB_PATH`) et sélectionnés ensemble dans la section « Worker プリセット » du modal combo. Créez-les, modifiez-les ou supprimez-les via le dialogue プリセット管理 : ces changements n'affectent que les sélections futures, car les sélections sont développées en instantané au lancement. Si l'API des préréglages est indisponible, les brouillons classiques workerA/workerB continuent de fonctionner. Les onglets de groupe affichent les membres nommés sous la forme `実装担当（workerImplement）`, avec repli sur le libellé du rôle.
+**Préréglages de workers** : des modèles de lancement combinant nom affiché, rôle technique (`workerImplement`, ... -- l'identifiant utilisé pour les handoffs MCP, les git worktrees et les ids de session), CLI et modèle peuvent être stockés côté serveur dans SQLite (`~/.local/share/ccserver/ccserver.sqlite3`, remplaçable par `CCSERVER_DB_PATH`) et sélectionnés ensemble dans la section « Worker プリセット » du modal combo. Créez-les, modifiez-les ou supprimez-les via le dialogue プリセット管理 : ces changements n'affectent que les sélections futures, car les sélections sont développées en instantané au lancement. Si l'API des préréglages est indisponible, les brouillons classiques workerA/workerB continuent de fonctionner. Les onglets de groupe affichent les membres nommés sous la forme `実装担当（workerImplement）`, avec repli sur le libellé du rôle.
 
-Le bouton représentant une horloge permet de programmer des prompts. Ceux-ci sont conservés dans `.scheduled-prompts.json` et peuvent être exécutés après la fermeture du navigateur ou un redémarrage du serveur. L'heure est interprétée dans le fuseau horaire du serveur.
+Le bouton représentant une horloge permet de programmer des prompts. Ceux-ci sont conservés dans `~/.local/state/ccserver/scheduled-prompts.json` (remplaçable par `CCSERVER_SCHEDULES_PATH`) et peuvent être exécutés après la fermeture du navigateur ou un redémarrage du serveur. L'heure est interprétée dans le fuseau horaire du serveur.
 
 **Partage de session** (opt-in, `CCSERVER_SESSION_SHARING=1`) : une session peut être ouverte simultanément sur plusieurs appareils -- l'ouvrir depuis un téléphone ne déconnecte pas le poste de travail, et les entrées comme les sorties sont partagées par tous (comme une session tmux partagée). Un pty n'a qu'une seule taille : une fois le partage activé, il adopte donc la plus petite fenêtre parmi les clients connectés ; les écrans plus larges affichent une marge inutilisée et chaque client reste lisible. Désactivé par défaut : un second client qui se connecte reprend simplement la session à la place du premier, comme ccserver le faisait avant l'existence de cette fonctionnalité -- un client en arrière-plan (onglet caché) n'a aucun moyen fiable de signaler qu'il n'est pas réellement affiché, et laissé dans la négociation de taille, il peut sinon figer l'écran de tous les vrais clients à une taille minuscule indéfiniment. Une session sans aucun client connecté est détruite après `CCSERVER_SESSION_TIMEOUT_MS` (2 heures par défaut ; `0` désactive complètement la destruction), et une session dont le pty s'est terminé est conservée pendant `CCSERVER_SESSION_EXITED_TIMEOUT_MS` (5 minutes par défaut) afin que son code de sortie reste consultable. Chaque destruction de session est journalisée avec son motif -- `journalctl -u ccserver | grep '[session]'` répond à la question « pourquoi ma session s'est-elle terminée ? ». Voir le [guide du partage de session](https://nananek.github.io/ccserver/guides/session-sharing/).
 
@@ -86,7 +94,7 @@ Le bouton représentant une horloge permet de programmer des prompts. Ceux-ci so
 
 L'option **Lancer dans le bac à sable** démarre la CLI sous `bwrap`. Seuls le projet sélectionné et les répertoires de configuration autorisés sont visibles ; les projets voisins restent inaccessibles. Lorsque cela est possible, Docker rootless s'exécute également à l'intérieur du bac à sable.
 
-Le répertoire HOME du bac à sable est persistant par projet par défaut, sous `~/.local/share/ccserver-sandbox/home/`. Définissez `persistentHome: false` pour obtenir un HOME temporaire à chaque session. Ces répertoires persistants sont inscriptibles et peuvent contenir des outils, caches et configurations shell du projet.
+Le répertoire HOME du bac à sable est persistant par projet par défaut, sous `~/.local/share/ccserver-sandbox/home/`. Cette arborescence reste volontairement en place après la migration XDG (les HOME persistants et les git worktrees contiennent des chemins absolus ; voir [Configuration](#configuration)). Définissez `persistentHome: false` pour obtenir un HOME temporaire à chaque session. Ces répertoires persistants sont inscriptibles et peuvent contenir des outils, caches et configurations shell du projet.
 
 Pour Docker sur Debian/Ubuntu :
 
@@ -98,11 +106,30 @@ Le transfert GPG, le transfert de l'agent SSH et le broker git/`gh` sont des opt
 
 ## Configuration
 
+ccserver sépare ses réglages en deux, et l'appartenance se décide par une seule question :
+**la sécurité d'une session déjà en cours dépend-elle de cette valeur ?** Si oui, le réglage est
+statique.
+
+- **Dynamique** -- modifiable depuis l'interface web, effet immédiat : stocké dans la table
+  SQLite `settings`.
+- **Statique** -- lu une seule fois au démarrage, nécessite un redémarrage, en particulier les
+  frontières de sécurité (`browseRoots`, `forceSandbox`, `allowUnsandboxedAgents`,
+  `hiddenApps`) : stocké dans `~/.config/ccserver/sandbox.config.json`.
+
+`npm run setup` crée ce fichier pour vous :
+
 ```bash
-cp server/sandbox.config.example.json server/sandbox.config.json
+npm run setup -- --yes
+$EDITOR ~/.config/ccserver/sandbox.config.json
 # Chemin alternatif facultatif :
 # CCSERVER_SANDBOX_CONFIG=/chemin/vers/config.json
 ```
+
+Le fichier généré est volontairement minimal. Copier `server/sandbox.config.example.json` tel quel
+activerait `"gpg": true`, transférant silencieusement le gpg-agent de l'hôte et `~/.gnupg` dans
+chaque bac à sable ; utilisez `npm run setup -- --yes --seed-example` si vous voulez malgré tout
+l'exemple complet. `server/sandbox.config.example.json` documente chaque clé et sa valeur par
+défaut.
 
 Exemple :
 
@@ -124,6 +151,12 @@ Exemple :
 ```
 
 Les principales options sont `docker`, `persistentHome`, `gpg`, `sshAgent`, `gitBroker`, `forceSandbox`, `defaultApp`, `showUsage`, `usageMcp`, `binds` et `env`. Consultez le README japonais pour la référence complète et les limites de sécurité.
+
+Tous les chemins utilisés par ccserver peuvent être remplacés par une variable d'environnement
+(`CCSERVER_DB_PATH`, `CCSERVER_GROUPS_PATH`, `CCSERVER_SCHEDULES_PATH`, ...) ; un chemin ainsi
+défini n'est jamais touché par `npm run setup`. La liste complète, et le raisonnement derrière la
+séparation dynamique/statique, se trouvent sur le site de documentation, section
+Référence -> 設定モデル.
 
 ## API
 
@@ -155,14 +188,33 @@ Les entrées/sorties du terminal et la gestion des sessions passent par `/ws/ter
 
 ## Exécution avec systemd
 
+Compilez le client, exécutez l'assistant de configuration, puis installez l'unité fournie :
+
 ```bash
 npm run build --workspace=client
+npm run setup -- --yes
 mkdir -p ~/.config/systemd/user
 cp docs/ccserver.service ~/.config/systemd/user/ccserver.service
 systemctl --user daemon-reload
 systemctl --user enable --now ccserver
 systemctl --user status ccserver
 ```
+
+### Mise à jour
+
+```bash
+systemctl --user stop ccserver     # migrer serveur arrêté
+git pull
+npm ci
+npm run build --workspace=client
+npm run setup                      # vérifier le plan d'abord
+npm run setup -- --yes
+systemctl --user start ccserver
+```
+
+Après la migration, démarrez toujours ccserver depuis une copie de travail qui inclut cette
+disposition. Les branches plus anciennes résolvent les anciens chemins et démarreraient avec un
+état vide.
 
 ## HTTPS avec Tailscale Serve
 

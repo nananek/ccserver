@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { X509Certificate } from 'node:crypto';
 import { closeDb, getDb } from '../db.js';
+import { resetLayoutCache } from '../paths.js';
 import * as pairing from './federationPairing.js';
 import { opensslAvailable, peerCertInfo } from './federationIdentity.js';
 import {
@@ -63,6 +64,56 @@ test('winningDialerIsSelf: lexicographically smaller fingerprint wins, symmetric
 test('RPC_METHODS / authorizeRequest are exported here for link dispatch to share', () => {
   assert.equal(typeof RPC_METHODS['sessions.list'], 'function');
   assert.equal(authorizeRequest({ kind: 'rpc', method: 'sessions.list' }, { status: 'active' }, false).ok, true);
+});
+
+// Issue #201: the setup gate has to cover the federation surface as well.
+// index.js gates HTTP writes and terminal.js gates the WS `init` /
+// `schedule_prompt` messages, but a paired peer talks neither -- the
+// federation listener is its own TLS port and never sees fastify's onRequest
+// hook. Without this, a peer could create sessions, groups and worktrees on
+// an un-migrated host, writing saved-sessions.json / saved-groups.json to
+// the very paths the operator was about to migrate (attack-test-201 F2,
+// through a third door).
+test('★ #201: the CREATING federation RPCs are refused while setup is incomplete', async () => {
+  const savedLayout = process.env.CCSERVER_LAYOUT;
+  process.env.CCSERVER_LAYOUT = 'legacy';
+  resetLayoutCache();
+  try {
+    for (const method of ['sessions.create', 'groups.create']) {
+      // No ctx and no deps on purpose: the refusal has to land BEFORE
+      // loadRouteDeps(), so it works on a host whose DB is still at the old
+      // path and cannot be opened yet.
+      const res = await RPC_METHODS[method]({}, undefined);
+      assert.equal(res.ok, false, method);
+      assert.equal(res.code, 'SETUP_REQUIRED', method);
+      assert.match(res.error, /npm run setup/);
+    }
+  } finally {
+    if (savedLayout === undefined) delete process.env.CCSERVER_LAYOUT;
+    else process.env.CCSERVER_LAYOUT = savedLayout;
+    resetLayoutCache();
+  }
+});
+
+test('#201: only the creating RPCs are gated -- reads and destroys are not', async () => {
+  // Gating the read/destroy side would cut a peer off from the sessions
+  // already running on the host, which is the 12h-timeout outage rev2's R2
+  // warns about. Neither can put new state at a path the wizard is about to
+  // move: destroy only removes.
+  const savedLayout = process.env.CCSERVER_LAYOUT;
+  process.env.CCSERVER_LAYOUT = 'legacy';
+  resetLayoutCache();
+  try {
+    const list = await RPC_METHODS['sessions.list']({}, undefined);
+    assert.equal(list.ok, true);
+    assert.notEqual(list.code, 'SETUP_REQUIRED');
+    const destroy = await RPC_METHODS['sessions.destroy']({ id: 'no-such-session' }, undefined);
+    assert.notEqual(destroy.code, 'SETUP_REQUIRED');
+  } finally {
+    if (savedLayout === undefined) delete process.env.CCSERVER_LAYOUT;
+    else process.env.CCSERVER_LAYOUT = savedLayout;
+    resetLayoutCache();
+  }
 });
 
 // Issue #161 regression: a forgotten (hard-deleted) peer must be treated

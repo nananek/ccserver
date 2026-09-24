@@ -19,14 +19,13 @@
 
 import { execFileSync } from 'node:child_process';
 import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, rmdirSync, rmSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { realOrNearest } from '../pathPolicy.js';
 import { projectHashForCwd } from './projectHash.js';
+import { resolvePath, PATH_IDS } from '../paths.js';
 
 export function worktreeRoot() {
-  return process.env.CCSERVER_WORKTREE_ROOT
-    || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'worktrees');
+  return resolvePath(PATH_IDS.worktrees);
 }
 
 // M1 defense-in-depth (vuln_scan report / PoC p9): the primary fix is that
