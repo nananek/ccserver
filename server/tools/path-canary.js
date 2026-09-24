@@ -34,10 +34,25 @@
 // SAFETY: this never overwrites. A path that already has something gets
 // recorded, not replaced, so running it cannot destroy what it exists to
 // protect. It still CREATES files where nothing is, so outside CI it asks for
-// --force, and `clean` removes only what it made.
+// --force, and `clean` removes only what it made -- decoys whose contents
+// still match what it wrote, and directories that are still empty.
+//
+// LIMITS, so the guarantees are not read as wider than they are:
+//   - `clean` trusts the manifest to say what it created. It will not delete
+//     a path whose contents have changed, but a manifest author who knows a
+//     file's exact contents could still name it. The manifest is an ordinary
+//     file in a temp directory; treat it as trusted input.
+//   - `verify` flags a directory whose mtime moved even when the contents
+//     match. That is the point (it catches create-then-delete), but it means
+//     ANY writer counts, including a legitimate one -- a ccserver actually
+//     running on the machine while this is armed will trip it. This is a CI
+//     tool; on a developer's box, expect that.
+//   - it compares what it recorded at `place` against what is there at
+//     `verify`. Anything that happens and is undone between two `verify`
+//     runs, or before `place`, is outside its window.
 
 import {
-  existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -134,6 +149,22 @@ function describe(path, type) {
   return { state: 'file', sha: sha(path), size: st.size };
 }
 
+// Every ancestor of `dir` that does not exist yet, outermost first -- the
+// directories a `mkdirSync(recursive)` is about to bring into being. Recorded
+// so `clean` can take them back out; without this, `place` left its scaffolding
+// behind and "removes what it made" was true of files only.
+function missingAncestors(dir) {
+  const out = [];
+  let cur = dir;
+  while (!existsSync(cur)) {
+    out.unshift(cur);
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return out;
+}
+
 function place({ force }) {
   if (!process.env.CI && !force) {
     console.error('path-canary: this creates files at real host paths. Pass --force if that is what you want.');
@@ -141,6 +172,7 @@ function place({ force }) {
     process.exit(2);
   }
   const records = [];
+  const createdDirs = [];
   for (const { id, type, path } of hostPaths()) {
     const before = describe(path, type);
     let created = null;
@@ -150,6 +182,7 @@ function place({ force }) {
       // directory itself.
       const decoy = type === 'dir' ? join(path, DECOY_NAME) : path;
       try {
+        createdDirs.push(...missingAncestors(dirname(decoy)));
         mkdirSync(dirname(decoy), { recursive: true });
         writeFileSync(decoy, decoyBody(`${id} @ ${path}`, decoy), { flag: 'wx' });
         created = decoy;
@@ -166,7 +199,7 @@ function place({ force }) {
     const dirAfter = created && type === 'dir' ? describe(path, 'dir') : null;
     records.push({ id, type, path, before, created, dirAfter, after: created ? describe(created, 'file') : null });
   }
-  writeFileSync(MANIFEST, JSON.stringify({ at: Date.now(), records }, null, 2));
+  writeFileSync(MANIFEST, JSON.stringify({ at: Date.now(), records, createdDirs }, null, 2));
   const seeded = records.filter((r) => r.created).length;
   console.log(`path-canary: recorded ${records.length} host paths, seeded ${seeded} decoys -> ${MANIFEST}`);
 }
@@ -240,7 +273,7 @@ function verify() {
 // the manifest is not describing this tree.
 function clean() {
   if (!existsSync(MANIFEST)) return;
-  const { records } = JSON.parse(readFileSync(MANIFEST, 'utf-8'));
+  const { records, createdDirs } = JSON.parse(readFileSync(MANIFEST, 'utf-8'));
   let removed = 0;
   const kept = [];
   for (const r of records) {
@@ -249,8 +282,15 @@ function clean() {
     if (now.state !== 'file' || now.sha !== r.after.sha) { kept.push(r.created); continue; }
     try { rmSync(r.created, { force: true }); removed += 1; } catch { /* best effort */ }
   }
+  // Directories go last and deepest-first, and only via rmdir -- which fails
+  // on a non-empty directory. So anything that gained real content since
+  // `place` (a test's output, an operator's files) is left standing.
+  let dirsRemoved = 0;
+  for (const dir of [...(createdDirs || [])].reverse()) {
+    try { rmdirSync(dir); dirsRemoved += 1; } catch { /* not empty, or gone */ }
+  }
   rmSync(MANIFEST, { force: true });
-  console.log(`path-canary: removed ${removed} decoys it created.`);
+  console.log(`path-canary: removed ${removed} decoys and ${dirsRemoved} empty directories it created.`);
   if (kept.length > 0) {
     console.log(`  left ${kept.length} alone (no longer the decoy this script wrote): ${kept.slice(0, 5).join(', ')}`);
   }

@@ -42,13 +42,23 @@ export default defineConfig({
     // exactly that.
     //
     // The SERVER keeps the real $HOME, and that is deliberate too. Once the
-    // marker exists the layout is v2, so every registry entry resolves under
+    // marker exists the layout is v2, so every REGISTRY entry resolves under
     // the XDG roots above and legacyDataRoot() is only read (scratchRoots()'s
-    // lexical check) -- the server writes nothing under $HOME, and the
-    // old-old DB hop is skipped outright at v2. Meanwhile several specs
-    // (breadcrumb-nested, home-tilde) compare the server's paths against the
-    // TEST process's $HOME, so redirecting the server's broke four of them in
-    // CI. Isolating the server's HOME bought nothing and cost those tests.
+    // lexical check); the old-old DB hop is skipped outright at v2. Measured:
+    // with decoys in a stand-in home, the server came up at v2 and left every
+    // one of them byte-identical, adding no files.
+    //
+    // Scope of that claim: it is about the paths #201 owns. Modules that call
+    // homedir() directly -- bunTmpdir's cache dir, a session launched with no
+    // cwd, the unsandboxed usage capture's fallback cwd -- are outside the
+    // registry and were not part of that measurement, so "writes nothing
+    // under $HOME" means "nothing the registry resolves", not "nothing at
+    // all".
+    //
+    // Meanwhile several specs (breadcrumb-nested, home-tilde) compare the
+    // server's paths against the TEST process's $HOME, so redirecting the
+    // server's broke four of them in CI. Isolating the server's HOME bought
+    // nothing for the registry paths and cost those tests.
     //
     // isolated-env.js is the other half of that, and it is not optional
     // either. NINE registry entries have their legacy location outside $HOME

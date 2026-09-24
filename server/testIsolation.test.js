@@ -398,6 +398,38 @@ test('★ assertSafeToMigrate follows a DANGLING symlink too', () => {
 // be a route that is known to be isolated. A new entrance either gets added
 // here deliberately -- which is the moment to ask how it is isolated -- or
 // this fails.
+//
+// WHAT THIS NET CATCHES, AND WHAT IT DOES NOT.
+//
+// It is a grep over tracked files, so it sees spellings, not behaviour. That
+// is worth stating plainly rather than letting the name imply a proof.
+//
+// Caught:
+//   - the wizard named as a path, with or without the extension:
+//     `server/cli/setup.js` and `server/cli/setup` (the second really runs --
+//     `node server/cli/setup --help` exits 0, and an earlier version of this
+//     test missed it)
+//   - `setup.js` in any quote style, including the double quotes an earlier
+//     version missed
+//   - `npm run setup` in a file that a shell executes (a workflow, a shell
+//     script, package.json) -- the npm indirection, which reaches the wizard
+//     without the string `setup.js` appearing anywhere
+//
+// NOT caught, by construction:
+//   - a spelling assembled at runtime: `'setup' + '.js'`, `${dir}/setup.js`,
+//     a path read from config or env
+//   - `npm run setup` invoked from JavaScript (spawn('npm', ['run', ...])).
+//     In .js/.jsx that string is almost always an instruction printed to the
+//     operator -- server/index.js, routes/setup.js and SetupGate.jsx all
+//     contain it as a message -- and treating those as launchers would add a
+//     dozen "this only mentions it" allowlist entries, which is how an
+//     allowlist stops being read
+//   - untracked files (git ls-files), so a scratch script on a developer's
+//     machine is not covered
+//
+// So: a drift net over the spellings people actually write, not a proof that
+// no other route exists. The isolation itself is enforced by spawnWizard()
+// and isolated-env.js; this only makes a NEW route hard to add silently.
 const WIZARD_ROUTES = {
   'server/cli/setup.js': 'the wizard itself',
   'server/testIsolation.js': 'spawnWizard(): the sanctioned route for JS callers',
@@ -411,6 +443,19 @@ const WIZARD_ROUTES = {
 // the generator rather than their own copy of the list.
 const SHELL_ROUTES = ['playwright.config.js', '.github/workflows/sandbox-macos.yml'];
 
+// The wizard named as a path, in any quote style, with or without the
+// extension. `server/cli/setup` without `.js` is a real, working invocation.
+const WIZARD_PATH = /cli[/\\]setup(?:\.js)?\b|['"`]setup\.js['"`]/;
+// `npm run setup` only counts in a file a shell executes. In .js/.jsx the
+// same string is the instruction the server and the UI print for the
+// operator, not a launch -- see the header.
+const NPM_RUN_SETUP = /\bnpm run setup\b/;
+const shellExecuted = (rel) => /\.(ya?ml|sh|bash)$/.test(rel) || rel === 'package.json' || rel.endsWith('/package.json');
+
+function namesTheWizard(rel, text) {
+  return WIZARD_PATH.test(text) || (shellExecuted(rel) && NPM_RUN_SETUP.test(text));
+}
+
 test('★ every route that launches the wizard is a known-isolated one', () => {
   const root = repoRoot();
   const tracked = execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' })
@@ -420,7 +465,7 @@ test('★ every route that launches the wizard is a known-isolated one', () => {
     if (rel.startsWith('docs-site/') || rel.endsWith('.md')) continue;   // prose, not a launcher
     let text;
     try { text = readFileSync(join(root, rel), 'utf8'); } catch { continue; }
-    if (/cli\/setup\.js|'setup\.js'/.test(text)) found.push(rel);
+    if (namesTheWizard(rel, text)) found.push(rel);
   }
   assert.ok(found.length > 0, 'sanity: the enumeration must find something');
   for (const rel of found) {
@@ -435,6 +480,23 @@ test('★ every route that launches the wizard is a known-isolated one', () => {
   // permitting a file that was renamed.
   for (const rel of Object.keys(WIZARD_ROUTES)) {
     assert.ok(found.includes(rel), `${rel} is declared a wizard route but no longer references the wizard`);
+  }
+});
+
+test('a workflow that reaches the wizard must be declared a shell caller', () => {
+  // Otherwise a new CI job could launch it (typically via `npm run setup`)
+  // and never be checked for using isolated-env.js -- which is how the
+  // playwright webServer drifted in the first place.
+  const root = repoRoot();
+  const tracked = execFileSync('git', ['ls-files', '.github/workflows'], { cwd: root, encoding: 'utf8' })
+    .split('\n').filter(Boolean);
+  for (const rel of tracked) {
+    const text = readFileSync(join(root, rel), 'utf8');
+    if (!namesTheWizard(rel, text)) continue;
+    assert.ok(
+      SHELL_ROUTES.includes(rel),
+      `${rel} launches the wizard but is not in SHELL_ROUTES, so nothing checks that it uses isolated-env.js`,
+    );
   }
 });
 
