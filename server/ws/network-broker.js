@@ -57,7 +57,7 @@
 //     the toggle is instant and needs no sandbox restart.
 
 import { lookup as dnsLookup } from 'node:dns';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { createServer, request as httpRequest } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -288,6 +288,96 @@ export function buildIsolatedProxyEnv({ host = '127.0.0.1', port, token, noProxy
     NO_PROXY: noProxy,
     no_proxy: noProxy,
   };
+}
+
+// Issue #222: publish the chosen port atomically. A plain writeFileSync
+// creates the file before the content lands, and the parent's readiness wait
+// used to key on existsSync -- so it could open the file in that window and
+// read it empty, which the parse then rejected as 'malformed port file'. It
+// showed up as an intermittent startup failure, taken by whichever caller
+// started a broker first in a parallel run.
+//
+// Written inline rather than reused from networkAllowlist.js: that module's
+// atomic writer is hardcoded to the sandbox config path, so there is nothing
+// to import. Same technique, different destination.
+export function writePortFileAtomic(portFile, port) {
+  const tmp = `${portFile}.tmp-${process.pid}`;
+  try {
+    writeFileSync(tmp, String(port));
+    renameSync(tmp, portFile);
+  } catch (err) {
+    // A leftover temp file would be mistaken for scratch state later, and
+    // would hide the fact that the publish never completed.
+    try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    throw err;
+  }
+}
+
+// The reader half of the same contract: the port file is ready only when it
+// parses. Absent, empty, half-written or garbage all mean "not yet" -- they
+// are not failures, because the child may simply not have published yet.
+// Returns the port, or null when there is nothing usable to read.
+export function readPortFile(portFile) {
+  let raw;
+  try {
+    raw = readFileSync(portFile, 'utf-8');
+  } catch {
+    return null;
+  }
+  const port = Number(raw.trim());
+  return Number.isInteger(port) && port > 0 ? port : null;
+}
+
+// How much of an unusable port file is quoted back in the failure message.
+// Only ever enough to recognise what landed there ('a stray log line', 'an
+// HTML error page'), never enough to be a channel in its own right.
+const PORT_FILE_SNIPPET_BYTES = 64;
+
+// What the port file looked like when the readiness wait gave up. Waiting on
+// the parsed value (rather than on existsSync) means 'absent' and 'present but
+// garbage' now reach the same timeout, and the thrown message is the only
+// artifact that survives -- startNetworkBroker removes the runtime dir on the
+// way out. Issue #222's complaint about the old failure was precisely that it
+// named no cause, so the reason has to carry the distinction.
+//
+// The snippet is quoted with JSON.stringify, which turns control bytes into
+// escapes. That matters more than it looks, because this string is thrown and
+// then travels:
+//   - it surfaces to the user as a session-startup failure, so a terminal
+//     escape or a newline through verbatim would hand the file we could not
+//     read a say in how that message reads;
+//   - it can also reach the server log. createSession folds this into its
+//     `error` string, and the scheduler's auto-resume path console.warn's that
+//     (sessionManager.js's fireSchedule), where a raw newline could forge log
+//     structure.
+// Not through fastify's logger, though: that is `logger: true` with no
+// serializer, and these failures are returned rather than thrown. Whether any
+// OTHER path logs it has not been traced -- which is the point of quoting
+// rather than of enumerating destinations. The escaping is what makes the
+// question moot wherever it ends up.
+//
+// The read is bounded too -- the cap belongs on the read, not just on the
+// output, so that whatever sits at the path cannot decide how much is pulled
+// into memory to describe it.
+function describeUnreadablePortFile(portFile) {
+  let fd;
+  try {
+    fd = openSync(portFile, 'r');
+  } catch (e) {
+    // e.code only: e.message embeds the full path, which adds nothing here
+    // and is the noisiest part of the resulting failure.
+    return e.code === 'ENOENT' ? 'never created' : `unreadable: ${e.code || 'open failed'}`;
+  }
+  try {
+    const buf = Buffer.alloc(PORT_FILE_SNIPPET_BYTES);
+    const n = readSync(fd, buf, 0, PORT_FILE_SNIPPET_BYTES, 0);
+    if (n === 0) return 'created but still empty';
+    return `unparseable: ${JSON.stringify(buf.subarray(0, n).toString('utf-8'))}`;
+  } catch (e) {
+    return `unreadable: ${e.code || 'read failed'}`;
+  } finally {
+    try { closeSync(fd); } catch { /* nothing left to close */ }
+  }
 }
 
 function runServer({ allowlist, denylist, mode, portFile, state: initialState, adminToken }) {
@@ -563,7 +653,7 @@ function runServer({ allowlist, denylist, mode, portFile, state: initialState, a
   server.listen(0, '0.0.0.0', () => {
     const { port } = server.address();
     try {
-      writeFileSync(portFile, String(port));
+      writePortFileAtomic(portFile, port);
     } catch (e) {
       process.stderr.write(`[network-broker] failed to write port file: ${e.message}\n`);
       process.exit(1);
@@ -666,28 +756,25 @@ export async function startNetworkBroker(
   // stdin write above needs in order to actually flush, and every caller up
   // the chain -- buildSandboxSpawn -> createSession -- now awaits this
   // whole function).
+  // Wait until the port file PARSES, not until it merely exists (issue #222).
+  // The writer publishes atomically now, so the two are equivalent for a
+  // healthy child -- but keying on the value keeps this loop correct even if
+  // something else ever creates the path first, and it removes the empty-file
+  // window entirely rather than narrowing it.
   const deadline = Date.now() + 2000;
-  while (!existsSync(portFile) && Date.now() < deadline) {
+  let port = readPortFile(portFile);
+  while (port === null && Date.now() < deadline) {
     if (spawnError) break;
     if (proc.exitCode !== null || proc.signalCode !== null) break;
     await sleep(20);
+    port = readPortFile(portFile);
   }
 
-  if (spawnError || proc.exitCode !== null || proc.signalCode !== null || !existsSync(portFile)) {
-    const reason = spawnError ? spawnError.message : proc.exitCode !== null ? `exited code=${proc.exitCode}` : proc.signalCode ? `signal=${proc.signalCode}` : 'port file not ready within 2s';
+  if (spawnError || proc.exitCode !== null || proc.signalCode !== null || port === null) {
+    const reason = spawnError ? spawnError.message : proc.exitCode !== null ? `exited code=${proc.exitCode}` : proc.signalCode ? `signal=${proc.signalCode}` : `port file not ready within 2s (${describeUnreadablePortFile(portFile)})`;
     try { proc.kill('SIGKILL'); } catch { /* already dead */ }
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
     throw new Error(`network broker failed to start: ${reason}`);
-  }
-
-  let port;
-  try {
-    port = Number(readFileSync(portFile, 'utf-8').trim());
-    if (!Number.isInteger(port) || port <= 0) throw new Error('malformed port file');
-  } catch (e) {
-    try { proc.kill('SIGKILL'); } catch { /* already dead */ }
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-    throw new Error(`network broker failed to start: ${e.message}`);
   }
 
   const probed = await probeBroker(port);
