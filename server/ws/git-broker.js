@@ -57,6 +57,7 @@ import { fileURLToPath } from 'node:url';
 import { computeGitAllowlist, normalizeGitUrl, resolveOriginUrl } from './gitAllowlist.js';
 import { classifyGhInvocation, extractGhTextFields, findBlockedGhFileArg } from './ghAllowlist.js';
 import { buildGuardConfig, compilePatterns, findBlockedMatch } from './commitGuard.js';
+import { classifyGhUsage, recordGhUsage } from '../ghUsageRecording.js';
 
 const GH_EXEC_TIMEOUT_MS = 30_000;
 const GH_EXEC_MAX_BYTES = 10 * 1024 * 1024;
@@ -254,7 +255,9 @@ function findBlockedGhText(req, ctx) {
 }
 
 async function handleGhExec(req, conn, ctx) {
+  const record = (result, denial = null) => recordGhUsage({ client: ctx.app, ...classifyGhUsage(req.argv), result, denial });
   if (!Array.isArray(req.argv) || !req.argv.every((a) => typeof a === 'string')) {
+    record('cli-error', 'bad-request');
     conn.end(`${JSON.stringify({ ok: false, reason: 'bad-request' })}\n`);
     return;
   }
@@ -267,6 +270,7 @@ async function handleGhExec(req, conn, ctx) {
     () => resolveOriginUrl(ctx.cwd),
   );
   if (!subOk) {
+    record('cli-error', subReason);
     process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (${subReason})\n`);
     conn.end(`${JSON.stringify({ ok: false, reason: subReason })}\n`);
     return;
@@ -281,6 +285,7 @@ async function handleGhExec(req, conn, ctx) {
   // invocation targets.
   const fileArgBlocked = findBlockedGhFileArg(req.argv);
   if (fileArgBlocked) {
+    record('cli-error', fileArgBlocked.reason);
     process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (${fileArgBlocked.reason})\n`);
     conn.end(`${JSON.stringify({ ok: false, reason: fileArgBlocked.reason, field: fileArgBlocked.field })}\n`);
     return;
@@ -290,6 +295,7 @@ async function handleGhExec(req, conn, ctx) {
   // ghAllowlist.js) must be allow-listed, not just the first/primary one.
   const denied = repos.find((r) => !ctx.allowSet.has(r));
   if (denied) {
+    record('cli-error', 'not-allowlisted');
     process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (repo ${denied} not-allowlisted)\n`);
     conn.end(`${JSON.stringify({ ok: false, reason: 'not-allowlisted' })}\n`);
     return;
@@ -298,6 +304,7 @@ async function handleGhExec(req, conn, ctx) {
   const blocked = findBlockedGhText(req, ctx);
   if (blocked) {
     const reason = blocked.reason || 'blocked-message';
+    record('cli-error', reason);
     process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> deny (${reason} in --${blocked.field}: ${blocked.match.source})\n`);
     conn.end(`${JSON.stringify({ ok: false, reason, field: blocked.field })}\n`);
     return;
@@ -306,6 +313,16 @@ async function handleGhExec(req, conn, ctx) {
   process.stdout.write(`[git-broker] gh-exec ${req.argv.join(' ')} -> allow (repo(s) ${repos.join(', ')})\n`);
   const stdinBuf = req.stdin ? Buffer.from(req.stdin, 'base64') : null;
   const result = await execGh(req.argv, ctx.cwd, stdinBuf);
+  // execGh failures are broker-side results, not policy denials: `timeout`
+  // keeps its own result category, and a spawn failure (gh missing or not
+  // runnable on the host) is broker-unavailable. cli-error is reserved for a
+  // gh process that actually ran and exited non-zero. Passing these reasons
+  // as `denial` would file them under broker-denied:*, which is only for the
+  // fixed allow-list/guard refusals above.
+  const outcome = result.ok
+    ? (result.exitCode === 0 ? 'success' : 'cli-error')
+    : (result.reason === 'timeout' ? 'timeout' : 'broker-unavailable');
+  record(outcome);
   conn.end(`${JSON.stringify(result)}\n`);
 }
 
@@ -353,7 +370,7 @@ function handleRequest(line, conn, ctx) {
   conn.end(`${JSON.stringify({ ok: false, reason: 'bad-request' })}\n`);
 }
 
-function runServer({ sock, allowlist, cwd, commitGuard }) {
+function runServer({ sock, allowlist, cwd, commitGuard, app }) {
   let allowSet;
   try {
     allowSet = new Set(JSON.parse(readFileSync(allowlist, 'utf-8')));
@@ -377,7 +394,7 @@ function runServer({ sock, allowlist, cwd, commitGuard }) {
   // Per-session connection token (see handleRequest). Delivered via env, not
   // argv: the broker process is unsandboxed, but keeping it out of the command
   // line avoids incidental exposure via crash reports / process listings.
-  const ctx = { allowSet, cwd, guardPatterns, token: process.env.CCSANDBOX_BROKER_TOKEN || '' };
+  const ctx = { allowSet, cwd, guardPatterns, app, token: process.env.CCSANDBOX_BROKER_TOKEN || '' };
 
   try { unlinkSync(sock); } catch { /* fresh dir, usually not present */ }
 
@@ -471,7 +488,7 @@ function probeBrokerSync(sockPath, timeoutMs = 700, token = '') {
 // PR-body guard for this launch (logged, not thrown) -- unlike the
 // allow-list above, this is a best-effort accident-prevention layer, not a
 // credential-scoping boundary the launch must refuse to proceed without.
-export function startGitBroker({ cwd, blockedPatterns = null }) {
+export function startGitBroker({ cwd, app = 'shell', blockedPatterns = null, ghUsageRecording = null }) {
   const allowlist = computeGitAllowlist(cwd);
   if (!allowlist || allowlist.length === 0) return null;
 
@@ -509,11 +526,16 @@ export function startGitBroker({ cwd, blockedPatterns = null }) {
   // layer, not a hard boundary, since KERN_PROCARGS2 leaks the token to a
   // same-UID peer).
   const token = randomBytes(24).toString('base64url');
-  const serveArgs = [__filename, '--serve', '--sock', sockPath, '--allowlist', allowlistPath, '--cwd', cwd];
+  const serveArgs = [__filename, '--serve', '--sock', sockPath, '--allowlist', allowlistPath, '--cwd', cwd, '--app', app];
   if (commitGuardPath) serveArgs.push('--commit-guard', commitGuardPath);
   const proc = spawn(process.execPath, serveArgs, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, CCSANDBOX_BROKER_TOKEN: token },
+    env: {
+      ...process.env,
+      CCSANDBOX_BROKER_TOKEN: token,
+      CCSERVER_GH_USAGE_RECORDING: ghUsageRecording?.enabled === true ? '1' : '0',
+      CCSERVER_GH_USAGE_RECORDING_FILE: ghUsageRecording?.enabled === true ? ghUsageRecording.file : '',
+    },
   });
 
   proc.stdout.on('data', (d) => process.stdout.write(`[git-broker] ${d}`));
@@ -571,6 +593,7 @@ function parseServeArgs(argv) {
     if (argv[i] === '--sock') out.sock = argv[++i];
     else if (argv[i] === '--allowlist') out.allowlist = argv[++i];
     else if (argv[i] === '--cwd') out.cwd = argv[++i];
+    else if (argv[i] === '--app') out.app = argv[++i];
     else if (argv[i] === '--commit-guard') out.commitGuard = argv[++i];
   }
   return out;

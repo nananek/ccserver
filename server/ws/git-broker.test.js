@@ -13,9 +13,9 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, statSync, symlinkSync, readFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startGitBroker, ensureHostRuntimeDir } from './git-broker.js';
@@ -66,6 +66,7 @@ before(() => {
   writeFileSync(fakeGh, [
     '#!/usr/bin/env bash',
     'if [ "$1" = "auth" ] && [ "$2" = "token" ]; then echo "fake-token-123"; exit 0; fi',
+    'case " $* " in *" __exit7__ "*) echo "fake-gh-boom" >&2; exit 7;; esac',
     'echo "GH_ARGS:$*"',
     'exit 0',
     '',
@@ -219,6 +220,120 @@ test('gh-exec: malformed argv fails closed', async () => {
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'bad-request');
 });
+
+test('gh usage recording: a gh CLI non-zero exit is cli-error, not broker-denied', async () => {
+  const file = join(root, 'usage-cli-error.json');
+  const b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+  try {
+    const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1', '--json', '__exit7__'] });
+    assert.equal(r.ok, true);
+    assert.equal(r.exitCode, 7);
+  } finally {
+    if (b) { b.proc.kill('SIGTERM'); await new Promise((r) => setTimeout(r, 200)); rmSync(b.dir, { recursive: true, force: true }); }
+  }
+  const counters = JSON.parse(readFileSync(file, 'utf8')).counters;
+  assert.equal(counters['codex\tpr\tread\tcli-error'], 1);
+  assert.equal(Object.keys(counters).some((k) => k.includes('broker-denied')), false, `non-denial recorded as a denial: ${JSON.stringify(counters)}`);
+});
+
+test('gh usage recording: a gh spawn failure is broker-unavailable, not a denial', async () => {
+  const file = join(root, 'usage-execless.json');
+  // PATH with git (the broker resolves the cwd origin before exec) but no gh.
+  const gitOnly = join(root, 'git-only-bin');
+  mkdirSync(gitOnly, { recursive: true });
+  try { symlinkSync(execFileSync('which', ['git'], { encoding: 'utf8' }).trim(), join(gitOnly, 'git')); } catch { /* already present */ }
+  const savedPath = process.env.PATH;
+  process.env.PATH = gitOnly;
+  let b;
+  try {
+    b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+    const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'exec-failed');
+  } finally {
+    process.env.PATH = savedPath;
+    if (b) { b.proc.kill('SIGTERM'); await new Promise((r) => setTimeout(r, 200)); rmSync(b.dir, { recursive: true, force: true }); }
+  }
+  const counters = JSON.parse(readFileSync(file, 'utf8')).counters;
+  assert.equal(counters['codex\tpr\tread\tbroker-unavailable'], 1);
+  assert.equal(Object.keys(counters).some((k) => k.includes('broker-denied')), false, `non-denial recorded as a denial: ${JSON.stringify(counters)}`);
+});
+
+test('gh usage recording: a FIFO aggregate cannot wedge the broker past SIGTERM', async () => {
+  const file = join(root, 'usage-fifo.json');
+  if (spawnSync('mkfifo', [file]).status !== 0) return; // POSIX-only; skip elsewhere
+  // readFileSync on a FIFO blocks until a writer appears. That froze the
+  // broker's event loop, so it answered nothing further AND could not run its
+  // own SIGTERM handler -- session teardown left an orphan broker + socket.
+  const gitOnly = join(root, 'git-only-bin');
+  mkdirSync(gitOnly, { recursive: true });
+  try { symlinkSync(execFileSync('which', ['git'], { encoding: 'utf8' }).trim(), join(gitOnly, 'git')); } catch { /* already present */ }
+  const savedPath = process.env.PATH;
+  process.env.PATH = gitOnly;
+  let b;
+  try {
+    b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+    // The gh call itself still answers...
+    const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1'] });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'exec-failed');
+    // ...and so does the next request on the same broker.
+    const again = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '2'] });
+    assert.equal(again.ok, false);
+  } finally {
+    process.env.PATH = savedPath;
+  }
+  b.proc.kill('SIGTERM');
+  const exited = await Promise.race([
+    new Promise((r) => b.proc.once('exit', () => r(true))),
+    new Promise((r) => setTimeout(() => r(false), 5000)),
+  ]);
+  if (!exited) b.proc.kill('SIGKILL');
+  rmSync(b.dir, { recursive: true, force: true });
+  assert.equal(exited, true, 'the broker ignored SIGTERM and would have been orphaned');
+  // The planted FIFO is replaced by a real aggregate rather than stopping
+  // recording for good.
+  assert.equal(statSync(file).isFile(), true, 'the FIFO should have been replaced by a regular file');
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).counters['codex\tpr\tread\tbroker-unavailable'], 2);
+});
+
+// The broker is where a wedged aggregate actually hurts, and where a silent
+// failure is least visible. Both of these stopped recording for good while gh
+// kept answering normally and nothing was logged.
+for (const [name, plant] of [
+  ['a future-dated lock', (file) => {
+    writeFileSync(`${file}.lock`, '');
+    const future = new Date(Date.now() + 1000 * 60 * 60 * 24 * 365 * 100);
+    utimesSync(`${file}.lock`, future, future);
+  }],
+  ['a directory at the aggregate path', (file) => mkdirSync(file, { recursive: true })],
+]) {
+  test(`gh usage recording: ${name} cannot silently stop the broker recording`, async () => {
+    const file = join(root, `usage-${name.replace(/[^a-z]+/gi, '-')}.json`);
+    plant(file);
+    const gitOnly = join(root, 'git-only-bin');
+    mkdirSync(gitOnly, { recursive: true });
+    try { symlinkSync(execFileSync('which', ['git'], { encoding: 'utf8' }).trim(), join(gitOnly, 'git')); } catch { /* already present */ }
+    const savedPath = process.env.PATH;
+    process.env.PATH = gitOnly;
+    let b;
+    let log = '';
+    try {
+      b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+      b.proc.stderr.on('data', (d) => { log += d; });
+      b.proc.stdout.on('data', (d) => { log += d; });
+      const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1'] });
+      assert.equal(r.ok, false);
+      assert.equal(r.reason, 'exec-failed');
+    } finally {
+      process.env.PATH = savedPath;
+      if (b) { b.proc.kill('SIGTERM'); await new Promise((r) => setTimeout(r, 300)); rmSync(b.dir, { recursive: true, force: true }); }
+    }
+    assert.equal(statSync(file).isFile(), true, 'the obstruction should have been cleared');
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).counters['codex\tpr\tread\tbroker-unavailable'], 1);
+    assert.match(log, /gh-usage/, 'clearing an obstruction must be reported, not silent');
+  });
+}
 
 test('startGitBroker returns null for non-git cwd (no dead wrapper)', () => {
   const dir = join(root, 'not-a-repo2');
