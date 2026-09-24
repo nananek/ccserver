@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyGhUsage, formatGhUsageReport, readCapped, recordGhUsage, resetGhUsage, resetGhUsageWarnings, resetTargetStatus } from './ghUsageRecording.js';
+import { classifyGhUsage, formatGhUsageReport, readCapped, recordGhUsage, resetGhUsage, resetGhUsageWarnings, aggregateStatus } from './ghUsageRecording.js';
 
 let dir;
 let oldEnabled;
@@ -237,7 +237,7 @@ test('reset refuses anything that is not an aggregate unless forced', () => {
   dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
   const victim = join(dir, 'victim.txt');
   writeFileSync(victim, 'IMPORTANT USER DATA\n');
-  assert.equal(resetTargetStatus(victim), 'not-an-aggregate');
+  assert.equal(aggregateStatus(victim), 'not-an-aggregate');
   assert.equal(resetGhUsage(victim), false);
   assert.equal(readFileSync(victim, 'utf8'), 'IMPORTANT USER DATA\n', 'reset must not clobber an unrelated file');
   // --force exists for an aggregate too corrupt to recognise, which is
@@ -247,16 +247,16 @@ test('reset refuses anything that is not an aggregate unless forced', () => {
 
   const asDir = join(dir, 'a-directory');
   mkdirSync(asDir);
-  assert.equal(resetTargetStatus(asDir), 'not-a-regular-file');
+  assert.equal(aggregateStatus(asDir), 'not-a-regular-file');
   assert.equal(resetGhUsage(asDir, { force: true }), false, 'not even --force may write over a directory');
   assert.equal(lstatSync(asDir).isDirectory(), true);
 
   const link = join(dir, 'link.json');
   symlinkSync(victim, link);
-  assert.equal(resetTargetStatus(link), 'not-a-regular-file', 'reset must not follow a symlink');
+  assert.equal(aggregateStatus(link), 'not-a-regular-file', 'reset must not follow a symlink');
 
   const fresh = join(dir, 'fresh.json');
-  assert.equal(resetTargetStatus(fresh), 'ok');
+  assert.equal(aggregateStatus(fresh), 'ok');
   assert.equal(resetGhUsage(fresh), true);
 });
 
@@ -311,15 +311,16 @@ test('a lock held right now is still respected', () => {
   assert.deepEqual(w.seen, []);
 });
 
-test('a directory at the aggregate path is cleared instead of wedging recording', () => {
+test('an empty directory at the aggregate path is cleared instead of wedging recording', () => {
   oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
   oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
   dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
   const file = join(dir, 'aggregate.json');
   // rename(2) refuses to replace a directory, so this stopped recording for
   // good even after the lock and tmp paths learned to clear obstructions.
+  // Only an EMPTY one is removed (rmdir) -- a non-empty directory is someone
+  // else's data and is refused instead; see the test further down.
   mkdirSync(file);
-  writeFileSync(join(file, 'decoy'), 'x');
   process.env.CCSERVER_GH_USAGE_RECORDING = '1';
   process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
   const w = armWarnings();
@@ -331,25 +332,27 @@ test('a directory at the aggregate path is cleared instead of wedging recording'
   assert.match(w.seen.join('\n'), /cleared an obstruction at the aggregate path/);
 });
 
-test('an obstruction too big to clear cheaply is refused out loud, not silently', () => {
+test('a non-empty directory obstruction is refused out loud, never deleted', () => {
   oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
   oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
   dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
   const file = join(dir, 'aggregate.json');
   const lock = `${file}.lock`;
   mkdirSync(lock);
-  for (let i = 0; i < 200; i++) writeFileSync(join(lock, `e${i}`), '');
+  writeFileSync(join(lock, 'someone-elses-file'), 'DATA');
   const old = new Date(Date.now() - 600_000);
   utimesSync(lock, old, old);
   process.env.CCSERVER_GH_USAGE_RECORDING = '1';
   process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
   const w = armWarnings();
   try {
-    // Deleting it synchronously would be the stall this module must not
-    // cause, so it declines -- but never in silence.
+    // This module only ever writes regular files here, so a non-empty
+    // directory is never its own work product -- it declines rather than
+    // deleting it, but never in silence.
     assert.equal(recordGhUsage({ client: 'codex', target: 'pr', operation: 'read', result: 'success' }), false);
   } finally { w.restore(); }
-  assert.equal(existsSync(lock), true);
+  assert.equal(existsSync(lock), true, 'the obstruction must be kept, not deleted');
+  assert.equal(readFileSync(join(lock, 'someone-elses-file'), 'utf8'), 'DATA');
   assert.match(w.seen.join('\n'), /not recording \(lock-stuck\)/);
 });
 
@@ -376,8 +379,128 @@ test('an aggregate that outgrew the read cap is repairable with --force', () => 
   dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
   const file = join(dir, 'aggregate.json');
   writeFileSync(file, 'x'.repeat(1024 * 1024 + 1));
-  assert.equal(resetTargetStatus(file), 'too-large');
+  assert.equal(aggregateStatus(file), 'too-large');
   assert.equal(resetGhUsage(file), false, 'still not silently overwritten');
   assert.equal(resetGhUsage(file, { force: true }), true);
   assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).counters, {});
+});
+
+test('a non-empty directory at the aggregate path is never recursively deleted', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const file = join(dir, 'operator-data');
+  // An operator typo -- or `enable --file <dir>`, which the CLI accepted with
+  // exit 0 -- pointed the aggregate at a real directory. Clearing obstructions
+  // with a recursive delete then destroyed its contents on the next gh call.
+  mkdirSync(join(file, 'sub'), { recursive: true });
+  writeFileSync(join(file, 'irreplaceable.txt'), 'YEARS OF WORK');
+  writeFileSync(join(file, 'sub', 'more.txt'), 'x');
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+  const w = armWarnings();
+  try {
+    assert.equal(recordGhUsage({ client: 'codex', target: 'pr', operation: 'read', result: 'success' }), false);
+  } finally { w.restore(); }
+  assert.equal(lstatSync(file).isDirectory(), true, 'the directory must survive');
+  assert.equal(readFileSync(join(file, 'irreplaceable.txt'), 'utf8'), 'YEARS OF WORK');
+  assert.equal(readFileSync(join(file, 'sub', 'more.txt'), 'utf8'), 'x');
+  assert.match(w.seen.join('\n'), /not recording \(aggregate-obstructed\)/);
+});
+
+test('a deep planted tree is declined immediately, not counted then deleted', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const file = join(dir, 'aggregate.json');
+  const lock = `${file}.lock`;
+  // The entry cap only ever counted the TOP level, so a handful of
+  // directories holding thousands of files passed it and were all deleted
+  // synchronously. rmdir cannot recurse, so depth stops mattering.
+  mkdirSync(lock);
+  for (let i = 0; i < 4; i++) {
+    const sub = join(lock, `d${i}`);
+    mkdirSync(sub);
+    for (let j = 0; j < 300; j++) writeFileSync(join(sub, `f${j}`), '');
+  }
+  const old = new Date(Date.now() - 600_000);
+  utimesSync(lock, old, old);
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+  const started = Date.now();
+  assert.equal(recordGhUsage({ client: 'codex', target: 'pr', operation: 'read', result: 'success' }), false);
+  const elapsed = Date.now() - started;
+  assert.equal(existsSync(join(lock, 'd0', 'f0')), true, '1200 files must not have been deleted');
+  assert.ok(elapsed < 500, `declining must be immediate, took ${elapsed}ms`);
+});
+
+test('repeatedly planting a stale lock warns once, not once per attempt', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const file = join(dir, 'aggregate.json');
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+  // The stale-lock notice reports a *successful* recovery, so it had been a
+  // raw console.warn outside the once-per-reason funnel -- one touch per gh
+  // call was enough to flood the broker's log.
+  const w = armWarnings();
+  try {
+    for (let i = 0; i < 5; i++) {
+      writeFileSync(`${file}.lock`, '');
+      const old = new Date(Date.now() - 600_000);
+      utimesSync(`${file}.lock`, old, old);
+      assert.equal(recordGhUsage({ client: 'codex', target: 'pr', operation: 'read', result: 'success' }), true);
+    }
+  } finally { w.restore(); }
+  assert.equal(w.seen.filter((l) => /stale aggregate lock/.test(l)).length, 1, w.seen.join('\n'));
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).counters['codex\tpr\tread\tsuccess'], 5);
+});
+
+test('a lock held far longer than any writer holds one stops being silent', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const file = join(dir, 'aggregate.json');
+  const lock = `${file}.lock`;
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+  const call = { client: 'codex', target: 'pr', operation: 'read', result: 'success' };
+  // Stamp the lock with the clock the module sees, so shifting time below
+  // models a lock being refreshed rather than one going stale.
+  const keepFresh = () => { writeFileSync(lock, ''); const t = new Date(Date.now()); utimesSync(lock, t, t); };
+  const w = armWarnings();
+  const realNow = Date.now;
+  try {
+    keepFresh();
+    // Ordinary contention is normal and must stay quiet...
+    assert.equal(recordGhUsage(call), false);
+    assert.deepEqual(w.seen, [], 'a genuinely held lock must not warn');
+    // ...but a refreshed planted lock is indistinguishable from a live writer
+    // at any single moment and differs only in how long it persists.
+    Date.now = () => realNow() + 120_000;
+    keepFresh();
+    assert.equal(recordGhUsage(call), false);
+  } finally { Date.now = realNow; w.restore(); }
+  assert.match(w.seen.join('\n'), /not recording \(lock-held-too-long\)/);
+});
+
+test('a warning quotes the path so a crafted one cannot forge log lines', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const odd = join(dir, 'a\nb\u001b[31m');
+  mkdirSync(odd);
+  const file = join(odd, 'aggregate.json');
+  mkdirSync(file);
+  writeFileSync(join(file, 'keep'), 'x');
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+  const w = armWarnings();
+  try { assert.equal(recordGhUsage({ client: 'codex', target: 'pr', operation: 'read', result: 'success' }), false); }
+  finally { w.restore(); }
+  const line = w.seen.find((l) => /aggregate-obstructed/.test(l));
+  assert.ok(line, w.seen.join('\n'));
+  assert.doesNotMatch(line, /\n/, 'a literal newline reached the log line');
+  assert.doesNotMatch(line, /\u001b\[31m/, 'a raw escape sequence reached the log');
 });

@@ -16,7 +16,7 @@
 // fixed categories.  Keeping the file where sessions cannot write it is the
 // only thing that makes the numbers trustworthy (see docs-site
 // sandbox/configuration.md).
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, opendirSync, openSync, readSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const VERSION = 1;
@@ -33,11 +33,15 @@ const MAX_AGGREGATE_BYTES = 1024 * 1024;
 // A lock whose mtime is further ahead than this cannot belong to a live
 // writer, whatever the clock says (see tryLock).
 const CLOCK_SKEW_MS = 5_000;
-// Clearing an obstruction is synchronous, so it is bounded: a planted tree
-// with thousands of entries would make the cleanup its own event-loop stall,
-// which is the very thing this module must never cause. Above the bound we
-// refuse, say so, and skip the write.
-const MAX_OBSTRUCTION_ENTRIES = 64;
+// A warning repeats at most this often per reason. Once-per-process kept a
+// flood out of the log but also meant a fault an operator missed went quiet
+// forever; an hourly reminder is still 24 lines a day at worst.
+const WARN_REPEAT_MS = 60 * 60 * 1000;
+// A lock genuinely held by a concurrent writer is released in well under a
+// millisecond. Being blocked by one for this long is not contention -- it is
+// someone refreshing a planted lock, which is otherwise indistinguishable
+// from a live writer and therefore silent (see tryLock).
+const HELD_LOCK_STUCK_MS = 60_000;
 const CLIENTS = new Set(['claude', 'codex', 'opencode', 'copilot', 'commandcode', 'shell']);
 const TARGETS = new Set(['issue', 'pr', 'repository', 'workflow', 'release']);
 const OPERATIONS = new Set(['read', 'create', 'edit', 'close', 'comment', 'workflow', 'release']);
@@ -96,15 +100,27 @@ function validRow(key, count) {
 // making failure observable is structural rather than per-case. One warning
 // per distinct reason keeps a hot path from becoming a log flood while
 // guaranteeing a wedged aggregate is never invisible.
-const warnedReasons = new Set();
+const warnedReasons = new Map(); // reason -> last warned at (ms)
+// Quote the path: a warning goes to the broker's log, and a configured path
+// can contain newlines or escape sequences. The CLI already does this for the
+// paths it prints; the log had been left raw.
+function q(path) { return JSON.stringify(String(path)); }
+// Every warning in this module goes through here, including the ones that
+// report a *successful* recovery -- those had been raw console.warn calls and
+// so escaped the once-per-reason rule entirely, which let a planted stale lock
+// produce a warning per gh call.
+function warnOnce(reason, message, now = Date.now()) {
+  const last = warnedReasons.get(reason);
+  if (last !== undefined && now - last < WARN_REPEAT_MS) return false;
+  warnedReasons.set(reason, now);
+  console.warn(`[gh-usage] ${message}`);
+  return true;
+}
 function abandon(reason, path, detail = '') {
-  if (!warnedReasons.has(reason)) {
-    warnedReasons.add(reason);
-    console.warn(`[gh-usage] not recording (${reason}) at ${path}${detail ? `: ${detail}` : ''}; counts are incomplete until this is resolved`);
-  }
+  warnOnce(reason, `not recording (${reason}) at ${q(path)}${detail ? `: ${detail}` : ''}; counts are incomplete until this is resolved`);
   return false;
 }
-// Exported for tests: each warning fires once per process, so a test that
+// Exported for tests: warnings are rate-limited per process, so a test that
 // asserts on one has to be able to arm it again.
 export function resetGhUsageWarnings() { warnedReasons.clear(); }
 
@@ -117,24 +133,29 @@ export function resetGhUsageWarnings() { warnedReasons.clear(); }
 // after the lock and tmp paths had been dealt with.
 //
 // unlink(2) removes files, symlinks, FIFOs and devices, and removes a symlink
-// without following it. It cannot remove a directory (EISDIR), so that case
-// falls through to rmSync -- bounded, because the delete is synchronous.
+// without following it. It cannot remove a directory (EISDIR), and the only
+// other thing tried here is rmdir(2), which removes an EMPTY directory and
+// nothing else.
+//
+// Deliberately NOT a recursive delete. An earlier version of this reached for
+// rmSync({recursive:true}) so that "clear an obstruction" would work for every
+// file type, which turned these paths into a delete primitive rooted at an
+// operator-configured path: pointing `file` at a real directory (a typo, or
+// `enable --file <dir>`, which the CLI accepted) destroyed its contents on the
+// next gh call. It was also not actually bounded -- the entry cap counted only
+// the top level, so eight directories holding 64k files still deleted all of
+// them synchronously.
+//
+// The uniformity that matters is that every obstruction takes the SAME PATH,
+// not that every obstruction gets deleted. This module only ever creates
+// regular files at these three paths, so a non-empty directory is never its
+// own work product and never something it should remove. Declining and saying
+// so satisfies the rule that recording must not stop silently, which is what
+// the recursive delete was reaching for.
 function clearObstruction(path) {
   try { unlinkSync(path); return true; }
   catch (e) { if (e.code === 'ENOENT') return true; }
-  // Count with opendir, not readdirSync: reading all of a 20k-entry planted
-  // tree just to decide it is too big to delete is itself the stall we are
-  // avoiding, and it would repeat on every gh call. Stop one past the bound.
-  let dir;
-  try { dir = opendirSync(path); }
-  catch { return false; }
-  let n = 0;
-  try {
-    while (n <= MAX_OBSTRUCTION_ENTRIES && dir.readSync() !== null) n++;
-  } catch { return false; }
-  finally { try { dir.closeSync(); } catch {} }
-  if (n > MAX_OBSTRUCTION_ENTRIES) return false;
-  try { rmSync(path, { recursive: true, force: true }); return true; }
+  try { rmdirSync(path); return true; }
   catch { return false; }
 }
 
@@ -243,16 +264,39 @@ function lockIsHeld(st) {
   return age >= -CLOCK_SKEW_MS && age < LOCK_STALE_MS;
 }
 
+// When the lock has been "held" continuously since this moment, it is no
+// longer plausible contention. Cleared every time the lock is actually taken.
+let heldSince = 0;
+
 function tryLock(lock) {
-  if (createLock(lock)) return true;
+  if (createLock(lock)) { heldSince = 0; return true; }
   let st;
   try { st = lstatSync(lock); }
-  catch { return createLock(lock) || abandon('lock-unavailable', lock); } // vanished, or never EEXIST
-  if (lockIsHeld(st)) return false; // a real concurrent writer: skip this increment, never wait
-  if (!clearObstruction(lock) || !createLock(lock)) {
-    return abandon('lock-stuck', lock, 'it could not be cleared; remove it by hand');
+  catch { // vanished, or the failure was never EEXIST
+    if (createLock(lock)) { heldSince = 0; return true; }
+    return abandon('lock-unavailable', lock);
   }
-  console.warn(`[gh-usage] removed a stale aggregate lock (${lock}); a previous writer may have crashed or the aggregate may be under attack`);
+  if (lockIsHeld(st)) {
+    // A real concurrent writer holds the lock for microseconds, so skipping
+    // this increment is normal and stays silent. Someone refreshing a planted
+    // lock looks identical at any single moment and differs only in duration
+    // -- which is the one thing that can be checked, so that the "held" branch
+    // cannot be a silent kill switch (it was, until this).
+    const now = Date.now();
+    if (!heldSince) heldSince = now;
+    else if (now - heldSince >= HELD_LOCK_STUCK_MS) {
+      abandon('lock-held-too-long', lock,
+        `it has been locked for ${Math.round((now - heldSince) / 1000)}s, far longer than a writer holds it; remove it by hand`);
+    }
+    return false;
+  }
+  if (!clearObstruction(lock) || !createLock(lock)) {
+    return abandon('lock-stuck', lock,
+      'it is not a file this module wrote and could not be removed (a non-empty directory is never removed); remove it by hand');
+  }
+  heldSince = 0;
+  warnOnce('stale-lock-removed',
+    `removed a stale aggregate lock (${q(lock)}); a previous writer may have crashed or the aggregate may be under attack`);
   return true;
 }
 
@@ -285,10 +329,12 @@ function renameOnto(tmp, path) {
   catch (e) {
     if (!['EISDIR', 'ENOTDIR', 'EEXIST', 'ENOTEMPTY'].includes(e.code)) throw e;
     if (!clearObstruction(path)) {
-      abandon('aggregate-obstructed', path, 'something that is not a file is in the way and could not be cleared');
+      abandon('aggregate-obstructed', path,
+        'something that is not a file is in the way and was not removed (a non-empty directory is never removed); move it aside by hand');
       throw e;
     }
-    console.warn(`[gh-usage] cleared an obstruction at the aggregate path (${path}); it was not a regular file`);
+    warnOnce('aggregate-obstruction-cleared',
+      `cleared an obstruction at the aggregate path (${q(path)}); it was not a regular file`);
   }
   renameSync(tmp, path);
 }
@@ -328,15 +374,17 @@ export function recordGhUsage({ client, target, operation, result, denial } = {}
   });
 }
 
-// What `reset` may replace. It creates or overwrites its target outright, so
-// a mistyped --file used to silently turn an operator's unrelated file into
-// aggregate JSON. Absent or an existing aggregate is always fine; a
-// directory, FIFO, device or symlink is never written; and any other regular
-// file needs --force, which also covers the one legitimate case this cannot
-// recognise -- an aggregate too corrupt to parse, i.e. exactly what `reset`
-// exists to repair. lstat, not stat: a symlink is not something to follow and
-// clobber.
-export function resetTargetStatus(path) {
+// What is actually sitting at an aggregate path. Used by `reset` to decide
+// what it may replace and by `show` to tell "nothing recorded yet" apart from
+// "could not be read" -- an empty report is the same either way, which left
+// an operator with a broken aggregate believing it was merely idle.
+//
+// For `reset`: absent or an existing aggregate is always fine; a directory,
+// FIFO, device or symlink is never written; and any other regular file needs
+// --force, which also covers the one legitimate case this cannot recognise --
+// an aggregate too corrupt to parse, i.e. exactly what `reset` exists to
+// repair. lstat, not stat: a symlink is not something to follow and clobber.
+export function aggregateStatus(path) {
   let st;
   try { st = lstatSync(path); }
   catch (e) { return e.code === 'ENOENT' ? 'ok' : 'unreadable'; }
@@ -367,7 +415,7 @@ const FORCEABLE = new Set(['not-an-aggregate', 'too-large']);
 // planted FIFO/symlink and restores recording, whereas refusing would let one
 // stop recording for good.
 export function resetGhUsage(path, { force = false } = {}) {
-  const status = resetTargetStatus(path);
+  const status = aggregateStatus(path);
   if (status !== 'ok' && !(force && FORCEABLE.has(status))) return false;
   return withLock(path, () => {
     writeState(path, emptyState());
