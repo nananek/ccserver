@@ -575,7 +575,7 @@ export const MIGRATIONS = [
     //             -> here
     //   static  = read once at process start, needs a restart to change,
     //             especially the security boundaries (browseRoots /
-    //             forceSandbox / allowUnsandboxedAgents / hiddenApps)
+    //             forceSandbox / hiddenApps)
     //             -> sandbox.config.json
     // The test for which side something belongs on: does the safety of an
     // ALREADY RUNNING session depend on the value? If yes, it is static.

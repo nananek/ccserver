@@ -171,7 +171,15 @@ export async function dirsRoute(fastify, opts) {
     const initialBrowsePath = browseRoots.length === 0 || isContained(resolve(home), browseRoots)
       ? home
       : browseRoots[0];
-    return { home, browseRoots, browseRootsInvalid, initialBrowsePath, defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: sandboxAvailable() };
+    // forceSandbox here is the EFFECTIVE flag (loadSandboxConfig derives it:
+    // explicit config OR browseRoots set), which is the whole point -- the UI
+    // used to read the explicit one and so offered an unsandboxed launch the
+    // server then overrode, then displayed the session as unsandboxed
+    // (issue #251). One field, one judgement, both sides.
+    //
+    // forceSandboxReason is for WORDING ONLY ("forceSandbox で強制" vs
+    // "browseRoots により必須"); the UI must never branch policy on it.
+    return { home, browseRoots, browseRootsInvalid, initialBrowsePath, defaultApp, forceSandbox, forceSandboxReason: cfg.forceSandboxReason, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: sandboxAvailable() };
   });
 
   fastify.get('/dirs', async (request, reply) => {

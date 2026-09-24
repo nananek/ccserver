@@ -9,7 +9,7 @@ ccserver の設定は 2 種類あります。どちらに属するかは好み�
 
 > Web UI から変更でき再起動なしで反映される設定は SQLite の `settings` テーブルに置く。
 > プロセス起動時に一度だけ読まれ、変更に再起動を要する設定 — とくにセキュリティ境界
-> (`browseRoots` / `forceSandbox` / `allowUnsandboxedAgents` / `hiddenApps`) — は
+> (`browseRoots` / `forceSandbox` / `hiddenApps`) — は
 > `sandbox.config.json` に置く。
 >
 > **判定基準は「実行中のセッションの安全性がその値に依存するか」。依存するなら静的。**
@@ -21,7 +21,7 @@ ccserver の設定は 2 種類あります。どちらに属するかは好み�
 | 置き場所 | SQLite の `settings` テーブル | `~/.config/ccserver/sandbox.config.json` |
 | 変更方法 | Web UI の設定タブ | テキストエディタ |
 | 反映 | 即時 | **ccserver の再起動が必要** |
-| 例 | ワーカープリセット、起動プリセット、ペアリング済みインスタンス、パスキー、GPG Vault | `docker` / `persistentHome` / `gpg` / `sshAgent` / `gpgVault` / `browseRoots` / `hiddenApps` / `allowUnsandboxedAgents` / `reviewerMcp` / `usageMcp` |
+| 例 | ワーカープリセット、起動プリセット、ペアリング済みインスタンス、パスキー、GPG Vault | `docker` / `persistentHome` / `gpg` / `sshAgent` / `gpgVault` / `browseRoots` / `hiddenApps` / `reviewerMcp` / `usageMcp` |
 
 ### 現時点での既知の例外
 

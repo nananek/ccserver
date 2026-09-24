@@ -129,6 +129,42 @@ test('GET /dirs/home exposes toolsAvailable for the opt-in tool toggles', async 
   assert.equal(toolsAvailable.codeReviewGraph, process.platform !== 'darwin');
 });
 
+// GET /dirs/home's forceSandbox is the EFFECTIVE flag (issue #251).
+//
+// The Web UI keyed its launch menu on this field while it meant "what the
+// operator literally wrote", so on a host with browseRoots set (and
+// forceSandbox absent) it offered 通常起動 for a session the server then
+// sandboxed anyway -- and showed the running session as unsandboxed. The fix
+// was to make ONE value carry the judgement, derived in loadSandboxConfig and
+// read by both sides. This pins that the route ships the derived value, not
+// the raw one.
+test('GET /dirs/home ships the effective forceSandbox, and the reason for wording', async () => {
+  await withConfig({}, async () => {
+    const { forceSandbox, forceSandboxReason } = (await app.inject({ method: 'GET', url: '/api/dirs/home' })).json();
+    assert.equal(forceSandbox, false);
+    assert.equal(forceSandboxReason, null);
+  });
+
+  // The row the UI got wrong: nothing says "forceSandbox" in this config.
+  await withConfig({ browseRoots: [homedir()] }, async () => {
+    const { forceSandbox, forceSandboxReason } = (await app.inject({ method: 'GET', url: '/api/dirs/home' })).json();
+    assert.equal(forceSandbox, true, 'browseRoots alone must already read as a forced sandbox');
+    assert.equal(forceSandboxReason, 'browseRoots', 'and the UI must be able to say WHY, without re-deriving it');
+  });
+
+  await withConfig({ forceSandbox: true }, async () => {
+    const { forceSandbox, forceSandboxReason } = (await app.inject({ method: 'GET', url: '/api/dirs/home' })).json();
+    assert.equal(forceSandbox, true);
+    assert.equal(forceSandboxReason, 'config');
+  });
+
+  // A leftover allowUnsandboxedAgents must not reopen the choice.
+  await withConfig({ browseRoots: [homedir()], allowUnsandboxedAgents: true }, async () => {
+    const { forceSandbox } = (await app.inject({ method: 'GET', url: '/api/dirs/home' })).json();
+    assert.equal(forceSandbox, true, 'the retired key must not resurrect the unsandboxed option');
+  });
+});
+
 // GET /dirs/home reports availableApps.opencodeGo: toggle on + Go API key
 // present. Sync and network-free. Pinned to a temp config + temp,
 // initially keyless XDG_DATA_HOME so the host's real auth.json never leaks

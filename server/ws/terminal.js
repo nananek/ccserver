@@ -221,6 +221,15 @@ export function attachTerminalHandler(chan) {
             // override) -- lets the client show whether GPG Vault is really
             // active for this specific session (gpgVaultBadge.js).
             gpgVaultActive: !!session.gpgVaultActive,
+            // Effective sandbox flag, for the same reason and in the same
+            // shape (issue #251). The client opens the tab optimistically
+            // with the value it REQUESTED, but createSession overrides that
+            // whenever forceSandbox or browseRoots mandates a sandbox -- so
+            // without this the tab and the terminal header kept showing
+            // "no sandbox" for a session that was in fact sandboxed, while
+            // the session list (which reads the server's value) showed the
+            // opposite for the very same session.
+            sandbox: !!session.sandbox,
             // How many clients (this one included) are watching the session.
             viewers: session.sockets.size,
           })
@@ -280,6 +289,9 @@ export function attachTerminalHandler(chan) {
             rows: session.rows,
             isReconnect: true,
             gpgVaultActive: !!session.gpgVaultActive,
+            // Same effective value on re-attach (issue #251): a tab restored
+            // from another device must not inherit this client's guess.
+            sandbox: !!session.sandbox,
             viewers: session.sockets.size,
           })
         );

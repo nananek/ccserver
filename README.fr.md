@@ -113,7 +113,7 @@ statique.
 - **Dynamique** -- modifiable depuis l'interface web, effet immédiat : stocké dans la table
   SQLite `settings`.
 - **Statique** -- lu une seule fois au démarrage, nécessite un redémarrage, en particulier les
-  frontières de sécurité (`browseRoots`, `forceSandbox`, `allowUnsandboxedAgents`,
+  frontières de sécurité (`browseRoots`, `forceSandbox`,
   `hiddenApps`) : stocké dans `~/.config/ccserver/sandbox.config.json`.
 
 `npm run setup` crée ce fichier pour vous :

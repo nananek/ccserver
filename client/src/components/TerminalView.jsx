@@ -237,7 +237,7 @@ function osc52Response(text) {
   return `\x1b]52;c;${btoa(bin)}\x07`;
 }
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, customLabel = null, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, customLabel = null, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onSandboxResolved, onExited, attachSessionId, xtermTheme, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -392,6 +392,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   useEffect(() => { onSessionIdRef.current = onSessionId; }, [onSessionId]);
   const onExitedRef = useRef(onExited);
   useEffect(() => { onExitedRef.current = onExited; }, [onExited]);
+  const onSandboxResolvedRef = useRef(onSandboxResolved);
+  useEffect(() => { onSandboxResolvedRef.current = onSandboxResolved; }, [onSandboxResolved]);
 
   const xtermThemeRef = useRef(xtermTheme);
   useEffect(() => { xtermThemeRef.current = xtermTheme; }, [xtermTheme]);
@@ -879,6 +881,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             }
             if (typeof msg.viewers === 'number') viewerCountRef.current = msg.viewers;
             if (typeof msg.gpgVaultActive === 'boolean') setGpgVaultActive(msg.gpgVaultActive);
+            // The sandbox flag the session ACTUALLY launched with. The tab was
+            // opened with the value this client requested, and the server
+            // overrides it whenever forceSandbox/browseRoots mandate a sandbox
+            // -- so lift the real one up and let the tab correct itself
+            // (issue #251). Older servers omit the field; the optimistic value
+            // is then all there is, exactly as before.
+            if (typeof msg.sandbox === 'boolean' && onSandboxResolvedRef.current) {
+              onSandboxResolvedRef.current(msg.sandbox);
+            }
             // 再接続などで同一タブに新しいセッションが始まるケースがあるため、
             // セッション確立のたびにexitedフラグを戻す。
             if (onExitedRef.current) onExitedRef.current(false);

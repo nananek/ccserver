@@ -44,6 +44,10 @@ function sanitizeSandboxOpts(opts, avail) {
 // The short title variant is used for disabled launch-button tooltips.
 const SANDBOX_UNAVAILABLE_NOTE = 'このサーバーではサンドボックス機能が利用できないため、サンドボックス起動・コンボ起動はできません。通常起動をご利用ください。';
 const FORCE_SANDBOX_UNAVAILABLE_NOTE = 'サーバー設定 (forceSandbox) でサンドボックスが強制されていますが、このホストではサンドボックス機能を利用できません。サンドボックス基盤をインストールするか、サーバー設定を見直してください。';
+// browseRoots is the other cause of a forced sandbox -- /api/dirs/home's
+// forceSandboxReason says which one is in effect (issue #251).
+const BROWSE_ROOTS_SANDBOX_NOTE = 'サーバー設定 (browseRoots) により、セッションはサンドボックスで起動されます。通常起動はできません。';
+const BROWSE_ROOTS_SANDBOX_UNAVAILABLE_NOTE = 'サーバー設定 (browseRoots) でサンドボックスが必須ですが、このホストではサンドボックス機能を利用できません。サンドボックス基盤をインストールするか、サーバー設定を見直してください。';
 const LAUNCHES_BLOCKED_TITLE = 'サーバー設定でサンドボックスが強制されていますが、このホストではサンドボックス機能を利用できません';
 const COMBO_UNAVAILABLE_TITLE = 'コンボ起動は常時サンドボックス必須ですが、このサーバーではサンドボックス機能を利用できません';
 
@@ -147,10 +151,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   const fileInputRef = useRef(null);
   const dragCountRef = useRef(0);
   const [sandboxDefault, setSandboxDefault] = useState(() => localStorage.getItem(SANDBOX_KEY) === '1');
-  // Server-enforced sandbox (sandbox.config.json's "forceSandbox"): when on,
-  // the sandbox toggle is overridden -- every launch is sandboxed and the
-  // "通常起動" choice is disabled. Set from /api/dirs/home.
+  // The server's EFFECTIVE "every session must be sandboxed" flag, straight
+  // off /api/dirs/home. It is the same field createSession enforces on, so
+  // the menu and the server cannot disagree -- they did, and that was issue
+  // #251: this used to be the operator's literal "forceSandbox" value, which
+  // missed the browseRoots case, so the menu offered 通常起動 for a launch
+  // the server then sandboxed anyway.
+  //
+  // Nothing here re-derives the rule; the server decides it in one place
+  // (loadSandboxConfig) and this reads the answer.
   const [forceSandbox, setForceSandbox] = useState(false);
+  // 'config' | 'browseRoots' | null -- WORDING ONLY, never a policy branch.
+  const [forceSandboxReason, setForceSandboxReason] = useState(null);
   // Whether a sandbox backend exists on the server host (/api/dirs/home's
   // sandboxAvailable). false disables the sandbox choice (and combo mode,
   // which always requires the sandbox). null until the fetch resolves;
@@ -267,7 +279,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   }, []);
 
   const chooseSandbox = useCallback((val) => {
-    if (forceSandbox) return; // server forbids unsandboxed launches
+    if (forceSandbox) return; // server overrides an unsandboxed request
     if (val && sandboxAvailable === false) return; // no sandbox backend on the server host
     setSandboxDefault(val);
     localStorage.setItem(SANDBOX_KEY, val ? '1' : '0');
@@ -508,6 +520,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
         setForceSandbox(true);
         setSandboxDefault(true);
       }
+      // Absent on a server older than this field: the note then just falls
+      // back to the generic forceSandbox wording.
+      setForceSandboxReason(data.forceSandboxReason || null);
       // No sandbox backend on the server host: the sandbox choice (and combo
       // mode, which always requires it) cannot work. Correct a remembered
       // sandbox default the same way stale app defaults are corrected
@@ -748,13 +763,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
 
   // Sandbox choice + gpg/sshAgent suboptions for the single-launch pane.
   // Sandbox choice unavailable when no sandbox backend exists on the server host
-  // (combo mode is covered separately at its own toggle/button). Under
-  // forceSandbox the toggle stays locked on -- launches will fail
+  // (combo mode is covered separately at its own toggle/button). When the
+  // server mandates a sandbox the toggle stays locked on -- launches will fail
   // server-side, and the note below says so.
   const sandboxChoiceDisabled = sandboxAvailable === false && !forceSandbox;
-  // Contradictory server config (forceSandbox but no sandbox backend): no
-  // launch can succeed, so the launch buttons are disabled as well
-  // (fail-closed UI).
+  // Contradictory server config (a sandbox is mandated -- by forceSandbox or
+  // by browseRoots -- but no backend exists): no launch can succeed, so the
+  // launch buttons are disabled as well (fail-closed UI).
   // null (fetch pending / older server) keeps everything enabled.
   const launchesBlocked = forceSandbox && sandboxAvailable === false;
   const sandboxPicker = (
@@ -823,9 +838,11 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
       </div>
       <p className="open-menu-note">
         {forceSandbox && sandboxAvailable === false
-          ? FORCE_SANDBOX_UNAVAILABLE_NOTE
+          ? (forceSandboxReason === 'browseRoots' ? BROWSE_ROOTS_SANDBOX_UNAVAILABLE_NOTE : FORCE_SANDBOX_UNAVAILABLE_NOTE)
           : forceSandbox
-            ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
+            ? (forceSandboxReason === 'browseRoots'
+              ? BROWSE_ROOTS_SANDBOX_NOTE
+              : 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。')
             : sandboxAvailable === false
               ? SANDBOX_UNAVAILABLE_NOTE
               : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。初期値は一般設定で変更でき、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
@@ -848,7 +865,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           {sandboxAvailable === false && (
             <div className={`directory-warning-banner${forceSandbox ? ' is-error' : ''}`} role="alert">
               {forceSandbox
-                ? FORCE_SANDBOX_UNAVAILABLE_NOTE
+                ? (forceSandboxReason === 'browseRoots' ? BROWSE_ROOTS_SANDBOX_UNAVAILABLE_NOTE : FORCE_SANDBOX_UNAVAILABLE_NOTE)
                 : SANDBOX_UNAVAILABLE_NOTE}
             </div>
           )}

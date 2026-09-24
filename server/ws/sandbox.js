@@ -635,6 +635,12 @@ export function _resetVikunjaWarningForTests() {
   warnedVikunjaConfig = false;
 }
 
+// Same latch + seam for the retired allowUnsandboxedAgents key.
+let warnedAllowUnsandboxedAgents = false;
+export function _resetAllowUnsandboxedAgentsWarningForTests() {
+  warnedAllowUnsandboxedAgents = false;
+}
+
 // Load the optional sandbox config. Path from the registry (issue #201):
 // CCSERVER_SANDBOX_CONFIG, else $XDG_CONFIG_HOME/ccserver/sandbox.config.json,
 // falling back to the pre-#201 in-tree server/sandbox.config.json while that
@@ -734,11 +740,10 @@ export function loadSandboxConfig() {
       ? rawCommitGuard.blockedPatterns.filter((p) => typeof p === 'string' && p)
       : [],
   };
-  // Forbid launching the agent (or a shell) outside the sandbox: every session
-  // is forced sandboxed, and a launch is refused -- instead of falling back to
-  // a direct (unsandboxed) spawn -- when bwrap is unavailable (or on Windows).
-  // Also blocks /usage's direct-launch fallback; see usage.js. Default off.
-  const forceSandbox = raw.forceSandbox === true;
+  // What the operator literally wrote. The EFFECTIVE value is computed below,
+  // after browseRoots is known, because browseRoots implies this -- read that
+  // one, not this.
+  const forceSandboxExplicit = raw.forceSandbox === true;
   // ccserver-notify (see notify.js): the Discord webhook the notify MCP tool
   // delivers to, plus the initial subscription seed (https webhook URLs only --
   // a non-https URL is dropped, never trusted as a delivery target). The
@@ -881,14 +886,45 @@ export function loadSandboxConfig() {
   const browseRootsEmptyArray = Array.isArray(raw.browseRoots) && raw.browseRoots.length === 0;
   const browseRootsInvalid = configError !== null
     || (browseRootsPresent && !browseRootsEmptyArray && browseRoots.length === 0);
-  // Whether an agent session (shell:false) may run unsandboxed while
-  // browseRoots is set. Default false: browseRoots alone would otherwise
-  // still leave an unsandboxed agent free to read/write anything the
-  // ccserver process can reach, since only its cwd (not its filesystem
-  // access) is constrained without a sandbox. Shell sessions have no such
-  // opt-out (see createSession) -- issue #189 explicitly rejected one for
-  // them.
-  const allowUnsandboxedAgents = raw.allowUnsandboxedAgents === true;
+  // THE effective "every session must be sandboxed" flag, decided once, here.
+  //
+  // browseRoots implies it. browseRoots only narrows what the WEB UI may
+  // browse and launch into -- it does not confine a process once started. An
+  // unsandboxed agent is a coding agent: it runs shell commands, so `cd` and
+  // `cat` walk straight out of the roots. So "browseRoots is set" and "a
+  // session may run unsandboxed" were never compatible; the config merely let
+  // an operator ask for a containment the implementation could not give.
+  //
+  // Collapsing it to one value here is the point. The old arrangement derived
+  // this judgement separately in createSession (mustSandboxShell /
+  // mustSandboxAgent) and in the Web UI (which looked only at the explicit
+  // forceSandbox) -- and the UI's copy was the incomplete one, so it offered
+  // an unsandboxed launch the server then overrode, and then displayed the
+  // running session as unsandboxed (issue #251). Everything downstream now
+  // reads this single field.
+  const forceSandbox = forceSandboxExplicit || browseRoots.length > 0;
+  // Which of the two causes is in effect -- for WORDING ONLY (refusal text,
+  // UI notes). Never branch policy on it: that is what forceSandbox is for.
+  const forceSandboxReason = !forceSandbox ? null : (forceSandboxExplicit ? 'config' : 'browseRoots');
+
+  // allowUnsandboxedAgents (retired). It used to let an agent run unsandboxed
+  // while browseRoots was set. It never delivered what its name promised --
+  // see above -- so it is ignored rather than honoured. Warned about, not
+  // silently dropped: a host that still sets it is a host whose operator
+  // believes agents run unsandboxed there, and they now do not. Same
+  // once-per-process shape as the retired notify.vikunja key above.
+  if (raw.allowUnsandboxedAgents !== undefined && !warnedAllowUnsandboxedAgents) {
+    warnedAllowUnsandboxedAgents = true;
+    console.warn(
+      '[config] "allowUnsandboxedAgents" has been retired and is ignored. It allowed an agent to run '
+      + 'outside the sandbox while "browseRoots" was set, but an agent that can run shell commands simply '
+      + 'walks out of those roots, so the setting promised a containment it never provided. '
+      + (browseRoots.length > 0
+        ? 'Because "browseRoots" is set, agent sessions are now always sandboxed.'
+        : '"browseRoots" is not set here, so nothing changes for this host.')
+      + ' Remove the key to silence this.',
+    );
+  }
   // Network isolation (see network-broker.js): isolate is the master
   // switch for the whole feature (false by default: no broker, open egress,
   // no live toggle on either backend). initialState never decides whether
@@ -899,7 +935,7 @@ export function loadSandboxConfig() {
   // cannot drift apart -- see that function's header comment.
   const network = normalizeNetworkSettings(raw.network);
   return {
-    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, allowUnsandboxedAgents, network,
+    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, forceSandboxReason, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, network,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       // Agent notification bridge (plan-notify-bridge). Parsed by the same
