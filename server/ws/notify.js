@@ -387,15 +387,36 @@ export function restoreNotify() {
 // tolerates any run of invisibles between the letters and consumes them along
 // with the marker.
 //
-// HONEST LIMIT: this defangs characters that are INVISIBLE, not characters
-// that merely LOOK like the ones in "_from". Full-width `＿from：` and the
-// Cyrillic `_frом:` are still possible, and enumerating homoglyphs is not a
-// winnable game. The point of this is that a reader cannot be shown something
-// byte-identical in appearance to ccserver's own footer; a near-miss in a
-// different script is a weaker trick and is left alone deliberately.
-const IGN = '[\\p{Default_Ignorable_Code_Point}\\p{Cf}\\p{Mn}]*';
+// HONEST LIMIT: this covers characters that are invisible or render blank --
+// the default-ignorable set, format and combining marks, plus U+2800 (braille
+// blank), U+FFFC and the private-use areas, which a review found rendering as
+// nothing in some fonts. It does NOT cover characters that merely LOOK like
+// the ones in "_from": full-width `＿from：` and the Cyrillic `_frом:` are
+// still possible, and enumerating homoglyphs is not a winnable game. The
+// point is that a reader cannot be shown something byte-identical in
+// appearance to ccserver's own footer; a near-miss in a different script is a
+// weaker trick and is left alone deliberately.
+//
+// PERFORMANCE IS PART OF THE CONTRACT HERE. The first attempt at this wrote
+// the tail as `m <IGN>* \s* <IGN>*:` -- three adjacent quantifiers over
+// OVERLAPPING sets (JS's \s contains U+FEFF, which is also Cf). On input like
+// `_from` + CGJ x n with no colon, the engine enumerates every way to split
+// that run between them: 32k characters took 6.7 SECONDS, 100k took 67.8, and
+// a 1MiB MCP argument extrapolated to about two hours of a frozen event loop.
+// A defence against an invisible-character bypass had become a far bigger
+// hole than the bypass.
+//
+// The rule that keeps it linear: ONE quantifier per position, over ONE class
+// that already contains everything allowed there. Do not reintroduce a second
+// star next to this one -- notify.test.js has a timing test that fails if you
+// do, but understanding why is cheaper than reading the failure.
+const IGN_CHARS = '\\p{Default_Ignorable_Code_Point}\\p{Cf}\\p{Mn}\\u2800\\uFFFC\\p{Co}';
+const IGN = `[${IGN_CHARS}]*`;
+// The tail additionally allows real whitespace (`_from :`), folded into the
+// same single class rather than chained after it.
+const IGN_OR_SPACE = `[\\s${IGN_CHARS}]*`;
 const FOOTER_MARKER_RE = new RegExp(
-  `_${IGN}f${IGN}r${IGN}o${IGN}m${IGN}\\s*${IGN}:`,
+  `_${IGN}f${IGN}r${IGN}o${IGN}m${IGN_OR_SPACE}:`,
   'giu',
 );
 
@@ -446,8 +467,12 @@ function attributionField(value) {
     .replace(/ {2,}/g, ' ')
     .trim();
   const defanged = defangFooterMarker(flat);
-  return defanged.length > ATTRIBUTION_FIELD_MAX
-    ? `${defanged.slice(0, ATTRIBUTION_FIELD_MAX - 1)}\u2026`
+  // Code points, not UTF-16 units. This is the same defect F3 fixed in
+  // pushDelivery's byte-trim, left behind here -- a project name of emoji
+  // ended with half a surrogate pair.
+  const cps = Array.from(defanged);
+  return cps.length > ATTRIBUTION_FIELD_MAX
+    ? `${cps.slice(0, ATTRIBUTION_FIELD_MAX - 1).join('')}\u2026`
     : defanged;
 }
 

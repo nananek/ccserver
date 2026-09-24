@@ -519,9 +519,62 @@ test('F1: subscribe() rejects a mapped-IPv6 loopback/metadata webhook', () => {
 
 // --- increment review (attack-review-notify-579a096) -------------------------
 
+// The defence added for F1 became a worse hole than the bypass it closed: a
+// tail of three adjacent quantifiers over overlapping sets turned into
+// catastrophic backtracking (32k chars = 6.7s, 1MiB extrapolated to ~2 hours
+// of a frozen event loop). These two cases are the regression net. The
+// thresholds are deliberately loose -- a shape check for "is this quadratic
+// again", not a benchmark, so a slow CI box will not flake.
+test('H1: the footer defang is linear on adversarial input, not quadratic', () => {
+  // 1MiB is the MCP transport's own cap, so this is the worst case a single
+  // notify tool call can present.
+  for (const n of [32_000, 100_000, 1_000_000]) {
+    const evil = `_from${'\u034f'.repeat(n)}x`; // a CGJ run never closed by ':'
+    const started = process.hrtime.bigint();
+    defangFooterMarker(evil);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 2000, `${n} chars took ${ms.toFixed(0)}ms (quadratic regression?)`);
+  }
+});
+
+test('H1: other invisible runs and mixed whitespace stay linear too', () => {
+  const cases = [
+    `_from${'\u200b'.repeat(500_000)}x`,
+    `_from${'\u034f \u200b\t'.repeat(125_000)}x`,
+    `_${'\u034f'.repeat(250_000)}f${'\u034f'.repeat(250_000)}r`,
+  ];
+  for (const evil of cases) {
+    const started = process.hrtime.bigint();
+    defangFooterMarker(evil);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 2000, `took ${ms.toFixed(0)}ms`);
+  }
+});
+
+test('F1: whitespace is handled where it renders identically, not mid-word', () => {
+  // `_from<NBSP>:` looks exactly like `_from:` and is defanged. `_fr<NBSP>om:`
+  // renders as "_fr om:" -- a visible gap, not a lookalike -- and is left be.
+  for (const c of ['\u00a0', '\u2009', ' ', '\t']) {
+    assert.ok(!defangFooterMarker(`x _from${c}: y`).includes('_from'), `tail ${JSON.stringify(c)}`);
+  }
+  assert.match(defangFooterMarker('_fr\u00a0om:'), /_fr/, 'mid-word whitespace is out of scope by design');
+});
+
+test('L2: the attribution cap never splits a surrogate pair', () => {
+  // The same defect F3 fixed in pushDelivery's byte-trim, left behind here.
+  const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  for (let n = 1; n <= 120; n++) {
+    const footer = buildAttribution({ projectName: '\u{1F389}'.repeat(n), sessionId: '\u{1F389}'.repeat(n) }, 'h');
+    assert.ok(!LONE.test(footer), `${n} emoji produced a lone surrogate`);
+  }
+});
+
+
 test('F1: invisible characters hidden inside the footer marker do not evade it', () => {
   // Every one of these renders as "_from:" and slid past the literal pattern.
-  const hidden = ['​', '͏', '᠎', '️', '\u{E0000}', '￹', '⁠', '‍'];
+  const hidden = ['\u200b', '\u034f', '\u180e', '\ufe0f', '\u{E0000}', '\ufff9', '\u2060', '\u200d',
+    // Added after a review found these rendering blank in some fonts (L3).
+    '\u2800', '\ufffc', '\ue000', '\u{F0000}'];
   for (const c of hidden) {
     for (const probe of [`_from${c}:`, `_fr${c}om:`, `_${c}from:`]) {
       const out = defangFooterMarker(`x ${probe} y`);
