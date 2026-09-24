@@ -111,6 +111,11 @@ jobs:
     name: Docs build (docs-site)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # This job only reads the repo and builds; nothing it does needs write
+    # access. The other jobs in this file inherit the repository default the
+    # same way -- tightening those is a separate change, not folded in here.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
 
