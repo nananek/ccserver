@@ -154,7 +154,7 @@ export function reviewWorktreePath(projectCwd, jobId) {
 // open(2) for ever, and since this is execFileSync the whole ccserver process
 // blocks with it -- SIGTERM included, so only SIGKILL gets the host back.
 // Measured: with no timeout the call never returns; with one it stalls for the
-// timeout and then throws (signal SIGTERM, errno ETIMEDOUT).
+// timeout and then throws (code ETIMEDOUT, signal SIGTERM).
 //
 // The timeout is what removes the PERMANENT hang. It does not make the call
 // non-blocking: the event loop still stops for up to GIT_TIMEOUT_MS, and a
@@ -166,6 +166,33 @@ export function reviewWorktreePath(projectCwd, jobId) {
 // tree. Overridable for a host where that is genuinely slower.
 const GIT_TIMEOUT_MS = Number(process.env.CCSERVER_REVIEWER_GIT_TIMEOUT_MS) || 10_000;
 
+// Did spawnSync's own timeout kill this child?
+//
+// `code` alone, and both of the conditions this test used to also carry were
+// removed on purpose (measured on Node 26; reviewer.test.js pins all four
+// shapes):
+//
+//   - `errno === -110` was Linux-only. errno is libuv's NUMERIC value, and
+//     ETIMEDOUT is 110 on Linux but 60 on macOS (xnu), so on a macOS host that
+//     conjunct was simply never true: the timeout went out UNTAGGED and the one
+//     pre-acceptance caller reported "cwd is not a git repository" about a
+//     directory that plainly is one -- exactly the wrong answer the tagging
+//     exists to prevent (#252 gate, F1). `code` is the error NAME, the same
+//     string on every platform.
+//   - `signal === 'SIGTERM'` was the DANGEROUS half rather than a harmless
+//     synonym, so it could not simply be kept once errno was dropped: a child
+//     killed by an EXTERNAL SIGTERM (an operator, a supervisor) reports signal
+//     SIGTERM too, and gets NO code and NO errno at all. Accepting it would tag
+//     someone else's kill as a git timeout. Node sets code ETIMEDOUT only when
+//     spawnSync's own timer fired, which is precisely the case meant here.
+//
+// Exported for the tests: the FIFO case below can only exercise the platform it
+// runs on, and CI runs these on Linux, so the platform-independence itself has
+// to be checkable from a synthetic error shape.
+export function isSpawnTimeout(err) {
+  return !!err && err.code === 'ETIMEDOUT';
+}
+
 function git(cwd, args) {
   try {
     return execFileSync('git', ['-C', cwd, ...args], {
@@ -176,7 +203,7 @@ function git(cwd, args) {
     // swallow failures into benign defaults ("no origin remote", "not a
     // repo"), which for a REAL repo whose git was blocked would be a wrong
     // answer wearing a normal one's clothes. Tag it so they can tell.
-    if (err && (err.signal === 'SIGTERM' || err.code === 'ETIMEDOUT') && err.errno === -110) {
+    if (isSpawnTimeout(err)) {
       throw Object.assign(
         new Error(`git ${args[0]} in ${cwd} exceeded ${GIT_TIMEOUT_MS}ms and was killed`),
         { code: 'EGITTIMEOUT', cause: err },
@@ -368,10 +395,20 @@ export function snapshotDirtyChanges(projectCwd) {
 
 export function applyPatchToWorktree(worktreePath, patchText) {
   if (!patchText || !patchText.trim()) return;
+  // Not routed through git() above because this one needs `input` on stdin,
+  // which that helper deliberately does not offer (it pipes stdin from
+  // /dev/null). It gets the same timeout by hand instead: the cwd here is a
+  // review worktree the host created moments ago under a unique jobId, before
+  // any session exists, so no sandbox can plant a FIFO in it TODAY -- but an
+  // untimed synchronous git is a permanent host-wide hang the moment that
+  // stops being true (if apply ever moves after session start, or the review
+  // worktree is ever bind-mounted). Cheap here, so it does not wait for that
+  // (#252 gate, F2).
   execFileSync('git', ['-C', worktreePath, 'apply', '--whitespace=nowarn', '-'], {
     input: patchText,
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: GIT_TIMEOUT_MS,
   });
 }
 
