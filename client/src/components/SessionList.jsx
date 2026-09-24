@@ -1,6 +1,30 @@
 import TabIcon from './TabIcon.jsx';
 import { useGpgVaultStatusContext } from './GpgVaultStatusProvider.jsx';
 import { gpgVaultBadgeState } from '../gpgVaultBadge.js';
+import { activityInfo } from '../activityLevel.js';
+
+// エージェントの稼働度 (緑=待機中 / 黄=低活動 / 赤=稼働中)。行の左端の縦線は
+// 「ビューアが接続しているか」という別の軸なので混ぜず、独立した点で出す。
+// 色だけに頼らないよう、レベルごとに形 (中空 / 半分 / 塗りつぶし) を変え、
+// 状態語は行の aria-label と title の両方に入れる (活動なしのときは何も
+// 出さない: サーバーが level:null = 「その問いが成立しない」と返す)。
+function ActivityDot({ activity }) {
+  const info = activityInfo(activity);
+  if (!info) return null;
+  return (
+    <span
+      className={`session-activity ${info.className}${info.verified ? '' : ' is-unverified'}`}
+      title={info.title}
+      aria-hidden="true"
+    />
+  );
+}
+
+// aria-label 用の接頭辞。状態語を読み上げに載せる (点自体は aria-hidden)。
+function activityAria(activity) {
+  const info = activityInfo(activity);
+  return info ? `${info.ariaText}, ` : '';
+}
 
 export function baseName(path) {
   if (!path) return '';
@@ -79,10 +103,11 @@ export default function SessionList({
                   type="button"
                   role="menuitem"
                   className="session-menu-select"
-                  aria-label={`${tab.exited ? '終了済み' : '稼働中'}: ${displayLabel}`}
+                  aria-label={`${activityAria(tab.activity)}${tab.exited ? '終了済み' : '稼働中'}: ${displayLabel}`}
                   onClick={() => { onSelectTab(tab.id); }}
                 >
                   <span className="session-menu-item-top">
+                    <ActivityDot activity={tab.activity} />
                     <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
                     <span className="session-menu-label">{displayLabel}</span>
                     {(() => {
@@ -179,10 +204,11 @@ export default function SessionList({
                 type="button"
                 role="menuitem"
                 className="session-menu-select"
-                aria-label={`${s.connected ? '稼働中' : 'アイドル'}: ${s.customLabel || s.cwd || s.id}`}
+                aria-label={`${activityAria(s.activity)}${s.connected ? '稼働中' : 'アイドル'}: ${s.customLabel || s.cwd || s.id}`}
                 onClick={() => { onOpenSession(s); }}
               >
                 <span className="session-menu-item-top">
+                  <ActivityDot activity={s.activity} />
                   <TabIcon type="terminal" app={s.app} shell={!!s.shell} />
                   <span className="session-menu-label">{s.customLabel || baseName(s.cwd) || s.id.slice(0, 8)}</span>
                   {(() => {
@@ -230,10 +256,11 @@ export default function SessionList({
                   type="button"
                   role="menuitem"
                   className="session-menu-select"
-                  aria-label={`リモート (${host}): ${s.cwd || s.id}`}
+                  aria-label={`${activityAria(s.activity)}リモート (${host}): ${s.cwd || s.id}`}
                   onClick={() => { onOpenRemoteSession(entry); }}
                 >
                   <span className="session-menu-item-top">
+                    <ActivityDot activity={s.activity} />
                     <TabIcon type="terminal" app={s.app} shell={!!s.shell} />
                     <span className="session-menu-label">{label}</span>
                     {s.sandbox

@@ -3,6 +3,7 @@ import { authFetch, getToken } from '../auth.js';
 import { displayPath } from '../displayPath.js';
 import TabIcon from './TabIcon.jsx';
 import { formatSize } from '../formatSize.js';
+import { activityInfo } from '../activityLevel.js';
 
 const TerminalView = lazy(() => import('./TerminalView.jsx'));
 const DocPreview = lazy(() => import('./DocPreview.jsx'));
@@ -395,6 +396,16 @@ export default function GroupTabView({
   // name fall back to the plain role label.
   const memberLabel = (m) => (m.name ? `${m.name}（${m.role}）` : roleLabel(m.role));
 
+  // サブタブのツールチップ兼アクセシブル名。稼働度を色だけで伝えないため、
+  // 状態語とその根拠 (activityInfo の title) をここに載せる。
+  const memberTitle = (m) => {
+    const info = activityInfo(m.activity);
+    const head = info ? `${memberLabel(m)} — ${info.label}` : memberLabel(m);
+    const parts = [m.cwd ? `${head} — ${m.cwd}` : head];
+    if (info) parts.push(info.title);
+    return parts.join('\n');
+  };
+
   return (
     <div className="group-tab-view">
       <div className="group-subtab-bar">
@@ -405,12 +416,22 @@ export default function GroupTabView({
             onClick={() => setActiveRole(m.role)}
             role="button"
             tabIndex={0}
-            title={m.cwd ? `${memberLabel(m)} — ${m.cwd}` : memberLabel(m)}
+            title={memberTitle(m)}
+            aria-label={memberTitle(m)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') setActiveRole(m.role);
             }}
           >
             <span className="group-subtab-label">
+              {/* エージェントの稼働度。右端の current-turn ドット (オーケスト
+                  レーターが誰の手番と思っているか) とは別の軸なので、こちらは
+                  タブの左端に置いて衝突させない。色だけに頼らないよう形を変え、
+                  状態語はタブの title / aria-label に入れている。 */}
+              {(() => {
+                const info = activityInfo(m.activity);
+                if (!info) return null;
+                return <span className={`group-subtab-activity ${info.className}${info.verified ? '' : ' is-unverified'}`} aria-hidden="true" />;
+              })()}
               <TabIcon type="terminal" app={m.app === 'codex' ? 'codex' : m.app === 'opencode' ? 'opencode' : 'claude'} shell={false} />
               {memberLabel(m)}
               {m.model && <span className="group-subtab-model" title={m.model}>{m.model}</span>}

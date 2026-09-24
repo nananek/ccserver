@@ -377,6 +377,15 @@ export function getTabStatus(deps, { sessionId }) {
     // (bytes-based), a spinner that keeps redrawing keeps this small -- a
     // large value means the screen is genuinely static.
     screenIdleMs: session.screenLastChangeAt != null ? Date.now() - session.screenLastChangeAt : null,
+    // The graded read of the same question (see activity.js): level 'idle'
+    // (waiting for input), 'low' (running but barely redrawing -- a spinner,
+    // a long tool call) or 'busy' (actively painting output). Unlike the two
+    // raw idle figures above, 'idle' here is not a timing guess: it requires
+    // the app's own "esc to interrupt" footer marker to be ABSENT as well as
+    // the screen to be still, so a thinking member never reads as idle.
+    // `reason` says which rule decided, `markerVerified` whether this app has
+    // a captured-frame marker at all.
+    activity: deps.sessionManager.activitySnapshot(session),
     // Whether THIS session can use docker right now (a live rootless dockerd
     // holds at most one project's data-root at a time -- see
     // sessionManager.dockerAvailability). Check before handing this session a

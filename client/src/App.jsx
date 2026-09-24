@@ -19,6 +19,7 @@ import { useSessionSidebarPrefs } from './hooks/useSessionSidebarPrefs.js';
 import { NARROW_DRAWER_QUERY } from './hooks/viewportQuery.js';
 import { useNotifications } from './hooks/useNotifications.js';
 import { useRemoteSessions } from './hooks/useRemoteSessions.js';
+import { useVisiblePolling } from './hooks/useVisiblePolling.js';
 import { loadNavGuardMode, saveNavGuardMode, useNavGuard } from './hooks/useNavGuard.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
@@ -678,6 +679,12 @@ export default function App() {
     // on tab changes too.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionPanelOpen, sessionSidebarMode, fetchServerSessions, fetchServerGroups, groupsVersion, sessionTabsKey]);
+  // The events above are enough to keep membership right, but not the
+  // per-session activity level (SessionList's dots), which changes on its own
+  // as the agents work. Poll while the panel is actually on screen; the hook
+  // skips ticks for a backgrounded browser tab and stops entirely when the
+  // panel is closed.
+  useVisiblePolling(fetchServerSessions, 3000, sessionPanelOpen);
   const closeSessionMenu = useCallback(() => setSessionMenuOpen(false), []);
   const toggleSessionMenu = useCallback(() => {
     setSessionMenuOpen((v) => !v);
@@ -921,10 +928,18 @@ export default function App() {
   // `session` message instead, so its open header badge doesn't depend on
   // serverSessions' event-driven (not continuously polled) refresh cadence.
   const serverSessionsById = new Map(serverSessions.map((s) => [s.id, s]));
+  // Remote tabs are not in serverSessions (that list is this instance's own
+  // sessions): their reading comes from the peer's listing, relayed through
+  // useRemoteSessions. Without this second index an OPENED remote tab would
+  // be the only row in the list with no activity dot.
+  const remoteSessionsByKey = new Map(
+    remoteSessions.map(({ instance, session }) => [`${instance.id}:${session.id}`, session]),
+  );
   const sessionTabsForList = sessionTabs.map((t) => {
     const sid = t.sessionId || t.attachSessionId || null;
     const srv = sid ? serverSessionsById.get(sid) : null;
-    return { ...t, gpgVaultActive: srv?.gpgVaultActive ?? false };
+    const remoteSrv = t.remote && sid ? remoteSessionsByKey.get(`${t.remote.instanceId}:${sid}`) : null;
+    return { ...t, gpgVaultActive: srv?.gpgVaultActive ?? false, activity: (srv || remoteSrv)?.activity ?? null };
   });
   const groupTabs = tabs.filter((t) => t.type === 'group');
   const openedTabCount = sessionTabs.length + groupTabs.length;
