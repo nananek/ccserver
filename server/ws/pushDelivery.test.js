@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deliverToSubscribers, vapidSubject } from './pushDelivery.js';
+import { deliverToSubscribers, vapidSubject, sanitizePushText } from './pushDelivery.js';
 import { MAX_PAYLOAD_BYTES } from './webPush.js';
 
 const KEYS = { publicKey: 'BPub', privateKey: 'Priv' };
@@ -134,4 +134,40 @@ test('a missing VAPID identity is reported, not thrown', async () => {
     deliverPush: async () => ({ ok: true, gone: false, status: 201 }),
   });
   assert.deepEqual(res, { sent: 0, failed: 3, pruned: 0 });
+});
+
+// --- increment review (attack-review-notify-579a096) -------------------------
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+test('F3: the byte-trim never re-introduces a lone surrogate', async () => {
+  // sanitizePushText replaces lone surrogates, but the size-convergence loop
+  // used to slice by UTF-16 unit and split a pair right back open. This is the
+  // exact body an attacker review reported it on.
+  const h = harness();
+  await deliverToSubscribers({ title: 'T', body: '\u{1F389}'.repeat(1900) + 'a'.repeat(200) }, h.deps);
+  const payload = JSON.parse(h.sent[0].payload);
+  assert.ok(!LONE_SURROGATE.test(payload.body), 'no lone surrogate may survive the trim');
+  assert.ok(Buffer.byteLength(h.sent[0].payload, 'utf-8') <= MAX_PAYLOAD_BYTES);
+  assert.ok(payload.body.endsWith('…'));
+});
+
+test('F3: emoji-only bodies of many sizes all stay well-formed and in budget', async () => {
+  // The trim length depends on where the multi-byte characters fall, so sweep
+  // sizes rather than trusting one.
+  for (let n = 900; n <= 2100; n += 97) {
+    const h = harness();
+    // eslint-disable-next-line no-await-in-loop
+    await deliverToSubscribers({ title: 'T', body: '\u{1F389}'.repeat(n) }, h.deps);
+    const raw = h.sent[0].payload;
+    assert.ok(Buffer.byteLength(raw, 'utf-8') <= MAX_PAYLOAD_BYTES, `n=${n} over budget`);
+    assert.ok(!LONE_SURROGATE.test(JSON.parse(raw).body), `n=${n} produced a lone surrogate`);
+  }
+});
+
+test('F1: the push sanitizer defangs a marker with invisibles inside it', () => {
+  for (const probe of ['_from​:', '_fr​om:', '_from͏:', '_from️:']) {
+    const out = sanitizePushText(`x ${probe} y`, { maxCodePoints: 500 });
+    assert.ok(!out.includes('_from'), `${JSON.stringify(probe)} -> ${JSON.stringify(out)}`);
+  }
 });

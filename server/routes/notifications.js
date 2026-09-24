@@ -156,13 +156,16 @@ export async function notificationsRoute(fastify) {
         .header('Retry-After', String(Math.ceil(waitMs / 1000)))
         .send({ error: `test notifications are limited to one every ${TEST_SEND_MIN_INTERVAL_MS / 1000}s; try again in ${Math.ceil(waitMs / 1000)}s` });
     }
-    lastTestSendAt = now;
     const settings = getBridgeSettings();
     const channels = Array.isArray(request.body?.channels) && request.body.channels.length > 0
       ? request.body.channels
       : settings.channels;
     const bad = channels.filter((c) => !BRIDGE_CHANNELS.includes(c));
     if (bad.length > 0) return reply.code(400).send({ error: `unknown channel(s): ${bad.join(', ')}` });
+    // Claim the slot only once the request is known-good: rejecting a
+    // malformed body used to burn the operator's next five seconds, so a
+    // client looping on 400s could keep the "send a test" button unusable.
+    lastTestSendAt = now;
     const res = await sendNotification({
       title: 'ccserver',
       body: 'Test notification from Settings. If you can read this, delivery works.',

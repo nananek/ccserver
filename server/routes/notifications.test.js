@@ -310,3 +310,21 @@ test('F1: an agent-chosen title and body are sanitized before they reach a devic
   assert.ok(out.includes('\n'), 'newlines are fine in a push body, unlike the OSC path');
   assert.equal(sanitizePushText('a‮b​c d', { maxCodePoints: 100 }), 'abcd');
 });
+
+test('F5: a rejected request does not consume the test-send slot', async () => {
+  _resetTestSendThrottleForTests();
+  writeConfig({ notify: { discordWebhook: 'https://discord.example/hook' } });
+  const realFetch = _getDeliverFetch();
+  _setDeliverFetchForTests(async () => ({ ok: true }));
+  try {
+    const bad = await app.inject({
+      method: 'POST', url: '/api/notify-settings/test', payload: { channels: ['carrier-pigeon'] },
+    });
+    assert.equal(bad.statusCode, 400);
+    const good = await app.inject({ method: 'POST', url: '/api/notify-settings/test', payload: {} });
+    assert.equal(good.statusCode, 200, 'a 400 must not burn the next five seconds');
+  } finally {
+    _setDeliverFetchForTests(realFetch);
+    _resetTestSendThrottleForTests();
+  }
+});

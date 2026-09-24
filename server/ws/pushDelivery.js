@@ -102,11 +102,21 @@ function buildPayload({ title, body, level, attribution, tag, url }) {
   // is not enough: JSON escaping and multi-byte characters mean a character
   // removed is not always a byte removed, so this converges instead of
   // guessing. The body is the only field that can plausibly be long.
+  //
+  // Trimming by CODE POINT, not by UTF-16 unit: an attacker review found this
+  // loop re-introducing the very lone surrogates sanitizePushText had just
+  // replaced, because slicing `over` units off the end can land in the middle
+  // of a surrogate pair ('🎉'x1900 + 'a'x200 lost a low surrogate in 14 of 400
+  // random bodies). Dropping whole code points cannot split a pair.
   const ELLIPSIS = '…';
+  let cps = Array.from(payload.body);
   let trimmed = false;
-  while (Buffer.byteLength(json, 'utf-8') > MAX_PAYLOAD_BYTES && payload.body.length > 0) {
+  while (Buffer.byteLength(json, 'utf-8') > MAX_PAYLOAD_BYTES && cps.length > 0) {
     const over = Buffer.byteLength(json, 'utf-8') - MAX_PAYLOAD_BYTES;
-    payload.body = payload.body.slice(0, Math.max(0, payload.body.length - Math.max(1, over)));
+    // `over` is a BYTE overshoot and each code point is 1-4 bytes, so dropping
+    // `over` code points always converges and never under-shoots.
+    cps = cps.slice(0, Math.max(0, cps.length - Math.max(1, over)));
+    payload.body = cps.join('');
     trimmed = true;
     json = JSON.stringify({ ...payload, body: payload.body + ELLIPSIS });
   }

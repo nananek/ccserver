@@ -380,7 +380,24 @@ export function restoreNotify() {
 // bridge path: a final attacker review found the MCP path reaching the Web
 // Push payload untouched, which is the same "one side fixed, the other left
 // open" shape as several earlier findings.
-const FOOTER_MARKER_RE = /_from\s*:/gi;
+// Matching `_from:` literally was not enough: an attacker review inserted
+// characters that render as nothing between the letters -- `_fr<ZWSP>om:`,
+// `_from<CGJ>:`, `_from<VS16>:`, `_from<U+E0000>:` -- and every one of them
+// read as "_from:" on screen while sliding past the pattern. So the pattern
+// tolerates any run of invisibles between the letters and consumes them along
+// with the marker.
+//
+// HONEST LIMIT: this defangs characters that are INVISIBLE, not characters
+// that merely LOOK like the ones in "_from". Full-width `＿from：` and the
+// Cyrillic `_frом:` are still possible, and enumerating homoglyphs is not a
+// winnable game. The point of this is that a reader cannot be shown something
+// byte-identical in appearance to ccserver's own footer; a near-miss in a
+// different script is a weaker trick and is left alone deliberately.
+const IGN = '[\\p{Default_Ignorable_Code_Point}\\p{Cf}\\p{Mn}]*';
+const FOOTER_MARKER_RE = new RegExp(
+  `_${IGN}f${IGN}r${IGN}o${IGN}m${IGN}\\s*${IGN}:`,
+  'giu',
+);
 
 export function defangFooterMarker(text) {
   return typeof text === 'string' ? text.replace(FOOTER_MARKER_RE, 'from:') : text;
@@ -410,17 +427,51 @@ function projectLabel(identity) {
   return basename(cwd);
 }
 
+// One field of the footer. The VALUES here are not ccserver's own: they come
+// from the identity frame the process that connected to the notify broker sent
+// (see mcpBroker.js), and that socket has no token gate today -- so treat them
+// as untrusted strings, not as facts.
+//
+// An attacker review connected to the broker directly and set
+// projectName to "victim-project\n\n_from: sneaky\nfake", which put a whole
+// extra forged footer LINE inside the real one. Flattening control characters
+// and capping the length is what keeps the footer to one line regardless of
+// what the frame said. It does NOT make the values true -- see the note above
+// buildAttribution.
+const ATTRIBUTION_FIELD_MAX = 64;
+
+function attributionField(value) {
+  const flat = String(value)
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+  const defanged = defangFooterMarker(flat);
+  return defanged.length > ATTRIBUTION_FIELD_MAX
+    ? `${defanged.slice(0, ATTRIBUTION_FIELD_MAX - 1)}\u2026`
+    : defanged;
+}
+
 // Pure footer builder: "_from: <host> · <project> · group <groupShort> ·
 // session <sessionShort>". host is always present; project appears when a
 // meaningful name exists; group appears only for combo sessions (groupId set);
 // session appears when a sessionId is known. identity is the per-connection
 // attribution (see mcpBroker.js); null/undefined yields host-only.
+//
+// WHAT THIS FOOTER IS AND IS NOT. It is ASSEMBLED by ccserver, on one line,
+// from fields no caller can split or extend (attributionField above). It is
+// NOT an authenticated statement of origin: the notify broker accepts an
+// identity frame from whoever connects to its socket, which every sandboxed
+// session can reach, and unlike the group control/handoff brokers it does not
+// require a token. A process that wanted to could therefore claim another
+// session's project name. Closing that is tracked separately -- it is about
+// the broker, not about notifications -- see the issue linked from
+// docs-site guides/notify.md.
 export function buildAttribution(identity, host) {
-  const parts = [String(host)];
+  const parts = [attributionField(host)];
   const project = projectLabel(identity);
-  if (project) parts.push(project);
-  if (identity?.groupId) parts.push(`group ${shortId(identity.groupId)}`);
-  if (identity?.sessionId) parts.push(`session ${shortId(identity.sessionId)}`);
+  if (project) parts.push(attributionField(project));
+  if (identity?.groupId) parts.push(`group ${attributionField(shortId(identity.groupId))}`);
+  if (identity?.sessionId) parts.push(`session ${attributionField(shortId(identity.sessionId))}`);
   return `\n\n_from: ${parts.join(' · ')}`;
 }
 

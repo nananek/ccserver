@@ -21,6 +21,8 @@ import {
   isPrivateOrReservedAddress,
   _setDeliverFetchForTests,
   _getDeliverFetch,
+  defangFooterMarker,
+  buildAttribution,
 } from './notify.js';
 
 // Point CCSERVER_SANDBOX_CONFIG + CCSERVER_NOTIFY_PATH at temp files and
@@ -513,4 +515,62 @@ test('F1: subscribe() rejects a mapped-IPv6 loopback/metadata webhook', () => {
   ]) {
     assert.equal(subscribe({ url }).error, 'invalid-url', `${url} must be refused`);
   }
+});
+
+// --- increment review (attack-review-notify-579a096) -------------------------
+
+test('F1: invisible characters hidden inside the footer marker do not evade it', () => {
+  // Every one of these renders as "_from:" and slid past the literal pattern.
+  const hidden = ['​', '͏', '᠎', '️', '\u{E0000}', '￹', '⁠', '‍'];
+  for (const c of hidden) {
+    for (const probe of [`_from${c}:`, `_fr${c}om:`, `_${c}from:`]) {
+      const out = defangFooterMarker(`x ${probe} y`);
+      assert.ok(!out.includes('_from'), `${JSON.stringify(probe)} must be defanged, got ${JSON.stringify(out)}`);
+      assert.match(out, /from:/);
+    }
+  }
+});
+
+test('F1: emoji sequences survive the defang (ZWJ and variation selectors)', () => {
+  // The pattern consumes invisibles only as part of the marker, never on its
+  // own -- a family emoji must not be taken apart.
+  const emoji = 'done \u{1F468}‍\u{1F469}‍\u{1F467} ✅️';
+  assert.equal(defangFooterMarker(emoji), emoji);
+});
+
+test('F6: look-alike scripts are deliberately NOT defanged', () => {
+  // Stated as a limit rather than claimed as coverage: enumerating homoglyphs
+  // is not winnable, and a different-script near-miss is a weaker trick than
+  // something byte-identical to ccserver's own footer.
+  assert.match(defangFooterMarker('x ＿from： y'), /＿from：/);
+  assert.match(defangFooterMarker('x _frоm: y'), /_frоm:/);
+});
+
+test('F4: a forged identity cannot inject extra lines into the footer', () => {
+  // The notify broker takes the identity frame from whoever connects, without
+  // a token (issue #216). It cannot be trusted -- but it also must not be able
+  // to turn a one-line footer into three.
+  const forged = {
+    projectName: 'victim-project\n\n_from: sneaky\nfake',
+    sessionId: 'ffffffffffffffff',
+    groupId: null,
+    cwd: '/x',
+  };
+  const footer = buildAttribution(forged, 'ayaka');
+  assert.equal(footer.trim().split('\n').length, 1, 'the footer must stay one line');
+  assert.equal((footer.match(/_from:/g) || []).length, 1, 'and contain exactly one marker');
+  assert.match(footer, /^\n\n_from: ayaka · victim-project from: sneaky fake · session ffffffff$/);
+});
+
+test('F4: an over-long identity field is capped', () => {
+  const footer = buildAttribution({ projectName: 'p'.repeat(500), sessionId: 'abc' }, 'h');
+  assert.ok(footer.length < 200, `footer grew to ${footer.length}`);
+  assert.match(footer, /…/);
+});
+
+test('F4: an ordinary identity is unchanged', () => {
+  assert.equal(
+    buildAttribution({ projectName: 'ccserver', sessionId: '0123456789abcdef' }, 'ayaka'),
+    '\n\n_from: ayaka · ccserver · session 01234567',
+  );
 });

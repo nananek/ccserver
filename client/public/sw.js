@@ -46,18 +46,29 @@ self.addEventListener('fetch', (event) => {
 // claimed the title is always server-composed, and an attacker review showed
 // that is only true of one of the two paths:
 //
-//   attribution  ALWAYS server-set. The host / project / session the
-//                notification really came from. This is the trust anchor.
+//   attribution  ASSEMBLED by the server, on one line, from fields nothing can
+//                split or extend. But its VALUES are what the process that
+//                connected to the notify broker said they were: that socket
+//                has no token gate today, so this is a self-report, not an
+//                authenticated statement of origin (ccserver issue #216).
+//                Treat it as "which session claims to be speaking".
 //   title        server-composed for a notification the pty bridge captured
 //                ("<app> · <project>"); AGENT-CHOSEN for one an agent sent
 //                itself through the `notify` MCP tool. So a title alone does
-//                not tell you who is speaking -- read `attribution` for that.
+//                not tell you who is speaking.
 //   body         agent text in both cases.
 //
-// Both paths are sanitized server-side before they get here (control and
-// invisible characters removed, the "_from:" footer marker defanged so the
-// text cannot impersonate ccserver's own attribution line, lengths capped),
-// but sanitized is not the same as trusted.
+// An earlier version of this comment called attribution "the trust anchor";
+// an attacker review connected to the broker directly and forged one, so it
+// is not. Nothing shown in a ccserver push notification is authenticated.
+//
+// Both paths ARE sanitized server-side before they get here: control and
+// invisible characters removed, lengths capped, and the "_from:" marker
+// defanged (including when invisible characters are hidden inside it). What
+// that buys is that the text cannot produce something byte-identical to
+// ccserver's own footer -- it does not buy authenticity, and it does not stop
+// a body from simply containing a plausible-looking line of its own, since
+// push bodies deliberately keep their newlines.
 
 const LEVEL_BADGE = {
   info: 'ℹ️',
