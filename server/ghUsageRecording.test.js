@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyGhUsage, formatGhUsageReport, readCapped, recordGhUsage, resetGhUsage, resetGhUsageWarnings, aggregateStatus } from './ghUsageRecording.js';
+import { aggregateReadProblem, aggregateStatus, classifyGhUsage, formatGhUsageReport, readCapped, recordGhUsage, resetGhUsage, resetGhUsageWarnings } from './ghUsageRecording.js';
 
 let dir;
 let oldEnabled;
@@ -503,4 +503,107 @@ test('a warning quotes the path so a crafted one cannot forge log lines', () => 
   assert.ok(line, w.seen.join('\n'));
   assert.doesNotMatch(line, /\n/, 'a literal newline reached the log line');
   assert.doesNotMatch(line, /\u001b\[31m/, 'a raw escape sequence reached the log');
+});
+
+test('show diagnoses the file the reader actually read, symlinks included', () => {
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const file = join(dir, 'aggregate.json');
+  const link = join(dir, 'link.json');
+  writeFileSync(file, JSON.stringify({
+    version: 1, startedOn: '2026-01-01', counters: { 'codex\tpr\tread\tsuccess': 1 },
+  }));
+  symlinkSync('aggregate.json', link);
+  // The reader follows symlinks; aggregateStatus does not, because `reset`
+  // must not clobber a link's target. Diagnosing with the latter made `show`
+  // print the counts and then claim the file could not be read.
+  assert.match(formatGhUsageReport(link), /count=1/);
+  assert.equal(aggregateReadProblem(link), null, 'a link to a healthy aggregate reads fine');
+  assert.equal(aggregateStatus(link), 'not-a-regular-file', 'reset must still refuse to follow it');
+
+  assert.equal(aggregateReadProblem(join(dir, 'absent.json')), null, 'an absent aggregate is empty, not broken');
+  writeFileSync(join(dir, 'junk.json'), 'not json at all');
+  assert.equal(aggregateReadProblem(join(dir, 'junk.json')), 'not-an-aggregate');
+  writeFileSync(join(dir, 'big.json'), 'x'.repeat(1024 * 1024 + 1));
+  assert.equal(aggregateReadProblem(join(dir, 'big.json')), 'too-large');
+  mkdirSync(join(dir, 'a-dir'));
+  assert.equal(aggregateReadProblem(join(dir, 'a-dir')), 'not-a-regular-file');
+});
+
+test('a warning detail cannot split the log line either', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  // write-failed passes an errno message, which embeds the paths raw -- so
+  // quoting only the `path` argument still let a crafted path break the line.
+  const odd = join(dir, 'a\nb\u001b[31m');
+  mkdirSync(odd);
+  const file = join(odd, 'aggregate.json');
+  mkdirSync(file);
+  writeFileSync(join(file, 'keep'), 'x');
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+  const w = armWarnings();
+  try { assert.equal(recordGhUsage({ client: 'codex', target: 'pr', operation: 'read', result: 'success' }), false); }
+  finally { w.restore(); }
+  assert.ok(w.seen.length > 0);
+  for (const line of w.seen) {
+    assert.doesNotMatch(line, /\n/, `a warning split across lines: ${JSON.stringify(line)}`);
+    assert.doesNotMatch(line, /\u001b\[31m/, `a raw escape reached the log: ${JSON.stringify(line)}`);
+  }
+  assert.ok(w.seen.some((l) => /write-failed/.test(l)), 'the errno-detail warning is the one that used to split');
+});
+
+test('releasing a held lock periodically no longer hides the drops', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const file = join(dir, 'aggregate.json');
+  const lock = `${file}.lock`;
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  process.env.CCSERVER_GH_USAGE_RECORDING_FILE = file;
+  const call = { client: 'codex', target: 'pr', operation: 'read', result: 'success' };
+  const w = armWarnings();
+  try {
+    // The continuous-hold timer resets on every successful acquire, so
+    // letting one call through now and then kept it from ever firing while
+    // still dropping nearly everything. Sheer volume of drops is the other
+    // tell, and it survives the release.
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < 60; i++) {
+        writeFileSync(lock, '');
+        const t = new Date(Date.now());
+        utimesSync(lock, t, t);
+        assert.equal(recordGhUsage(call), false);
+      }
+      rmSync(lock, { force: true });
+      assert.equal(recordGhUsage(call), true, 'the occasional let-through still works');
+    }
+  } finally { w.restore(); }
+  assert.match(w.seen.join('\n'), /not recording \(lock-contended\)/, w.seen.join('\n') || '(no warnings)');
+});
+
+test('a warning for one aggregate does not silence another', () => {
+  oldEnabled = process.env.CCSERVER_GH_USAGE_RECORDING;
+  oldFile = process.env.CCSERVER_GH_USAGE_RECORDING_FILE;
+  dir = mkdtempSync(join(tmpdir(), 'ccserver-gh-usage-'));
+  const call = { client: 'codex', target: 'pr', operation: 'read', result: 'success' };
+  const paths = [join(dir, 'a'), join(dir, 'b')].map((d) => {
+    mkdirSync(d);
+    const f = join(d, 'aggregate.json');
+    mkdirSync(f);
+    writeFileSync(join(f, 'keep'), 'x');
+    return f;
+  });
+  process.env.CCSERVER_GH_USAGE_RECORDING = '1';
+  const w = armWarnings();
+  try {
+    for (const f of paths) {
+      process.env.CCSERVER_GH_USAGE_RECORDING_FILE = f;
+      assert.equal(recordGhUsage(call), false);
+    }
+  } finally { w.restore(); }
+  // Keyed by reason alone, B's identical reason was suppressed by A's.
+  for (const f of paths) {
+    assert.ok(w.seen.some((l) => l.includes(JSON.stringify(f))), `no warning named ${f}: ${w.seen.join('\n')}`);
+  }
 });

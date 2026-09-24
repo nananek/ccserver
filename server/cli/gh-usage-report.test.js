@@ -233,7 +233,7 @@ test('show says why a report is empty when the aggregate cannot be read', () => 
   assert.equal(res.status, 0, res.stderr);
   // The report itself stays pasteable on stdout; the diagnosis goes to stderr.
   assert.doesNotMatch(res.stdout, /count=|warning:/);
-  assert.match(res.stderr, /not a readable gh usage aggregate \(too-large\)/);
+  assert.match(res.stderr, /could not be read as a gh usage aggregate \(too-large\)/);
 
   // A genuinely empty aggregate says nothing at all.
   const fresh = join(tmpRoot, 'fresh-aggregate.json');

@@ -3,7 +3,7 @@
 // here uploads, opens a browser, or invokes gh.
 import { chmodSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { aggregateStatus, defaultRecordingPath, formatGhUsageReport, resetGhUsage } from '../ghUsageRecording.js';
+import { aggregateReadProblem, aggregateStatus, defaultRecordingPath, formatGhUsageReport, resetGhUsage } from '../ghUsageRecording.js';
 // pathPolicy is dependency-free (node builtins only), so the CLI can reuse
 // the server's own containment rule without pulling in ws/sandbox.js.
 import { isCcserverScratchPath, isContained, normalizeBrowseRoots } from '../pathPolicy.js';
@@ -138,9 +138,14 @@ if (command === 'show') {
   // An unreadable or wrecked aggregate prints exactly the same empty report as
   // one that simply has nothing in it yet, so say which it is. On stderr, so
   // the report on stdout stays pasteable as-is.
-  const status = aggregateStatus(file);
-  if (status !== 'ok') {
-    console.error(`warning: ${q(file)} is not a readable gh usage aggregate (${status}), so this report is empty for that reason, not because nothing was recorded.`);
+  //
+  // This asks the reader why IT could not read the file, rather than deriving
+  // the answer from aggregateStatus: that one is lstat-based for `reset`'s
+  // sake, so a symlink to a healthy aggregate printed the counts and then
+  // claimed the file could not be read.
+  const problem = aggregateReadProblem(file);
+  if (problem) {
+    console.error(`warning: ${q(file)} could not be read as a gh usage aggregate (${problem}), so this report is empty for that reason, not because nothing was recorded.`);
   }
 }
 else if (command === 'reset') {
