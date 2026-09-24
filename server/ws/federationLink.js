@@ -364,6 +364,11 @@ export class FederationLink {
     this._preferSelfAsDialer = winningDialerIsSelf(selfIdentity.fingerprint, row.fingerprint);
 
     this.live = null; // { socket, framer, isDialer } once established
+    // Candidates started but not yet resolved into `live`. Issue #246: without
+    // this, close() had nothing to destroy them BY -- _startCandidate kept no
+    // reference, so a socket still waiting for the peer's link-hello when the
+    // link went away stayed open with nobody owning it.
+    this._candidates = new Set();
     this._peerPem = null; // live TLS peer cert PEM for the current `live` connection
     this.destroyed = false;
     this._wantsConnection = false;
@@ -500,6 +505,7 @@ export class FederationLink {
     const candidate = {
       socket, framer: null, isDialer, discarded: false, peerPem: peerInfo.pem,
     };
+    this._candidates.add(candidate);
     candidate.framer = new LineFramer(socket, {
       onError: (err) => {
         this.log?.warn?.({ err }, '[federation-link] frame error, closing connection');
@@ -531,15 +537,23 @@ export class FederationLink {
     if (candidateShouldWin) {
       const old = this.live;
       old.discarded = true;
+      // Fold BEFORE adopting and before the socket dies. Marking `discarded`
+      // is exactly what makes _onSocketClose early-return, so this is the only
+      // place that can still tell a caller its RPC is gone; and folding first
+      // means the new connection is never adopted with the old one's leftovers
+      // still on the link.
+      this._foldConnectionState('federation link superseded by a duplicate connection');
       this._adopt(candidate);
       try { old.socket.destroy(); } catch { /* ignore */ }
     } else {
       candidate.discarded = true;
+      this._candidates.delete(candidate);
       try { candidate.socket.destroy(); } catch { /* ignore */ }
     }
   }
 
   _adopt(candidate) {
+    this._candidates.delete(candidate);
     this.live = candidate;
     // The live TLS peer certificate, not the (possibly stale/absent) DB
     // cache -- matches the one-shot path's info.pem, used verbatim by
@@ -551,24 +565,45 @@ export class FederationLink {
     this._onConnectCb?.();
   }
 
+  // Everything that was riding on ONE connection, folded because that
+  // connection is going away. Pending RPCs can never be answered (their reply
+  // was coming back over that socket) and every open channel was multiplexed
+  // over the same framer, so both are gone with it.
+  //
+  // Issue #247: three places take a connection away -- close(), the body of
+  // _onSocketClose, and _resolveCandidate's supersede branch -- and only the
+  // first two used to fold anything. The third left pending RPCs to be
+  // collected by their own 15s timeout. Keeping the definition in one place is
+  // the point: a fourth path added later should have to reach for this rather
+  // than grow a fourth opinion.
+  //
+  // Deliberately connection-scoped, NOT link-scoped. Setting `live`, firing
+  // onDisconnect, scheduling a reconnect and clearing timers stay with the
+  // callers, because the supersede case is not a disconnect at all -- the link
+  // stays up on a better connection and must not announce otherwise.
+  _foldConnectionState(reason) {
+    for (const pending of this.pendingRpc.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    this.pendingRpc.clear();
+    for (const handler of this.channels.values()) {
+      try { handler.handleClose(); } catch { /* ignore */ }
+    }
+    this.channels.clear();
+    for (const chan of this.outboundChannels.values()) {
+      try { chan.onClose(); } catch { /* ignore */ }
+    }
+    this.outboundChannels.clear();
+  }
+
   _onSocketClose(candidate) {
+    this._candidates.delete(candidate);
     if (candidate.discarded) return; // we destroyed it ourselves as a losing duplicate / superseded link
     if (candidate === this.live) {
       this.live = null;
       this._clearRevokeCheckTimer();
-      for (const pending of this.pendingRpc.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error('federation link closed'));
-      }
-      this.pendingRpc.clear();
-      for (const handler of this.channels.values()) {
-        try { handler.handleClose(); } catch { /* ignore */ }
-      }
-      this.channels.clear();
-      for (const chan of this.outboundChannels.values()) {
-        try { chan.onClose(); } catch { /* ignore */ }
-      }
-      this.outboundChannels.clear();
+      this._foldConnectionState('federation link closed');
       this._onDisconnectCb?.();
     }
     if (!this.destroyed) this._scheduleReconnect();
@@ -765,24 +800,21 @@ export class FederationLink {
     this._wantsConnection = false;
     this._clearReconnectTimer();
     this._clearRevokeCheckTimer();
+    // Issue #246: candidates still waiting for the peer's link-hello. They are
+    // not `live`, so the block below would never reach them, and nothing else
+    // owns them -- during a double dial that is a TLS socket left open in the
+    // host process when the pair is revoked mid-handshake.
+    for (const candidate of this._candidates) {
+      candidate.discarded = true;
+      try { candidate.socket.destroy(); } catch { /* ignore */ }
+    }
+    this._candidates.clear();
     if (this.live) {
       const live = this.live;
       live.discarded = true;
       try { live.socket.destroy(); } catch { /* ignore */ }
       this.live = null;
-      for (const pending of this.pendingRpc.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error('federation link closed'));
-      }
-      this.pendingRpc.clear();
-      for (const handler of this.channels.values()) {
-        try { handler.handleClose(); } catch { /* ignore */ }
-      }
-      this.channels.clear();
-      for (const chan of this.outboundChannels.values()) {
-        try { chan.onClose(); } catch { /* ignore */ }
-      }
-      this.outboundChannels.clear();
+      this._foldConnectionState('federation link closed');
       this._onDisconnectCb?.();
     }
   }

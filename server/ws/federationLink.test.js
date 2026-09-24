@@ -14,7 +14,7 @@
 
 import { test, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer as createTlsServer } from 'node:tls';
+import { createServer as createTlsServer, connect as tlsConnect } from 'node:tls';
 import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync, rmSync, readFileSync, mkdirSync,
@@ -163,14 +163,22 @@ function listenTls(identity, onSocket) {
   });
 }
 
-function waitFor(fn, { timeoutMs = 5000, intervalMs = 20 } = {}) {
+// `describe` is only called on the timeout path, so a wait that never comes
+// true still says what it was looking at instead of just 'timed out'.
+function waitFor(fn, { timeoutMs = 5000, intervalMs = 20, describe = null } = {}) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
     const tick = () => {
       let ok;
       try { ok = fn(); } catch { ok = false; }
       if (ok) return resolve();
-      if (Date.now() - start > timeoutMs) return reject(new Error('timed out waiting for condition'));
+      if (Date.now() - start > timeoutMs) {
+        let detail = '';
+        if (describe) {
+          try { detail = ` -- ${describe()}`; } catch (e) { detail = ` -- describe() threw: ${e.message}`; }
+        }
+        return reject(new Error(`timed out waiting for condition${detail}`));
+      }
       setTimeout(tick, intervalMs);
     };
     tick();
@@ -195,6 +203,49 @@ let serverB;
 // FederationLink instances so timers/state never leak across tests).
 let inboundTargetA = null;
 let inboundTargetB = null;
+// Every socket each side's listener accepted, in arrival order. A link's own
+// dialed socket lives inside FederationLink, but its FAR end is one of these,
+// so between them these two lists name both physical connections of a
+// simultaneous double dial -- which is what lets a test reach into one end of a
+// connection the link under test is holding the other end of.
+let acceptedByA = [];
+let acceptedByB = [];
+// Withholds one side's acceptInbound until the test releases it. acceptInbound
+// is what sends that side's link-hello, and the PEER only resolves its
+// candidate for that connection once the hello lands -- so holding it parks the
+// peer with an unresolved candidate for as long as the test wants. A release,
+// not a timer: the point is to remove timing from the setup, not to bet on it.
+let inboundHoldA = false;
+let inboundHoldB = false;
+let heldAcceptsA = [];
+let heldAcceptsB = [];
+// The sockets currently sitting in those queues. A held socket has not been
+// handed to a link, so no link can own it -- if a test fails before releasing,
+// only the harness can close it. Deliberately just the held ones: sockets a
+// link HAS taken are the link's to clean up, and covering for it here is what
+// would hide issue #246.
+let heldSockets = [];
+
+function acceptInto(target, accepted, held, hold, socket, info) {
+  accepted.push(socket);
+  if (hold) {
+    heldSockets.push(socket);
+    held.push(() => { if (!socket.destroyed) target.acceptInbound(socket, info); });
+    return;
+  }
+  target.acceptInbound(socket, info);
+}
+
+function releaseHeldAccepts() {
+  inboundHoldA = false;
+  inboundHoldB = false;
+  const pending = [...heldAcceptsA, ...heldAcceptsB];
+  heldAcceptsA = [];
+  heldAcceptsB = [];
+  heldSockets = [];
+  for (const deliver of pending) deliver();
+  return pending.length;
+}
 
 before(async () => {
   if (skip) return;
@@ -207,11 +258,11 @@ before(async () => {
 
   serverA = await listenTls(identityA, (socket) => {
     const info = peerCertInfo(socket);
-    if (info && inboundTargetA) inboundTargetA.acceptInbound(socket, info);
+    if (info && inboundTargetA) acceptInto(inboundTargetA, acceptedByA, heldAcceptsA, inboundHoldA, socket, info);
   });
   serverB = await listenTls(identityB, (socket) => {
     const info = peerCertInfo(socket);
-    if (info && inboundTargetB) inboundTargetB.acceptInbound(socket, info);
+    if (info && inboundTargetB) acceptInto(inboundTargetB, acceptedByB, heldAcceptsB, inboundHoldB, socket, info);
   });
 });
 
@@ -232,6 +283,13 @@ beforeEach(() => {
   if (skip) return;
   inboundTargetA = null;
   inboundTargetB = null;
+  acceptedByA = [];
+  acceptedByB = [];
+  inboundHoldA = false;
+  inboundHoldB = false;
+  heldAcceptsA = [];
+  heldAcceptsB = [];
+  heldSockets = [];
   // Each test re-pairs the same two identities from scratch -- clear
   // whatever rows an earlier test (including a revoke) left behind.
   getDb().prepare('DELETE FROM paired_instances').run();
@@ -243,6 +301,12 @@ afterEach(() => {
   linkB?.close();
   linkA = null;
   linkB = null;
+  // Only the ones still held (see heldSockets): no link ever took these, so
+  // nothing else can close them.
+  for (const sock of heldSockets) {
+    try { sock.destroy(); } catch { /* already gone */ }
+  }
+  heldSockets = [];
 });
 
 test('a link established by only one side dialing carries RPC in BOTH directions', { skip }, async () => {
@@ -311,6 +375,165 @@ test('duplicate simultaneous dials resolve to one link, consistently on both sid
   // Both directions still function over whichever connection won.
   assert.equal((await linkA.rpc('sessions.list', {})).ok, true);
   assert.equal((await linkB.rpc('sessions.list', {})).ok, true);
+});
+
+// ---------------------------------------------------------------------
+// Issues #246 / #247: what a link folds when it loses a connection.
+//
+// Three paths take a connection away: close(), the body of _onSocketClose, and
+// _resolveCandidate's supersede branch. They did not agree on what to fold --
+// pendingRpc and the open channels were folded by the first two only, and the
+// sockets of candidates that have not resolved yet were folded by none of them
+// (they were not recorded anywhere). Both issues are that disagreement seen
+// from two sides, so these tests pin the shared teardown on ALL THREE paths
+// rather than only on the two that were reported.
+
+// Parks both links with the losing connection adopted and the winning one's
+// hello still in flight -- the middle of a double dial, held open with no timer.
+// Returns the release fn plus which side is the preferring dialer.
+async function parkMidDuplicateDial() {
+  const rowForBFromA = approve(pairing.recordOutboundRequest({
+    fingerprint: identityB.fingerprint, certPem: identityB.cert, hostnameClaimed: 'b', addr: `127.0.0.1:${serverB.address().port}`,
+  }));
+  const rowForAFromB = approve(pairing.recordOutboundRequest({
+    fingerprint: identityA.fingerprint, certPem: identityA.cert, hostnameClaimed: 'a', addr: `127.0.0.1:${serverA.address().port}`,
+  }));
+  linkA = new FederationLink(rowForBFromA, { selfIdentity: identityA });
+  linkB = new FederationLink(rowForAFromB, { selfIdentity: identityB });
+  inboundTargetA = linkA;
+  inboundTargetB = linkB;
+
+  const aShouldBeDialer = winningDialerIsSelf(identityA.fingerprint, identityB.fingerprint);
+  if (aShouldBeDialer) inboundHoldB = true; else inboundHoldA = true;
+  linkA.connect();
+  linkB.connect();
+  await waitFor(
+    () => linkA.live?.isDialer === !aShouldBeDialer && linkB.live?.isDialer === aShouldBeDialer,
+    { timeoutMs: 5000 },
+  );
+  return { aShouldBeDialer };
+}
+
+test('#246 close() destroys a candidate socket that has not resolved yet', { skip }, async () => {
+  // A candidate is unresolved until the PEER's link-hello arrives on it, so the
+  // simplest way to hold one there is a peer that connects, is accepted, and
+  // then says nothing. No double dial needed: this is the plain shape of the
+  // bug, and the socket in question is the one our own listener accepted, so
+  // the test can see it without reaching inside the link.
+  const row = approve(pairing.recordInboundRequest({
+    fingerprint: identityB.fingerprint, certPem: identityB.cert, hostnameClaimed: 'b', addr: `127.0.0.1:${serverB.address().port}`,
+  }));
+  linkA = new FederationLink(row, { selfIdentity: identityA });
+  inboundTargetA = linkA;
+
+  const mute = await new Promise((resolve) => {
+    const sock = tlsConnect({
+      host: '127.0.0.1', port: serverA.address().port,
+      key: identityB.key, cert: identityB.cert, rejectUnauthorized: false,
+    }, () => resolve(sock));
+  });
+  try {
+    // acceptInbound has started a candidate on linkA and written OUR hello;
+    // `mute` never answers, so that candidate never resolves.
+    await waitFor(() => acceptedByA.length === 1);
+    const unresolvedEnd = acceptedByA[0];
+    assert.equal(linkA.connected, false, 'the candidate must not have been adopted -- nothing resolved it');
+    assert.equal(unresolvedEnd.destroyed, false, 'precondition: the unresolved candidate socket is open');
+
+    linkA.close();
+
+    await waitFor(() => unresolvedEnd.destroyed, {
+      timeoutMs: 3000,
+      describe: () => `close() left the unresolved candidate socket open (destroyed=${unresolvedEnd.destroyed}); nothing else owns it, so it stays in the host process`,
+    });
+  } finally {
+    try { mute.destroy(); } catch { /* already gone */ }
+  }
+});
+
+test('#247 a superseded connection folds the RPC that was riding on it', { skip }, async () => {
+  const { aShouldBeDialer } = await parkMidDuplicateDial();
+  // The preferring dialer is the side that supersedes: the winning connection
+  // is the one IT dialed, so its own candidate for it is the one that wins.
+  const superseding = aShouldBeDialer ? linkA : linkB;
+  // Its live (losing) connection is the end ITS OWN listener accepted...
+  const ownLosingEnd = (aShouldBeDialer ? acceptedByA : acceptedByB).at(-1);
+  // ...and the winning connection's far end sits on the peer's listener.
+  const peerWinningEnd = (aShouldBeDialer ? acceptedByB : acceptedByA).at(-1);
+  // Say so rather than assume it: if this bookkeeping is wrong the test would
+  // otherwise quietly stop being about anything.
+  assert.equal(ownLosingEnd, superseding.live.socket, 'the socket we are about to pause must be the live (losing) one');
+
+  // Stop OUR side reading on the losing connection, so the reply to the RPC
+  // below can never land and the request stays outstanding.
+  ownLosingEnd.pause();
+  const inflight = superseding.rpc('sessions.list', {}, { timeoutMs: 15_000 });
+  const settled = inflight.then(() => 'resolved', (e) => `rejected: ${e.message}`);
+  assert.equal(superseding.pendingRpc.size, 1, 'precondition: the RPC is outstanding on the losing connection');
+
+  // Release the held accept (which WRITES the peer's hello on the winning
+  // connection) and immediately stop the peer from READING on it. The peer can
+  // therefore not resolve the winner, so it will not discard the loser, so its
+  // close cannot reach us first -- which pins the order to "we resolve first",
+  // the ordering in which the discard branch is the only thing that could fold
+  // this RPC. The other order is already handled by _onSocketClose and is not
+  // what this test is about.
+  releaseHeldAccepts();
+  peerWinningEnd.pause();
+
+  const outcome = await Promise.race([
+    settled,
+    new Promise((resolve) => setTimeout(() => resolve('STILL PENDING'), 4000)),
+  ]);
+  assert.notEqual(outcome, 'STILL PENDING', 'the RPC on the discarded connection was never folded -- it would have sat until its own 15s timeout');
+  // Named for the path that folded it, so this cannot pass by way of the close
+  // handler doing the work instead.
+  assert.match(outcome, /^rejected: federation link superseded/, 'the supersede branch is what must fold it');
+  assert.equal(superseding.pendingRpc.size, 0, 'and pendingRpc must be left empty');
+});
+
+test('#247 all three teardown paths fold an outstanding RPC', { skip }, async () => {
+  // The factoring is the point: one shared teardown, reached from every path
+  // that takes a connection away. A path that skips it is exactly the bug.
+  const rowForBFromA = approve(pairing.recordOutboundRequest({
+    fingerprint: identityB.fingerprint, certPem: identityB.cert, hostnameClaimed: 'b', addr: `127.0.0.1:${serverB.address().port}`,
+  }));
+  const rowForAFromB = approve(pairing.recordInboundRequest({
+    fingerprint: identityA.fingerprint, certPem: identityA.cert, hostnameClaimed: 'a', addr: `127.0.0.1:${serverA.address().port}`,
+  }));
+
+  // Path 1: close(). One-sided dial, so there is exactly one connection.
+  linkA = new FederationLink(rowForBFromA, { selfIdentity: identityA });
+  linkB = new FederationLink(rowForAFromB, { selfIdentity: identityB });
+  inboundTargetB = linkB;
+  linkA.connect();
+  await waitFor(() => linkA.connected && linkB.connected);
+  acceptedByB.at(-1).pause();
+  let settled = linkA.rpc('sessions.list', {}, { timeoutMs: 15_000 }).then(() => 'resolved', (e) => `rejected: ${e.message}`);
+  assert.equal(linkA.pendingRpc.size, 1);
+  linkA.close();
+  assert.match(await settled, /^rejected: federation link closed/, 'close() must fold the outstanding RPC');
+  assert.equal(linkA.pendingRpc.size, 0, 'close() must leave pendingRpc empty');
+  linkB.close(); // this pair is finished with; afterEach only knows the last one
+
+  // Path 2: the body of _onSocketClose -- the peer drops the live connection.
+  linkA = new FederationLink(rowForBFromA, { selfIdentity: identityA });
+  linkB = new FederationLink(rowForAFromB, { selfIdentity: identityB });
+  inboundTargetB = linkB;
+  linkA.connect();
+  await waitFor(() => linkA.connected && linkB.connected);
+  const peerEnd = acceptedByB.at(-1);
+  peerEnd.pause();
+  settled = linkA.rpc('sessions.list', {}, { timeoutMs: 15_000 }).then(() => 'resolved', (e) => `rejected: ${e.message}`);
+  assert.equal(linkA.pendingRpc.size, 1);
+  peerEnd.destroy();
+  assert.match(await settled, /^rejected: federation link closed/, 'a dropped live connection must fold the outstanding RPC');
+  await waitFor(() => linkA.pendingRpc.size === 0);
+  linkA.close();
+  linkB.close();
+
+  // Path 3 is the supersede branch, covered by the test above -- it needs the
+  // held double dial, which cannot coexist with the one-sided setup here.
 });
 
 test('revoking the pair permanently closes the link and stops reconnecting', { skip }, async () => {
