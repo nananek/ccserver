@@ -182,8 +182,39 @@ function execGh(argv, cwd, stdinBuf) {
     child.stdout.on('data', (d) => { outLen += d.length; if (outLen <= GH_EXEC_MAX_BYTES) out.push(d); });
     child.stderr.on('data', (d) => { errLen += d.length; if (errLen <= GH_EXEC_MAX_BYTES) err.push(d); });
     child.on('error', () => { clearTimeout(timer); finish({ ok: false, reason: 'exec-failed' }); });
+
+    // A pipe's failures are emitted on the PIPE, not on the ChildProcess, so
+    // the handler above does not cover them -- and they are asynchronous, so
+    // a try/catch around the write cannot either. Unhandled, they take this
+    // whole broker process down, and with it every git and gh call for the
+    // session it serves. network-broker.js guards its own child's stdin for
+    // exactly this reason; gh relay was added later and did not get the same
+    // treatment.
+    //
+    // `gh` closing stdin early is NORMAL, not a fault: a subcommand that does
+    // not read stdin exits as soon as it is done, and whatever is still in
+    // flight then fails with EPIPE. So a stdin failure is deliberately NOT
+    // resolved on. The authoritative outcome of the request is the child's
+    // exit code and the output already captured, and both still arrive on
+    // 'close'; resolving here instead would throw gh's real answer away and
+    // leave the child unreaped. Retrying is not an option either -- these
+    // commands are not idempotent (a second `pr create` posts twice).
+    //
+    // It is recorded and logged rather than ignored, because a zero exit
+    // after a partial write means gh acted on truncated input, and that is
+    // worth being able to see in the broker log.
+    let stdinError = null;
+    const noteStdinError = (e) => { stdinError ??= e; };
+    child.stdin.on('error', noteStdinError);
+    // Same class, same consequence, on the read side.
+    child.stdout.on('error', noteStdinError);
+    child.stderr.on('error', noteStdinError);
+
     child.on('close', (code) => {
       clearTimeout(timer);
+      if (stdinError) {
+        process.stdout.write(`[git-broker] gh-exec stdin did not finish writing (${stdinError.code || stdinError.message}); gh exited ${code}\n`);
+      }
       finish({
         ok: true,
         exitCode: typeof code === 'number' ? code : 1,
@@ -192,8 +223,14 @@ function execGh(argv, cwd, stdinBuf) {
       });
     });
 
-    if (stdinBuf && stdinBuf.length) child.stdin.write(stdinBuf);
-    child.stdin.end();
+    // write()/end() can also fail synchronously (ERR_STREAM_DESTROYED) once
+    // the child is gone; funnel that into the same place as the async form.
+    try {
+      if (stdinBuf && stdinBuf.length) child.stdin.write(stdinBuf);
+      child.stdin.end();
+    } catch (e) {
+      noteStdinError(e);
+    }
   });
 }
 

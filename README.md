@@ -37,6 +37,7 @@
 ## 必要な環境
 
 - Node.js >= 22.13 / npm >= 9
+  - CI が実際に検証しているのは **Node 22 / 24 / 26** です (22 = Maintenance LTS、24 = Active LTS、26 = Current。26 は 2026-10-28 に Active LTS になります)。`engines` に上限を置いていないのは、より新しい Node で `npm install` が警告を出す/止まるのを避けるためで、未検証のバージョンが動く保証ではありません。
 - C++ コンパイラ (node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`)
 - 対応する AI CLI のいずれか 1 つ以上 (Claude Code / opencode / GitHub Copilot CLI / OpenAI Codex CLI / Command Code)。サーバーにインストールされている CLI だけを起動時に選べます。
 

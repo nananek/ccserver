@@ -42,6 +42,12 @@ const WARN_REPEAT_MS = 60 * 60 * 1000;
 // someone refreshing a planted lock, which is otherwise indistinguishable
 // from a live writer and therefore silent (see tryLock).
 const HELD_LOCK_STUCK_MS = 60_000;
+// ...and however briefly it is released each time, dropping this many
+// increments inside one warning window is not contention either. Well above
+// anything real contention produces, since a writer holds the lock for
+// microseconds: two brokers racing on the same aggregate essentially never
+// collide, let alone this often.
+const HELD_LOCK_SKIP_LIMIT = 100;
 const CLIENTS = new Set(['claude', 'codex', 'opencode', 'copilot', 'commandcode', 'shell']);
 const TARGETS = new Set(['issue', 'pr', 'repository', 'workflow', 'release']);
 const OPERATIONS = new Set(['read', 'create', 'edit', 'close', 'comment', 'workflow', 'release']);
@@ -100,29 +106,50 @@ function validRow(key, count) {
 // making failure observable is structural rather than per-case. One warning
 // per distinct reason keeps a hot path from becoming a log flood while
 // guaranteeing a wedged aggregate is never invisible.
-const warnedReasons = new Map(); // reason -> last warned at (ms)
+// Keyed by reason AND path: the key used to be the reason alone, so one
+// aggregate's warning suppressed a different aggregate's identical warning for
+// an hour. Production runs one path per process, but nothing in the module
+// said so, and the same assumption made heldSince misfire across paths.
+// Bounded explicitly, since a key now contains a caller-supplied path.
+const warnedReasons = new Map(); // `${reason}\t${path}` -> last warned at (ms)
+const WARN_KEYS_MAX = 32;
 // Quote the path: a warning goes to the broker's log, and a configured path
 // can contain newlines or escape sequences. The CLI already does this for the
 // paths it prints; the log had been left raw.
-function q(path) { return JSON.stringify(String(path)); }
+// JSON.stringify escapes C0 and the quote, but NOT U+2028/U+2029 -- which
+// end a line for anything that treats the log as JavaScript or as Unicode
+// lines, so they belong with the rest of the line-breaking characters.
+function q(path) {
+  return JSON.stringify(String(path)).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+// `detail` is usually an errno message, which embeds paths raw -- so a path
+// with a newline in it split one warning across three log lines even after
+// the path argument itself was quoted. Quoting the whole sentence would be
+// unreadable, so just flatten the controls out of it.
+function oneLine(detail) {
+  return String(detail).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim();
+}
 // Every warning in this module goes through here, including the ones that
 // report a *successful* recovery -- those had been raw console.warn calls and
 // so escaped the once-per-reason rule entirely, which let a planted stale lock
 // produce a warning per gh call.
-function warnOnce(reason, message, now = Date.now()) {
-  const last = warnedReasons.get(reason);
+function warnOnce(reason, path, message, now = Date.now()) {
+  const key = `${reason}\t${path}`;
+  const last = warnedReasons.get(key);
   if (last !== undefined && now - last < WARN_REPEAT_MS) return false;
-  warnedReasons.set(reason, now);
+  warnedReasons.set(key, now);
+  while (warnedReasons.size > WARN_KEYS_MAX) warnedReasons.delete(warnedReasons.keys().next().value);
   console.warn(`[gh-usage] ${message}`);
   return true;
 }
 function abandon(reason, path, detail = '') {
-  warnOnce(reason, `not recording (${reason}) at ${q(path)}${detail ? `: ${detail}` : ''}; counts are incomplete until this is resolved`);
+  warnOnce(reason, path,
+    `not recording (${reason}) at ${q(path)}${detail ? `: ${oneLine(detail)}` : ''}; counts are incomplete until this is resolved`);
   return false;
 }
 // Exported for tests: warnings are rate-limited per process, so a test that
 // asserts on one has to be able to arm it again.
-export function resetGhUsageWarnings() { warnedReasons.clear(); }
+export function resetGhUsageWarnings() { warnedReasons.clear(); lockWatch.clear(); }
 
 // The three paths this module owns: the aggregate itself, `<aggregate>.lock`
 // and `<aggregate>.<pid>.tmp`. Anything sitting at one of them that is not the
@@ -167,16 +194,29 @@ function clearObstruction(path) {
 // call in that session hung. O_NONBLOCK makes open(2) return immediately for
 // a FIFO, and fstat on the descriptor we already hold (not a separate lstat,
 // which a symlink swap could race) rules out FIFOs, devices and directories.
+// Returns { fd, size } on success, or { problem } -- where a null problem
+// means "absent", which is not a fault. The problem is what lets `show` say
+// why a report is empty using the rules the read actually followed.
 function openRegularFile(path) {
   let fd;
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK); }
-  catch { return null; }
-  try {
-    const st = fstatSync(fd);
-    if (st.isFile() && st.size <= MAX_AGGREGATE_BYTES) return { fd, size: st.size };
-  } catch { /* fall through to close */ }
-  try { closeSync(fd); } catch {}
-  return null;
+  catch (e) {
+    if (e.code !== 'ENOENT') return { problem: 'unreadable' };
+    // open(2) resolved to nothing. Either the path is genuinely absent -- an
+    // aggregate with nothing in it yet, which is not a fault -- or it is a
+    // symlink whose target is gone, which is, and which `show` otherwise
+    // reports with the same silence as an empty one.
+    try { lstatSync(path); return { problem: 'broken-symlink' }; }
+    catch { return { problem: null }; }
+  }
+  let st;
+  try { st = fstatSync(fd); }
+  catch { try { closeSync(fd); } catch {} return { problem: 'unreadable' }; }
+  // open(2) followed any symlink, so this is the TARGET's type: a link to a
+  // healthy aggregate is read normally, exactly as it always was.
+  if (!st.isFile()) { try { closeSync(fd); } catch {} return { problem: 'not-a-regular-file' }; }
+  if (st.size > MAX_AGGREGATE_BYTES) { try { closeSync(fd); } catch {} return { problem: 'too-large' }; }
+  return { fd, size: st.size };
 }
 
 // Read at most the number of bytes fstat just reported, and never more than
@@ -203,16 +243,23 @@ export function readCapped(fd, size) {
   return buf.toString('utf8', 0, len);
 }
 
-function readState(path) {
+// Reads the aggregate and reports why it could not be read, as one operation.
+// `show` used to derive that reason separately, with aggregateStatus -- which
+// is lstat-based because `reset` must not follow a symlink onto someone's
+// file. The reader follows symlinks, so the two disagreed: pointed at a link
+// to a healthy aggregate, `show` printed the counts AND said the file could
+// not be read. Deriving the reason from the read itself is what keeps them
+// from drifting again.
+function readAggregate(path) {
   const opened = openRegularFile(path);
   // Not a readable regular file: start fresh rather than read it. The next
-  // writeState renames over whatever is there, so a planted FIFO/symlink is
-  // replaced by a real aggregate instead of stopping recording for good.
-  if (opened === null) return emptyState();
+  // writeState renames over whatever is there, so a planted FIFO is replaced
+  // by a real aggregate instead of stopping recording for good.
+  if (opened.fd === undefined) return { state: emptyState(), problem: opened.problem };
   const { fd, size } = opened;
   try {
     const text = readCapped(fd, size);
-    if (text === null) return emptyState();
+    if (text === null) return { state: emptyState(), problem: 'too-large' }; // grew past the checked size
     const parsed = JSON.parse(text);
     // `typeof [] === 'object'` too, and JSON.stringify drops the string
     // properties an increment adds to an array -- so a one-byte tamper
@@ -231,12 +278,18 @@ function readState(path) {
       for (const [key, count] of Object.entries(parsed.counters)) {
         if (validRow(key, count)) counters[key] = count;
       }
-      return { version: VERSION, startedOn, counters };
+      return { state: { version: VERSION, startedOn, counters }, problem: null };
     }
   } catch { /* missing/corrupt data starts fresh; never expose its contents */ }
   finally { try { closeSync(fd); } catch {} }
-  return emptyState();
+  return { state: emptyState(), problem: 'not-an-aggregate' };
 }
+
+function readState(path) { return readAggregate(path).state; }
+
+// Why `show`'s report is empty, or null when the aggregate read fine (an
+// absent file reads fine: it is genuinely empty, not broken).
+export function aggregateReadProblem(path) { return readAggregate(path).problem; }
 
 // Best-effort, single-attempt lock. Recording is observability, so it must
 // never delay a gh call: an earlier draft busy-waited up to 1s on contention,
@@ -264,29 +317,67 @@ function lockIsHeld(st) {
   return age >= -CLOCK_SKEW_MS && age < LOCK_STALE_MS;
 }
 
-// When the lock has been "held" continuously since this moment, it is no
-// longer plausible contention. Cleared every time the lock is actually taken.
-let heldSince = 0;
+// Per-lock-path view of how contended it has been. `heldSince` was a single
+// module-level number, which misreported across aggregates and, worse, reset
+// on every successful acquire -- so releasing the lock once a minute kept the
+// "held too long" warning from ever firing while still dropping almost every
+// count. `skips` therefore accumulates across successes and is only cleared
+// by a warning or a reset.
+const lockWatch = new Map(); // lock path -> { heldSince, skips, windowStart }
+function watchFor(lock, now) {
+  let w = lockWatch.get(lock);
+  if (!w || now - w.windowStart >= WARN_REPEAT_MS) {
+    w = { heldSince: 0, skips: 0, windowStart: now };
+    lockWatch.set(lock, w);
+    // Both bounded maps evict, but they lose opposite things. warnedReasons
+    // only forgets WHEN it last warned, so the next event warns again --
+    // eviction there errs loud. This map holds the counters that do the
+    // noticing, so dropping an entry silently rewinds them: 99 recorded skips
+    // on one aggregate became 0 after touching 33 others, and the 100th skip
+    // no longer warned. Report what is being discarded rather than losing it,
+    // so eviction errs loud here too.
+    while (lockWatch.size > WARN_KEYS_MAX) {
+      const [oldestLock, oldest] = lockWatch.entries().next().value;
+      lockWatch.delete(oldestLock);
+      if (oldest.skips > 0) {
+        abandon('lock-contended', oldestLock,
+          `${oldest.skips} increments were dropped because the lock was busy, and this aggregate is being forgotten to stay within the tracking bound`);
+      }
+    }
+  }
+  return w;
+}
 
 function tryLock(lock) {
-  if (createLock(lock)) { heldSince = 0; return true; }
+  const now = Date.now();
+  if (createLock(lock)) { watchFor(lock, now).heldSince = 0; return true; }
   let st;
   try { st = lstatSync(lock); }
   catch { // vanished, or the failure was never EEXIST
-    if (createLock(lock)) { heldSince = 0; return true; }
+    if (createLock(lock)) { watchFor(lock, now).heldSince = 0; return true; }
     return abandon('lock-unavailable', lock);
   }
   if (lockIsHeld(st)) {
     // A real concurrent writer holds the lock for microseconds, so skipping
-    // this increment is normal and stays silent. Someone refreshing a planted
-    // lock looks identical at any single moment and differs only in duration
-    // -- which is the one thing that can be checked, so that the "held" branch
-    // cannot be a silent kill switch (it was, until this).
-    const now = Date.now();
-    if (!heldSince) heldSince = now;
-    else if (now - heldSince >= HELD_LOCK_STUCK_MS) {
+    // this increment is normal and stays silent. Someone holding a planted
+    // lock looks identical at any single moment; only how much of the time it
+    // is held tells them apart, so the "held" branch cannot be a silent kill
+    // switch. Two ways to notice, because either alone can be dodged: held
+    // continuously for a minute, or simply skipping far more often than
+    // contention ever would over the window.
+    const w = watchFor(lock, now);
+    w.skips += 1;
+    if (!w.heldSince) w.heldSince = now;
+    const stuckFor = now - w.heldSince;
+    if (stuckFor >= HELD_LOCK_STUCK_MS) {
       abandon('lock-held-too-long', lock,
-        `it has been locked for ${Math.round((now - heldSince) / 1000)}s, far longer than a writer holds it; remove it by hand`);
+        `it has been locked for ${Math.round(stuckFor / 1000)}s, far longer than a writer holds it; remove it by hand`);
+      w.heldSince = now;
+      w.skips = 0;
+    } else if (w.skips >= HELD_LOCK_SKIP_LIMIT) {
+      abandon('lock-contended', lock,
+        `${w.skips} increments were dropped because the lock was busy; a writer holds it for microseconds, so something is sitting on it`);
+      w.skips = 0;
     }
     return false;
   }
@@ -294,8 +385,8 @@ function tryLock(lock) {
     return abandon('lock-stuck', lock,
       'it is not a file this module wrote and could not be removed (a non-empty directory is never removed); remove it by hand');
   }
-  heldSince = 0;
-  warnOnce('stale-lock-removed',
+  watchFor(lock, now).heldSince = 0;
+  warnOnce('stale-lock-removed', lock,
     `removed a stale aggregate lock (${q(lock)}); a previous writer may have crashed or the aggregate may be under attack`);
   return true;
 }
@@ -333,7 +424,7 @@ function renameOnto(tmp, path) {
         'something that is not a file is in the way and was not removed (a non-empty directory is never removed); move it aside by hand');
       throw e;
     }
-    warnOnce('aggregate-obstruction-cleared',
+    warnOnce('aggregate-obstruction-cleared', path,
       `cleared an obstruction at the aggregate path (${q(path)}); it was not a regular file`);
   }
   renameSync(tmp, path);
@@ -374,12 +465,14 @@ export function recordGhUsage({ client, target, operation, result, denial } = {}
   });
 }
 
-// What is actually sitting at an aggregate path. Used by `reset` to decide
-// what it may replace and by `show` to tell "nothing recorded yet" apart from
-// "could not be read" -- an empty report is the same either way, which left
-// an operator with a broken aggregate believing it was merely idle.
+// What is actually sitting at an aggregate path, by lstat -- i.e. WITHOUT
+// following a symlink. Used by `reset` and `enable`, which replace the path
+// by rename and so must not follow a link onto someone else's file. `show`
+// deliberately does NOT use this: it reports what the reader saw
+// (aggregateReadProblem, which does follow links), because saying "cannot be
+// read" about a file it just printed counts from is worse than saying nothing.
 //
-// For `reset`: absent or an existing aggregate is always fine; a directory,
+// Absent or an existing aggregate is always fine; a directory,
 // FIFO, device or symlink is never written; and any other regular file needs
 // --force, which also covers the one legitimate case this cannot recognise --
 // an aggregate too corrupt to parse, i.e. exactly what `reset` exists to
@@ -395,7 +488,7 @@ export function aggregateStatus(path) {
   // an aggregate too damaged to parse, could not repair this one.
   if (st.size > MAX_AGGREGATE_BYTES) return 'too-large';
   const opened = openRegularFile(path);
-  if (opened === null) return 'unreadable';
+  if (opened.fd === undefined) return 'unreadable';
   try {
     const text = readCapped(opened.fd, opened.size);
     const parsed = text === null ? null : JSON.parse(text);
@@ -423,8 +516,18 @@ export function resetGhUsage(path, { force = false } = {}) {
   });
 }
 
-export function formatGhUsageReport(path, { includePeriod = true } = {}) {
-  const state = readState(path);
+// The report and the reason it is empty, from a SINGLE read. `show` used to
+// call formatGhUsageReport and aggregateReadProblem separately, which is two
+// reads of a file another process can replace in between -- the exact drift
+// between stdout and stderr this whole change exists to remove.
+export function buildGhUsageReport(path, opts) {
+  const { state, problem } = readAggregate(path);
+  return { report: renderReport(state, opts), problem };
+}
+
+export function formatGhUsageReport(path, opts) { return buildGhUsageReport(path, opts).report; }
+
+function renderReport(state, { includePeriod = true } = {}) {
   const lines = ['ccserver-gh-usage-report: 1'];
   if (includePeriod) lines.push(`period: ${state.startedOn}..${today()}`);
   lines.push('recording: opted-in-local-aggregate', '');
