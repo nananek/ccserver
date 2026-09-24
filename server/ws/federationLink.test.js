@@ -163,14 +163,24 @@ function listenTls(identity, onSocket) {
   });
 }
 
-function waitFor(fn, { timeoutMs = 5000, intervalMs = 20 } = {}) {
+// `describe` is what keeps a wait from swallowing the diagnosis: a condition
+// that never comes true otherwise reports nothing but 'timed out', which is
+// exactly the failure mode that makes a waited-for state hard to debug. It is
+// only called on the timeout path.
+function waitFor(fn, { timeoutMs = 5000, intervalMs = 20, describe = null } = {}) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
     const tick = () => {
       let ok;
       try { ok = fn(); } catch { ok = false; }
       if (ok) return resolve();
-      if (Date.now() - start > timeoutMs) return reject(new Error('timed out waiting for condition'));
+      if (Date.now() - start > timeoutMs) {
+        let detail = '';
+        if (describe) {
+          try { detail = ` -- ${describe()}`; } catch (e) { detail = ` -- describe() threw: ${e.message}`; }
+        }
+        return reject(new Error(`timed out waiting for condition${detail}`));
+      }
       setTimeout(tick, intervalMs);
     };
     tick();
@@ -195,6 +205,44 @@ let serverB;
 // FederationLink instances so timers/state never leak across tests).
 let inboundTargetA = null;
 let inboundTargetB = null;
+// Every socket each side's listener accepted, in arrival order. A link's own
+// dialed socket lives inside FederationLink, but its FAR end is one of these,
+// so these two lists between them name both physical connections of a
+// simultaneous double-dial -- which is what lets a test see that one of them
+// has been dropped (see the duplicate-dial test).
+let acceptedByA = [];
+let acceptedByB = [];
+// Withholds one side's acceptInbound until the test says so. acceptInbound is
+// what sends that side's link-hello on the connection, and the PEER only
+// resolves its candidate for that connection once the hello lands -- so
+// holding it keeps the peer's second candidate pending for as long as the test
+// wants. A release, not a delay: a timer would just re-introduce the race the
+// test exists to remove. Off by default, and the un-held path is unchanged, so
+// no other test's timing moves.
+let inboundHoldA = false;
+let inboundHoldB = false;
+let heldAcceptsA = [];
+let heldAcceptsB = [];
+
+function acceptInto(target, accepted, held, hold, socket, info) {
+  accepted.push(socket);
+  if (hold) {
+    held.push(() => { if (!socket.destroyed) target.acceptInbound(socket, info); });
+    return;
+  }
+  target.acceptInbound(socket, info);
+}
+
+// Delivers everything held back so far, and stops holding.
+function releaseHeldAccepts() {
+  inboundHoldA = false;
+  inboundHoldB = false;
+  const pending = [...heldAcceptsA, ...heldAcceptsB];
+  heldAcceptsA = [];
+  heldAcceptsB = [];
+  for (const deliver of pending) deliver();
+  return pending.length;
+}
 
 before(async () => {
   if (skip) return;
@@ -207,11 +255,11 @@ before(async () => {
 
   serverA = await listenTls(identityA, (socket) => {
     const info = peerCertInfo(socket);
-    if (info && inboundTargetA) inboundTargetA.acceptInbound(socket, info);
+    if (info && inboundTargetA) acceptInto(inboundTargetA, acceptedByA, heldAcceptsA, inboundHoldA, socket, info);
   });
   serverB = await listenTls(identityB, (socket) => {
     const info = peerCertInfo(socket);
-    if (info && inboundTargetB) inboundTargetB.acceptInbound(socket, info);
+    if (info && inboundTargetB) acceptInto(inboundTargetB, acceptedByB, heldAcceptsB, inboundHoldB, socket, info);
   });
 });
 
@@ -232,6 +280,12 @@ beforeEach(() => {
   if (skip) return;
   inboundTargetA = null;
   inboundTargetB = null;
+  acceptedByA = [];
+  acceptedByB = [];
+  inboundHoldA = false;
+  inboundHoldB = false;
+  heldAcceptsA = [];
+  heldAcceptsB = [];
   // Each test re-pairs the same two identities from scratch -- clear
   // whatever rows an earlier test (including a revoke) left behind.
   getDb().prepare('DELETE FROM paired_instances').run();
@@ -243,6 +297,16 @@ afterEach(() => {
   linkB?.close();
   linkA = null;
   linkB = null;
+  // close() only tears down the link's LIVE connection. A duplicate dial that
+  // has not finished resolving still has a second candidate socket open, and an
+  // accepted-but-never-adopted socket keeps the event loop alive -- so a test
+  // that fails mid-resolution would hang the whole file instead of reporting
+  // its assertion. Drop everything the listeners handed out.
+  for (const sock of [...acceptedByA, ...acceptedByB]) {
+    try { sock.destroy(); } catch { /* already gone */ }
+  }
+  acceptedByA = [];
+  acceptedByB = [];
 });
 
 test('a link established by only one side dialing carries RPC in BOTH directions', { skip }, async () => {
@@ -285,6 +349,75 @@ test('a link established by only one side dialing carries RPC in BOTH directions
   channel.close();
 });
 
+// Issue #237: `connected` is `!!this.live`, and _resolveCandidate adopts the
+// FIRST candidate unconditionally, swapping to the winner only when the second
+// one arrives. `connected && connected` is satisfied in that in-between state,
+// with a side still holding the loser; the original test asserted right after
+// it.
+//
+// The condition here: both sides `connected`, with exactly one of the two
+// accepted sockets destroyed.
+//
+// Three rounds of review found claims in this comment that outran the code, so
+// what follows is split into what was measured and what is not claimed. Nothing
+// here is stated as a consequence of anything else.
+//
+// Measured:
+//   - Reverting to `connected && connected` makes the deterministic test below
+//     fail: 5 runs, 5 failures.
+//   - Applied where there is no double dial (a one-sided dial, a single
+//     connection): `accepted` stays below 2, the condition stays unmet, and the
+//     wait ends in a timeout rather than a pass.
+//   - When the condition is not met, `describe` prints the observed state with
+//     the timeout.
+//   - No false positive in 200 idle runs plus 300 under 16 CPU burners on 8
+//     cores, polled with setImmediate.
+//
+// Not claimed:
+//   - That this condition implies settlement. It does not follow. Each list
+//     holds ONE END of a connection -- the end our listener accepted -- and the
+//     far end lives inside the peer's FederationLink. A review constructed the
+//     counterexample: hold the winner's accepting side in "sends its hello but
+//     never reads" (pause() after acceptInbound), and the condition went true
+//     20/20 with both sides reading as the dialer, i.e. on two different
+//     connections.
+//   - That the 500 runs above make the state unreachable naturally. They are
+//     500 runs. There is an argument for why the orderings line up (the peer
+//     sends its hello when it accepts, after our hello was already written), but
+//     it is an argument, not a measurement of every ordering.
+//   - That a broken fingerprint rule reaches the orientation assertions.
+//     Measured, by changing `winningDialerIsSelf`: with both sides preferring
+//     self, both duplicate-dial tests time out at `accepted:6 dropped:6` and the
+//     assertions are never evaluated (each side discards the other's inbound,
+//     that discard closes the peer's live, the peer redials, and `accepted`
+//     keeps growing). With both sides preferring the peer, the original test
+//     times out and the deterministic one passes.
+//   - That this file covers the rule itself. It cannot: `aShouldBeDialer` is
+//     computed from the same `winningDialerIsSelf` the production path uses, so
+//     a change applied symmetrically to both is invisible here. The rule has its
+//     own pure-function test near the top of this file.
+function duplicateDialState() {
+  const both = [...acceptedByA, ...acceptedByB];
+  return {
+    accepted: both.length,
+    dropped: both.filter((sock) => sock.destroyed).length,
+    aConnected: linkA.connected,
+    bConnected: linkB.connected,
+    aIsDialer: linkA.live?.isDialer ?? null,
+    bIsDialer: linkB.live?.isDialer ?? null,
+  };
+}
+
+function waitForDuplicateDialToSettle(opts = {}) {
+  return waitFor(() => {
+    const st = duplicateDialState();
+    return st.aConnected && st.bConnected && st.accepted === 2 && st.dropped === 1;
+  }, {
+    describe: () => `duplicate dial never settled: ${JSON.stringify(duplicateDialState())}`,
+    ...opts,
+  });
+}
+
 test('duplicate simultaneous dials resolve to one link, consistently on both sides', { skip }, async () => {
   const rowForBFromA = approve(pairing.recordOutboundRequest({
     fingerprint: identityB.fingerprint, certPem: identityB.cert, hostnameClaimed: 'b', addr: `127.0.0.1:${serverB.address().port}`,
@@ -302,7 +435,7 @@ test('duplicate simultaneous dials resolve to one link, consistently on both sid
   // resolution rule exists for.
   linkA.connect();
   linkB.connect();
-  await waitFor(() => linkA.connected && linkB.connected);
+  await waitForDuplicateDialToSettle();
 
   const aShouldBeDialer = winningDialerIsSelf(identityA.fingerprint, identityB.fingerprint);
   assert.equal(linkA.live.isDialer, aShouldBeDialer);
@@ -311,6 +444,59 @@ test('duplicate simultaneous dials resolve to one link, consistently on both sid
   // Both directions still function over whichever connection won.
   assert.equal((await linkA.rpc('sessions.list', {})).ok, true);
   assert.equal((await linkB.rpc('sessions.list', {})).ok, true);
+});
+
+// The red for #237, made deterministic. The original failure needed the full
+// suite's scheduling pressure to spread the two candidates' arrivals apart;
+// here the winning connection's link-hello is simply withheld, so the
+// unsettled state is entered on purpose and held open with no timer involved.
+//
+// Against the old `connected && connected` wait this test fails on the first
+// orientation assertion -- the same assertion issue #237 reported. Not the same
+// value direction: `aShouldBeDialer` comes from freshly generated fingerprints
+// each run, so which way the comparison reads varies per run (5 runs gave 4
+// one way, 1 the other). Against the settled wait it passes.
+test('#237 duplicate dials: a late winning candidate is waited out, not asserted through', { skip }, async () => {
+  const rowForBFromA = approve(pairing.recordOutboundRequest({
+    fingerprint: identityB.fingerprint, certPem: identityB.cert, hostnameClaimed: 'b', addr: `127.0.0.1:${serverB.address().port}`,
+  }));
+  const rowForAFromB = approve(pairing.recordOutboundRequest({
+    fingerprint: identityA.fingerprint, certPem: identityA.cert, hostnameClaimed: 'a', addr: `127.0.0.1:${serverA.address().port}`,
+  }));
+
+  linkA = new FederationLink(rowForBFromA, { selfIdentity: identityA });
+  linkB = new FederationLink(rowForAFromB, { selfIdentity: identityB });
+  inboundTargetA = linkA;
+  inboundTargetB = linkB;
+
+  const aShouldBeDialer = winningDialerIsSelf(identityA.fingerprint, identityB.fingerprint);
+  // Hold the accept on whichever listener the WINNING dialer connects to. Its
+  // hello is then the one in flight, so both sides adopt the losing connection
+  // first and sit there: connected, and holding the wrong one.
+  if (aShouldBeDialer) inboundHoldB = true; else inboundHoldA = true;
+
+  linkA.connect();
+  linkB.connect();
+
+  // The state #237 asserted in. Waiting FOR it (rather than assuming it is
+  // already there) keeps the setup itself off the clock -- a slow handshake
+  // delays this line instead of breaking the test.
+  await waitFor(
+    () => linkA.live?.isDialer === !aShouldBeDialer && linkB.live?.isDialer === aShouldBeDialer,
+    { describe: () => `never reached the unsettled state: ${JSON.stringify(duplicateDialState())}` },
+  );
+  assert.equal(linkA.connected, true, 'both sides read as connected here -- that is the whole problem');
+  assert.equal(linkB.connected, true);
+  assert.equal(duplicateDialState().dropped, 0, 'nothing has been dropped yet: both sides adopted a first candidate, but neither has superseded it');
+
+  // Let the winning hello through; the second candidate can now be resolved,
+  // and with it the supersede that settles the duplicate.
+  assert.equal(releaseHeldAccepts(), 1, 'exactly the winning dialer\'s connection was held');
+  await waitForDuplicateDialToSettle();
+
+  assert.equal(linkA.live.isDialer, aShouldBeDialer);
+  assert.equal(linkB.live.isDialer, !aShouldBeDialer, 'the two sides must agree on the same physical connection');
+  assert.equal((await linkA.rpc('sessions.list', {})).ok, true, 'the surviving connection is the usable one');
 });
 
 test('revoking the pair permanently closes the link and stops reconnecting', { skip }, async () => {
