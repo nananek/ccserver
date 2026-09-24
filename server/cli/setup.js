@@ -90,7 +90,7 @@ printLeftovers();
 
 if (running) {
   console.error(`ccserver (:${port()}) が応答しています。移行前に停止してください:`);
-  console.error('  systemctl --user stop ccserver');
+  printServiceHint('stop');
   console.error('  (停止せずに実行するには --force)');
   process.exit(1);
 }
@@ -180,8 +180,41 @@ console.log('');
 console.log('⚠ 移行後は必ず本機能を含むブランチのコードで起動してください。');
 console.log('  古いブランチのコードは旧パスを参照するため、空の状態で起動します。');
 console.log('');
-console.log('  systemctl --user start ccserver');
+printServiceHint('start');
+// Said here because this is the moment an operator most needs to know it
+// exists: right after an irreversible-looking one-way move, before anything
+// has gone wrong. Hunting for it later means reading paths.js.
+console.log('');
+console.log('元に戻す手順 (移行を取り消す) は docs の「設定モデル」→「移行を取り消す」にあります:');
+console.log(`  ${layoutMarkerPath()} を消すと旧レイアウトに戻りますが、`);
+console.log('  ファイルを旧位置へ戻す作業が別途必要です。手順は上記ドキュメントを参照してください。');
 process.exit(0);
+
+// How to stop/start ccserver. Deliberately not a single systemd command.
+//
+// The setup gate (issue #201 Step5) means EVERY host now has to run this
+// wizard, macOS included, and ccserver runs there under launchd, in a tmux
+// pane, or straight from a shell -- `systemctl --user` exists on none of
+// them. Printing only that left the operator of the most dangerous command in
+// this tool reading an instruction that does not apply to their machine.
+//
+// systemd is still named first because docs/ccserver.service is what the
+// deployment docs set up, and it is the case where a stale unit will restart
+// the server underneath a migration. The point is to say what has to be true
+// -- the server must not be running -- rather than to guess how.
+function printServiceHint(action) {
+  const out = action === 'stop' ? console.error : console.log;
+  if (action === 'stop') {
+    out(`  systemd:          systemctl --user stop ccserver`);
+    out(`  launchd (macOS):  launchctl unload ~/Library/LaunchAgents/<ccserver の plist>`);
+    out('  tmux / 手動起動:   そのプロセスで Ctrl-C');
+    out(`  分からない場合:    lsof -nP -iTCP:${port()} -sTCP:LISTEN  で PID を調べて kill`);
+  } else {
+    out(`  systemd:          systemctl --user start ccserver`);
+    out(`  launchd (macOS):  launchctl load ~/Library/LaunchAgents/<ccserver の plist>`);
+    out('  tmux / 手動起動:   NODE_ENV=production node server/index.js');
+  }
+}
 
 // --- marker + config seeding ------------------------------------------------
 

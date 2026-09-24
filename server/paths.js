@@ -56,6 +56,29 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // --- XDG base directories ---------------------------------------------------
+//
+// XDG ON EVERY PLATFORM, macOS INCLUDED. There is no `process.platform`
+// branch here and that is a decision, not an oversight -- macOS convention
+// would be ~/Library/Application Support/ccserver.
+//
+// Reasons, in order:
+//   1. $XDG_* wins if it is set, and a macOS user who sets it means it. This
+//      repo already relies on that: sandbox-seatbelt.js hands opencode
+//      XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME so its host config
+//      is reachable from inside the sandbox. Honoring ~/Library instead
+//      would ignore an explicit instruction from the operator.
+//   2. ccserver is a long-running developer service driven from a terminal,
+//      and ~/.config is where its neighbours (git, gh, claude, codex) keep
+//      their state on macOS too. ~/Library/Application Support is where GUI
+//      apps go.
+//   3. One layout means one migration, one docs page, one set of paths in
+//      every error message. A second platform layout would double the
+//      registry's surface and every test that pins it.
+//
+// Where a platform branch IS warranted this repo makes one -- git-broker.js's
+// hostRuntimeDir() falls back to /tmp on darwin because /run/user does not
+// exist there. Nothing equivalent applies to ~/.config or ~/.local.
+//
 // An empty string counts as unset, matching opencodeUsage.js's authFilePath().
 // A relative value is ignored too: the XDG spec requires absolute paths, and
 // honoring a relative one would scatter state under whatever cwd the service

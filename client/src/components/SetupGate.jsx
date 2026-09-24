@@ -119,12 +119,22 @@ function SetupInstructions({ status }) {
         実行後にサーバーを再起動してください。
       </p>
 
+      {/* The restart line names systemd but does not assume it: this gate is
+          what forces every host through the wizard, and on macOS ccserver
+          runs under launchd, in tmux, or straight from a shell -- none of
+          which have `systemctl --user`. */}
       <pre className="setup-gate-commands">
 {`cd <ccserverのディレクトリ>
 npm run setup           # まず内容を確認 (ドライラン)
 npm run setup -- --yes  # 実行
+
+# ccserver を再起動 (systemd の場合)
 systemctl --user restart ccserver`}
       </pre>
+      <p className="settings-hint">
+        systemd を使っていない場合 (macOS の launchd、tmux、手動起動など) は、
+        起動した方法で ccserver を再起動してください。
+      </p>
 
       {warnings.length > 0 && (
         <>

@@ -169,6 +169,13 @@ export function checkoutEnv(dir, { allow = [] } = {}) {
 // This alone is the right env for spawning a SERVER, which never migrates
 // anything. Spawning the WIZARD needs the checkout overrides on top -- see
 // spawnWizard, which is how every test does it.
+// NOTE for a future macOS test: this requires `dir` to be under tmpdir(),
+// which on darwin is $TMPDIR (/var/folders/...), NOT /tmp. Two test files
+// here deliberately mkdtemp under /tmp on darwin instead, to keep unix socket
+// paths inside sun_path's 104 bytes (groupManager.test.js, mcpBroker.test.js).
+// No file combines the two patterns today, so nothing is broken; if a #201
+// test ever needs a short socket path on macOS, widen this check rather than
+// dropping it.
 export function isolatedEnv(dir, extra = {}) {
   if (!isUnder(dir, tmpdir())) {
     throw new Error(`isolatedEnv: ${dir} is not under ${tmpdir()} -- refusing to build a test env outside the temp tree`);
