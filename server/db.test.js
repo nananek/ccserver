@@ -333,9 +333,10 @@ test('v9 migration: an existing vault becomes legacy; existing sessions/tokens g
 
 // Issue #201 Step4 (decision D2). The settings table is the landing pad for
 // dynamic configuration; it ships empty, so what matters here is that
-// arriving at v10 from a populated v9 DB costs nothing.
-test('v10 migration: a populated v9 DB gains the settings table and loses no rows', () => {
-  const path = join(tmpRoot, 'v9-to-v10.sqlite3');
+// arriving at it from a populated v9 DB costs nothing. It is v11 rather than
+// v10 because the Web Push VAPID/subscription tables landed on v10 first.
+test('v11 migration: a populated v9 DB gains the settings table and loses no rows', () => {
+  const path = join(tmpRoot, 'v9-to-v11.sqlite3');
   const upToV9 = MIGRATIONS.filter((m) => m.version <= 9);
   const db = new DatabaseSync(path);
   migrate(db, upToV9);
@@ -345,7 +346,7 @@ test('v10 migration: a populated v9 DB gains the settings table and loses no row
 
   migrate(db, MIGRATIONS);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 10);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 11);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM worker_presets').get().c, 1, 'existing rows survive');
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM settings').get().c, 0, 'the table ships empty');
   db.prepare('INSERT INTO settings (scope, scope_id, key, value, updated_at) VALUES (?,?,?,?,?)')
