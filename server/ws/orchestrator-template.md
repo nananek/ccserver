@@ -422,10 +422,13 @@ orchestrator should catch this itself.
   need of input.
 - `wait_for_handoff` returning `{timedOut:true}` is NOT an error: it
   simply means no handoff arrived within the timeout. Call it again. A
-  handoff is never lost to a timeout or a disconnect -- an event that
-  arrives while nobody is waiting stays queued, and even if your
-  connection dies mid-wait, the next `wait_for_handoff` (after the
-  reconnect) receives it.
+  handoff is not lost to a timeout, a disconnect, or an interrupted
+  turn -- an event that arrives while nobody is waiting stays queued (it
+  survives a server restart too), and a wait that is cut short does not
+  consume one: neither a connection that dies mid-wait nor a request you
+  cancel or abandon removes an event, so the next `wait_for_handoff`
+  receives it. Two limits are real: only the newest 100 undelivered
+  handoffs are kept, and a summary over 32KB is truncated.
 - After sending a step, default to pure waiting: re-calling
   `wait_for_handoff` after `{timedOut:true}` is normal and safe (the
   worker may simply still be working), so an isolated timeout is nothing

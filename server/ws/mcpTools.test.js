@@ -527,6 +527,17 @@ test('#245: a live (unaborted) wait is not re-queued', async () => {
   assert.deepEqual(requeued, [], 'nothing is re-queued on a normal delivery');
 });
 
+// The stubs above prove the LOGIC; this proves the wiring. mcpTools only ever
+// sees groupManager through the narrow facade, so a method it calls that the
+// facade does not re-export is a TypeError in production that no stubbed test
+// can see -- which is exactly how requeueHandoff shipped missing (#245).
+test('#245: the groupManager facade exposes every method mcpTools calls on it', () => {
+  const api = groupManager.getGroupManagerApi();
+  for (const name of ['pushHandoff', 'takeHandoff', 'requeueHandoff']) {
+    assert.equal(typeof api[name], 'function', `groupManagerApi.${name} must exist for mcpTools`);
+  }
+});
+
 test('waitForHandoff: empty queue times out with a tiny timedOut result (not an error)', async () => {
   const g = await makeGroupAsync();
   const started = Date.now();

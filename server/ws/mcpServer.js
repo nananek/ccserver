@@ -204,7 +204,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'wait_for_handoff',
-    'Block until a worker calls handoff_to_orchestrator, or the timeout elapses. Returns the structured handoff event (worker, summary, status) -- or {timedOut:true} on timeout, in which case simply call wait_for_handoff again. Handoffs are never lost: a handoff that arrives while no one is waiting stays queued, and even a connection that dies mid-wait does not consume it -- the next wait_for_handoff (after reconnect) receives it. Call this once per turn instead of polling read_output.',
+    'Block until a worker calls handoff_to_orchestrator, or the timeout elapses. Returns the structured handoff event (worker, summary, status) -- or {timedOut:true} on timeout, in which case simply call wait_for_handoff again. A handoff that arrives while no one is waiting stays queued (and survives a server restart), and a wait that is cut short does not consume one: neither a connection that dies mid-wait nor a request you cancel or abandon removes an event -- the next wait_for_handoff receives it. Two limits are real and NOT covered by that: only the newest 100 undelivered handoffs are kept (older ones are dropped once a group exceeds it), and a summary over 32KB is truncated. Call this once per turn instead of polling read_output.',
     { timeoutMs: z.number().optional() },
     // `extra` carries this request's AbortSignal. Forwarding it is what keeps
     // a cancelled or abandoned wait from swallowing the next handoff (#245) --
@@ -224,7 +224,7 @@ export function buildHandoffMcpServer(deps) {
 
   server.tool(
     'handoff_to_orchestrator',
-    'Notify the orchestrator that your task is complete, blocked, needs input, or hit an error. Call this exactly once when you finish a task or when you need the orchestrator to make a decision. The orchestrator is waiting on wait_for_handoff and will see the summary you provide here.',
+    'Notify the orchestrator that your task is complete, blocked, needs input, or hit an error. Call this exactly once when you finish a task or when you need the orchestrator to make a decision. The orchestrator is waiting on wait_for_handoff and will see the summary you provide here. `summary` is truncated at 32KB, and ok:true means the handoff was queued, not that the orchestrator has read it.',
     { summary: z.string(), status: z.enum(['done', 'blocked', 'needs_input', 'error']).optional(), nextRole: z.string().optional() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.handoffToOrchestrator(deps, args)) }] }),
   );

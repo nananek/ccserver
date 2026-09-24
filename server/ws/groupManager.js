@@ -517,6 +517,11 @@ function persistGroups() {
         memberPrefs: g.memberPrefs || {},
         members: Object.fromEntries([...g.members]),
         memberWorktrees: Object.fromEntries([...g.memberWorktrees]),
+        // #245: undelivered handoffs outlive the process. Both the tool
+        // description and the docs promised this already; nothing was saving
+        // it, so a restart silently emptied the queue and the orchestrator
+        // waited forever for work a worker had been told was sent.
+        handoffQueue: g.handoffQueue || [],
       });
     }
     if (arr.length > 0) {
@@ -572,7 +577,12 @@ export function restoreGroups() {
       files: new Map(),
       controlBroker: null,
       handoffChannels: new Map(),
-      handoffQueue: [],
+      // #245: restore what was still undelivered. Capped on the way back in
+      // as well -- a hand-edited or corrupted file must not let the queue
+      // start out over the limit it is otherwise held to.
+      handoffQueue: Array.isArray(e.handoffQueue)
+        ? e.handoffQueue.filter((ev) => ev && typeof ev === 'object').slice(-MAX_HANDOFF_QUEUE)
+        : [],
       handoffEmitter: new EventEmitter(),
       pendingTakes: new Set(),
       memberSaved: new Map(),
@@ -1075,7 +1085,15 @@ export function pushHandoff(groupId, event) {
   const group = groups.get(groupId);
   if (!group) return false;
   if (group.handoffQueue.length >= MAX_HANDOFF_QUEUE) {
-    group.handoffQueue.shift();
+    // #245: the sender of the dropped event was told ok:true and will never
+    // learn it went nowhere. Dropping is still the right call (an absent
+    // orchestrator must not grow memory without bound), but doing it in
+    // silence is not -- this line is the only place anyone can find out.
+    // Changing the contract so the SENDER learns is a separate decision.
+    const dropped = group.handoffQueue.shift();
+    console.warn(`[groupManager] handoff queue full for ${groupId} (${MAX_HANDOFF_QUEUE}): `
+      + `dropping the oldest undelivered handoff from ${dropped?.fromRole || 'unknown'} -- `
+      + 'the orchestrator is not consuming handoffs and that one is now lost');
   }
   group.handoffQueue.push(event);
   // A worker handed off: the turn moves to the orchestrator -- or, when the
@@ -1083,6 +1101,10 @@ export function pushHandoff(groupId, event) {
   group.currentTurn = event.nextRole || 'orchestrator';
   group.lastHandoffAt = Date.now();
   group.handoffEmitter.emit('handoff');
+  // Persist the queue itself, not just the fact that a group exists (#245):
+  // nothing else on this path rewrites the file, so without this the queue
+  // would only ever reach disk if some unrelated mutation happened to follow.
+  persistGroups();
   return true;
 }
 
@@ -1183,6 +1205,8 @@ export function takeHandoff(groupId, timeoutMs, opts = {}) {
           return;
         }
         finish(waiter.consumed);
+        // Delivered: it must not come back after a restart (#245).
+        persistGroups();
       }, 0);
     };
     const timer = timeoutMs > 0
@@ -1209,6 +1233,7 @@ export function requeueHandoff(groupId, event) {
   if (!group || !event) return false;
   if (!group.handoffQueue.includes(event)) group.handoffQueue.unshift(event);
   group.handoffEmitter.emit('handoff');
+  persistGroups();
   return true;
 }
 

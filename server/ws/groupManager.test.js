@@ -319,6 +319,52 @@ test('#245: a wait whose signal is already aborted consumes nothing', async () =
   assert.deepEqual(await groupManager.takeHandoff(gid, 200), { type: 'done', from: 'workerA', summary: 'still here' });
 });
 
+// #245: the tool description and the docs both promised undelivered handoffs
+// survive a restart. Nothing was saving them: persistGroups() left the queue
+// out entirely and restoreGroups() rebuilt it empty, so a restart threw away
+// work every sender had been told {ok:true} for.
+test('#245: an undelivered handoff survives a restart', async () => {
+  const gid = await makeGroup();
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'must outlive the process' });
+
+  // Simulate the restart the way restoreGroups() actually sees it: the file on
+  // disk is the only thing that crosses the process boundary.
+  const onDisk = JSON.parse(readFileSync(process.env.CCSERVER_GROUPS_PATH, 'utf-8'));
+  const saved = onDisk.find((g) => g.id === gid);
+  assert.ok(saved, 'the group reached disk');
+  assert.deepEqual(saved.handoffQueue, [{ type: 'done', from: 'workerA', summary: 'must outlive the process' }],
+    'the queue is part of what is persisted');
+
+  // Restart simulation. Two things matter: destroyGroup also rewrites the
+  // file, so the on-disk state has to be put back; and the file accumulates
+  // every group this suite made, so restoreGroups() is pointed at THIS group
+  // alone -- resurrecting the rest would leave their brokers and timers behind
+  // and the test process would never exit.
+  groupManager.destroyGroup(gid);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([saved]));
+  groupManager.restoreGroups();
+  assert.deepEqual(await groupManager.takeHandoff(gid, 200),
+    { type: 'done', from: 'workerA', summary: 'must outlive the process' },
+    'and the restored group still has it to hand out');
+  groupManager.destroyGroup(gid);
+});
+
+// The other half: a handoff that WAS delivered must not come back.
+test('#245: a delivered handoff does not reappear after a restart', async () => {
+  const gid = await makeGroup();
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'delivered once' });
+  assert.equal((await groupManager.takeHandoff(gid, 200)).summary, 'delivered once');
+
+  const saved = JSON.parse(readFileSync(process.env.CCSERVER_GROUPS_PATH, 'utf-8')).find((g) => g.id === gid);
+  assert.deepEqual(saved.handoffQueue, [], 'the delivery was written through');
+  groupManager.destroyGroup(gid);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([saved]));
+  groupManager.restoreGroups();
+  assert.deepEqual(await groupManager.takeHandoff(gid, 200), { timedOut: true },
+    'a restart must not resurrect an already-delivered handoff');
+  groupManager.destroyGroup(gid);
+});
+
 test('onOrchestratorExit settles pending waiters as timedOut (no 15-min zombie)', async () => {
   const gid = await makeGroup();
 
