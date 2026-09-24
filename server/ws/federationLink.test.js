@@ -356,19 +356,47 @@ test('a link established by only one side dialing carries RPC in BOTH directions
 // settled -- intermittently, because under load the two candidates' arrivals
 // spread apart. This waits for the resolution to be OVER instead.
 //
-// What makes it over: a double dial creates exactly two physical connections,
-// and settling destroys one of them. If one is destroyed while both sides are
-// still `connected`, then neither side is holding the destroyed one (losing
-// your live connection nulls `live` -- _onSocketClose -- so you would not read
-// as connected), both are therefore on the survivor, and no third candidate
-// can arrive to swap anything again. That is final.
+// The signal: a double dial creates exactly two physical connections, and
+// settling destroys one of them. So this waits for both sides to be
+// `connected` with exactly one of the two accepted sockets destroyed.
+//
+// Be clear about what that does NOT prove. Each of these lists holds ONE END
+// of a connection -- the end our listener accepted. Destroying that end says
+// nothing about the far end, which lives inside the peer's FederationLink: a
+// side that has not yet seen the close can still be `connected` while holding
+// its own end of the SAME losing connection. So "nobody holds the destroyed
+// socket" is true and "both sides are on the survivor" does not follow from
+// it. The condition is not logically closed, and a review built the
+// counterexample: hold the winner's accepting side in "sends its hello but
+// never reads" (pause() right after acceptInbound) and this wait goes true
+// 20/20 with both sides reading as the dialer -- i.e. sitting on two DIFFERENT
+// connections, exactly what the assertion's own message is about.
+//
+// What does hold it shut in a natural run is causal order, not logic. The
+// preferring dialer cannot resolve the winning connection until the peer's
+// hello arrives on it, and the peer sends that hello when it accepts -- by
+// which point it has a framer up, and OUR hello was written before that. So
+// the peer resolves the winning connection BEFORE we do, and is already off
+// the loser by the time we supersede and destroy it. Measured: no false
+// positive in 200 idle runs plus 300 under 16 CPU burners on 8 cores, polled
+// densely with setImmediate. Nothing reaches this state without being
+// constructed.
+//
+// So: a large reduction of the original window (which needed only "the second
+// candidate has not arrived at EITHER side"), not an airtight one.
+//
+// It does fail safe if misapplied: anything that is not a double dial leaves
+// `accepted` below 2, so this never goes true for a one-sided dial -- it times
+// out (with `describe`) rather than quietly passing.
 //
 // Deliberately NOT the assertion's own condition: this says "resolution
 // finished", the assertions say "it finished the way the fingerprint rule
 // requires". A real regression in the rule still settles, so it still fails as
-// an assertion with actual/expected -- not as a bare timeout. And if the two
-// sides settle on DIFFERENT connections, nothing is destroyed, the wait times
-// out, and `describe` reports the split instead of just the timeout.
+// an assertion with actual/expected -- not as a bare timeout. And whenever the
+// condition is simply never met, the wait times out with `describe` reporting
+// the observed state rather than just the word 'timeout'. (Which states leave
+// it unmet is exactly what the paragraph above says is not proven, so that is
+// the claim here, not a stronger one.)
 function duplicateDialState() {
   const both = [...acceptedByA, ...acceptedByB];
   return {
@@ -425,8 +453,10 @@ test('duplicate simultaneous dials resolve to one link, consistently on both sid
 // unsettled state is entered on purpose and held open with no timer involved.
 //
 // Against the old `connected && connected` wait this test fails on the first
-// orientation assertion -- which is the exact assertion, and the exact value
-// direction, that issue #237 reported. Against the settled wait it passes.
+// orientation assertion -- the same assertion issue #237 reported. Not the same
+// value direction: `aShouldBeDialer` comes from freshly generated fingerprints
+// each run, so which way the comparison reads varies per run (5 runs gave 4
+// one way, 1 the other). Against the settled wait it passes.
 test('#237 duplicate dials: a late winning candidate is waited out, not asserted through', { skip }, async () => {
   const rowForBFromA = approve(pairing.recordOutboundRequest({
     fingerprint: identityB.fingerprint, certPem: identityB.cert, hostnameClaimed: 'b', addr: `127.0.0.1:${serverB.address().port}`,
