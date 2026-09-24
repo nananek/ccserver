@@ -20,9 +20,9 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, cpSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { classifyActivity } from './activity.js';
 
@@ -363,6 +363,99 @@ test('#245: a delivered handoff does not reappear after a restart', async () => 
   assert.deepEqual(await groupManager.takeHandoff(gid, 200), { timedOut: true },
     'a restart must not resurrect an already-delivered handoff');
   groupManager.destroyGroup(gid);
+});
+
+// --- #245 review findings ----------------------------------------------------
+
+// Delivery is at-least-once by design, so the receiver needs a way to tell a
+// repeat from a second real handoff. Nothing else in the event does it: two
+// workers can legitimately send the same summary with the same status.
+test('#245: every handoff carries a unique id', async () => {
+  const gid = await makeGroup();
+  const api = groupManager.getGroupManagerApi();
+  const tools = await import('./mcpTools.js');
+  const deps = { groupId: gid, role: 'workerA', sessionId: 's1', groupManager: api };
+
+  tools.handoffToOrchestrator(deps, { summary: 'same text', status: 'done' });
+  tools.handoffToOrchestrator(deps, { summary: 'same text', status: 'done' });
+  const a = await groupManager.takeHandoff(gid, 200);
+  const b = await groupManager.takeHandoff(gid, 200);
+
+  assert.equal(typeof a.id, 'string');
+  assert.notEqual(a.id, b.id, 'two identical-looking handoffs are still distinguishable');
+
+  // ...and a re-queue hands back the SAME id, which is what makes "same id =
+  // already handled" work for the duplicate this branch deliberately allows.
+  api.requeueHandoff(gid, a);
+  assert.equal((await groupManager.takeHandoff(gid, 200)).id, a.id);
+  groupManager.destroyGroup(gid);
+});
+
+// The documented ceiling is "the newest 100 and 32KB". restoreGroups enforced
+// only the count, so a hand-edited or corrupted file could reintroduce an
+// event the normal path could never produce.
+test('#245: restore applies the 32KB summary cap, not just the count cap', async () => {
+  const gid = await makeGroup();
+  groupManager.pushHandoff(gid, { fromRole: 'workerA', summary: 'x', status: 'done' });
+  const saved = JSON.parse(readFileSync(process.env.CCSERVER_GROUPS_PATH, 'utf-8')).find((g) => g.id === gid);
+  saved.handoffQueue = [{ fromRole: 'workerA', summary: 'y'.repeat(200000), status: 'done' }];
+
+  groupManager.destroyGroup(gid);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([saved]));
+  groupManager.restoreGroups();
+
+  const ev = await groupManager.takeHandoff(gid, 200);
+  assert.equal(ev.summary.length, 32 * 1024, 'an oversized summary in the file is cut to the documented cap');
+  groupManager.destroyGroup(gid);
+});
+
+// A re-queue put the queue at 101 and left it there.
+test('#245: re-queueing a recovered event still honours the 100 cap', async () => {
+  const gid = await makeGroup();
+  const api = groupManager.getGroupManagerApi();
+  for (let i = 0; i < 100; i += 1) groupManager.pushHandoff(gid, { fromRole: 'workerA', summary: `e${i}` });
+  assert.equal(groupManager.getGroup(gid).handoffQueue.length, 100);
+
+  api.requeueHandoff(gid, { fromRole: 'workerA', summary: 'recovered' });
+  assert.equal(groupManager.getGroup(gid).handoffQueue.length, 100, 'the cap holds');
+  assert.equal(groupManager.getGroup(gid).handoffQueue[0].summary, 'recovered',
+    'and the recovered event is the next one out, not the one dropped');
+  groupManager.destroyGroup(gid);
+});
+
+// #245 put persistGroups on the handoff hot path, so its write has to be safe
+// to run there: not blockable, atomic, and not world-readable.
+test('#245: the state file is written atomically, 0600, and never onto a planted path', async () => {
+  const gid = await makeGroup();
+  groupManager.pushHandoff(gid, { fromRole: 'workerA', summary: 'persisted' });
+
+  const mode = statSync(process.env.CCSERVER_GROUPS_PATH).mode & 0o777;
+  assert.equal(mode, 0o600, `the queue holds agent-written summaries; got ${mode.toString(8)}`);
+
+  // No temp file is left behind on the happy path.
+  const dir = dirname(process.env.CCSERVER_GROUPS_PATH);
+  assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith('.tmp')), [],
+    'the temp file is renamed into place, not left lying around');
+  groupManager.destroyGroup(gid);
+});
+
+// A file that exists but does not parse is total loss of every group AND every
+// undelivered handoff -- the thing this branch promises survives a restart.
+// index.js only logs when something WAS restored, so silence here made a total
+// loss look exactly like a fresh install.
+test('#245: an unparseable state file is reported, not silently dropped', () => {
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, '{ this is not json');
+  const realWarn = console.warn;
+  const warnings = [];
+  console.warn = (...a) => { warnings.push(a.join(' ')); };
+  try {
+    assert.deepEqual(groupManager.restoreGroups(), { restored: 0, ids: [] });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(warnings.length, 1, 'losing every group must not be silent');
+  assert.match(warnings[0], /does not parse/);
+  assert.match(warnings[0], /undelivered handoff/, 'and it must say what was lost');
 });
 
 test('onOrchestratorExit settles pending waiters as timedOut (no 15-min zombie)', async () => {

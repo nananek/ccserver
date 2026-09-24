@@ -16,6 +16,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
 
 const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Z0-9]|[>=<]|#[0-9])/g;
 
@@ -449,6 +450,14 @@ export function handoffToOrchestrator(deps, { summary, status = 'done', nextRole
     return { error: 'bad-request', message: `status must be one of: ${statuses.join(', ')}` };
   }
   const ok = deps.groupManager.pushHandoff(deps.groupId, {
+    // #245: the delivery guarantee is at-least-once on purpose -- a handoff
+    // that arrives twice is recoverable, one that never arrives is not (see
+    // waitForHandoff's re-queue). That trade only works if the RECEIVER can
+    // tell a repeat from a second real handoff, and nothing else in the event
+    // distinguishes them: two workers can legitimately send the same summary
+    // with the same status. So every handoff carries an id, and the
+    // orchestrator's rule is simply "same id = already handled".
+    id: randomUUID(),
     fromSessionId: sessionId,
     fromRole: deps.role || null,
     summary: String(summary || '').slice(0, MAX_HANDOFF_SUMMARY_CHARS),

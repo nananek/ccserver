@@ -428,7 +428,10 @@ orchestrator should catch this itself.
   consume one: neither a connection that dies mid-wait nor a request you
   cancel or abandon removes an event, so the next `wait_for_handoff`
   receives it. Two limits are real: only the newest 100 undelivered
-  handoffs are kept, and a summary over 32KB is truncated.
+  handoffs are kept, and a summary over 32KB is truncated. Delivery is
+  at-least-once: recovering a handoff from a wait you interrupted can hand
+  you the SAME one twice, so key on the event's `id` -- an id you have
+  already acted on is a repeat, not a second handoff.
 - After sending a step, default to pure waiting: re-calling
   `wait_for_handoff` after `{timedOut:true}` is normal and safe (the
   worker may simply still be working), so an isolated timeout is nothing

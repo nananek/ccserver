@@ -28,7 +28,7 @@ import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker
 import { isValidApp } from './appLaunch.js';
 import { loadSandboxConfig } from './sandbox.js';
 import { resolveMemberWorktree, removeMemberWorktree, listWorktreeDirs } from './worktree.js';
-import { readJsonFileIfRegular } from './regularFile.js';
+import { readJsonFileIfRegular, readRegularFileText } from './regularFile.js';
 import { sendNotification } from './notify.js';
 import {
   getGroupFilesRoot,
@@ -525,7 +525,31 @@ function persistGroups() {
       });
     }
     if (arr.length > 0) {
-      writeFileSync(groupsPath(), JSON.stringify(arr));
+      // Written to a fresh temp name and renamed into place, for three
+      // reasons that all matter more now that #245 put this on the handoff
+      // hot path (every push, every delivery, every re-queue):
+      //
+      //   - writeFileSync straight onto the final path BLOCKS if that path is
+      //     a FIFO, and being synchronous it takes the event loop and the
+      //     SIGTERM handler with it (the #212 shape, on the write side). A
+      //     name we just made cannot be something that was lying in wait.
+      //   - rename(2) is atomic, so a crash mid-write can no longer leave a
+      //     half-written file. restoreGroups' parse failure is total loss of
+      //     every group AND every undelivered handoff, which is exactly what
+      //     this branch promises survives a restart.
+      //   - 0600 on creation: the queue holds summaries the agents wrote, and
+      //     under the legacy layout this file sits in the checkout, where the
+      //     default 0644 is readable by any other local user. The DB already
+      //     does this; the state files never did.
+      const finalPath = groupsPath();
+      const tmpPath = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
+      try {
+        writeFileSync(tmpPath, JSON.stringify(arr), { mode: 0o600 });
+        renameSync(tmpPath, finalPath);
+      } catch (err) {
+        try { unlinkSync(tmpPath); } catch { /* nothing to clean up */ }
+        throw err;
+      }
     } else {
       try { unlinkSync(groupsPath()); } catch { /* nothing to remove */ }
     }
@@ -544,13 +568,38 @@ function persistGroups() {
 // generateOrchestratorClaudeMdSrc) so a scheduled auto-resume or an
 // orchestrator restart can use it as cwd again.
 export function restoreGroups() {
+  // Read and parse as two steps, deliberately. readJsonFileIfRegular() would
+  // do both in one call, but it is JSON.parse(readRegularFileText(...)), so a
+  // missing file and a corrupt one arrive at the same catch and cannot be told
+  // apart -- and telling them apart is the whole point of the warning below
+  // (#245). readRegularFileText() is the same reader minus the parse, so #212's
+  // protections (O_NONBLOCK so a FIFO cannot block the event loop, O_NOFOLLOW
+  // so a symlink is refused, and the size cap) are unchanged.
+  let raw;
+  try {
+    raw = readRegularFileText(groupsPath());
+  } catch {
+    // No file (a fresh install), or something we refuse to read: a FIFO, a
+    // symlink, or a file over STATE_FILE_MAX_BYTES. Start empty either way.
+    return { restored: 0, ids: [] };
+  }
   let arr;
   try {
-    arr = readJsonFileIfRegular(groupsPath());
-  } catch {
-    return { restored: 0, ids: [] }; // no file / unreadable
+    arr = JSON.parse(raw);
+  } catch (err) {
+    // Distinguished from "no file" on purpose: a file that EXISTS but does not
+    // parse means every group and every undelivered handoff in it is gone, and
+    // index.js only logs when something was restored -- so the old silent
+    // {restored:0} made a total loss indistinguishable from a fresh install
+    // (#245 review). Say so; it is the only chance anyone has to notice.
+    console.warn(`[groupManager] ${groupsPath()} exists but does not parse (${err.message}); `
+      + 'every saved group and every undelivered handoff in it is being dropped');
+    return { restored: 0, ids: [] };
   }
-  if (!Array.isArray(arr)) return { restored: 0, ids: [] };
+  if (!Array.isArray(arr)) {
+    console.warn(`[groupManager] ${groupsPath()} is not a JSON array; ignoring it`);
+    return { restored: 0, ids: [] };
+  }
 
   const savedSessions = peekSavedSessions() || [];
   const ids = [];
@@ -580,8 +629,13 @@ export function restoreGroups() {
       // #245: restore what was still undelivered. Capped on the way back in
       // as well -- a hand-edited or corrupted file must not let the queue
       // start out over the limit it is otherwise held to.
+      // Both caps, not just the count one. The tool description and the docs
+      // promise "the newest 100" and "32KB", and a restore that enforced only
+      // the first would let a hand-edited or corrupted file reintroduce an
+      // event the normal path could never produce -- the documented limit
+      // would then be true of pushes and false of the queue (#245 review).
       handoffQueue: Array.isArray(e.handoffQueue)
-        ? e.handoffQueue.filter((ev) => ev && typeof ev === 'object').slice(-MAX_HANDOFF_QUEUE)
+        ? e.handoffQueue.filter((ev) => ev && typeof ev === 'object').slice(-MAX_HANDOFF_QUEUE).map(capHandoffSummary)
         : [],
       handoffEmitter: new EventEmitter(),
       pendingTakes: new Set(),
@@ -1078,6 +1132,17 @@ function cleanupMemberWorktree(group, role) {
   group.memberWorktrees.delete(role);
 }
 
+// The same 32KB ceiling mcpTools puts on a summary at push time, applied
+// wherever an event can enter the queue by another route. Kept here rather
+// than imported from mcpTools to avoid a cycle (mcpTools imports this module's
+// facade), and asserted equal to it in the tests.
+export const MAX_HANDOFF_SUMMARY_CHARS = 32 * 1024;
+
+function capHandoffSummary(ev) {
+  if (!ev || typeof ev.summary !== 'string' || ev.summary.length <= MAX_HANDOFF_SUMMARY_CHARS) return ev;
+  return { ...ev, summary: ev.summary.slice(0, MAX_HANDOFF_SUMMARY_CHARS) };
+}
+
 // FIFO handoff queue + EventEmitter: workers push, orchestrator takes. The
 // queue is capped so workers pushing while the orchestrator is away (crashed,
 // not waiting) can't grow memory without bound -- oldest hands off first.
@@ -1231,7 +1296,15 @@ export function takeHandoff(groupId, timeoutMs, opts = {}) {
 export function requeueHandoff(groupId, event) {
   const group = groups.get(groupId);
   if (!group || !event) return false;
-  if (!group.handoffQueue.includes(event)) group.handoffQueue.unshift(event);
+  if (!group.handoffQueue.includes(event)) {
+    // Put it back at the FRONT, then honour the cap from the BACK: the
+    // recovered event is the oldest undelivered one, so it is the next thing
+    // owed to the orchestrator, and dropping the newest to make room would
+    // undo the recovery. Without this the queue sits at 101 and the documented
+    // "newest 100" is false by one (#245 review).
+    group.handoffQueue.unshift(event);
+    while (group.handoffQueue.length > MAX_HANDOFF_QUEUE) group.handoffQueue.pop();
+  }
   group.handoffEmitter.emit('handoff');
   persistGroups();
   return true;
