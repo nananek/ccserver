@@ -18,9 +18,10 @@
 // HEAD commit -- see plan section 2.3.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { realOrNearest } from '../pathPolicy.js';
 import { projectHashForCwd } from './projectHash.js';
 
 export function worktreeRoot() {
@@ -52,12 +53,64 @@ export function worktreePathFor(projectCwd, role) {
   return path;
 }
 
+// Every git invocation is bounded. The metadata these calls scan is
+// rw-writable from inside the sandboxed sessions that share the repo
+// (sandbox.js's gitCommonDir bind), so a hostile sibling can plant entries
+// that make git block forever: a FIFO at .git/worktrees/<name>/gitdir makes
+// both `git worktree list` and `git worktree add` hang while scanning
+// (verified with git 2.55). execFileSync has no timeout by default, so that
+// would freeze this process's event loop instead of failing the launch.
+// 30s is far above any legitimate local worktree operation; the env
+// override exists so tests can exercise the bound without waiting.
+function gitTimeoutMs() {
+  const raw = Number(process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+}
+
 // stderr is piped (not inherited): a non-repo cwd or a routine "prunable"
 // state produces expected git stderr chatter ("fatal: not a git
 // repository", "Preparing worktree ...") that would otherwise look like a
 // real server error in the logs on every call.
 function git(cwd, args) {
-  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+  return execFileSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: gitTimeoutMs(),
+  });
+}
+
+// Reads a `gitdir`-style file (an admin entry's back-reference, or a
+// worktree's `.git` gitlink) without ever blocking on a hostile one. Both
+// live in metadata that sandboxed sessions can write: `.git/worktrees/*/`
+// through the common-dir rw bind, and the role's own `<worktree>/.git`
+// through its checkout bind. The git calls that scan this metadata are
+// bounded too (gitTimeoutMs above), but this module also parses it
+// directly -- and a plain readFileSync would follow a symlink into a device
+// (endless read / OOM) or block forever on a FIFO swapped in between that
+// scan and this read (verified: a FIFO at a role checkout's `.git` blocks
+// here with no git involvement at all). O_NONBLOCK keeps open() from
+// blocking on a FIFO, O_NOFOLLOW refuses a symlinked final component, and
+// the fstat/isFile + size cap reject devices and oversized files. Returns
+// null for anything that is not a small regular file.
+const GITDIR_FILE_MAX_BYTES = 4096;
+function readGitdirFile(file) {
+  let fd;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW || 0));
+  } catch {
+    return null;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > GITDIR_FILE_MAX_BYTES) return null;
+    const buf = Buffer.alloc(st.size);
+    if (st.size > 0) readSync(fd, buf, 0, st.size, 0);
+    return buf.toString('utf-8');
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function isDirectory(path) {
@@ -141,12 +194,8 @@ function commonDirOf(worktreePath) {
 // (resolved, so a relative gitdir also works), or null when `path/.git`
 // isn't a worktree-style gitlink (a plain repo, or nothing at all).
 function worktreeGitdirTarget(path) {
-  let content;
-  try {
-    content = readFileSync(join(path, '.git'), 'utf-8');
-  } catch {
-    return null;
-  }
+  const content = readGitdirFile(join(path, '.git'));
+  if (content === null) return null;
   const match = /^gitdir:\s*(.+?)\s*$/m.exec(content);
   return match ? resolve(path, match[1]) : null;
 }
@@ -157,6 +206,48 @@ function commonDirOfProject(projectCwd) {
     return resolve(projectCwd, raw);
   } catch {
     return null;
+  }
+}
+
+// Removes ONLY the .git/worktrees/<name> admin entry belonging to
+// `worktreePath` (matched through each entry's `gitdir` back-reference),
+// leaving every other registration in the shared repo alone. Deliberately
+// NOT `git worktree prune`: prune clears every registration git considers
+// stale, and from inside a sandbox every other session's worktree directory
+// is invisible, so it would delete their very much alive registrations --
+// see resolveMemberWorktree's call site (issue #224). Best effort: a
+// failure here surfaces as `git worktree add`'s own "missing but already
+// registered" error, exactly like the old prune path.
+function removeWorktreeRegistration(projectCwd, worktreePath) {
+  const commonDir = commonDirOfProject(projectCwd);
+  if (!commonDir) return;
+  const worktreesDir = join(commonDir, 'worktrees');
+  let names;
+  try {
+    names = readdirSync(worktreesDir);
+  } catch {
+    return;
+  }
+  // git records the back-reference (and `worktree list` prints paths) as
+  // realpaths, while worktreePath is the lexical path built from
+  // worktreeRoot()/HOME/CCSERVER_WORKTREE_ROOT. Comparing the two spellings
+  // directly never matches when any component of the root is a symlink
+  // (macOS's /var -> /private/var tmpdir, a symlinked $HOME), which would
+  // leave the stale registration in place and wedge recreation forever with
+  // "missing but already registered worktree". realOrNearest reconciles
+  // them, and still resolves the missing worktree tail (the very case this
+  // function exists for) through the nearest existing ancestor.
+  const gitlink = join(realOrNearest(worktreePath), '.git');
+  for (const name of names) {
+    // A hostile sibling can leave anything at <name>/gitdir; skip whatever
+    // is not a small regular file instead of blocking/OOMing on it.
+    const content = readGitdirFile(join(worktreesDir, name, 'gitdir'));
+    if (content === null) continue;
+    // Resolving a relative value against the worktrees dir keeps it from
+    // resolving against process.cwd() (git itself writes absolute paths).
+    const target = realOrNearest(resolve(worktreesDir, content.trim()));
+    if (target !== gitlink) continue;
+    try { rmSync(join(worktreesDir, name), { recursive: true, force: true }); } catch { /* best effort */ }
   }
 }
 
@@ -204,8 +295,16 @@ export function resolveMemberWorktree(projectCwd, role, hintBranch = null) {
   const path = worktreePathFor(projectCwd, role);
   mkdirSync(dirname(path), { recursive: true });
 
+  // `git worktree list` prints realpaths, while worktreePathFor() is lexical:
+  // on a root that sits behind a symlink (macOS tmpdir /var -> /private/var,
+  // a symlinked $HOME, or CCSERVER_WORKTREE_ROOT), a direct string compare
+  // would treat this role's own worktree as unregistered -- skipping the
+  // stale-registration cleanup below and wedging recreation with "missing
+  // but already registered worktree". realOrNearest lines the spellings up
+  // (and tolerates the lost-checkout tail, which no longer exists).
+  const realPath = realOrNearest(path);
   const entries = listWorktrees(projectCwd);
-  const existing = entries.find((e) => resolve(e.path) === resolve(path));
+  const existing = entries.find((e) => realOrNearest(resolve(e.path)) === realPath);
 
   if (existing && !existing.prunable) {
     const branch = existing.detached ? null : branchShortName(existing.branch);
@@ -229,19 +328,24 @@ export function resolveMemberWorktree(projectCwd, role, hintBranch = null) {
     try { empty = readdirSync(path).length === 0; } catch { /* handled below */ }
     if (empty) {
       try { rmdirSync(path); } catch { /* let git report the real failure */ }
-    } else if (isGitRepo(path) && commonDirOf(path) === commonDirOfProject(projectCwd)) {
-      // The registration may have been pruned externally while the checkout
-      // itself survived. Reusing it preserves the user's files and avoids
-      // trying to overwrite a potentially valuable worktree.
-      return {
-        usedWorktree: true,
-        cwd: path,
-        gitCommonDir: commonDirOf(path),
-        created: false,
-        lostWork: false,
-        branch: branchOf(path),
-      };
     } else {
+      const pathCommonDir = commonDirOf(path);
+      const projectCommonDir = commonDirOfProject(projectCwd);
+      if (isGitRepo(path) && pathCommonDir && projectCommonDir && realOrNearest(pathCommonDir) === realOrNearest(projectCommonDir)) {
+        // The registration may have been pruned externally while the checkout
+        // itself survived. Reusing it preserves the user's files and avoids
+        // trying to overwrite a potentially valuable worktree. Compared via
+        // realOrNearest for the same symlinked-root reason as `existing`
+        // above.
+        return {
+          usedWorktree: true,
+          cwd: path,
+          gitCommonDir: pathCommonDir,
+          created: false,
+          lostWork: false,
+          branch: branchOf(path),
+        };
+      }
       // Not empty and not a working repo either -- check for a *dead*
       // linked worktree: its `.git` gitlink still points at
       // `<projectCommonDir>/worktrees/<role>`, but that admin dir itself is
@@ -253,12 +357,14 @@ export function resolveMemberWorktree(projectCwd, role, hintBranch = null) {
       // otherwise fail forever with "already exists". Only discard it when
       // the gitlink demonstrably belonged to *this* project's worktree
       // admin dir, never an unrelated directory that happens to occupy the
-      // path.
+      // path. Both sides of that containment check are canonicalized so a
+      // symlinked project path cannot make a legitimate gitlink look
+      // foreign (which would leave the role permanently unlaunchable).
       const gitdirTarget = worktreeGitdirTarget(path);
-      const projectCommonDir = commonDirOfProject(projectCwd);
       if (
         gitdirTarget && !existsSync(gitdirTarget)
-        && projectCommonDir && gitdirTarget.startsWith(join(projectCommonDir, 'worktrees') + '/')
+        && projectCommonDir
+        && realOrNearest(gitdirTarget).startsWith(join(realOrNearest(projectCommonDir), 'worktrees') + '/')
       ) {
         try { rmSync(path, { recursive: true, force: true }); } catch { /* let git report the real failure */ }
       }
@@ -266,9 +372,18 @@ export function resolveMemberWorktree(projectCwd, role, hintBranch = null) {
   }
 
   // Registered in .git/worktrees/ but the directory itself is gone
-  // (prunable) -- prune the stale registration before adding again at the
+  // (prunable) -- drop that stale registration before adding again at the
   // same path, and remember whether a working branch was checked out there
-  // (the prune drops that information from `git worktree list`).
+  // (dropping it removes that information from `git worktree list`).
+  //
+  // Scoped to this worktree's OWN entry on purpose. `git worktree prune`
+  // would also clear every OTHER registration git considers prunable -- and
+  // inside a sandbox every other session's worktree directory is
+  // invisible (only this role's checkout and the project dir are bind-
+  // mounted), so all of them look prunable. One prune then unregisters
+  // checkouts that are alive and well on the host, leaving their sessions
+  // with "fatal: not a git repository: (null)" and no way to run
+  // `gh pr create` (issue #224).
   const priorBranchFromGit = existing && !existing.detached ? branchShortName(existing.branch) : null;
   // External interference may have already pruned the stale registration
   // (rm -rf + `git worktree prune`), leaving `existing` null and
@@ -279,7 +394,7 @@ export function resolveMemberWorktree(projectCwd, role, hintBranch = null) {
   // only when git no longer reports the branch.
   const priorBranch = priorBranchFromGit || (typeof hintBranch === 'string' ? hintBranch : null);
   if (existing) {
-    try { git(projectCwd, ['worktree', 'prune']); } catch { /* best effort */ }
+    removeWorktreeRegistration(projectCwd, path);
   }
 
   if (priorBranch && branchExists(projectCwd, priorBranch)) {

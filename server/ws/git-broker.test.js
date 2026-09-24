@@ -167,6 +167,33 @@ test('gh-exec: allowed subcommand executes the fake gh and relays stdout/exit co
   assert.equal(Buffer.from(r.stdout, 'base64').toString(), 'GH_ARGS:pr view 1\n');
 });
 
+test('gh-exec: a gh that closes stdin early does not take the broker down', async () => {
+  // Found by the Node 22/24/26 CI matrix (#220): on Node 24 this crashed the
+  // broker process with an unhandled `write EPIPE`, and every later test in
+  // this file then failed with ECONNREFUSED. It is a race -- the same SHA
+  // passed on a second run -- but the defect is in the broker, not the test:
+  // child.stdin had no 'error' handler, and a pipe's errors are emitted on
+  // the pipe rather than on the ChildProcess that child.on('error') watches.
+  //
+  // The fake gh never reads stdin and exits immediately, so a payload larger
+  // than the pipe buffer (64 KiB on Linux) is still in flight when the child
+  // is gone. In production the same shape is `gh` exiting before it has read
+  // an entire --body-file - payload, which would kill the broker and with it
+  // every git and gh call for that session.
+  const big = Buffer.alloc(512 * 1024, 'x').toString('base64');
+  const r = await request(broker, { op: 'gh-exec', argv: ['pr', 'view', '1'], stdin: big });
+  // The request still gets gh's own answer: the write failing does not make
+  // a command that ran and exited 0 into a broker error.
+  assert.equal(r.ok, true, `the request must still be answered: ${JSON.stringify(r)}`);
+  assert.equal(r.exitCode, 0);
+
+  // And the broker is still serving afterwards -- the part that actually
+  // broke, since a dead broker takes the whole session's git/gh with it.
+  const after = await request(broker, { op: 'gh-exec', argv: ['pr', 'view', '2'] });
+  assert.equal(after.ok, true, `the broker must survive: ${JSON.stringify(after)}`);
+  assert.equal(after.exitCode, 0);
+});
+
 test('gh-exec: gh api is refused before ever touching the real gh binary', async () => {
   const r = await request(broker, { op: 'gh-exec', argv: ['api', '/user'] });
   assert.equal(r.ok, false);
