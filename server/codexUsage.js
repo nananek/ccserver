@@ -176,6 +176,20 @@ function capture() {
 
     proc.on('error', (err) => finish({ error: `Failed to launch codex: ${err.message}` }));
 
+    // A pipe's failures are emitted on the PIPE, not on the ChildProcess, so
+    // the handler above never sees them, and they are asynchronous, so
+    // sendRequests's try/catch cannot catch them either. Unhandled, an EPIPE
+    // from a codex that died between spawn and the writes below is an
+    // unhandled 'error' event -- and this module runs INSIDE the ccserver
+    // process, so that takes the whole server down rather than one broker.
+    // (git-broker.js's execGh had the same gap; network-broker.js has had
+    // this guard on its own child for a while.)
+    //
+    // Unlike the gh relay, a failed write here means the JSON-RPC request
+    // never reached codex, so no answer is coming: finish now instead of
+    // waiting out CAPTURE_TIMEOUT_MS for a reply that cannot arrive.
+    proc.stdin.on('error', (err) => finish({ error: `Failed to send the request to codex: ${err.message}` }));
+
     proc.stdout.on('data', (d) => {
       buf += d.toString();
       let idx;
@@ -208,7 +222,9 @@ function sendRequests(proc) {
     proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'ccserver', version: '0.0.1' } } })}\n`);
     proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'account/rateLimits/read' })}\n`);
   } catch {
-    // dead pipe; the process's own 'error'/'exit' handling covers this
+    // A synchronous failure (ERR_STREAM_DESTROYED on an already-closed pipe).
+    // The asynchronous form -- EPIPE -- never lands here; it is an 'error'
+    // event on proc.stdin, which capture() handles. Both end the capture.
   }
 }
 
