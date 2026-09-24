@@ -545,7 +545,9 @@ try {
         ? 'subscribe a browser to Web Push from Settings > 通知, which counts as a delivery target too (#234). '
         : 'NOTE: subscribing a browser to Web Push would also count as a delivery target (#234), but this '
           + 'process failed to initialize its VAPID keys (see the error above), so that route is unavailable '
-          + 'here and a restart alone will not change it -- fix the VAPID error first. ')
+          + 'here, and restarting will not help for as long as that error persists -- fix it first. (Some '
+          + 'causes are transient: the key pair is stored in SQLite, so a locked or full database fails this '
+          + 'and then succeeds once the cause clears.) ')
       + 'ALL OF THESE TAKE EFFECT ON THE NEXT START: the notify MCP broker is created once, here at boot '
       + '(ensureNotifyBroker), and sessions only get the tool while it is running -- so restart ccserver '
       + 'after configuring one. Settings > 通知\'s "send a test" goes straight out over HTTP and needs no '
