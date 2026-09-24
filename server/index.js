@@ -501,10 +501,17 @@ const PORT = process.env.PORT || 3001;
 // anyone (a late binding, so notify.js does not have to depend on the push
 // store existing). This one call answers for both paths that ask the question
 // -- notifyEnabled() / sendNotification() and the bridge (#234).
+// Whether the Web Push half of the remedy the DISABLED warning below offers
+// is actually available in THIS process. If the VAPID identity could not be
+// minted, setWebpushReachable is never wired, webpushReachable() answers false
+// for the life of the process, and "subscribe a browser" cannot help no matter
+// how many times the operator restarts -- so the warning must not offer it.
+let webpushRemedyAvailable = true;
 try {
   ensureVapidKeys();
   setWebpushReachable(() => countSubscriptions() > 0);
 } catch (err) {
+  webpushRemedyAvailable = false;
   fastify.log.error({ err }, 'Failed to initialize Web Push VAPID keys; push notifications are unavailable');
 }
 
@@ -534,7 +541,11 @@ try {
       'ccserver-notify is DISABLED: no delivery target is configured, so the notify MCP tool will not be '
       + 'injected into any session and agents have no way to call a human. Set notify.discordWebhook '
       + '(or CCSERVER_DISCORD_WEBHOOK), or seed notify.subscriptions, in sandbox.config.json -- or '
-      + 'subscribe a browser to Web Push from Settings > 通知, which counts as a delivery target too (#234). '
+      + (webpushRemedyAvailable
+        ? 'subscribe a browser to Web Push from Settings > 通知, which counts as a delivery target too (#234). '
+        : 'NOTE: subscribing a browser to Web Push would also count as a delivery target (#234), but this '
+          + 'process failed to initialize its VAPID keys (see the error above), so that route is unavailable '
+          + 'here and a restart alone will not change it -- fix the VAPID error first. ')
       + 'ALL OF THESE TAKE EFFECT ON THE NEXT START: the notify MCP broker is created once, here at boot '
       + '(ensureNotifyBroker), and sessions only get the tool while it is running -- so restart ccserver '
       + 'after configuring one. Settings > 通知\'s "send a test" goes straight out over HTTP and needs no '

@@ -397,6 +397,35 @@ test('sendNotification: the unreachable warning is once per outage, not once per
   });
 });
 
+// The reset half of the same latch, pinned on its own. Deleting the
+// `warnedUnreachable = false` in restoreNotify() leaves every other notify
+// test green -- the warn-once case above only passes because whichever case
+// ran before it happened to end on a successful send. So assert the reset
+// directly: a restore rebuilds the subscription registry, and the first
+// outage after it is a NEW outage that has to be reported.
+test('sendNotification: restoreNotify() clears the "already warned" latch', async () => {
+  await withNotifyConfig({ notify: { subscriptions: [] } }, async () => {
+    const realWarn = console.warn;
+    const warnings = [];
+    console.warn = (...args) => { warnings.push(args.join(' ')); };
+    try {
+      restoreNotify();
+      await sendNotification({ title: 'x', body: 'y' });
+      assert.equal(warnings.length, 1, 'the first outage is reported');
+      await sendNotification({ title: 'x', body: 'y' });
+      assert.equal(warnings.length, 1, 'and not repeated while it lasts');
+
+      // The registry is rebuilt from scratch here; "we already said nobody is
+      // listening" does not survive that.
+      restoreNotify();
+      await sendNotification({ title: 'x', body: 'y' });
+      assert.equal(warnings.length, 2, 'the first outage AFTER a restore is reported again');
+    } finally {
+      console.warn = realWarn;
+    }
+  });
+});
+
 // Attribution footer: sendNotification(args, identity) appends
 // "_from: host · project · group <groupShort> · session <sessionShort>" to the
 // payload content. host comes from the resolved notify hostname, project from
