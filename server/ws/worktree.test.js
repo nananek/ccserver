@@ -16,7 +16,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -162,6 +162,60 @@ test("resolveMemberWorktree: recreating a lost worktree leaves other sessions' r
   assert.equal(git(siblingB, ['rev-parse', '--is-inside-work-tree']).trim(), 'true', 'sibling B works again');
 });
 
+test('resolveMemberWorktree: recreates a lost worktree when the worktree root is a symlink', () => {
+  // git records/prints worktree paths as realpaths, while worktreePathFor()
+  // builds a lexical path from CCSERVER_WORKTREE_ROOT (or $HOME). A root
+  // that sits behind a symlink (macOS tmpdir /var -> /private/var, a
+  // symlinked $HOME, or an operator's CCSERVER_WORKTREE_ROOT) must still
+  // line up, or the stale-registration lookup and removal both miss and
+  // recreation wedges forever with "missing but already registered
+  // worktree".
+  const realRoot = join(runtimeDir, 'worktrees-real');
+  const linkRoot = join(runtimeDir, 'worktrees-link');
+  mkdirSync(realRoot, { recursive: true });
+  symlinkSync(realRoot, linkRoot, 'dir');
+  const prev = process.env.CCSERVER_WORKTREE_ROOT;
+  process.env.CCSERVER_WORKTREE_ROOT = linkRoot;
+  try {
+    const first = worktree.resolveMemberWorktree(repo, 'workerSymRoot');
+    assert.equal(first.created, true);
+    rmSync(first.cwd, { recursive: true, force: true }); // disk loss -- prunable now
+
+    const recreated = worktree.resolveMemberWorktree(repo, 'workerSymRoot');
+    assert.equal(recreated.created, true, 'symlink spelling must still match the recorded realpath');
+    assert.equal(recreated.cwd, first.cwd);
+    assert.equal(git(recreated.cwd, ['rev-parse', '--is-inside-work-tree']).trim(), 'true', 'checkout is usable again');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_WORKTREE_ROOT;
+    else process.env.CCSERVER_WORKTREE_ROOT = prev;
+  }
+});
+
+test('resolveMemberWorktree: recovers an orphaned checkout when the project path is a symlink', () => {
+  // Same realpath-vs-lexical split, but on the project side: the dangling
+  // gitlink's admin dir is under the *real* project's .git/worktrees while
+  // commonDirOfProject() returns the lexical (symlinked) spelling, so the
+  // dead-checkout containment check must canonicalize both sides or the
+  // role can never be relaunched into its own path.
+  const realRepo = join(runtimeDir, 'symproj-real');
+  const linkRepo = join(runtimeDir, 'symproj-link');
+  mkdirSync(realRepo, { recursive: true });
+  git(realRepo, ['init', '-q']);
+  git(realRepo, ['-c', 'user.name=t', '-c', 'user.email=t@t.com', 'commit', '-q', '--allow-empty', '-m', 'init']);
+  symlinkSync(realRepo, linkRepo, 'dir');
+
+  const first = worktree.resolveMemberWorktree(linkRepo, 'workerSymProj');
+  writeFileSync(join(first.cwd, 'scratch.txt'), 'about to be discarded');
+  // External interference: admin dir deleted, checkout survives with a
+  // dangling .git gitlink (exactly the worker-orphaned scenario above).
+  const adminRoot = join(realRepo, '.git', 'worktrees');
+  for (const name of readdirSync(adminRoot)) rmSync(join(adminRoot, name), { recursive: true, force: true });
+
+  const recreated = worktree.resolveMemberWorktree(linkRepo, 'workerSymProj');
+  assert.equal(recreated.created, true, 'the dead checkout must be recognized as this project\'s own and replaced');
+  assert.ok(!existsSync(join(recreated.cwd, 'scratch.txt')), 'dead checkout was discarded, not reused');
+});
+
 test('removeMemberWorktree removes a clean worktree and is idempotent', () => {
   const res = worktree.resolveMemberWorktree(repo, 'workerF');
   assert.equal(worktree.removeMemberWorktree(repo, 'workerF'), true);
@@ -209,3 +263,4 @@ test('resolveMemberWorktree propagates the escape rejection instead of creating 
   assert.throws(() => worktree.resolveMemberWorktree(repo, '../../../escape'), /escapes the project's worktree directory/);
   assert.equal(existsSync(join(runtimeDir, 'escape')), false, 'nothing was created outside CCSERVER_WORKTREE_ROOT');
 });
+
