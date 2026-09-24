@@ -1,7 +1,8 @@
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, readFileSync, unlinkSync, rmSync, statSync } from 'node:fs';
+import { writeFileSync, unlinkSync, rmSync, statSync } from 'node:fs';
+import { readJsonFileIfRegular } from './regularFile.js';
 // `dirname` / `fileURLToPath` were only here to build __dirname for the
 // repo-root state-file paths; #201 moved those to the registry (see
 // savedSessionsPath/schedulesPath below), so they are gone. master's
@@ -1904,7 +1905,7 @@ export function cancelScheduledPrompt(id) {
 export function restoreSchedules() {
   let arr;
   try {
-    arr = JSON.parse(readFileSync(schedulesPath(), 'utf-8'));
+    arr = readJsonFileIfRegular(schedulesPath());
   } catch {
     return; // no file / unreadable
   }
@@ -2413,7 +2414,7 @@ export function gracefulShutdown() {
 // intact.
 export function peekSavedSessions() {
   try {
-    return JSON.parse(readFileSync(savedSessionsPath(), 'utf-8'));
+    return readJsonFileIfRegular(savedSessionsPath());
   } catch {
     return null;
   }

@@ -18,11 +18,12 @@
 // HEAD commit -- see plan section 2.3.
 
 import { execFileSync } from 'node:child_process';
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, rmdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { realOrNearest } from '../pathPolicy.js';
 import { projectHashForCwd } from './projectHash.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
+import { readRegularFileText } from './regularFile.js';
 
 export function worktreeRoot() {
   return resolvePath(PATH_IDS.worktrees);
@@ -87,28 +88,23 @@ function git(cwd, args) {
 // directly -- and a plain readFileSync would follow a symlink into a device
 // (endless read / OOM) or block forever on a FIFO swapped in between that
 // scan and this read (verified: a FIFO at a role checkout's `.git` blocks
-// here with no git involvement at all). O_NONBLOCK keeps open() from
-// blocking on a FIFO, O_NOFOLLOW refuses a symlinked final component, and
-// the fstat/isFile + size cap reject devices and oversized files. Returns
-// null for anything that is not a small regular file.
+// here with no git involvement at all).
+//
+// The open/fstat/read dance that avoids all that now lives in
+// regularFile.js, which the state-JSON restore paths share (issue #212).
+// This was the original copy of it; folding it in is what fixed the
+// short-read bug it carried (issue #229 -- the old code ignored readSync's
+// return value, so a short read left NUL bytes in the tail, and `\0`
+// survives .trim() and silently broke the path match in
+// removeWorktreeRegistration).
+//
+// Returns null for anything that is not a small regular file.
 const GITDIR_FILE_MAX_BYTES = 4096;
 function readGitdirFile(file) {
-  let fd;
   try {
-    fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW || 0));
+    return readRegularFileText(file, { maxBytes: GITDIR_FILE_MAX_BYTES });
   } catch {
     return null;
-  }
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile() || st.size > GITDIR_FILE_MAX_BYTES) return null;
-    const buf = Buffer.alloc(st.size);
-    if (st.size > 0) readSync(fd, buf, 0, st.size, 0);
-    return buf.toString('utf-8');
-  } catch {
-    return null;
-  } finally {
-    closeSync(fd);
   }
 }
 

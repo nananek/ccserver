@@ -14,10 +14,11 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir, homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import { dockerdStatus, buildSandboxSpawn, dockerSandboxAvailable } from './sandbox.js';
+import { dockerdStatus, dindLockHeld, buildSandboxSpawn, dockerSandboxAvailable } from './sandbox.js';
 
 let tmpRoot;
 let dindRoot;
@@ -98,4 +99,89 @@ test('dockerdStatus: isolated per cwd, trims surrounding whitespace', async (t) 
   writeFileSync(join(dataRootA, '.ccserver-dockerd.status'), '  tag-a  \n');
   assert.equal(dockerdStatus(cwdA), 'tag-a');
   assert.equal(dockerdStatus(cwdB), null, 'a different project has no status of its own');
+});
+
+
+// ---------------------------------------------------------------------------
+// #212: the data-root is bind-mounted READ-WRITE into the sandbox
+// ---------------------------------------------------------------------------
+//
+// This is the difference between these two cases and the eight state-JSON
+// readers this PR also fixed. Those live under the config and state roots,
+// which buildBwrapArgs does NOT bind -- measured from inside a sandbox,
+// ~/.config/ccserver and ~/.local/state/ccserver do not even exist there. The
+// docker data-root DOES get bound, rw, at ~/.local/share/docker:
+//
+//   /proc/self/mountinfo:
+//     ... /ccserver-sandbox/dind/<slug> /home/kts_sz/.local/share/docker rw ...
+//   $ test -w ~/.local/share/docker/.ccserver-dockerd.status  -> writable
+//   $ rm f && mkfifo f                                        -> succeeds
+//
+// So a session can replace its own status/lock file with a FIFO. These are
+// the only #212 sites reachable that way.
+//
+// A regression does NOT fail these -- it hangs the runner (a synchronous open
+// cannot be interrupted from inside the process). See the header of
+// stateRestoreFifo.test.js.
+
+// Mirrors sandbox.js's slugify() (it is not exported). The live-read
+// assertion in each case below is what catches it if the two ever drift --
+// otherwise the FIFO would land somewhere nothing reads and the case would
+// pass for the boring reason.
+function slugFor(p) {
+  return p.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'root';
+}
+
+function mkfifoAt(t, path) {
+  try {
+    execFileSync('mkfifo', [path]);
+    return true;
+  } catch {
+    t.skip('mkfifo unavailable');
+    return false;
+  }
+}
+
+test('#212: dockerdStatus refuses a FIFO status file instead of blocking', { timeout: 15000 }, (t) => {
+  const cwd = '/srv/docker-status-fifo-proj';
+  const dir = join(dindRoot, slugFor(cwd));
+  mkdirSync(dir, { recursive: true });
+  const statusFile = join(dir, '.ccserver-dockerd.status');
+
+  // Prove the read path is live at this exact path FIRST, so a slug drift
+  // cannot turn this case into a hollow pass.
+  writeFileSync(statusFile, 'tag-live\n');
+  assert.equal(dockerdStatus(cwd), 'tag-live', 'the read path is live at this path');
+
+  rmSync(statusFile);
+  if (!mkfifoAt(t, statusFile)) return;
+  // Pre-fix this was readFileSync, which does not throw on a FIFO -- it waits
+  // for a writer that never comes, with the host's event loop stopped.
+  assert.equal(dockerdStatus(cwd), null, 'a FIFO reads as "no tag", exactly like a missing file');
+});
+
+test('#212: dindLockHeld refuses a FIFO lock file instead of blocking', { timeout: 15000 }, (t) => {
+  const name = 'dind-lock-fifo-proj';
+  const dir = join(dindRoot, name);
+  mkdirSync(dir, { recursive: true });
+  const lockFile = join(dir, '.ccserver-dockerd.lock');
+
+  // Live-read proof: a real, unheld lock file answers false through the real
+  // flock(1), so we know this path is the one dindLockHeld consults.
+  writeFileSync(lockFile, '');
+  try {
+    execFileSync('flock', ['-n', lockFile, 'true'], { stdio: 'ignore' });
+  } catch {
+    t.skip('flock unavailable');
+    return;
+  }
+  assert.equal(dindLockHeld(name), false, 'an unheld regular lock file is not held');
+
+  rmSync(lockFile);
+  if (!mkfifoAt(t, lockFile)) return;
+  // existsSync says yes to a FIFO, and flock(1) then blocks in open(2)
+  // forever -- through execFileSync that is the host's event loop, not just
+  // the child's. A FIFO is not a lock file, so it reads as "not held", the
+  // same answer a missing one gives.
+  assert.equal(dindLockHeld(name), false, 'a FIFO lock file is not a held lock');
 });

@@ -37,6 +37,7 @@ import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forget
 import { APPS } from './appLaunch.js';
 import { normalizeBrowseRoots, isContained, isCcserverScratchPath } from '../pathPolicy.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
+import { isRegularFile, readRegularFileText } from './regularFile.js';
 import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
 
 const execFileAsync = promisify(execFile);
@@ -211,6 +212,16 @@ const DOCKERD_LOCK_NAME = '.ccserver-dockerd.lock';
 // sessionManager.dockerAvailability, the only consumer).
 const DOCKERD_STATUS_NAME = '.ccserver-dockerd.status';
 
+// The entrypoint writes one tag (a directory basename) plus a newline -- 54
+// bytes in practice. 4096 is ~75x that, so no legitimate status file can hit
+// it, while a planted one is still bounded.
+const DOCKERD_STATUS_MAX_BYTES = 4096;
+
+// flock -n exits instantly on a regular file. Anything slower means the file
+// stopped being one between the isRegularFile check and the exec, so the
+// child is killed rather than waited on.
+const FLOCK_TIMEOUT_MS = 5000;
+
 // True when a (live or leaked) dockerd currently holds the data-root lock for
 // this sandbox slug. Deletion must be refused then: the daemon's live overlay
 // mounts defeat every removal strategy (EBUSY) and deleting under a running
@@ -222,9 +233,19 @@ const DOCKERD_STATUS_NAME = '.ccserver-dockerd.status';
 // the settings-page DELETE route imports it for its immediate 409 pre-check.
 export function dindLockHeld(name) {
   const lock = join(dindRoot(), name, DOCKERD_LOCK_NAME);
-  if (!existsSync(lock)) return false;
+  // Not existsSync: this data-root is --bind mounted READ-WRITE into the
+  // sandbox (buildBwrapArgs, at ~/.local/share/docker), so the session can
+  // delete this lock file and drop a FIFO in its place. existsSync says
+  // "yes" to a FIFO, and flock(1) would then block in open(2) waiting for a
+  // writer that never comes -- with execFileSync that is the HOST's event
+  // loop stopped, past the point where SIGTERM is handled (issue #212).
+  // isRegularFile answers without blocking.
+  if (!isRegularFile(lock)) return false;
   try {
-    execFileSync('flock', ['-n', lock, 'true'], { stdio: 'ignore' });
+    // ...and a timeout anyway, because the check above is on a path: the
+    // session can swap the file between it and the exec. The check keeps the
+    // normal case honest, the timeout bounds the race.
+    execFileSync('flock', ['-n', lock, 'true'], { stdio: 'ignore', timeout: FLOCK_TIMEOUT_MS });
     return false;
   } catch (err) {
     return err.code !== 'ENOENT';
@@ -247,9 +268,17 @@ export function dockerdLockHeld(cwd) {
 export function dockerdStatus(cwd) {
   const path = join(dindRoot(), slugify(cwd), DOCKERD_STATUS_NAME);
   try {
-    return readFileSync(path, 'utf-8').trim() || null;
+    // Not readFileSync, for the same reason as dindLockHeld above: this file
+    // lives in the data-root the sandbox has READ-WRITE, so the session that
+    // is supposed to write its tag here can write a FIFO instead and stop
+    // the host in the next dockerAvailability() call. Unlike the state JSON
+    // this PR's other readers handle, THIS one is reachable from inside the
+    // sandbox -- the config and state dirs are not bind-mounted, this is.
+    // A tag is a few dozen bytes; the cap is generous for that and still
+    // bounds a planted file.
+    return readRegularFileText(path, { maxBytes: DOCKERD_STATUS_MAX_BYTES }).trim() || null;
   } catch {
-    return null;
+    return null; // absent, or not a regular file -- both read as "no tag yet"
   }
 }
 
@@ -623,7 +652,26 @@ export function loadSandboxConfig() {
   let configError = null;
   let configText = null;
   try {
-    configText = readFileSync(configPath, 'utf-8');
+    // followSymlinks, and ONLY here among the files regularFile.js reads.
+    //
+    // The line that matters: sandbox.config.json belongs to the OPERATOR,
+    // every other file that reader handles belongs to the SERVER. Since the
+    // #201 XDG split moved this one out of the checkout, keeping it under
+    // version control is the operator's own business, and symlinking it in
+    // from a dotfiles repo is the obvious way to do that. O_NOFOLLOW would
+    // turn that setup into a refusal to boot. The server's own state files
+    // have no such workflow -- nobody symlinks saved-groups.json -- so they
+    // keep O_NOFOLLOW.
+    //
+    // Nothing #212 cares about is given up. The FIFO block is stopped by
+    // O_NONBLOCK plus the fstat isFile() check, not by O_NOFOLLOW: measured,
+    // a symlink pointing at a FIFO is still refused in under a millisecond.
+    // O_NOFOLLOW only governs symlinks to regular files, and against an
+    // attacker who can already write this 0700 directory it buys nothing
+    // anyway: the flag does stop their symlink, but it does not stop them
+    // planting a regular file with the same contents, which is strictly
+    // easier. It narrows the method, not the outcome.
+    configText = readRegularFileText(configPath, { followSymlinks: true });
   } catch (err) {
     if (err.code !== 'ENOENT') configError = err.message;
   }
