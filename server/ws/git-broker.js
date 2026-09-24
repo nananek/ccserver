@@ -525,7 +525,92 @@ function probeBrokerSync(sockPath, timeoutMs = 700, token = '') {
 // PR-body guard for this launch (logged, not thrown) -- unlike the
 // allow-list above, this is a best-effort accident-prevention layer, not a
 // credential-scoping boundary the launch must refuse to proceed without.
-export function startGitBroker({ cwd, app = 'shell', blockedPatterns = null, ghUsageRecording = null }) {
+// How long a freshly spawned host-side broker gets to publish the artifact
+// that proves it is up: git's unix socket, network's port file (#248).
+//
+// Both were a fixed 2s. That is not a budget for the broker's own work -- it
+// is a bet on how much CPU the host has spare, and on a busy machine the bet
+// loses: #248 collected 31 "socket not ready within 2s" and 9 "port file not
+// ready within 2s" failures inside single full-suite runs.
+//
+// Measured here (8 cores, timing startGitBroker to its socket appearing):
+//
+//     idle                    p50  155ms   max   163ms   0/12 over 2s
+//     3x oversubscribed CPU   p50  781ms   max  1086ms   0/12 over 2s
+//     8x oversubscribed CPU   p50 1803ms   max  2398ms   2/10 over 2s
+//
+// So the work itself is ~150ms and 2s was never the cost of doing it -- it
+// was roughly the point where ordinary parallel load crosses over, which is
+// why the suite reddened rather than the feature breaking. 10s sits ~4x above
+// the measured tail at the load that actually reproduces the failure, ~64x
+// above the idle median, and matches the smallest of the startup tests' own
+// budgets, so the repo has one answer to "a spawned node should be up by now".
+//
+// It only bounds the FAILURE path -- a healthy broker resolves as soon as its
+// artifact appears, so raising this costs a working host nothing. What it
+// buys is that a loaded host creates the session instead of refusing it. The
+// cost of being wrong is bounded too, and only now: both waits are async, so
+// 10s of waiting delays this one session rather than the whole server.
+const BROKER_STARTUP_BUDGET_MS = 10_000;
+
+// Read per call rather than captured at module load, so a test can pin a
+// short budget around a deliberately-hung child instead of paying the
+// production value (see network-broker.test.js).
+export function brokerStartupBudgetMs() {
+  const raw = Number(process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : BROKER_STARTUP_BUDGET_MS;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Polls `probe` until it returns something truthy, the child dies, or the
+// budget runs out; resolves `{ value, waitedMs }` either way and never throws.
+// Shared by both brokers so "how long do we wait, and when do we stop early"
+// has one answer (#248).
+export async function awaitBrokerReady({ probe, isDead, budgetMs, pollMs = 20 }) {
+  const started = Date.now();
+  let value = probe();
+  while (!value && Date.now() - started < budgetMs) {
+    if (isDead()) break;
+    await sleep(pollMs);
+    value = probe();
+  }
+  return { value, waitedMs: Date.now() - started };
+}
+
+// One shape for both brokers' launch failures. The cases have to stay
+// distinguishable: an operator reading this line needs to know whether the
+// child crashed (exit code), was killed (signal), or was simply still
+// starting when time ran out -- only the last one is the load problem #248 is
+// about, and only that one is fixed by giving it longer. The old text ("socket
+// not ready within 2s") could not tell them apart, so every cause read as the
+// same dead end.
+export function brokerStartFailureReason({ spawnError, proc, waitedMs, budgetMs, waitingFor }) {
+  if (spawnError) return spawnError.message;
+  if (proc.exitCode !== null) {
+    return `exited code=${proc.exitCode} after ${waitedMs}ms, while ccserver was waiting for ${waitingFor}`;
+  }
+  if (proc.signalCode) {
+    return `terminated signal=${proc.signalCode} after ${waitedMs}ms, while ccserver was waiting for ${waitingFor}`;
+  }
+  // Kept short on purpose: #222 pins a bound on this whole string so an
+  // unusable port file cannot turn a log line into a payload, and the fixed
+  // wording here spends part of that budget.
+  return `timed out after ${waitedMs}ms waiting for ${waitingFor} (budget ${budgetMs}ms); `
+    + `the broker (pid ${proc.pid}) was still alive, so it was too slow rather than broken `
+    + '-- raise CCSERVER_BROKER_STARTUP_TIMEOUT_MS on a loaded host';
+}
+
+// `spawnProcess` is injectable for the same reason network-broker.js makes it
+// injectable: the launch FAILURE paths (a child that dies at once, a child
+// that never publishes its socket) cannot be produced with the real broker,
+// and they are the paths #248 is about.
+export async function startGitBroker(
+  { cwd, app = 'shell', blockedPatterns = null, ghUsageRecording = null },
+  { spawnProcess = spawn } = {},
+) {
   const allowlist = computeGitAllowlist(cwd);
   if (!allowlist || allowlist.length === 0) return null;
 
@@ -565,7 +650,7 @@ export function startGitBroker({ cwd, app = 'shell', blockedPatterns = null, ghU
   const token = randomBytes(24).toString('base64url');
   const serveArgs = [__filename, '--serve', '--sock', sockPath, '--allowlist', allowlistPath, '--cwd', cwd, '--app', app];
   if (commitGuardPath) serveArgs.push('--commit-guard', commitGuardPath);
-  const proc = spawn(process.execPath, serveArgs, {
+  const proc = spawnProcess(process.execPath, serveArgs, {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
@@ -590,23 +675,35 @@ export function startGitBroker({ cwd, app = 'shell', blockedPatterns = null, ghU
     }
   });
 
-  // buildSandboxSpawn (sandbox.js) is synchronous and bwrap's --bind-try only
-  // sees the socket if it already exists at mount-namespace setup time — a
-  // moment after this function returns. Without waiting here, the broker
-  // starting up asynchronously would silently lose the race: bwrap would
-  // launch before the socket file exists, and the sandbox would never see
-  // it (bind is a one-time snapshot, not a live mount). Block briefly
-  // (busy-wait via Atomics.wait, not a callback) until the broker is
-  // actually listening, verify liveness and probe readiness.
-  const deadline = Date.now() + 2000;
-  while (!existsSync(sockPath) && Date.now() < deadline) {
-    if (spawnError) break;
-    if (proc.exitCode !== null || proc.signalCode !== null) break;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-  }
+  // bwrap's --bind-try only sees the socket if it already exists at
+  // mount-namespace setup time -- a moment after this function returns.
+  // Without waiting here the broker would silently lose the race: bwrap would
+  // launch before the socket file exists, and the sandbox would never see it
+  // (bind is a one-time snapshot, not a live mount). So the socket must be
+  // there before we return.
+  //
+  // That is an ORDERING requirement, and `await` satisfies it exactly as well
+  // as blocking did. This used to be a synchronous Atomics.wait busy-wait,
+  // justified by a comment saying buildSandboxSpawn was synchronous; it is
+  // not, and has not been since network-broker's H1 review made it async --
+  // sandbox.js already awaits startNetworkBroker a few lines away. Holding
+  // the main thread here was therefore buying nothing, and #248 raised the
+  // budget from 2s to 10s, which would have turned the worst case into a 10s
+  // event-loop freeze with the SIGTERM handler wedged behind it -- the same
+  // sync-blocking shape #212/#252 are closing elsewhere. Async instead: the
+  // ordering still holds, and two sessions starting at once no longer
+  // serialise behind each other's broker spawn.
+  const budgetMs = brokerStartupBudgetMs();
+  const { value: ready, waitedMs } = await awaitBrokerReady({
+    probe: () => existsSync(sockPath),
+    isDead: () => spawnError !== null || proc.exitCode !== null || proc.signalCode !== null,
+    budgetMs,
+  });
 
-  if (spawnError || proc.exitCode !== null || proc.signalCode !== null || !existsSync(sockPath)) {
-    const reason = spawnError ? spawnError.message : proc.exitCode !== null ? `exited code=${proc.exitCode}` : proc.signalCode ? `signal=${proc.signalCode}` : 'socket not ready within 2s';
+  if (spawnError || proc.exitCode !== null || proc.signalCode !== null || !ready) {
+    const reason = brokerStartFailureReason({
+      spawnError, proc, waitedMs, budgetMs, waitingFor: `the broker socket ${sockPath}`,
+    });
     try { proc.kill('SIGKILL'); } catch {}
     try { rmSync(dir, { recursive: true, force: true }); } catch {}
     throw new Error(`git broker failed to start for ${cwd}: ${reason}`);

@@ -31,7 +31,7 @@ function git(cwd, args) {
   execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'ignore'] });
 }
 
-before(() => {
+before(async () => {
   root = mkdtempSync(join(tmpdir(), 'ccserver-gh-wrapper-test-'));
   repoDir = join(root, 'repo');
   mkdirSync(repoDir, { recursive: true });
@@ -51,7 +51,7 @@ before(() => {
   chmodSync(fakeGh, 0o755);
 
   process.env.PATH = `${binDir}:${process.env.PATH}`;
-  broker = startGitBroker({ cwd: repoDir });
+  broker = await startGitBroker({ cwd: repoDir });
 });
 
 after(async () => {

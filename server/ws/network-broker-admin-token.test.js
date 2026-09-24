@@ -185,14 +185,23 @@ test('H1: handshake failures (EOF, oversized payload, never-listening child) rej
     // (c) The child never listens: startNetworkBroker must give up on its
     //     readiness deadline, SIGKILL the child, and remove the directory.
     let hungChild = null;
+    // #248 raised the production budget to 10s; pin a short one so this keeps
+    // asserting "it waits, then gives up" without costing 10s every run.
+    const prevBudget = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = '600';
     const t0 = Date.now();
-    await assert.rejects(
-      () => startNetworkBroker({}, {
-        spawnProcess: (cmd, args, opts) => { hungChild = spawnFn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], opts); return hungChild; },
-      }),
-      /port file not ready within 2s/,
-    );
-    assert.ok(Date.now() - t0 >= 1900, 'must wait for the readiness deadline before giving up');
+    try {
+      await assert.rejects(
+        () => startNetworkBroker({}, {
+          spawnProcess: (cmd, args, opts) => { hungChild = spawnFn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], opts); return hungChild; },
+        }),
+        /timed out after \d+ms waiting for the port file/,
+      );
+    } finally {
+      if (prevBudget === undefined) delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+      else process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prevBudget;
+    }
+    assert.ok(Date.now() - t0 >= 500, 'must wait for the readiness budget before giving up');
     assert.ok(await waitForExit(hungChild, 3000), 'timed-out child must be killed');
     assert.deepEqual(readdirSync(priv), [], 'no runtime dir may survive the timed-out launch');
   } finally {
