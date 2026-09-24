@@ -281,6 +281,11 @@ export function getNotifySockPath() {
 // notifyBridge re-exports this rather than keeping its own copy: the whole of
 // #234 was the two paths answering "can Web Push reach anyone" differently, so
 // there is exactly one binding and index.js's single call answers for both.
+//
+// The DIRECTION is forced, not a preference: notifyBridge already imports
+// notify.js (sendNotification et al), so parking the binding over there and
+// having notify.js reach for it would close that edge into a cycle. Whoever
+// moves it back will find out the hard way -- it has to live here.
 let webpushReachableFn = () => false;
 export function setWebpushReachable(fn) {
   webpushReachableFn = typeof fn === 'function' ? fn : (() => false);

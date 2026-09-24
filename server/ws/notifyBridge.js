@@ -73,7 +73,9 @@ import { appDisplayName } from './appLaunch.js';
 
 // Re-exported, not redefined: notify.js owns the single Web Push reachability
 // binding so notifyEnabled() and this bridge cannot drift apart again (#234).
-// index.js wires it through either name.
+// index.js wires it through either name. Ownership sits over there because
+// this module already imports notify.js -- holding the binding here and
+// having notify.js read it would close that edge into a cycle.
 export { setWebpushReachable };
 
 const HOUR_MS = 60 * 60 * 1000;
