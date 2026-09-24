@@ -91,6 +91,8 @@ node server/cli/gh-usage-report.js enable \
   --file /absolute/path/gh-usage-recording.json
 ```
 
+`--file` に指定できるのは、存在しないパスか通常ファイルだけです (ディレクトリ・シンボリックリンク・FIFO・デバイスは拒否されます)。**既存の通常ファイルを指定した場合、その中身は最初の記録時に集計ファイルで上書きされます。** 空いているパスを指定してください。
+
 このコマンドは `sandbox.config.json` の `ghUsageRecording` を次の形で更新します。反映されるのは新規セッションだけなので、記録を始める前に対象のサンドボックスセッションを起動し直してください。
 
 ```json
