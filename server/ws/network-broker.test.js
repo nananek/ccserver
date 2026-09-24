@@ -8,11 +8,11 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, connect as netConnect } from 'node:net';
 import { spawn as spawnFn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isHostAllowed, isHostDenied, isHostMatched, canonicalizeIPv4Literal, startNetworkBroker, setNetworkBrokerMode, setNetworkBrokerLists, networkBrokerProxyUrl, buildIsolatedProxyEnv } from './network-broker.js';
+import { isHostAllowed, isHostDenied, isHostMatched, canonicalizeIPv4Literal, startNetworkBroker, setNetworkBrokerMode, setNetworkBrokerLists, networkBrokerProxyUrl, buildIsolatedProxyEnv, writePortFileAtomic, readPortFile } from './network-broker.js';
 
 const NETWORK_BROKER_PATH = fileURLToPath(new URL('./network-broker.js', import.meta.url));
 
@@ -570,4 +570,168 @@ test('client RST after 403/407/400 does not kill the broker', async () => {
   const stillDenied = await rawConnect(broker.port, target, basicAuth(broker.token));
   assert.match(stillDenied.statusLine, /^HTTP\/1\.1 403/, 'same broker still answers after RSTs');
   stillDenied.sock.destroy();
+});
+
+// Issue #222: the port file was written with a plain writeFileSync, which
+// creates the file (O_CREAT) before the content lands. The parent's readiness
+// wait keyed on existsSync, so it could observe the file the instant it was
+// created and read it while still empty -- Number('') is 0, which the parse
+// rejects as 'malformed port file'. Intermittent, and whichever test started a
+// broker first in a parallel run was the one that paid.
+//
+// Both halves are pinned here: the writer must publish the value atomically
+// (nothing partial is ever visible at the destination), and the reader must
+// treat "exists but does not parse yet" as not-ready rather than as a failure.
+test('#222 writePortFileAtomic: publishes the value and leaves no temp file behind', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-portfile-'));
+  try {
+    const portFile = join(dir, 'port');
+    writePortFileAtomic(portFile, 45678);
+    assert.equal(readFileSync(portFile, 'utf-8'), '45678');
+    // The temp file is gone: a leftover would be mistaken for scratch state by
+    // the runtime-dir cleanup and, worse, hide a failed publish.
+    assert.deepEqual(readdirSync(dir), ['port']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#222 writePortFileAtomic: replaces the destination instead of writing in place', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-portfile-'));
+  try {
+    const portFile = join(dir, 'port');
+    // The exact state the old code could leave behind mid-write.
+    writeFileSync(portFile, '');
+    const before = statSync(portFile).ino;
+    writePortFileAtomic(portFile, 3000);
+    assert.equal(readPortFile(portFile), 3000);
+    assert.deepEqual(readdirSync(dir), ['port']);
+    // This is the assertion that a plain writeFileSync cannot satisfy, and so
+    // the one that actually pins atomicity: writing in place means
+    // open(O_TRUNC) on THIS inode, which is exactly the window where a reader
+    // sees the file empty. rename() swaps in a different inode that already
+    // holds the full value, so the destination is only ever complete. The tmp
+    // file is created before the old inode is unlinked, so the numbers cannot
+    // coincide by reuse.
+    assert.notEqual(statSync(portFile).ino, before, 'the destination must be replaced by rename, not truncated in place');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#222 writePortFileAtomic: a failed publish throws and leaves no temp file behind', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-portfile-'));
+  try {
+    // A directory at the destination makes renameSync fail with EISDIR, which
+    // is the cheapest deterministic way to reach the cleanup path. A surviving
+    // temp file would accumulate in the broker's runtime dir and would hide
+    // the fact that the publish never completed.
+    const portFile = join(dir, 'port');
+    mkdirSync(portFile);
+    assert.throws(() => writePortFileAtomic(portFile, 3000), /EISDIR/);
+    assert.deepEqual(readdirSync(dir), ['port'], 'no port.tmp-<pid> may be left behind');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#222 readPortFile: an empty or unparseable file is not-ready, not a failure', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-portfile-'));
+  try {
+    const portFile = join(dir, 'port');
+    // Absent.
+    assert.equal(readPortFile(portFile), null);
+    // Created but not yet written -- the exact window issue #222 reported.
+    writeFileSync(portFile, '');
+    assert.equal(readPortFile(portFile), null, 'an empty port file must read as not-ready');
+    // A truncated value is indistinguishable from a legitimate small one --
+    // '4' could be port 4 or the first digit of 45678. That is precisely why
+    // the reader cannot be the only defence and the writer has to publish
+    // atomically; the issue notes this case as theoretically possible.
+    writeFileSync(portFile, '4');
+    assert.equal(readPortFile(portFile), 4, 'a value that parses is a value; the reader cannot tell it was truncated');
+    writeFileSync(portFile, 'nope');
+    assert.equal(readPortFile(portFile), null);
+    writeFileSync(portFile, '0');
+    assert.equal(readPortFile(portFile), null, 'port 0 is never what the child chose');
+    writeFileSync(portFile, '  45678\n');
+    assert.equal(readPortFile(portFile), 45678, 'surrounding whitespace is tolerated');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The parent half of issue #222. These drive startNetworkBroker with a stub
+// child that reproduces the race directly: it creates the port file empty
+// (what writeFileSync's O_CREAT used to expose) and only later publishes a
+// value. A parent that waits on existsSync reads the empty file and fails the
+// launch; a parent that waits on the parsed value keeps waiting and succeeds.
+const stubBrokerSpawn = (extraEnv) => (_command, args, options) => {
+  const portFile = args[args.indexOf('--port-file') + 1];
+  return spawnFn(process.execPath, [
+    '-e',
+    // Create the path with no value in it, then optionally publish one late.
+    'const fs = require("node:fs");' +
+    'const pf = process.env.STUB_PORT_FILE;' +
+    'const b64 = process.env.STUB_RAW_B64;' +
+    'fs.writeFileSync(pf, b64 ? Buffer.from(b64, "base64") : "");' +
+    'if (process.env.STUB_PORT) setTimeout(() => fs.writeFileSync(pf, process.env.STUB_PORT), 400);' +
+    'setTimeout(() => process.exit(0), 10000);',
+  ], { ...options, env: { ...options.env, STUB_PORT_FILE: portFile, ...extraEnv } });
+};
+
+test('#222 startNetworkBroker waits past an empty port file for the real value', async () => {
+  // probeBroker has to find something listening, so stand in for the broker's
+  // HTTP server and hand the stub child this port to publish.
+  const listener = createServer((sock) => sock.destroy());
+  await new Promise((resolve) => listener.listen(0, '127.0.0.1', resolve));
+  const { port: listenerPort } = listener.address();
+  try {
+    const broker = await startNetworkBroker({}, { spawnProcess: stubBrokerSpawn({ STUB_PORT: String(listenerPort) }) });
+    brokers.push(broker);
+    assert.equal(broker.port, listenerPort, 'the parent must report the value the child published, not the empty read');
+  } finally {
+    await new Promise((resolve) => listener.close(resolve));
+  }
+});
+
+test('#222 startNetworkBroker gives up on a never-published port file and names the cause', async () => {
+  // Also pins that the wait is bounded: the stub child stays alive for 10s, so
+  // only the 2s deadline can end this.
+  const started = Date.now();
+  await assert.rejects(
+    () => startNetworkBroker({}, { spawnProcess: stubBrokerSpawn({}) }),
+    // 'port file not ready' alone would leave an operator with nowhere to go;
+    // the reason has to separate "the child never wrote" from "it wrote
+    // something unusable" -- the distinction the old 'malformed port file'
+    // carried and a bare timeout loses.
+    /network broker failed to start: port file not ready within 2s \(created but still empty\)/,
+  );
+  assert.ok(Date.now() - started < 10000, 'the readiness wait must be bounded by its own deadline');
+});
+
+test('#222 the failure message quotes an unusable port file bounded and escaped', async () => {
+  // The message is thrown into a session-startup failure and the server log,
+  // so the file's own bytes must not be able to pose as log structure, and the
+  // file must not get to choose how much is read to describe it.
+  const esc = String.fromCharCode(27);
+  const nul = String.fromCharCode(0);
+  const garbage = `${esc}[31m<html>not a port${nul}\n${'A'.repeat(4096)}`;
+  let err = null;
+  try {
+    await startNetworkBroker({}, {
+      spawnProcess: stubBrokerSpawn({ STUB_RAW_B64: Buffer.from(garbage, 'utf-8').toString('base64') }),
+    });
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err, 'a port file that never parses must fail the launch');
+  assert.match(err.message, /port file not ready within 2s \(unparseable: /, 'the reason must name what was wrong, not just that time ran out');
+  // Neutralised: no raw control byte survives into the message.
+  assert.ok(!err.message.includes(esc), 'a terminal escape must not reach the message verbatim');
+  assert.ok(!err.message.includes(nul), 'a NUL must not reach the message verbatim');
+  assert.ok(!err.message.includes('\n'), 'a newline must not reach the message verbatim');
+  // Bounded: the 4KiB of padding cannot drag itself into the message.
+  assert.ok(!err.message.includes('A'.repeat(200)), 'the quoted snippet must be capped');
+  assert.ok(err.message.length < 400, `message stayed bounded (was ${err.message.length})`);
 });

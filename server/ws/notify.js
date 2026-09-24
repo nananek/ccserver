@@ -24,13 +24,14 @@
 
 import { randomUUID } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, join } from 'node:path';
 import { Agent, fetch as undiciFetch } from 'undici';
 import { loadSandboxConfig } from './sandbox.js';
 import { hostRuntimeDir } from './git-broker.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
+import { readJsonFileIfRegular } from './regularFile.js';
 
 // Persisted subscription registry (same pattern as .saved-groups.json /
 // .saved-sessions.json). Read at each use (like loadSandboxConfig's env
@@ -355,7 +356,7 @@ export function restoreNotify() {
     if (s && typeof s === 'object') add(s.url, s.name);
   }
   try {
-    const raw = JSON.parse(readFileSync(notifyPath(), 'utf-8'));
+    const raw = readJsonFileIfRegular(notifyPath());
     if (raw && Array.isArray(raw.subscriptions)) {
       for (const s of raw.subscriptions) {
         if (s && typeof s === 'object') add(s.url, s.name, s.id, s.createdAt);
