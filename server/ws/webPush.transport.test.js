@@ -18,9 +18,10 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { createECDH, randomBytes } from 'node:crypto';
 import { Agent, fetch as undiciFetch } from 'undici';
 import { getSsrfSafeDispatcher } from './notify.js';
-import { deliverPush, generateVapidKeys, validateDeliveryEndpoint, b64u } from './webPush.js';
+import { deliverPush, deliveryFetch, generateVapidKeys, validateDeliveryEndpoint, b64u } from './webPush.js';
 
 let server;
 let port;
@@ -57,21 +58,47 @@ test('the Agent we build is actually usable by the fetch we call', async () => {
   assert.ok(received.some((r) => r.url === '/agent-compat'), 'the request really arrived');
 });
 
-test('globalThis.fetch would NOT accept it (the trap this guards against)', async () => {
-  // Documents the incompatibility rather than relying on remembering it. If a
-  // future Node ships the same undici we depend on, this starts passing and
-  // the assertion below can be relaxed -- but until then, using
-  // globalThis.fetch with our Agent is a silent outage.
-  let failed = false;
+test('deliverPush calls the undici our Agent comes from, not the platform fetch', () => {
+  // THE cross-runtime form of F2's guard.
+  //
+  // This used to assert the opposite thing: that globalThis.fetch REJECTS our
+  // Agent. That is not a fact about ccserver, it is a fact about whichever
+  // undici the running Node happens to bundle -- true on Node 26, FALSE on
+  // Node 22, whose bundled undici still accepts a 6.x Agent. CI runs Node 22,
+  // so the suite failed there on correct code, and the failure said nothing
+  // about whether anything was wrong.
+  //
+  // Worse, it was asymmetric in the dangerous direction: on Node 22 a switch
+  // BACK to globalThis.fetch would have kept CI green, because on Node 22 that
+  // switch genuinely is not yet fatal -- and then broken production on Node 26.
+  // That is the exact path this regression took the first time.
+  //
+  // What must hold on every runtime is that the fetch deliverPush calls and
+  // the Agent getSsrfSafeDispatcher() builds come from the SAME undici. That
+  // is a property of our code, so assert it by identity.
+  assert.equal(deliveryFetch(), undiciFetch,
+    'deliverPush must call the `undici` package fetch, the one our Agent belongs to');
+  assert.notEqual(deliveryFetch(), globalThis.fetch,
+    'the platform fetch is backed by Node\'s own bundled undici, not the one we build Agents from');
+});
+
+test('the platform/dependency undici drift is recorded, not asserted', async (t) => {
+  // The drift is still worth knowing -- it broke every webhook and push
+  // delivery for two Node majors before anyone noticed -- so it is reported on
+  // whatever runtime the suite runs on. It is an observation about the
+  // environment, so it never fails the build.
+  let outcome;
   try {
-    await globalThis.fetch(`http://127.0.0.1:${port}/global-fetch`, {
+    const res = await globalThis.fetch(`http://127.0.0.1:${port}/global-fetch`, {
       method: 'POST', body: 'x', dispatcher: new Agent(),
     });
+    outcome = `ACCEPTED our Agent (HTTP ${res.status})`;
   } catch (err) {
-    failed = true;
-    assert.match(String(err.cause?.code || err.message), /UND_ERR_INVALID_ARG|invalid onError/);
+    outcome = `refused our Agent (${err.cause?.code || err.message})`;
   }
-  assert.equal(failed, true, 'if this ever passes, re-check which fetch deliverPush should use');
+  t.diagnostic(`${process.version}: globalThis.fetch ${outcome}`);
+  // The probe has to have actually run, or the diagnostic means nothing.
+  assert.ok(outcome, 'the drift probe produced no result');
 });
 
 test('the SSRF guard actually fires on a hostname that resolves to loopback', async () => {
@@ -112,6 +139,30 @@ test('deliverPush refuses an IP-literal endpoint before opening a socket', async
     assert.match(res.error, /IP literal|private or reserved/, endpoint);
   }
   assert.ok(!received.some((r) => r.url === '/literal'), 'nothing reached the listener');
+});
+
+test('deliverPush itself is guarded: the dispatcher is live on the real path', async () => {
+  // Stronger than probing the dispatcher in isolation (the case above builds
+  // the request by hand). This one goes through deliverPush with NO fetch
+  // seam, so it fails if the production path ever stops passing the
+  // dispatcher, or passes it to a fetch that quietly ignores it -- which is
+  // what "fetch failed" looked like when F2 was live.
+  const ecdh = createECDH('prime256v1');
+  ecdh.generateKeys();
+  const res = await deliverPush({
+    subscription: {
+      endpoint: `https://localhost:${port}/real-path`,
+      p256dh: b64u(ecdh.getPublicKey()),
+      auth: b64u(randomBytes(16)),
+    },
+    payload: 'x',
+    vapidKeys: generateVapidKeys(),
+    subject: 'mailto:ops@example.com',
+  });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /private\/reserved address|SSRF guard/,
+    `expected the connect-time guard to refuse, got: ${res.error}`);
+  assert.ok(!received.some((r) => r.url === '/real-path'), 'nothing reached the listener');
 });
 
 test('validateDeliveryEndpoint mirrors the registration rules', () => {

@@ -527,6 +527,19 @@ export function _getDeliverFetch() {
   return deliverFetch;
 }
 
+// undici reports every connect-time failure as a bare "fetch failed" and puts
+// the actual reason in `err.cause` -- including our OWN SSRF guard's refusal.
+// Logging only the outer message makes "the guard refused this" look exactly
+// like "the plumbing is broken", which is how a dead dispatcher went unnoticed
+// through two Node majors (attacker review F2). Both delivery paths -- webhook
+// here and Web Push in webPush.js -- report the cause as well.
+export function describeFetchError(err) {
+  const message = err?.message || String(err);
+  const cause = err?.cause?.message;
+  if (!cause || cause === message) return message;
+  return `${message}: ${cause}`;
+}
+
 async function deliver(url, content) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DELIVERY_TIMEOUT_MS);
@@ -555,7 +568,7 @@ async function deliver(url, content) {
     });
     return res.ok;
   } catch (err) {
-    console.warn(`[notify] delivery to ${url} failed: ${err.message}`);
+    console.warn(`[notify] delivery to ${url} failed: ${describeFetchError(err)}`);
     return false;
   } finally {
     clearTimeout(timer);

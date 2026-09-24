@@ -42,7 +42,7 @@ import {
   verify as verifyRaw,
 } from 'node:crypto';
 import { fetch as undiciFetch } from 'undici';
-import { getSsrfSafeDispatcher, isIpLiteralHost, isPrivateOrReservedAddress } from './notify.js';
+import { getSsrfSafeDispatcher, isIpLiteralHost, isPrivateOrReservedAddress, describeFetchError } from './notify.js';
 
 const CURVE = 'prime256v1';
 // RFC 8188's record size. 4096 matches the RFC 8291 example and is what every
@@ -289,6 +289,20 @@ export function validateDeliveryEndpoint(endpoint) {
   return null;
 }
 
+// The fetch `deliverPush` calls: undici's own, NOT globalThis.fetch. Node's
+// built-in fetch is backed by Node's OWN bundled undici and rejects an Agent
+// built by the `undici` package we depend on, which is how every webhook and
+// push delivery came to fail silently on Node >= 24 (see notify.js's
+// deliverFetch for the same choice on the webhook path).
+//
+// Exported so the transport test can assert BY IDENTITY that this and
+// getSsrfSafeDispatcher() come from the same undici, instead of restating the
+// choice in the test or -- as it did until now -- probing what the platform
+// fetch happens to do on the Node that is running.
+export function deliveryFetch() {
+  return undiciFetch;
+}
+
 /**
  * `fetchImpl` is a TEST SEAM and nothing else: passing it skips the SSRF-safe
  * dispatcher, so it must never be reachable from outside input. It is not, and
@@ -304,9 +318,7 @@ export async function deliverPush({
   subscription, payload, vapidKeys, subject, ttl = 2419200, urgency = 'normal',
   now = Date.now(), fetchImpl = null,
 }) {
-  // undici's own fetch, not globalThis.fetch: Node's built-in fetch rejects an
-  // Agent built by the `undici` package (see notify.js's deliverFetch).
-  const doFetch = fetchImpl || undiciFetch;
+  const doFetch = fetchImpl || deliveryFetch();
 
   // Third layer of the SSRF defence (attacker review F1). The first two are
   // registration-time validation and the dispatcher's connect-time lookup --
@@ -349,7 +361,7 @@ export async function deliverPush({
     // expired. Both are permanent -- the row is dropped rather than retried.
     return { ok: res.ok, gone: res.status === 404 || res.status === 410, status: res.status };
   } catch (err) {
-    return { ok: false, gone: false, status: 0, error: err?.message || String(err) };
+    return { ok: false, gone: false, status: 0, error: describeFetchError(err) };
   } finally {
     clearTimeout(timer);
   }
