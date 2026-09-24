@@ -43,8 +43,14 @@ ccserver/
 │       ├── terminal.js             # WebSocket + node-pty ブリッジ (/ws/terminal)
 │       ├── sessionManager.js       # セッション・予約プロンプトの状態管理/永続化
 │       ├── appLaunch.js            # アプリ非依存の起動ロジック (resume引数・permission検出等)
-│       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook/Vikunja 配送 + MCP ソケット
-│       ├── vikunjaClient.js        # notify.js から呼ばれる Vikunja タスク作成/更新クライアント
+│       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook/WebPush 配送 + MCP ソケット
+│       ├── agentNotifyDetect.js   # pty 出力から通知エスケープ (OSC 777/9/99) を検出するパーサ
+│       ├── agentNotifyConfig.js   # CLI に通知を吐かせる起動引数の組み立て
+│       ├── notifyBridge.js        # 検出 → ポリシー (発信元/流量制限) → 配送
+│       ├── notifyBridgeSettings.js # sandbox.config.json の notify.bridge 読み書き
+│       ├── webPush.js             # VAPID (RFC 8292) + ペイロード暗号化 (RFC 8291)
+│       ├── pushSubscriptions.js   # Web Push の購読と VAPID 鍵の SQLite ストア
+│       ├── pushDelivery.js        # 1通知を全購読へ fan-out
 │       ├── usageMcp.js             # ccserver-usage: get_usage MCP ツール (server/usage.js の getUsage を直接呼ぶ)
 │       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify / ccserver-usage / ccserver-reviewer、sandbox/host 両モード)
 │       ├── mcpServer.js            # control / handoff / notify / usage / reviewer 各 MCP サーバー (SocketTransport 含む)
@@ -60,7 +66,7 @@ ccserver/
 │       ├── sandbox-mcp-wrapper.cjs        # MCP stdio ↔ Unix socket の中継 (argv 'notify'/'usage' でそれぞれのソケットへ)
 │       ├── sandbox-gitconfig / sandbox-known-hosts / sandbox-ssh-config
 │       ├── git-broker.js           # サンドボックス外で動く、リポジトリスコープの認証情報ブローカー
-│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js, notify.test.js, vikunjaClient.test.js)
+│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js, notify.test.js)
 └── client/
     ├── package.json
     ├── index.html

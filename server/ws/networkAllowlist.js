@@ -11,7 +11,7 @@
 // `//` comment keys survive read-modify-write untouched (they are plain JSON
 // string keys); only formatting normalizes to 2-space + trailing newline.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeAllowedHosts, MAX_ALLOWED_HOSTS, normalizeNetworkSettings } from './network-broker.js';
@@ -21,6 +21,32 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export function resolveSandboxConfigPath() {
   return process.env.CCSERVER_SANDBOX_CONFIG
     || join(__dirname, '..', 'sandbox.config.json');
+}
+
+// Atomic whole-file replace (attacker review F2). A plain writeFileSync
+// truncates first, so a crash or ENOSPC mid-write leaves a partial JSON
+// document behind -- and server/index.js refuses to BOOT on a config it cannot
+// parse ("Refusing to start"). Writing to a sibling temp file and renaming
+// makes the swap a single atomic operation: a reader sees either the old
+// document or the new one, never half of one.
+//
+// The temp file is a sibling (same directory) so the rename cannot cross a
+// filesystem boundary, and 0600 because this file holds the Discord webhook
+// URL and, historically, API tokens.
+//
+// Shared by every writer of sandbox.config.json -- currently the network
+// settings below and notifyBridgeSettings.js -- so the two cannot drift into
+// one being atomic and the other not.
+export function writeSandboxConfigAtomic(next) {
+  const target = resolveSandboxConfigPath();
+  const tmp = `${target}.tmp-${process.pid}`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    renameSync(tmp, target);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    throw err;
+  }
 }
 
 function readRawConfig() {
@@ -118,7 +144,7 @@ export function updateNetworkSettings(patch = {}) {
   }
   next.network = net;
   try {
-    writeFileSync(resolveSandboxConfigPath(), `${JSON.stringify(next, null, 2)}\n`);
+    writeSandboxConfigAtomic(next);
   } catch (err) {
     return { ok: false, code: 'internal', message: `failed to write sandbox config: ${err.message}` };
   }

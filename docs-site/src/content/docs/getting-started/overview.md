@@ -26,7 +26,7 @@ description: ccserver のアーキテクチャ概要
 - **複数 CLI の統一管理**: Claude Code / opencode / GitHub Copilot CLI / OpenAI Codex CLI をブラウザから起動・再開。
 - **サンドボックス起動**: `bwrap` + rootless docker によるプロジェクト単位の隔離実行環境 (詳細は [サンドボックス](/ccserver/sandbox/overview/))。
 - **予約プロンプト**: 指定時刻や利用制限の解除時刻に自動でプロンプトを投入 (詳細は [予約プロンプト](/ccserver/guides/scheduled-prompts/))。
-- **通知 MCP (`ccserver-notify`)**: エージェントが自分で Discord / webhook / Vikunja へ通知できる MCP ツール (詳細は [通知と Vikunja 連携](/ccserver/guides/notify/))。
+- **通知 MCP (`ccserver-notify`)**: エージェントが自分で Discord / webhook / PWA (Web Push) へ通知できる MCP ツール。加えて、サンドボックス内の AI CLI が出すデスクトップ通知を pty から捕捉して同じ配信先へ転送できる (詳細は [通知](/ccserver/guides/notify/))。
 - **使用量 (Usage) 表示**: Claude Code の `/usage` や Codex のレート制限をブラウザから確認 (詳細は [使用量](/ccserver/guides/usage/))。
 - **拠点間 (federation) ペアリング**: 複数の ccserver インスタンスを mTLS でペアリングし、別インスタンスのセッションをリモート操作 (詳細は [federation](/ccserver/guides/federation/))。
 - **コンボ起動**: オーケストレーター + 複数ワーカーをロール別 git worktree で並行起動し、MCP 経由で連携 (詳細は [コンボ起動](/ccserver/guides/combo-launch/))。

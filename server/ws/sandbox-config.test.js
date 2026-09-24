@@ -3,7 +3,21 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
-import { loadSandboxConfig, installedApps, selectableAppIds, APP_IDS } from './sandbox.js';
+import { loadSandboxConfig, installedApps, selectableAppIds, APP_IDS, _resetVikunjaWarningForTests } from './sandbox.js';
+
+// console.warn capture for the compatibility-warning tests below. Kept local
+// rather than global so an unrelated failing test still prints its own output.
+function captureWarnings(fn) {
+  const seen = [];
+  const real = console.warn;
+  console.warn = (...args) => { seen.push(args.map(String).join(' ')); };
+  try {
+    fn();
+  } finally {
+    console.warn = real;
+  }
+  return seen;
+}
 
 // loadSandboxConfig reads the file at CCSERVER_SANDBOX_CONFIG (else the
 // default server/sandbox.config.json). Point it at a temp file to exercise the
@@ -184,47 +198,66 @@ test('notify.subscriptions seeds only https webhook urls, keeping names', () => 
   });
 });
 
-// notify.vikunja (see vikunjaClient.js): baseUrl/apiToken follow the same
-// https-only / env-override-wins pattern as discordWebhook above; the rest
-// (projectId, timeoutSeconds, verifyTls, the label prefixes) just need
-// sensible defaults when absent.
-test('notify.vikunja.baseUrl parses https URLs, rejects others, env override wins', () => {
-  withConfig({ notify: { vikunja: { baseUrl: 'https://vikunja.example/' } } }, () => {
-    assert.equal(loadSandboxConfig().notify.vikunja.baseUrl, 'https://vikunja.example', 'trailing slash is stripped');
+// notify.vikunja: the Vikunja channel was removed from ccserver-notify (it is
+// being re-cut as its own MCP server). A config file left over from before the
+// removal must still load -- the key is ignored, never a parse/validation error.
+test('notify.vikunja is ignored, not an error, when left over in the config', () => {
+  withConfig({
+    notify: {
+      discordWebhook: 'https://discord.example/hook',
+      vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
+    },
+  }, () => {
+    const cfg = loadSandboxConfig();
+    assert.equal(cfg.configError, null, 'a leftover vikunja block must not make the config unreadable');
+    assert.equal(cfg.notify.vikunja, undefined, 'the key is no longer surfaced');
+    assert.equal(cfg.notify.discordWebhook, 'https://discord.example/hook', 'the rest of notify still parses');
   });
-  withConfig({ notify: { vikunja: { baseUrl: 'http://insecure.example' } } }, () => {
-    assert.equal(loadSandboxConfig().notify.vikunja.baseUrl, null, 'non-https baseUrl is rejected');
+});
+
+// Review findings #2/#4/#5: the compatibility warning has to actually reach
+// the operator whose setup just went inert, and it has to be observable.
+test('a leftover notify.vikunja block warns exactly once per process', () => {
+  withConfig({ notify: { vikunja: { baseUrl: 'https://v.example', apiToken: 'tok' } } }, () => {
+    _resetVikunjaWarningForTests();
+    const warnings = captureWarnings(() => {
+      for (let i = 0; i < 5; i++) loadSandboxConfig();
+    });
+    assert.equal(warnings.length, 1, 'the latch must survive repeated reads (this runs on every session launch)');
+    assert.match(warnings[0], /notify\.vikunja/);
+    assert.match(warnings[0], /issue #207/);
   });
-  withConfig({}, () => {
-    assert.equal(loadSandboxConfig().notify.vikunja.baseUrl, null, 'absent key -> null');
-    assert.equal(loadSandboxConfig().notify.vikunja.apiToken, null);
-    assert.equal(loadSandboxConfig().notify.vikunja.projectId, null);
-  });
-  withConfig({ notify: { vikunja: { baseUrl: 'https://file.example' } } }, () => {
-    process.env.CCSERVER_VIKUNJA_BASE_URL = 'https://env.example';
+});
+
+test('a CCSERVER_VIKUNJA_* env with no config block still warns', () => {
+  // The old docs recommended passing the secret apiToken via the environment,
+  // so "env only, nothing in sandbox.config.json" was a supported setup -- and
+  // the one that would otherwise be switched off in complete silence.
+  withConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, () => {
+    process.env.CCSERVER_VIKUNJA_API_TOKEN = 'tok';
     try {
-      assert.equal(loadSandboxConfig().notify.vikunja.baseUrl, 'https://env.example', 'env override wins');
+      _resetVikunjaWarningForTests();
+      const warnings = captureWarnings(() => loadSandboxConfig());
+      assert.equal(warnings.length, 1, 'an env-only Vikunja setup must not go unmentioned');
+      assert.match(warnings[0], /CCSERVER_VIKUNJA_\*/);
     } finally {
-      delete process.env.CCSERVER_VIKUNJA_BASE_URL;
+      delete process.env.CCSERVER_VIKUNJA_API_TOKEN;
     }
   });
 });
 
-test('notify.vikunja.apiToken/projectId are read from config, env overrides both', () => {
-  withConfig({ notify: { vikunja: { apiToken: 'file-tok', projectId: 5 } } }, () => {
-    assert.equal(loadSandboxConfig().notify.vikunja.apiToken, 'file-tok');
-    assert.equal(loadSandboxConfig().notify.vikunja.projectId, 5);
+test('a non-object vikunja leftover is flagged too', () => {
+  withConfig({ notify: { vikunja: true } }, () => {
+    _resetVikunjaWarningForTests();
+    const warnings = captureWarnings(() => loadSandboxConfig());
+    assert.equal(warnings.length, 1, 'the point is to prompt cleanup, whatever shape the leftover has');
   });
-  withConfig({ notify: { vikunja: { apiToken: 'file-tok', projectId: 5 } } }, () => {
-    process.env.CCSERVER_VIKUNJA_API_TOKEN = 'env-tok';
-    process.env.CCSERVER_VIKUNJA_PROJECT_ID = '9';
-    try {
-      assert.equal(loadSandboxConfig().notify.vikunja.apiToken, 'env-tok', 'env override wins for apiToken');
-      assert.equal(loadSandboxConfig().notify.vikunja.projectId, '9', 'env override wins for projectId');
-    } finally {
-      delete process.env.CCSERVER_VIKUNJA_API_TOKEN;
-      delete process.env.CCSERVER_VIKUNJA_PROJECT_ID;
-    }
+});
+
+test('no Vikunja leftovers means no warning at all', () => {
+  withConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, () => {
+    _resetVikunjaWarningForTests();
+    assert.deepEqual(captureWarnings(() => loadSandboxConfig()), []);
   });
 });
 
@@ -358,21 +391,6 @@ test('opencodeGoUsage: env override wins over the file both ways, unrecognized e
     } finally {
       delete process.env.CCSERVER_OPENCODE_GO_USAGE;
     }
-  });
-});
-
-test('notify.vikunja defaults: timeoutSeconds=15, verifyTls=true, statusLabelPrefix=status-', () => {
-  withConfig({}, () => {
-    const v = loadSandboxConfig().notify.vikunja;
-    assert.equal(v.timeoutSeconds, 15);
-    assert.equal(v.verifyTls, true);
-    assert.equal(v.statusLabelPrefix, 'status-');
-  });
-  withConfig({ notify: { vikunja: { timeoutSeconds: 30, verifyTls: false, statusLabelPrefix: 'state-' } } }, () => {
-    const v = loadSandboxConfig().notify.vikunja;
-    assert.equal(v.timeoutSeconds, 30);
-    assert.equal(v.verifyTls, false);
-    assert.equal(v.statusLabelPrefix, 'state-');
   });
 });
 

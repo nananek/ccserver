@@ -1,6 +1,6 @@
 // Oracle test for the orchestrator injection template and the control MCP
 // tool descriptions: the read_output discipline (wait_for_handoff-first,
-// anomaly-gated single reads) and the Vikunja task start report must be
+// anomaly-gated single reads) and the once-per-task start report must be
 // spelled out where the orchestrator actually sees them. Read-only on
 // purpose: groupManager.test.js owns a runtime copy of the template and
 // edits that, so this suite only asserts markers in the real repo-tracked
@@ -83,10 +83,12 @@ test('template: notification discipline requires exactly one start-of-task notif
   assert.match(template, /- \*\*Starting\*\*: when you take on a NEW task from the human, open it with\s*\n\s+exactly ONE `notify` call BEFORE dispatching any work to the workers:/);
   assert.match(template, /level: 'info' ?\}\)/);
   assert.match(template, /once-per-task report,\s*\n\s+not a status update -- do not repeat it mid-task/);
-  // Why it matters: the first info notification creates the Vikunja tracking task.
-  assert.match(template, /this first `info` notification automatically creates\s*\n\s+the group's Vikunja tracking task \(labeled `status-running`\)/);
-  assert.match(template, /final Done\s*\n\s+notification \(`level: 'success'`\) closes it out as done/);
-  assert.match(template, /skipping\s*\n\s+the start report means the whole task goes untracked in Vikunja/);
+  // Why it matters: with no channel configured the tool is not injected at
+  // all, so the template has to say that rather than promise delivery.
+  assert.match(template, /if no channel is\s*\n\s+configured at all the notify tool itself is absent from this session/);
+  // The Vikunja channel was removed from ccserver-notify (it is being re-cut
+  // as its own MCP server) -- the template must not promise task tracking.
+  assert.doesNotMatch(template, /Vikunja/i);
 });
 
 test('mcpServer.js: read_output description states the discipline, status tools gate confirmation', () => {

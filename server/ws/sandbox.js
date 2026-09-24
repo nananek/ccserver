@@ -36,6 +36,7 @@ import { startNetworkBroker, buildIsolatedProxyEnv, normalizeNetworkSettings } f
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 import { normalizeBrowseRoots, isContained, isCcserverScratchPath } from '../pathPolicy.js';
+import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -593,6 +594,19 @@ function resolveFlag(envVal, fileVal, def) {
 // the other's shared state.
 export const APP_IDS = [...APPS];
 
+// One-shot latch for the removed-Vikunja-key notice below: loadSandboxConfig
+// re-reads the file on every call (every session launch, every notify), so the
+// warning has to be per-process rather than per-read.
+let warnedVikunjaConfig = false;
+
+// Test seam (review finding #4): the latch above is module state with no way
+// back, so a test that runs after anything else has already tripped it can
+// neither observe the warning nor assert it fires only once. Same shape as
+// federationIdentity.js's _resetIdentityCacheForTests().
+export function _resetVikunjaWarningForTests() {
+  warnedVikunjaConfig = false;
+}
+
 // Load the optional sandbox config. Path from CCSERVER_SANDBOX_CONFIG, else
 // server/sandbox.config.json (next to this module's parent). Shape:
 //   { "docker": true, "binds": [ { "src": "~/.ssh", "mode": "ro" }, ... ] }
@@ -702,43 +716,37 @@ export function loadSandboxConfig() {
   // entirely (default on).
   const notifyHostname = typeof rawNotify.hostname === 'string' && rawNotify.hostname.length > 0 ? rawNotify.hostname : null;
   const notifyAttribution = rawNotify.attribution !== false;
-  // Vikunja task tracking (see vikunjaClient.js): a `notify` call also
-  // creates/updates a Vikunja task so a missed Discord ping still leaves a
-  // TODO behind. Same env > config > default priority as discordWebhook
-  // above; the API token is secret, so CCSERVER_VIKUNJA_API_TOKEN is the
-  // recommended way to set it (README).
-  const rawVikunja = (rawNotify.vikunja && typeof rawNotify.vikunja === 'object') ? rawNotify.vikunja : {};
-  let vikunjaBaseUrl = null;
-  for (const candidate of [process.env.CCSERVER_VIKUNJA_BASE_URL, rawVikunja.baseUrl]) {
-    if (typeof candidate === 'string' && candidate.startsWith('https://')) {
-      vikunjaBaseUrl = candidate.replace(/\/+$/, '');
-      break;
-    }
+  // A `notify.vikunja` block left over from the removed Vikunja channel is
+  // deliberately NOT parsed and NOT an error: an existing deployment's
+  // sandbox.config.json must keep booting untouched. Say so once per process
+  // so the operator knows the key is inert now (see the follow-up issue --
+  // Vikunja is being re-cut as its own MCP server).
+  //
+  // The condition covers two shapes the old feature actually shipped with:
+  //   - a `notify.vikunja` block of ANY type (review finding #5: `!= null`
+  //     rather than a typeof check, so a `"vikunja": true` leftover is
+  //     flagged for cleanup too -- it is inert either way),
+  //   - a CCSERVER_VIKUNJA_* environment variable with no config block at all
+  //     (review finding #2). That was not an edge case: the old docs
+  //     *recommended* passing the secret apiToken via the environment, and
+  //     baseUrl/projectId had env overrides too, so "env only, nothing in the
+  //     config file" was a fully supported setup -- and the one that would
+  //     otherwise be switched off in total silence.
+  const hasLegacyVikunjaEnv = Object.keys(process.env).some((k) => k.startsWith('CCSERVER_VIKUNJA_'));
+  if ((rawNotify.vikunja != null || hasLegacyVikunjaEnv) && !warnedVikunjaConfig) {
+    warnedVikunjaConfig = true;
+    const where = rawNotify.vikunja != null
+      ? (hasLegacyVikunjaEnv
+        ? '"notify.vikunja" and the CCSERVER_VIKUNJA_* environment variables are set but no longer do anything'
+        : '"notify.vikunja" is set but no longer does anything')
+      : 'the CCSERVER_VIKUNJA_* environment variables are set but no longer do anything';
+    console.warn(
+      `[config] ${where}: the Vikunja channel was removed from `
+      + 'ccserver-notify and is being re-cut as a separate MCP server (issue #207). It is ignored, and it no '
+      + 'longer counts as a notify delivery target -- if it was your only one, the notify MCP tool is now '
+      + 'disabled entirely. Remove it to silence this.',
+    );
   }
-  let vikunjaApiToken = null;
-  for (const candidate of [process.env.CCSERVER_VIKUNJA_API_TOKEN, rawVikunja.apiToken]) {
-    if (typeof candidate === 'string' && candidate.length > 0) {
-      vikunjaApiToken = candidate;
-      break;
-    }
-  }
-  const vikunjaProjectId = process.env.CCSERVER_VIKUNJA_PROJECT_ID || rawVikunja.projectId || null;
-  const vikunjaTimeoutSecondsRaw = process.env.CCSERVER_VIKUNJA_TIMEOUT_SECONDS || rawVikunja.timeoutSeconds;
-  const vikunjaTimeoutSeconds = Number.isFinite(Number(vikunjaTimeoutSecondsRaw)) && Number(vikunjaTimeoutSecondsRaw) > 0
-    ? Number(vikunjaTimeoutSecondsRaw)
-    : 15;
-  const vikunjaVerifyTlsRaw = process.env.CCSERVER_VIKUNJA_VERIFY_TLS ?? rawVikunja.verifyTls;
-  const vikunjaVerifyTls = !(vikunjaVerifyTlsRaw === false || vikunjaVerifyTlsRaw === 'false');
-  const vikunjaStatusLabelPrefix = process.env.CCSERVER_VIKUNJA_STATUS_LABEL_PREFIX
-    || (typeof rawVikunja.statusLabelPrefix === 'string' && rawVikunja.statusLabelPrefix ? rawVikunja.statusLabelPrefix : 'status-');
-  // Kanban bucket titles for the Doing/To-Do "whose turn" distinction (see
-  // vikunjaClient.js's swapStatusBucket) -- same env > config > default
-  // precedence as statusLabelPrefix above.
-  const rawVikunjaBuckets = (rawVikunja.buckets && typeof rawVikunja.buckets === 'object') ? rawVikunja.buckets : {};
-  const vikunjaBucketDoing = process.env.CCSERVER_VIKUNJA_BUCKET_DOING
-    || (typeof rawVikunjaBuckets.doing === 'string' && rawVikunjaBuckets.doing ? rawVikunjaBuckets.doing : 'Doing');
-  const vikunjaBucketTodo = process.env.CCSERVER_VIKUNJA_BUCKET_TODO
-    || (typeof rawVikunjaBuckets.todo === 'string' && rawVikunjaBuckets.todo ? rawVikunjaBuckets.todo : 'To-Do');
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
   // Tools provisioned into the sandbox HOME at launch (rtk / code-review-graph).
@@ -835,15 +843,11 @@ export function loadSandboxConfig() {
     docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, allowUnsandboxedAgents, network,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
-      vikunja: {
-        baseUrl: vikunjaBaseUrl,
-        apiToken: vikunjaApiToken,
-        projectId: vikunjaProjectId,
-        timeoutSeconds: vikunjaTimeoutSeconds,
-        verifyTls: vikunjaVerifyTls,
-        statusLabelPrefix: vikunjaStatusLabelPrefix,
-        buckets: { doing: vikunjaBucketDoing, todo: vikunjaBucketTodo },
-      },
+      // Agent notification bridge (plan-notify-bridge). Parsed by the same
+      // normalizer the Settings GUI's read/write boundary uses, so the two
+      // structurally cannot disagree about what the file says -- exactly the
+      // arrangement `network` above has with normalizeNetworkSettings.
+      bridge: normalizeBridgeSettings(rawNotify.bridge),
     },
     configPath,
   };

@@ -1,7 +1,7 @@
 // notify.js -- the server-global ccserver-notify registry + delivery. Tests
 // the pure decision and persistence paths (withConfig-style temp files, like
 // sandbox-config.test.js / groupManager.test.js) and the fetch delivery with a
-// mocked global.fetch. The broker lifecycle (Unix socket + MCP wire) is covered
+// a stubbed delivery fetch. The broker lifecycle (Unix socket + MCP wire) is covered
 // in mcpBroker.test.js.
 
 import { test } from 'node:test';
@@ -19,6 +19,10 @@ import {
   sendNotification,
   resolvedHostname,
   isPrivateOrReservedAddress,
+  _setDeliverFetchForTests,
+  _getDeliverFetch,
+  defangFooterMarker,
+  buildAttribution,
 } from './notify.js';
 
 // Point CCSERVER_SANDBOX_CONFIG + CCSERVER_NOTIFY_PATH at temp files and
@@ -62,24 +66,23 @@ test('notifyEnabled: discord-only, subscriptions-only, and neither', async () =>
   });
 });
 
-// Confirmed with the user (see tmp/notify-vikunja-integration-plan.md section
-// 5, point 2): a Vikunja-only setup -- no Discord webhook, no subscriptions --
-// still counts as "notify is on" so the MCP server gets injected. This is the
-// one point the plan left open that was explicitly resolved before
-// implementation.
-test('notifyEnabled: vikunja-only (no discord, no subscriptions) also enables it', async () => {
+// Review finding #3: the "vikunja-only also enables notify" test was deleted
+// with the channel; its inverse has to take its place, or a change that
+// resurrects "a vikunja key counts as a delivery target" would pass unnoticed.
+// This is not a cosmetic difference: notifyEnabled() false means
+// shouldInjectNotify() false, which means the `notify` MCP tool is absent from
+// the session entirely -- the agent loses its only way to call a human.
+test('notifyEnabled: a leftover vikunja block is NOT a delivery target', async () => {
   await withNotifyConfig(
-    { notify: { subscriptions: [], vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok' } } },
+    { notify: { subscriptions: [], vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 } } },
     async () => {
       restoreNotify();
-      assert.equal(notifyEnabled(), true, 'vikunja baseUrl+apiToken alone enables notify');
-    },
-  );
-  await withNotifyConfig(
-    { notify: { subscriptions: [], vikunja: { baseUrl: 'https://vikunja.example' } } },
-    async () => {
-      restoreNotify();
-      assert.equal(notifyEnabled(), false, 'vikunja baseUrl alone (no apiToken) is not enough');
+      assert.equal(notifyEnabled(), false, 'the Vikunja channel is gone; its config must not enable notify');
+      assert.equal(
+        shouldInjectNotify({ shell: false, app: 'claude', groupId: null, groupRole: null, notifyEnabled: notifyEnabled() }),
+        false,
+        'and with nothing enabled, the notify tool is not injected at all',
+      );
     },
   );
 });
@@ -183,12 +186,12 @@ test('sendNotification POSTs { content, username } to discord and every subscrip
       subscribe({ url: 'https://hook-b.example/x' });
 
       const calls = [];
-      const realFetch = global.fetch;
-      global.fetch = async (url, opts) => {
+      const realFetch = _getDeliverFetch();
+      _setDeliverFetchForTests(async (url, opts) => {
         calls.push({ url: String(url), opts });
         if (String(url).includes('hook-a')) throw new Error('unreachable');
         return { ok: true };
-      };
+      });
       try {
         const res = await sendNotification({ title: 'Build failed', body: 'details here', level: 'error' });
         assert.equal(res.ok, true);
@@ -207,7 +210,7 @@ test('sendNotification POSTs { content, username } to discord and every subscrip
         assert.equal(a.url, 'https://hook-a.example/x');
         assert.equal(b.url, 'https://hook-b.example/x');
       } finally {
-        global.fetch = realFetch;
+        _setDeliverFetchForTests(realFetch);
       }
     },
   );
@@ -216,20 +219,20 @@ test('sendNotification POSTs { content, username } to discord and every subscrip
 test('sendNotification never throws and an empty message sends nothing', async () => {
   await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
     restoreNotify();
-    const realFetch = global.fetch;
-    global.fetch = async () => { throw new Error('network down'); };
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async () => { throw new Error('network down'); });
     try {
       const res = await sendNotification({ title: 'x' });
       assert.equal(res.ok, true, 'a total delivery failure still returns ok (non-blocking)');
       assert.deepEqual(res.delivered, { discord: false, webhooks: 0, failed: 0 });
 
       let calls = 0;
-      global.fetch = async () => { calls++; return { ok: true }; };
+      _setDeliverFetchForTests(async () => { calls++; return { ok: true }; });
       const empty = await sendNotification({});
       assert.equal(calls, 0, 'no content -> no delivery attempted');
       assert.deepEqual(empty.delivered, { discord: false, webhooks: 0, failed: 0 });
     } finally {
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   });
 });
@@ -242,8 +245,8 @@ test('sendNotification appends an attribution footer from the connection identit
   await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
     restoreNotify();
     const calls = [];
-    const realFetch = global.fetch;
-    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; });
     const prevHost = process.env.CCSERVER_HOSTNAME;
     try {
       process.env.CCSERVER_HOSTNAME = 'test-host';
@@ -261,7 +264,7 @@ test('sendNotification appends an attribution footer from the connection identit
     } finally {
       if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
       else process.env.CCSERVER_HOSTNAME = prevHost;
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   });
 });
@@ -270,8 +273,8 @@ test('sendNotification without identity carries a host-only footer', async () =>
   await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
     restoreNotify();
     const calls = [];
-    const realFetch = global.fetch;
-    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; });
     const prevHost = process.env.CCSERVER_HOSTNAME;
     try {
       process.env.CCSERVER_HOSTNAME = 'test-host';
@@ -282,7 +285,7 @@ test('sendNotification without identity carries a host-only footer', async () =>
     } finally {
       if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
       else process.env.CCSERVER_HOSTNAME = prevHost;
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   });
 });
@@ -291,8 +294,8 @@ test('notify.attribution=false strips the footer entirely', async () => {
   await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook', attribution: false } }, async () => {
     restoreNotify();
     const calls = [];
-    const realFetch = global.fetch;
-    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; });
     const prevHost = process.env.CCSERVER_HOSTNAME;
     try {
       process.env.CCSERVER_HOSTNAME = 'test-host';
@@ -306,7 +309,7 @@ test('notify.attribution=false strips the footer entirely', async () => {
     } finally {
       if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
       else process.env.CCSERVER_HOSTNAME = prevHost;
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   });
 });
@@ -317,14 +320,14 @@ test('notify hostname precedence: env wins over config, config over os.hostname(
   const prevHost = process.env.CCSERVER_HOSTNAME;
   const assertFooterHost = async (payloadHost) => {
     const calls = [];
-    const realFetch = global.fetch;
-    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; });
     try {
       await sendNotification({ title: 'x', body: 'y' });
       const payload = JSON.parse(calls[0].opts.body);
       assert.equal(payload.content, `x\ny\n\n_from: ${payloadHost}`);
     } finally {
-      global.fetch = realFetch;
+      _setDeliverFetchForTests(realFetch);
     }
   };
   try {
@@ -376,214 +379,56 @@ test('resolvedHostname precedence: env > notify.hostname > os.hostname()', async
   }
 });
 
-// Vikunja channel (see vikunjaClient.js): sendNotification dispatches to it
-// in parallel with Discord/webhooks and merges the result into
-// delivered.vikunja, never letting a Vikunja failure affect the overall
-// ok:true / non-blocking contract (plan section 2.5 / 6).
-async function withVikunjaTasksPath(fn) {
-  const dir = mkdtempSync(join(tmpdir(), 'ccserver-notify-vikunja-'));
-  const tasksPath = join(dir, 'vikunja-tasks.json');
-  const prev = process.env.CCSERVER_VIKUNJA_TASKS_PATH;
-  process.env.CCSERVER_VIKUNJA_TASKS_PATH = tasksPath;
-  try {
-    await fn(tasksPath);
-  } finally {
-    if (prev === undefined) delete process.env.CCSERVER_VIKUNJA_TASKS_PATH;
-    else process.env.CCSERVER_VIKUNJA_TASKS_PATH = prev;
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
-}
-
-test('sendNotification includes delivered.vikunja when Vikunja is configured and a tracking key is present', async () => {
-  await withNotifyConfig(
-    {
-      notify: {
-        discordWebhook: 'https://discord.example/hook',
-        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
-      },
-    },
-    async () => {
-      restoreNotify();
-      await withVikunjaTasksPath(async () => {
-        const realFetch = global.fetch;
-        global.fetch = async (url, opts) => {
-          const u = String(url);
-          if (u.includes('discord.example')) return { ok: true };
-          const path = new URL(u).pathname;
-          const method = opts.method;
-          if (method === 'GET' && path === '/api/v1/labels') return { ok: true, status: 200, text: async () => '[]' };
-          if (method === 'PUT' && path === '/api/v1/labels') return { ok: true, status: 201, text: async () => JSON.stringify({ id: 1 }) };
-          if (method === 'PUT' && /^\/api\/v1\/projects\/\d+\/tasks$/.test(path)) return { ok: true, status: 201, text: async () => JSON.stringify({ id: 42 }) };
-          if (method === 'PUT' && /^\/api\/v1\/tasks\/\d+\/labels$/.test(path)) return { ok: true, status: 201, text: async () => '{}' };
-          throw new Error(`unexpected fetch: ${method} ${path}`);
-        };
-        try {
-          const res = await sendNotification(
-            { title: 'Build failed', body: 'details', level: 'error' },
-            { sessionId: 'sess-abc', groupId: null, cwd: '/srv/proj', projectName: 'proj' },
-          );
-          assert.equal(res.ok, true);
-          assert.equal(res.delivered.discord, true);
-          assert.deepEqual(res.delivered.vikunja, { ok: true, action: 'created', taskId: 42 });
-        } finally {
-          global.fetch = realFetch;
-        }
-      });
-    },
-  );
-});
-
-test('sendNotification omits delivered.vikunja when there is no tracking key (no identity)', async () => {
-  await withNotifyConfig(
-    {
-      notify: {
-        discordWebhook: 'https://discord.example/hook',
-        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
-      },
-    },
-    async () => {
-      restoreNotify();
-      const realFetch = global.fetch;
-      let vikunjaCalled = false;
-      global.fetch = async (url) => {
-        const u = String(url);
-        if (u.includes('discord.example')) return { ok: true };
-        vikunjaCalled = true;
-        return { ok: true, status: 200, text: async () => '{}' };
-      };
-      try {
-        const res = await sendNotification({ title: 'x', body: 'y', level: 'info' });
-        assert.equal(res.delivered.vikunja, undefined, 'no identity -> no tracking key -> vikunja is skipped entirely');
-        assert.equal(vikunjaCalled, false);
-      } finally {
-        global.fetch = realFetch;
-      }
-    },
-  );
-});
-
-test('sendNotification stays ok:true even when the Vikunja call fails (non-blocking, like Discord)', async () => {
-  await withNotifyConfig(
-    {
-      notify: {
-        discordWebhook: 'https://discord.example/hook',
-        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
-      },
-    },
-    async () => {
-      restoreNotify();
-      await withVikunjaTasksPath(async () => {
-        const realFetch = global.fetch;
-        global.fetch = async (url) => {
-          const u = String(url);
-          if (u.includes('discord.example')) return { ok: true };
-          return { ok: false, status: 500, text: async () => '{}' };
-        };
-        try {
-          const res = await sendNotification(
-            { title: 'x', body: 'y', level: 'error' },
-            { sessionId: 'sess-fail' },
-          );
-          assert.equal(res.ok, true, 'a failing Vikunja call does not fail sendNotification');
-          assert.equal(res.delivered.discord, true);
-          assert.equal(res.delivered.vikunja.ok, false);
-        } finally {
-          global.fetch = realFetch;
-        }
-      });
-    },
-  );
-});
-
-// channels param (Issue #152): lets a caller pick a subset of the configured
-// channels per-call instead of always getting every configured channel.
-// Omitting it (every test above) must keep delivering to everything -- these
-// only cover the new, narrower channels:[...] behavior.
-test("sendNotification with channels:['discord'] skips Vikunja even when configured and a tracking key is present", async () => {
-  await withNotifyConfig(
-    {
-      notify: {
-        discordWebhook: 'https://discord.example/hook',
-        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
-      },
-    },
-    async () => {
-      restoreNotify();
-      await withVikunjaTasksPath(async () => {
-        const realFetch = global.fetch;
-        let vikunjaCalled = false;
-        global.fetch = async (url) => {
-          const u = String(url);
-          if (u.includes('discord.example')) return { ok: true };
-          vikunjaCalled = true;
-          return { ok: true, status: 200, text: async () => '{}' };
-        };
-        try {
-          const res = await sendNotification(
-            {
-              title: 'x', body: 'y', level: 'info', channels: ['discord'],
-            },
-            { sessionId: 'sess-discord-only' },
-          );
-          assert.equal(res.ok, true);
-          assert.equal(res.delivered.discord, true);
-          assert.equal(res.delivered.vikunja, undefined, "channels:['discord'] must skip Vikunja entirely");
-          assert.equal(vikunjaCalled, false);
-        } finally {
-          global.fetch = realFetch;
-        }
-      });
-    },
-  );
-});
-
-test("sendNotification with channels:['vikunja'] skips Discord and every subscribed webhook", async () => {
+// channels param (Issue #152): 'discord' is the only channel left now that the
+// Vikunja one was removed, so naming it explicitly must behave exactly like
+// omitting it -- and an empty list must still mean "deliver nowhere" rather
+// than falling back to everything.
+test('channels: naming discord delivers, an empty list delivers nothing', async () => {
   await withNotifyConfig(
     {
       notify: {
         discordWebhook: 'https://discord.example/hook',
         subscriptions: [{ url: 'https://hooks.example.com/slack', name: 'slack' }],
-        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
       },
     },
     async () => {
       restoreNotify();
-      await withVikunjaTasksPath(async () => {
-        const realFetch = global.fetch;
-        let webhookCalled = false;
-        global.fetch = async (url, opts) => {
-          const u = String(url);
-          if (u.includes('discord.example') || u.includes('hooks.example.com')) {
-            webhookCalled = true;
-            return { ok: true };
-          }
-          const path = new URL(u).pathname;
-          const method = opts.method;
-          if (method === 'GET' && path === '/api/v1/labels') return { ok: true, status: 200, text: async () => '[]' };
-          if (method === 'PUT' && path === '/api/v1/labels') return { ok: true, status: 201, text: async () => JSON.stringify({ id: 1 }) };
-          if (method === 'PUT' && /^\/api\/v1\/projects\/\d+\/tasks$/.test(path)) return { ok: true, status: 201, text: async () => JSON.stringify({ id: 7 }) };
-          if (method === 'PUT' && /^\/api\/v1\/tasks\/\d+\/labels$/.test(path)) return { ok: true, status: 201, text: async () => '{}' };
-          throw new Error(`unexpected fetch: ${method} ${path}`);
-        };
-        try {
-          const res = await sendNotification(
-            {
-              title: 'x', body: 'y', level: 'info', channels: ['vikunja'],
-            },
-            { sessionId: 'sess-vikunja-only' },
-          );
-          assert.equal(res.ok, true);
-          assert.equal(res.delivered.discord, false, "channels:['vikunja'] must skip Discord");
-          assert.equal(res.delivered.webhooks, 0, "channels:['vikunja'] must skip subscribed webhooks too");
-          assert.equal(res.delivered.failed, 0);
-          assert.deepEqual(res.delivered.vikunja, { ok: true, action: 'created', taskId: 7 });
-          assert.equal(webhookCalled, false);
-        } finally {
-          global.fetch = realFetch;
-        }
-      });
+      const realFetch = _getDeliverFetch();
+      let calls = 0;
+      _setDeliverFetchForTests(async () => { calls += 1; return { ok: true }; });
+      try {
+        const named = await sendNotification({ title: 'x', body: 'y', channels: ['discord'] });
+        assert.deepEqual(named.delivered, { discord: true, webhooks: 1, failed: 0 });
+        assert.equal(calls, 2, 'the Discord webhook and the subscription both got it');
+
+        calls = 0;
+        const none = await sendNotification({ title: 'x', body: 'y', channels: [] });
+        assert.deepEqual(none.delivered, { discord: false, webhooks: 0, failed: 0 });
+        assert.equal(calls, 0, 'an empty channels list must not fall back to every channel');
+      } finally {
+        _setDeliverFetchForTests(realFetch);
+      }
     },
   );
+});
+
+// Attacker review N4: the notification body is agent-authored, and a Discord
+// webhook pings @everyone/@here/roles found in `content` by default. Nothing
+// about the text is rewritten -- the mention is simply declared inert.
+test('deliver() sends allowed_mentions so an agent cannot ping @everyone', async () => {
+  await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
+    restoreNotify();
+    const realFetch = _getDeliverFetch();
+    let sent = null;
+    _setDeliverFetchForTests(async (_url, opts) => { sent = JSON.parse(opts.body); return { ok: true }; });
+    try {
+      await sendNotification({ title: '@everyone', body: 'build failed @here <@&123>' });
+      assert.deepEqual(sent.allowed_mentions, { parse: [] });
+      assert.match(sent.content, /@everyone/, 'the text itself is left readable, just not a ping');
+    } finally {
+      _setDeliverFetchForTests(realFetch);
+    }
+  });
 });
 
 // --- H4 SSRF guard (vuln_scan report) ---------------------------------------
@@ -608,7 +453,7 @@ test('isPrivateOrReservedAddress: IPv6 loopback/unspecified/link-local/ULA/mappe
 });
 
 test('H4: deliver() refuses to connect to a hostname that resolves to loopback, even with real (unmocked) fetch/DNS', async () => {
-  // No global.fetch mock here -- this exercises the real dispatcher's
+  // No delivery-fetch stub here -- this exercises the real dispatcher's
   // connect-time lookup guard. 'localhost' always resolves to a loopback
   // address without needing any network access, so this is fully hermetic
   // (mirrors vuln_scan/pocs/p4_notify_ssrf.mjs, which used a literal
@@ -627,4 +472,182 @@ test('H4: deliver() refuses to connect to a hostname that resolves to loopback, 
       unsubscribe(added.subscription.id);
     }
   });
+});
+
+// --- attacker review F1: IPv4-mapped IPv6 must not read as public ------------
+
+test('F1: every spelling of an IPv4-mapped private address is classified private', () => {
+  // The WHATWG URL parser normalizes all of these to the hex form, which the
+  // previous regex-based classifier read as a public address. An endpoint of
+  // https://[::ffff:169.254.169.254]/ -- the cloud metadata service -- was
+  // accepted, and the connect-time guard never sees an IP literal at all.
+  const mustBePrivate = [
+    '::ffff:127.0.0.1', '::ffff:7f00:1', '0:0:0:0:0:ffff:7f00:1',
+    '::ffff:169.254.169.254', '::ffff:a9fe:a9fe',
+    '::ffff:10.0.0.1', '::ffff:0a00:1',
+    '::ffff:192.168.1.1', '::ffff:c0a8:101',
+    '::127.0.0.1', '::7f00:1',
+    '64:ff9b::7f00:1', '2002:7f00:1::',
+    '::1', '::', 'fe80::1', 'febf::1', 'fc00::1', 'fdff::1', 'ff02::1', '100::1',
+  ];
+  for (const ip of mustBePrivate) {
+    assert.equal(isPrivateOrReservedAddress(ip, 6), true, `${ip} must be classified private/reserved`);
+  }
+  const mustBePublic = [
+    '2001:4860:4860::8888', '::ffff:8.8.8.8', '::ffff:0808:0808', '2002:0808:0808::',
+    '64:ff9b::0808:0808',
+  ];
+  for (const ip of mustBePublic) {
+    assert.equal(isPrivateOrReservedAddress(ip, 6), false, `${ip} must be classified public`);
+  }
+});
+
+test('F1: subscribe() rejects a mapped-IPv6 loopback/metadata webhook', () => {
+  // The same classifier backs the notify MCP's `subscribe` tool, which a
+  // sandboxed agent can call -- so this is the entry point that mattered most.
+  for (const url of [
+    'https://[::ffff:127.0.0.1]/hook',
+    'https://[::ffff:7f00:1]/hook',
+    'https://[::ffff:169.254.169.254]/hook',
+    'https://[0:0:0:0:0:ffff:7f00:1]/hook',
+    'https://[64:ff9b::7f00:1]/hook',
+    'https://[2002:7f00:1::]/hook',
+  ]) {
+    assert.equal(subscribe({ url }).error, 'invalid-url', `${url} must be refused`);
+  }
+});
+
+// --- increment review (attack-review-notify-579a096) -------------------------
+
+// The defence added for F1 became a worse hole than the bypass it closed: a
+// tail of three adjacent quantifiers over overlapping sets turned into
+// catastrophic backtracking (32k chars = 6.7s, 1MiB extrapolated to ~2 hours
+// of a frozen event loop). These two cases are the regression net. The
+// thresholds are deliberately loose -- a shape check for "is this quadratic
+// again", not a benchmark, so a slow CI box will not flake.
+test('H1: the footer defang is linear on adversarial input, not quadratic', () => {
+  // 1MiB is the MCP transport's own cap, so this is the worst case a single
+  // notify tool call can present.
+  for (const n of [32_000, 100_000, 1_000_000]) {
+    const evil = `_from${'\u034f'.repeat(n)}x`; // a CGJ run never closed by ':'
+    const started = process.hrtime.bigint();
+    defangFooterMarker(evil);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 2000, `${n} chars took ${ms.toFixed(0)}ms (quadratic regression?)`);
+  }
+});
+
+test('H1: other invisible runs and mixed whitespace stay linear too', () => {
+  const cases = [
+    `_from${'\u200b'.repeat(500_000)}x`,
+    `_from${'\u034f \u200b\t'.repeat(125_000)}x`,
+    `_${'\u034f'.repeat(250_000)}f${'\u034f'.repeat(250_000)}r`,
+  ];
+  for (const evil of cases) {
+    const started = process.hrtime.bigint();
+    defangFooterMarker(evil);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 2000, `took ${ms.toFixed(0)}ms`);
+  }
+});
+
+test('F1: whitespace is handled where it renders identically, not mid-word', () => {
+  // `_from<NBSP>:` looks exactly like `_from:` and is defanged. `_fr<NBSP>om:`
+  // renders as "_fr om:" -- a visible gap, not a lookalike -- and is left be.
+  for (const c of ['\u00a0', '\u2009', ' ', '\t']) {
+    assert.ok(!defangFooterMarker(`x _from${c}: y`).includes('_from'), `tail ${JSON.stringify(c)}`);
+  }
+  assert.match(defangFooterMarker('_fr\u00a0om:'), /_fr/, 'mid-word whitespace is out of scope by design');
+});
+
+const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+test('L2: the attribution cap never splits a surrogate pair', () => {
+  // The same defect F3 fixed in pushDelivery's byte-trim, left behind here.
+  for (let n = 1; n <= 120; n++) {
+    const footer = buildAttribution({ projectName: '\u{1F389}'.repeat(n), sessionId: '\u{1F389}'.repeat(n) }, 'h');
+    assert.ok(!LONE.test(footer), `${n} emoji produced a lone surrogate`);
+  }
+});
+
+test('L2r: shortId cuts the id in code points, at EVERY alignment', () => {
+  // Why L2r existed at all: the case above uses ids of nothing but emoji, and
+  // shortId cut 8 UTF-16 UNITS -- which for 2-unit code points lands exactly
+  // between pairs, every time. The cap looked clean while the bug was intact.
+  // An ODD number of leading 1-unit characters shifts the boundary INTO a
+  // pair, which is the case that has to be swept.
+  for (let lead = 0; lead <= 9; lead++) {
+    for (let n = 1; n <= 12; n++) {
+      const id = 'a'.repeat(lead) + '\u{1F389}'.repeat(n);
+      const footer = buildAttribution({ sessionId: id, groupId: id }, 'h');
+      assert.ok(!LONE.test(footer), `lead=${lead} n=${n} produced a lone surrogate: ${JSON.stringify(footer)}`);
+    }
+  }
+});
+
+test('L2r: a short id is 8 CODE POINTS, not 8 UTF-16 units', () => {
+  // The other half: code-point counting must not silently shorten the id in
+  // exchange for well-formedness. Eight emoji in, eight emoji out.
+  const footer = buildAttribution({ sessionId: '\u{1F389}'.repeat(20) }, 'h');
+  const shown = footer.slice(footer.indexOf('session ') + 'session '.length);
+  assert.equal(Array.from(shown).length, 8, `got ${JSON.stringify(shown)}`);
+});
+
+
+test('F1: invisible characters hidden inside the footer marker do not evade it', () => {
+  // Every one of these renders as "_from:" and slid past the literal pattern.
+  const hidden = ['\u200b', '\u034f', '\u180e', '\ufe0f', '\u{E0000}', '\ufff9', '\u2060', '\u200d',
+    // Added after a review found these rendering blank in some fonts (L3).
+    '\u2800', '\ufffc', '\ue000', '\u{F0000}'];
+  for (const c of hidden) {
+    for (const probe of [`_from${c}:`, `_fr${c}om:`, `_${c}from:`]) {
+      const out = defangFooterMarker(`x ${probe} y`);
+      assert.ok(!out.includes('_from'), `${JSON.stringify(probe)} must be defanged, got ${JSON.stringify(out)}`);
+      assert.match(out, /from:/);
+    }
+  }
+});
+
+test('F1: emoji sequences survive the defang (ZWJ and variation selectors)', () => {
+  // The pattern consumes invisibles only as part of the marker, never on its
+  // own -- a family emoji must not be taken apart.
+  const emoji = 'done \u{1F468}‍\u{1F469}‍\u{1F467} ✅️';
+  assert.equal(defangFooterMarker(emoji), emoji);
+});
+
+test('F6: look-alike scripts are deliberately NOT defanged', () => {
+  // Stated as a limit rather than claimed as coverage: enumerating homoglyphs
+  // is not winnable, and a different-script near-miss is a weaker trick than
+  // something byte-identical to ccserver's own footer.
+  assert.match(defangFooterMarker('x ＿from： y'), /＿from：/);
+  assert.match(defangFooterMarker('x _frоm: y'), /_frоm:/);
+});
+
+test('F4: a forged identity cannot inject extra lines into the footer', () => {
+  // The notify broker takes the identity frame from whoever connects, without
+  // a token (issue #216). It cannot be trusted -- but it also must not be able
+  // to turn a one-line footer into three.
+  const forged = {
+    projectName: 'victim-project\n\n_from: sneaky\nfake',
+    sessionId: 'ffffffffffffffff',
+    groupId: null,
+    cwd: '/x',
+  };
+  const footer = buildAttribution(forged, 'ayaka');
+  assert.equal(footer.trim().split('\n').length, 1, 'the footer must stay one line');
+  assert.equal((footer.match(/_from:/g) || []).length, 1, 'and contain exactly one marker');
+  assert.match(footer, /^\n\n_from: ayaka · victim-project from: sneaky fake · session ffffffff$/);
+});
+
+test('F4: an over-long identity field is capped', () => {
+  const footer = buildAttribution({ projectName: 'p'.repeat(500), sessionId: 'abc' }, 'h');
+  assert.ok(footer.length < 200, `footer grew to ${footer.length}`);
+  assert.match(footer, /…/);
+});
+
+test('F4: an ordinary identity is unchanged', () => {
+  assert.equal(
+    buildAttribution({ projectName: 'ccserver', sessionId: '0123456789abcdef' }, 'ayaka'),
+    '\n\n_from: ayaka · ccserver · session 01234567',
+  );
 });
