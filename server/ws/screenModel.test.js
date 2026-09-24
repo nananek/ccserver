@@ -91,6 +91,32 @@ test('unknown / ignored CSI sequences are dropped harmlessly (SGR, cursor hide, 
   assert.deepEqual(s.screenRows(), ['red text visible']);
 });
 
+// DECKPAM/DECKPNM are TWO bytes, unlike the charset designators (`ESC ( B`)
+// and the DEC line attributes (`ESC # 8`) they sit next to in the parser.
+// Consuming a third byte eats whatever follows -- usually the ESC that opens
+// the next sequence, whose remainder then lands on screen as text. Full-screen
+// TUIs emit these around application keypad mode, so `vim` or `less` in a
+// shell session reaches this path.
+test('ESC = / ESC > are two bytes and do not eat the sequence after them', () => {
+  // A CUP moves the cursor down, so the rows it lands past exist but are
+  // blank; the oracle is that nothing was PAINTED, same as the fuzz below.
+  const painted = (stream) => {
+    const s = createScreenModel();
+    s.feed(stream);
+    return s.screenRows().join('');
+  };
+
+  for (const keypad of ['\x1b=', '\x1b>']) {
+    const label = JSON.stringify(keypad);
+    assert.equal(painted(`${keypad}\x1b[3;7H`), '', `${label} swallowed the ESC of the following CUP`);
+    assert.equal(painted(`${keypad}HELLO`), 'HELLO', `${label} ate the first text byte`);
+  }
+
+  // The three-byte neighbours must keep consuming three bytes.
+  assert.equal(painted('\x1b(B\x1b[3;7H'), '', 'ESC ( B must still consume its third byte');
+  assert.equal(painted('\x1b#8HELLO'), 'HELLO', 'ESC # 8 must still consume its third byte');
+});
+
 test('escape sequences split across chunk boundaries are joined correctly', () => {
   const s = createScreenModel();
   const full = 'first\r\x1b[2Kline\r\x1b[31mred\x1b[0m end';
@@ -537,25 +563,18 @@ const FUZZ_PIECES = [
 // bytes may end up on the screen -- which is exactly what the over-long-CSI
 // regression did with its leftover parameters.
 //
-// Four pieces are excluded, for two different reasons.
+// Two pieces are excluded. `ESC` and `ESC[` are truncated: an incomplete
+// sequence's meaning is whatever follows it, so `ESC` next to `ESC[`
+// legitimately ends up printing the `[` (the parser consumes ESC ESC as one
+// unknown escape and the rest is text). Not something this property is about.
 //
-// `ESC` and `ESC[` are truncated: an incomplete sequence's meaning is
-// whatever follows it, so `ESC` next to `ESC[` legitimately ends up printing
-// the `[` (the parser consumes ESC ESC as one unknown escape and the rest is
-// text). Not something this property is about.
-//
-// `ESC =` and `ESC >` are excluded because of a REAL, pre-existing defect
-// this fuzz found: escapeSequence treats them as three-byte sequences like
-// `ESC ( B`, but DECKPAM/DECKPNM are two bytes. The parser therefore eats the
-// byte after them -- typically the ESC introducing the next sequence, whose
-// remainder then lands on screen as text. It predates this branch (the
-// branch changed none of that path), neither captured CLI emits either
-// sequence, and fixing it would move behaviour away from master right as this
-// PR reaches its merge gate; it is reported for a follow-up instead of
-// changed here.
+// `ESC =` and `ESC >` used to be excluded too, because this fuzz found a real
+// defect: escapeSequence treated them as three-byte sequences like `ESC ( B`,
+// so they ate the byte after them. That is fixed, and they are back in the
+// corpus -- their presence here IS the regression test (#213).
 const NON_PRINTING_PIECES = FUZZ_PIECES.filter(
   (p) => (p.startsWith('\x1b') || /^[\x00-\x1f]+$/.test(p))
-    && !['\x1b', '\x1b[', '\x1b=', '\x1b>'].includes(p),
+    && !['\x1b', '\x1b['].includes(p),
 );
 
 function randomStream(rand, pieces = 14, corpus = FUZZ_PIECES) {

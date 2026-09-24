@@ -1100,6 +1100,47 @@ test('readOutput: the 16KB text cap never splits an escape sequence (no control-
   assert.ok(out.text.startsWith('colored'), 'the cut lands after the split sequence: clean text follows');
 });
 
+// The same cap, over the two-byte keypad sequences. `ESC =` / `ESC >`
+// (DECKPAM/DECKPNM) are TWO bytes, not three like the charset designators
+// sitting next to them in ansiSequenceEnd, and a parser that over-consumes
+// lands the cut one byte INSIDE the following sequence -- so `[31m` reaches
+// the text view as literal characters. That residue carries no ESC of its
+// own, which is exactly why the "no bare ESC" assertion above cannot see it;
+// this case asserts on what the text starts with instead (#213).
+test('readOutput: the text cap does not split the two-byte ESC = / ESC > either', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const HEAD = 9999;
+  // Put the cut exactly two bytes into the escape: the end of a two-byte
+  // sequence, one byte short of a three-byte one. Either way the CSI that
+  // follows must survive whole, so `colored` still opens the text.
+  const layout = (seq) => 'a'.repeat(HEAD) + seq + '\x1b[31m' + 'colored'
+    + 'b'.repeat(16374 - seq.length);
+  // `ESC ( B` is the control: it really is three bytes, and must stay that way.
+  for (const seq of ['\x1b=', '\x1b>', '\x1b(B']) {
+    const label = JSON.stringify(seq);
+    const fakeSession = {
+      cwd: '/srv/project-x',
+      app: 'claude',
+      exited: false,
+      outputBuffer: [layout(seq)],
+    };
+    const deps = {
+      groupId: g,
+      groupManager: groupManager.getGroupManagerApi(),
+      sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+    };
+    const out = tools.readOutput(deps, { sessionId: 'sess-a1' });
+    assert.equal(out.truncated, true, `${label}: the cap must bite for this case to mean anything`);
+    assert.ok(out.text.length <= 16 * 1024, `${label}: text must stay capped (got ${out.text.length})`);
+    assert.ok(!out.text.includes('\x1b'), `${label}: no bare ESC may leak through the cap`);
+    assert.ok(
+      out.text.startsWith('colored'),
+      `${label}: the following sequence must survive whole, got ${JSON.stringify(out.text.slice(0, 12))}`,
+    );
+  }
+});
+
 test('readOutput: a dangling escape at the end of the stream never leaks into text', async () => {
   const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
