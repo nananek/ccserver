@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, exist
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { stopBroker } from './mcpBroker.js';
 import { MAX_FILE_BYTES, MAX_FILES_PER_GROUP, MAX_GROUP_BYTES } from './groupFiles.js';
 
@@ -335,6 +336,52 @@ test('agent publish TOCTOU: symlink swap before open is rejected and leaves no b
       const content = readFileSync(join(dir, e), 'utf-8');
       assert.ok(!content.includes('secret-outside'));
     }
+  } finally {
+    groupManager.setAgentPublishHookForTests(null);
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('agent publish TOCTOU: FIFO swap before open is rejected instead of blocking (#212)', async () => {
+  // The sibling case above swaps in a symlink; this one swaps in a FIFO.
+  //
+  // O_NOFOLLOW does not cover this: the swapped-in path is not a symlink, it
+  // is a real FIFO, so open(2) accepts it -- and with no writer it NEVER
+  // RETURNS. The fstat isFile() check below it is unreachable, the event loop
+  // stops, and SIGTERM stops being handled. That is issue #212 reached
+  // through the very race this file already hooks for; the pre-check cannot
+  // close it, because it is explicitly "not authoritative for TOCTOU".
+  // O_NONBLOCK is what makes the open return so the fstat can reject it.
+  //
+  // A regression here does NOT fail -- it hangs the runner, because a
+  // synchronous open cannot be interrupted from inside the process. See the
+  // header of stateRestoreFifo.test.js.
+  const tmp = mkdtempSync(join(tmpdir(), 'cc-gm-agent-fifo-'));
+  const cwd = join(tmp, 'wt');
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(join(cwd, 'ok.txt'), 'hello');
+  const gid = await makeGroup(cwd);
+  groupManager.registerMember(gid, 'workerA', 'sess-a');
+  groupManager.setSessionApiForTests({ getSession: (id) => id === 'sess-a' ? { cwd } : null, destroySession: () => {}, createSession: () => ({ error: 'unused' }), writeToSession: () => false, waitUntilSettled: async () => ({ settled: true }), dockerAvailability: () => ({ dockerAvailable: null }) });
+  let haveFifo = true;
+  try {
+    groupManager.setAgentPublishHookForTests(() => {
+      try { rmSync(join(cwd, 'ok.txt'), { force: true }); } catch {}
+      try { execFileSync('mkfifo', [join(cwd, 'ok.txt')]); } catch { haveFifo = false; }
+    });
+    const r = groupManager.publishGroupFileFromAgent(gid, 'workerA', 'ok.txt');
+    if (!haveFifo) return; // mkfifo unavailable -- same skip shape as files.test.js:481
+    assert.equal(r.error, 'bad-request');
+    assert.match(r.message, /not a regular file/);
+    // and nothing was promoted
+    assert.equal(groupManager.listGroupFiles(gid).files.length, 0);
+    const dir = groupManager.getGroupFilesDirForGroup(gid);
+    const { readdirSync } = await import('node:fs');
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { entries = []; }
+    assert.equal(entries.length, 0, 'no blob should remain after a FIFO rejection');
   } finally {
     groupManager.setAgentPublishHookForTests(null);
     groupManager.setSessionApiForTests(null);

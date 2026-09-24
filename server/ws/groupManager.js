@@ -1605,6 +1605,7 @@ export function publishGroupFileFromAgent(groupId, role, relativePath) {
 
   const O_RDONLY = fsConstants.O_RDONLY;
   const O_NOFOLLOW = fsConstants.O_NOFOLLOW || 0;
+  const O_NONBLOCK = fsConstants.O_NONBLOCK || 0;
   const O_WRONLY = fsConstants.O_WRONLY;
   const O_CREAT = fsConstants.O_CREAT;
   const O_EXCL = fsConstants.O_EXCL;
@@ -1621,8 +1622,16 @@ export function publishGroupFileFromAgent(groupId, role, relativePath) {
   let actualSize = null;
 
   try {
-    // Open with O_NOFOLLOW so a swapped-in symlink fails with ELOOP.
-    srcFd = openSync(resolved, O_RDONLY | O_NOFOLLOW);
+    // Open with O_NOFOLLOW so a swapped-in symlink fails with ELOOP, and with
+    // O_NONBLOCK so a swapped-in FIFO fails too. Without O_NONBLOCK the
+    // pre-check above is the only thing standing between an agent and issue
+    // #212: open(2) on a FIFO with no writer never returns, so the fstat
+    // below is never reached and the whole event loop stops -- past the point
+    // where SIGTERM can be handled. The pre-check cannot cover it, because
+    // the race it explicitly documents ("not authoritative for TOCTOU; the
+    // descriptor open below is") is exactly the window an agent uses to swap
+    // the regular file it validated for a FIFO.
+    srcFd = openSync(resolved, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
     const st = fstatSync(srcFd);
     if (!st.isFile()) {
       throw Object.assign(new Error('not a regular file'), { code: 'EBADFD' });

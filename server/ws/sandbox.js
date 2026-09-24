@@ -640,8 +640,9 @@ export function loadSandboxConfig() {
     // a symlink pointing at a FIFO is still refused in under a millisecond.
     // O_NOFOLLOW only governs symlinks to regular files, and against an
     // attacker who can already write this 0700 directory it buys nothing
-    // anyway -- planting a regular file there is strictly easier than
-    // planting a link, and neither is stopped by the flag.
+    // anyway: the flag does stop their symlink, but it does not stop them
+    // planting a regular file with the same contents, which is strictly
+    // easier. It narrows the method, not the outcome.
     configText = readRegularFileText(configPath, { followSymlinks: true });
   } catch (err) {
     if (err.code !== 'ENOENT') configError = err.message;

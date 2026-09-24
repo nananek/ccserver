@@ -1,10 +1,13 @@
 // regularFile.js -- the one reader used for every file a sandboxed session
 // could have replaced (issues #212 and #229).
 //
-// Every case here has a timeout. That is not decoration: the failure this
-// module exists to prevent is a BLOCK, not a throw, and a synchronous block
-// cannot be interrupted by anything inside the process. Without a timeout the
-// regression does not fail the suite, it hangs the runner.
+// The failure this module exists to prevent is a BLOCK, not a throw, and a
+// synchronous block cannot be interrupted by anything inside the process --
+// the per-case `timeout` included, since a timer needs an event loop to fire
+// on. So a regression here does not fail the suite, it hangs the runner, with
+// or without those timeouts; only an external kill ends it. They are kept
+// because they do bound the cases that fail by throwing. See the header of
+// stateRestoreFifo.test.js for how to bisect one by hand.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,6 +17,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import net from 'node:net';
 import { readRegularFileText, readJsonFileIfRegular, STATE_FILE_MAX_BYTES } from './regularFile.js';
 
 function tmp(t) {
@@ -87,8 +91,8 @@ test('#212: a FIFO is refused instead of blocking forever', { timeout: 5000 }, (
   const f = join(tmp(t), 'state.json');
   if (!mkfifo(t, f)) return;
   // Pre-fix, readFileSync here did not throw -- it waited for a writer that
-  // never comes, with the event loop stopped and SIGTERM unhandled. The
-  // timeout on this test is the only thing that could have caught it.
+  // never comes, with the event loop stopped and SIGTERM unhandled. Nothing
+  // in-process catches that; see the file header.
   assert.throws(() => readRegularFileText(f), (err) => err.code === 'ENOTREGULAR');
 });
 
@@ -122,7 +126,7 @@ test('followSymlinks follows a link to a regular file', { timeout: 5000 }, (t) =
 });
 
 test('followSymlinks does NOT reopen the block: every hostile target is still refused',
-  { timeout: 5000 }, (t) => {
+  { timeout: 5000 }, async (t) => {
   // This is the whole argument for the exemption. O_NOFOLLOW is not what
   // stops a FIFO from hanging the process -- O_NONBLOCK is, and it applies
   // to the final open regardless of how many links were walked to get there.
@@ -134,10 +138,18 @@ test('followSymlinks does NOT reopen the block: every hostile target is still re
   const adir = join(dir, 'adir');
   mkdirSync(adir);
 
+  const sock = join(dir, 'sock');
+  const srv = net.createServer();
+  await new Promise((r) => srv.listen(sock, r));
+  t.after(() => srv.close());
+
+  // Every row readRegularFileText's doc comment claims, including the socket
+  // one -- an uncovered claim in a comment is how the comment drifts.
   const cases = [
     ['link-to-fifo', fifo, 'ENOTREGULAR'],
     ['link-to-dir', adir, 'ENOTREGULAR'],
     ['link-to-devzero', '/dev/zero', 'ENOTREGULAR'],
+    ['link-to-socket', sock, 'ENXIO'],
     ['link-to-missing', join(dir, 'nowhere'), 'ENOENT'],
   ];
   for (const [name, target, code] of cases) {

@@ -10,10 +10,22 @@
 // server is listening but wedged.
 //
 // Reading the test output: a FAILING run of this file does not print failures,
-// it stops. That is the bug reproducing. Every case therefore carries an
-// explicit timeout, which is the only mechanism that can end a synchronous
-// block, and the reason these live in their own file -- a hang here does not
-// take an unrelated suite's results with it.
+// it stops. That is the bug reproducing, and NOTHING INSIDE THE PROCESS ENDS
+// IT. In particular the per-case `timeout` below does not: it is a timer, and
+// a timer cannot fire while the event loop is stopped. Measured -- a case
+// blocked on a FIFO with `{ timeout: 3000 }` and `--test-timeout=4000` ran
+// until an external `timeout 45` killed it, then reported `cancelled 1`.
+//
+// The timeouts are kept because they do bound the cases that fail by
+// THROWING. What bounds a regression here is the CI job timeout, or whatever
+// kills the runner from outside. To bisect one by hand, run a single case
+// under an external kill:
+//
+//   timeout 25 node --test --test-name-pattern='<case>' server/ws/stateRestoreFifo.test.js
+//
+// rc=124 with `tests 0 / pass 0 / fail 0` is the block; a real pass reports in
+// milliseconds. These live in their own file so that a hang here does not take
+// an unrelated suite's results with it.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
