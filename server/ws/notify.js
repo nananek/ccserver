@@ -369,9 +369,26 @@ export function restoreNotify() {
   return { subscriptions: listSubscriptions() };
 }
 
+// The one string that means something structural downstream: every payload
+// ends with "\n\n_from: <host> · <project> · session <id>", which notify.js
+// itself appends. Text that arrived from an agent -- the `notify` MCP tool's
+// arguments, or bytes it wrote to its pty -- must not be able to forge that.
+// Dropping the leading underscore costs nothing legible and makes the real
+// marker unforgeable.
+//
+// Applied to EVERY notification, on every channel, rather than only on the pty
+// bridge path: a final attacker review found the MCP path reaching the Web
+// Push payload untouched, which is the same "one side fixed, the other left
+// open" shape as several earlier findings.
+const FOOTER_MARKER_RE = /_from\s*:/gi;
+
+export function defangFooterMarker(text) {
+  return typeof text === 'string' ? text.replace(FOOTER_MARKER_RE, 'from:') : text;
+}
+
 function buildContent({ title, body, level }) {
-  const t = typeof title === 'string' ? title : '';
-  const b = typeof body === 'string' ? body : '';
+  const t = defangFooterMarker(typeof title === 'string' ? title : '');
+  const b = defangFooterMarker(typeof body === 'string' ? body : '');
   if (!t && !b) return '';
   const prefix = level && LEVEL_EMOJI[level] ? `${LEVEL_EMOJI[level]} ` : '';
   return `${prefix}${t}${b ? `\n${b}` : ''}`.trim();

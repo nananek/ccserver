@@ -63,7 +63,7 @@
 //   - bridgeStats() exposes the running totals.
 
 import { getBridgeSettingsCached } from './notifyBridgeSettings.js';
-import { sendNotification, listSubscriptions, resolvedDiscordWebhook } from './notify.js';
+import { sendNotification, listSubscriptions, resolvedDiscordWebhook, defangFooterMarker } from './notify.js';
 import { createNotifyDetector } from './agentNotifyDetect.js';
 import { basename } from 'node:path';
 import { appDisplayName } from './appLaunch.js';
@@ -141,20 +141,11 @@ export function buildBridgeTitle(session) {
   return project ? `${app} · ${project}` : app;
 }
 
-// Defang the one string that means something structural downstream: notify.js
-// ends every payload with "\n\n_from: <host> · <project> · session <id>".
-// The agent cannot open a new line (the detector's sanitizer sees to that), so
-// it cannot forge that LINE -- but an attacker review showed it can still write
-// a convincing "... _from: ayaka · trusted-project · session deadbeef" inline,
-// which reads as genuine to someone skimming. Dropping the leading underscore
-// costs nothing legible and makes the real marker unforgeable in either
-// position. Everything else in the agent's text is left exactly as written:
-// the line it sits on is already labelled by a title the agent could not set.
-const FOOTER_MARKER_RE = /_from\s*:/gi;
-
-function defangFooterMarker(text) {
-  return text.replace(FOOTER_MARKER_RE, 'from:');
-}
+// defangFooterMarker lives in notify.js so that EVERY path into a notification
+// -- this one and the `notify` MCP tool -- gets it, rather than only the pty
+// bridge. It is still applied here as well as there: the bridge's own tests
+// assert on the value this function returns, not on what notify.js later does
+// with it.
 
 // The agent's own title and body collapsed into one line. Both arrive already
 // sanitized and length-capped from the detector; joining them here is purely

@@ -72,6 +72,16 @@ function channelsAvailable() {
   };
 }
 
+// Throttle state for the test-send route below. Process-wide rather than
+// per-session on purpose: the thing being protected is the operator's Discord
+// channel and their phones, and those are shared no matter who pressed it.
+const TEST_SEND_MIN_INTERVAL_MS = 5000;
+let lastTestSendAt = 0;
+
+export function _resetTestSendThrottleForTests() {
+  lastTestSendAt = 0;
+}
+
 export async function notificationsRoute(fastify) {
   fastify.get('/notify-settings', async () => ({
     settings: getBridgeSettings(),
@@ -130,7 +140,23 @@ export async function notificationsRoute(fastify) {
   // "Does this actually work?" -- delivered through the real path (encryption,
   // VAPID, the push service) so a green result means the whole chain works,
   // not just that the row exists.
+  //
+  // Rate limited (attacker review F2): this route calls sendNotification
+  // directly, so it bypasses the bridge's per-session dedupe/throttle/cap
+  // entirely, and one request fans out to the Discord webhook, every
+  // subscribed webhook, and up to MAX_SUBSCRIPTIONS devices. Authentication
+  // bounds WHO can press it, not HOW OFTEN -- and an in-app XSS would inherit
+  // that authentication. A human pressing a "send a test" button needs one
+  // every few seconds at most.
   fastify.post('/notify-settings/test', async (request, reply) => {
+    const now = Date.now();
+    const waitMs = TEST_SEND_MIN_INTERVAL_MS - (now - lastTestSendAt);
+    if (waitMs > 0) {
+      return reply.code(429)
+        .header('Retry-After', String(Math.ceil(waitMs / 1000)))
+        .send({ error: `test notifications are limited to one every ${TEST_SEND_MIN_INTERVAL_MS / 1000}s; try again in ${Math.ceil(waitMs / 1000)}s` });
+    }
+    lastTestSendAt = now;
     const settings = getBridgeSettings();
     const channels = Array.isArray(request.body?.channels) && request.body.channels.length > 0
       ? request.body.channels

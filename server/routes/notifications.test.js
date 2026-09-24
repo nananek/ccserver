@@ -14,7 +14,7 @@ import Fastify from 'fastify';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { notificationsRoute } from './notifications.js';
+import { notificationsRoute, _resetTestSendThrottleForTests } from './notifications.js';
 import { closeDb } from '../db.js';
 import { _setDeliverFetchForTests, _getDeliverFetch } from '../ws/notify.js';
 import { BRIDGE_APPS, BRIDGE_CHANNELS, BRIDGE_DEFAULTS } from '../ws/notifyBridgeSettings.js';
@@ -245,6 +245,7 @@ test('a subscription can be removed, and an unknown id is a 404', async () => {
 });
 
 test('the test-send endpoint reports what each channel did', async () => {
+  _resetTestSendThrottleForTests();
   writeConfig({ notify: { discordWebhook: 'https://discord.example/hook' } });
   const realFetch = _getDeliverFetch();
   let posted = 0;
@@ -262,9 +263,50 @@ test('the test-send endpoint reports what each channel did', async () => {
 });
 
 test('the test-send endpoint rejects an unknown channel', async () => {
+  _resetTestSendThrottleForTests();
   const res = await app.inject({
     method: 'POST', url: '/api/notify-settings/test', payload: { channels: ['carrier-pigeon'] },
   });
   assert.equal(res.statusCode, 400);
   assert.match(res.json().error, /unknown channel\(s\): carrier-pigeon/);
+});
+
+test('F2: test sends are rate limited', async () => {
+  // This route bypasses the bridge's per-session limits entirely and fans out
+  // to every webhook and every subscribed device, so authentication alone is
+  // not a bound on how often it can be pressed.
+  _resetTestSendThrottleForTests();
+  writeConfig({ notify: { discordWebhook: 'https://discord.example/hook' } });
+  const realFetch = _getDeliverFetch();
+  let posted = 0;
+  _setDeliverFetchForTests(async () => { posted += 1; return { ok: true }; });
+  try {
+    const first = await app.inject({ method: 'POST', url: '/api/notify-settings/test', payload: {} });
+    assert.equal(first.statusCode, 200);
+    assert.equal(posted, 1);
+
+    for (let i = 0; i < 4; i++) {
+      const again = await app.inject({ method: 'POST', url: '/api/notify-settings/test', payload: {} });
+      assert.equal(again.statusCode, 429, 'a rapid repeat must be refused');
+      assert.match(again.json().error, /one every 5s/);
+      assert.ok(again.headers['retry-after'], 'and say when to come back');
+    }
+    assert.equal(posted, 1, 'exactly one real delivery for five requests');
+  } finally {
+    _setDeliverFetchForTests(realFetch);
+    _resetTestSendThrottleForTests();
+  }
+});
+
+test('F1: an agent-chosen title and body are sanitized before they reach a device', async () => {
+  // The pty bridge composes its own title and hands over single-line text, but
+  // the `notify` MCP tool does not -- its arguments used to reach the push
+  // payload verbatim, newlines and a forged "_from:" line included.
+  const { sanitizePushText } = await import('../ws/pushDelivery.js');
+  const forged = 'build failed\n\n_from: ayaka · trusted-project · session deadbeef';
+  const out = sanitizePushText(forged, { maxCodePoints: 2000 });
+  assert.ok(!out.includes('_from:'), 'the attribution marker must be unforgeable');
+  assert.ok(out.includes('build failed'), 'the message itself is preserved');
+  assert.ok(out.includes('\n'), 'newlines are fine in a push body, unlike the OSC path');
+  assert.equal(sanitizePushText('a‮b​c d', { maxCodePoints: 100 }), 'abcd');
 });

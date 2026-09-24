@@ -22,6 +22,7 @@ import {
   countSubscriptions,
 } from './pushSubscriptions.js';
 import { deliverPush, MAX_PAYLOAD_BYTES } from './webPush.js';
+import { defangFooterMarker } from './notify.js';
 
 // RFC 8292 §2.1: `sub` must be a mailto: or https: URI identifying whoever
 // operates the application server, so a push service has someone to contact
@@ -53,10 +54,44 @@ export function webpushConfigured() {
 // arguments are bounded by the transport), so this is a backstop rather than
 // the primary limit -- but a payload that cannot be encrypted would otherwise
 // fail per-subscription with a confusing error.
+// Every push payload is sanitized HERE, whatever produced it. The pty bridge
+// already hands over single-line, control-stripped text, but the `notify` MCP
+// tool does not: its title and body are whatever the agent passed, and a final
+// attacker review caught them reaching the payload verbatim -- newlines, a
+// forged "_from:" line and all. Doing it at this one choke point is what makes
+// the guarantee true for BOTH paths rather than only the one that was designed
+// for it.
+//
+// Newlines survive (unlike in the detector): a push body is rendered
+// multi-line by showNotification, and that is genuinely useful for an agent's
+// own message. What does not survive is anything that lets the text pretend to
+// be ccserver speaking -- the footer marker -- or anything invisible.
+const PUSH_CONTROL_RE = new RegExp('[\\u0000-\\u0009\\u000b-\\u001f\\u007f-\\u009f]', 'g');
+const PUSH_INVISIBLE_RE = new RegExp('[\\u00ad\\u061c\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u206f\\ufeff]', 'g');
+// A lone surrogate survives JSON.stringify as an escape but renders as U+FFFD
+// and can break stricter consumers; replace it rather than ship it.
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+export function sanitizePushText(value, { maxCodePoints }) {
+  let text = String(value ?? '')
+    .replace(PUSH_CONTROL_RE, ' ')
+    .replace(PUSH_INVISIBLE_RE, '')
+    .replace(LONE_SURROGATE_RE, '\uFFFD');
+  text = defangFooterMarker(text);
+  const cps = Array.from(text);
+  if (cps.length > maxCodePoints) text = `${cps.slice(0, maxCodePoints - 1).join('')}\u2026`;
+  return text.trim();
+}
+
+// Matches the detector's own caps so a bridge notification is not re-truncated
+// to a different length than a Discord one.
+const PUSH_TITLE_MAX = 200;
+const PUSH_BODY_MAX = 2000;
+
 function buildPayload({ title, body, level, attribution, tag, url }) {
   const payload = {
-    title: String(title ?? 'ccserver'),
-    body: String(body ?? ''),
+    title: sanitizePushText(title ?? 'ccserver', { maxCodePoints: PUSH_TITLE_MAX }) || 'ccserver',
+    body: sanitizePushText(body, { maxCodePoints: PUSH_BODY_MAX }),
     level: level || 'info',
     attribution: attribution || null,
     tag: tag || 'ccserver',

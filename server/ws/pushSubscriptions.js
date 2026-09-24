@@ -11,7 +11,7 @@
 // so it gets the same treatment. The connect-time half lives in webPush.js's
 // deliverPush, which uses notify.js's SSRF-safe dispatcher.
 
-import { randomUUID, createECDH } from 'node:crypto';
+import { randomUUID, createPublicKey } from 'node:crypto';
 import { getDb } from '../db.js';
 import { isPrivateOrReservedAddress, isIpLiteralHost } from './notify.js';
 import { generateVapidKeys } from './webPush.js';
@@ -73,15 +73,24 @@ export function validateEndpoint(endpoint) {
   return null;
 }
 
-// Attacker review F4: a 65-byte 0x04-prefixed blob is not necessarily a point
-// ON the curve. An off-curve key was stored happily and then failed every
-// single delivery afterwards, with the browser having been told it succeeded.
-// setPublicKey does the curve check OpenSSL already knows how to do.
+// A 65-byte 0x04-prefixed blob is not necessarily a point ON the curve. An
+// off-curve key used to be stored happily and then fail every delivery
+// afterwards, with the browser having been told it succeeded.
+//
+// createPublicKey does the same curve validation OpenSSL already knows how to
+// do, without ECDH.setPublicKey's DEP0031 deprecation warning (which fired on
+// every registration, and which a future Node may turn into a removal).
 function isOnCurveP256(uncompressed) {
   try {
-    const ecdh = createECDH('prime256v1');
-    ecdh.generateKeys();
-    ecdh.setPublicKey(uncompressed);
+    createPublicKey({
+      key: {
+        kty: 'EC',
+        crv: 'P-256',
+        x: uncompressed.subarray(1, 33).toString('base64url'),
+        y: uncompressed.subarray(33, 65).toString('base64url'),
+      },
+      format: 'jwk',
+    });
     return true;
   } catch {
     return false;

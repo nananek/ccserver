@@ -289,6 +289,17 @@ export function validateDeliveryEndpoint(endpoint) {
   return null;
 }
 
+/**
+ * `fetchImpl` is a TEST SEAM and nothing else: passing it skips the SSRF-safe
+ * dispatcher, so it must never be reachable from outside input. It is not, and
+ * cannot casually become so -- pushDelivery.js is the only production caller
+ * and passes a fixed set of fields with no `fetchImpl` among them. Documented
+ * rather than removed (an attacker review flagged it as worth stating) because
+ * the alternative is a module-level mutable default, which is a bigger seam
+ * than a parameter the one caller does not set. The endpoint re-validation
+ * below runs BEFORE the fetch either way, so even a stubbed fetch cannot be
+ * pointed at a literal.
+ */
 export async function deliverPush({
   subscription, payload, vapidKeys, subject, ttl = 2419200, urgency = 'normal',
   now = Date.now(), fetchImpl = null,
