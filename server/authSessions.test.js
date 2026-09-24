@@ -27,11 +27,9 @@ const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-authsessions-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
-  // Migrating a fresh DB runs v2's importLegacy/postApply, which read AND
-  // RENAME sandbox.js's legacy sidecar index under CCSERVER_SANDBOX_HOME_ROOT
-  // -- on a pre-v2 host that is the operator's real
-  // ~/.local/share/ccserver-sandbox/home/.index.json. Same hazard db.test.js
-  // documents at length; anything that opens a DB has to override this.
+  // Own temp root for this file. The general guarantee is mechanical now --
+  // see server/testEnvDefaults.js and the test-process guard in
+  // server/paths.js.
   process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
 });
 

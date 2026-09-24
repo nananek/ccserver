@@ -6,6 +6,7 @@
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,8 +33,17 @@ const saved = {};
 let tmpRoot;
 let caseDir;
 
+// This file's subject IS the default resolution -- the table below asserts
+// that every entry answers with the operator's real pre-#201 path when
+// nothing is set. paths.js refuses to resolve a default inside a test process
+// precisely so that no OTHER test can do that by accident, so this one file
+// opts out explicitly. It only reads the paths; it never creates or opens
+// anything at them.
+const savedAllow = process.env.CCSERVER_ALLOW_DEFAULT_PATHS;
+
 before(() => {
   for (const k of ENV_VARS) saved[k] = process.env[k];
+  process.env.CCSERVER_ALLOW_DEFAULT_PATHS = '1';
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-paths-'));
 });
 
@@ -41,6 +51,8 @@ after(() => {
   for (const k of ENV_VARS) {
     if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
   }
+  if (savedAllow === undefined) delete process.env.CCSERVER_ALLOW_DEFAULT_PATHS;
+  else process.env.CCSERVER_ALLOW_DEFAULT_PATHS = savedAllow;
   resetLayoutCache();
   rmSync(tmpRoot, { recursive: true, force: true });
 });
@@ -334,6 +346,57 @@ test('only the DB declares sidecars, and it declares both', () => {
   for (const e of allPaths()) {
     assert.deepEqual(e.sidecars, e.id === 'db' ? ['-wal', '-shm'] : []);
   }
+});
+
+// --- the test-process guard -------------------------------------------------
+
+test('★ a test process that resolves a DEFAULT path is refused, loudly', () => {
+  // The whole reason this guard exists: six test files on this branch
+  // resolved a real host path and wrote to it, and the only thing that had
+  // been standing in the way each time was a convention ("remember to set
+  // CCSERVER_* in before()"). Conventions do not propagate -- db.test.js
+  // carried a long warning about precisely this hazard and it still did not
+  // reach settingsStore.test.js. So resolving a default inside a test process
+  // now throws.
+  //
+  // This file opts out in before() because asserting the defaults is its
+  // subject; drop the opt-out for one assertion to exercise the guard.
+  delete process.env.CCSERVER_ALLOW_DEFAULT_PATHS;
+  try {
+    assert.throws(() => resolvePath(PATH_IDS.db), /refusing to resolve 'db' from its default location/);
+    // The message has to be actionable, not just a refusal: it names the real
+    // path it declined to hand over, how to run the suite properly, and the
+    // escape hatch.
+    assert.throws(() => resolvePath(PATH_IDS.savedGroups), /CCSERVER_GROUPS_PATH is not set/);
+    assert.throws(() => allPaths(), /testEnvDefaults\.js/);
+    assert.throws(() => allPaths(), /CCSERVER_ALLOW_DEFAULT_PATHS=1/);
+
+    // An entry WITH an override is unaffected -- the guard is about defaults,
+    // not about being in a test.
+    process.env.CCSERVER_DB_PATH = join(caseDir, 'mine.sqlite3');
+    assert.equal(resolvePath(PATH_IDS.db), join(caseDir, 'mine.sqlite3'));
+  } finally {
+    delete process.env.CCSERVER_DB_PATH;
+    process.env.CCSERVER_ALLOW_DEFAULT_PATHS = '1';
+  }
+});
+
+test('the guard keys off execArgv, which a spawned child does not inherit', () => {
+  // NODE_TEST_CONTEXT would have been the obvious signal, but it is an env
+  // var and IS inherited: a server or wizard spawned BY a test would then
+  // look like a test and refuse to boot. execArgv is per-process. This
+  // assertion pins the property the choice depends on -- if a future Node
+  // stops putting --test* in a test file process's execArgv, the guard goes
+  // inert and this fails.
+  assert.ok(
+    process.execArgv.some((a) => a.startsWith('--test')),
+    `a node:test process must carry a --test* execArgv entry; got ${JSON.stringify(process.execArgv)}`,
+  );
+  const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(JSON.stringify(process.execArgv))'], { encoding: 'utf8' });
+  assert.equal(
+    JSON.parse(child.stdout).some((a) => a.startsWith('--test')), false,
+    'a spawned child must NOT look like a test process',
+  );
 });
 
 test('pathEntry rejects an unknown id rather than returning undefined', () => {

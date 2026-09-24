@@ -31,7 +31,7 @@ import {
   isolatedEnv, checkoutEnv, assertSafeToMigrate, withIsolatedHome, spawnWizard,
   CHECKOUT_ENTRY_IDS,
 } from './testIsolation.js';
-import { allPaths, repoRoot } from './paths.js';
+import { allPaths, repoRoot, repoParentDir } from './paths.js';
 
 const SETUP_CLI = join(import.meta.dirname, 'cli', 'setup.js');
 
@@ -249,7 +249,9 @@ test('spawnWizard cleans up the breadcrumb it drops in the checkout', () => {
     const legacy = join(dir, 'home', '.local', 'share', 'ccserver-sandbox');
     mkdirSync(legacy, { recursive: true });
     writeFileSync(join(legacy, 'ccserver.sqlite3'), 'DB');
-    const res = spawnWizard(dir, ['--yes']);
+    // `db` is overridden by default now (its pre-#190 legacy spelling is the
+    // repo's PARENT), and this test's point is that the DB really moves.
+    const res = spawnWizard(dir, ['--yes'], {}, { allowCheckoutMigration: ['db'] });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.equal(existsSync(join(dir, 'data', 'ccserver', 'ccserver.sqlite3')), true, 'sanity: it did migrate');
     assert.equal(existsSync(breadcrumb), false,
@@ -312,15 +314,19 @@ test('★ assertSafeToMigrate resolves symlinks: a scratch home pointing outside
   });
 });
 
-test('CHECKOUT_ENTRY_IDS covers every registry entry whose legacy path is in the checkout', () => {
+test('CHECKOUT_ENTRY_IDS covers every registry entry with a legacy path outside $HOME', () => {
   // The list in testIsolation.js is hand-maintained. If a future entry lands
-  // a legacy path inside the repo and is not added here, spawnWizard would
-  // migrate it out of the developer's working tree -- so pin the two
-  // together.
+  // a legacy path in the repo -- or, like the DB's pre-#190 spelling, one
+  // level above it -- and is not added here, the wizard and the spawned
+  // servers would move it out of the developer's tree. So pin the two
+  // together. repoParentDir() is included because that is exactly the case
+  // three rounds of hand-placed decoys missed and the canary caught.
+  const outside = [repoRoot(), repoParentDir()];
   const fromRegistry = allPaths()
-    .filter((e) => e.legacyPaths.some((p) => p.startsWith(repoRoot())))
+    .filter((e) => e.legacyPaths.some((p) => outside.some((root) => p.startsWith(root))))
     .map((e) => e.id)
     .sort();
   assert.deepEqual([...CHECKOUT_ENTRY_IDS].sort(), fromRegistry);
-  assert.ok(fromRegistry.includes('sandboxConfig'));
+  assert.ok(fromRegistry.includes('sandboxConfig'), 'the live config must be covered');
+  assert.ok(fromRegistry.includes('db'), 'the pre-#190 DB location must be covered');
 });

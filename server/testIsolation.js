@@ -17,18 +17,27 @@
 //      migrates all of it into the test's temp directory, which the test then
 //      deletes in its `finally`.
 //
-//   2. THE CHECKOUT ITSELF. repoRoot() is import.meta.url-based, so it points
-//      at the real working tree no matter what the environment says, and
-//      eight registry entries have their legacy location there:
+//   2. THE CHECKOUT AND ITS PARENT. repoRoot() is import.meta.url-based, so
+//      it points at the real working tree no matter what the environment
+//      says, and eight registry entries have their legacy location there:
 //      server/sandbox.config.json plus the seven .saved-*.json /
 //      .scheduled-prompts.json state files at the repo root. On an
 //      un-migrated host sandbox.config.json is the LIVE config -- browseRoots,
 //      binds, webhook URLs -- so a developer running `npm test` in their own
 //      checkout lost it, along with their saved sessions, groups, group docs,
 //      group files, notification subscriptions, schedules and Vikunja tasks.
+//      A ninth lives one level HIGHER: the db entry's second legacy spelling
+//      is repoParentDir()/ccserver.sqlite3, the pre-#190 default, which
+//      paths.js keeps forever because real checkouts still have one there.
+//      getDb()'s automatic old-old -> old hop RELOCATES it, and since it is
+//      outside both $HOME and the checkout, neither of the other guards sees
+//      it -- found by server/tools/path-canary.js on its first run, after
+//      three rounds of hand-placed decoys had all missed it.
 //      Since no env var can move repoRoot(), the only way to keep the wizard
-//      away from them is to hand it an explicit CCSERVER_* override per entry,
-//      which turns each one into an `env-override` skip.
+//      and the spawned servers away from these is to hand them an explicit
+//      CCSERVER_* override per entry, which turns each one into an
+//      `env-override` skip (and, for the DB, makes migrateLegacyDbFile()
+//      return immediately).
 //
 // Neither of these is hypothetical. (1) was found by an attacker-perspective
 // review of this branch, reproduced against a fake $HOME; (2) survived that
@@ -50,12 +59,15 @@ const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 const SETUP_CLI = join(SERVER_DIR, 'cli', 'setup.js');
 const REPO_ROOT = join(SERVER_DIR, '..');
 
-// Registry entries whose legacy location is inside the CHECKOUT (see the
-// header's point 2). Mirrors server/paths.js's `sandboxConfig` entry and its
-// STATE_FILES table; paths.test.js pins those spellings, and the test at the
-// bottom of testIsolation.test.js pins that this list still covers all of
-// them, so the two cannot drift apart silently.
+// Registry entries whose legacy location is outside the isolated $HOME -- in
+// the checkout or its parent (see the header's point 2). Mirrors
+// server/paths.js's `sandboxConfig` entry, its STATE_FILES table, and the db
+// entry's repoParentDir() spelling; the test at the bottom of
+// testIsolation.test.js pins this list against the registry, so the two
+// cannot drift apart silently.
 const CHECKOUT_ENTRIES = [
+  // Not in the checkout itself but in its PARENT -- see the header's point 2.
+  ['db', 'CCSERVER_DB_PATH', 'ccserver.sqlite3'],
   ['sandboxConfig', 'CCSERVER_SANDBOX_CONFIG', 'sandbox.config.json'],
   ['savedSessions', 'CCSERVER_SAVED_SESSIONS_PATH', 'saved-sessions.json'],
   ['scheduledPrompts', 'CCSERVER_SCHEDULES_PATH', 'scheduled-prompts.json'],

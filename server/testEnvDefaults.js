@@ -20,22 +20,29 @@
 //                LIVE files.
 //
 // Both were reached without any wizard involved, just by normal store
-// behavior:
+// behavior. Each line below was reproduced by running the suite against a
+// DECOY layout -- a throwaway $HOME seeded to look like a pre-#201 host, plus
+// decoy files in the checkout -- and checking what came back changed:
 //
 //   getDb()                             opens dbPath() and runs migrations on
-//                                       it -- measured: a full `npm test`
-//                                       took a real DB from user_version 9 to
-//                                       10
-//   db migration v2's postApply         renameSync(legacyHomeIndexFile()) --
-//                                       renames the real .index.json
-//   sessionManager.persistSchedules()    unlinkSync(schedulesPath()) when the
-//                                       schedule list goes empty -- measured:
-//                                       deleted a decoy .scheduled-prompts.json
-//                                       at the repo root
-//   sessionManager.gracefulShutdown()    writeFileSync(savedSessionsPath())
+//                                       it. The decoy home's ccserver.sqlite3
+//                                       came back with a different checksum.
+//   db migration v2's postApply         renameSync(legacyHomeIndexFile()).
+//                                       The decoy home's home/.index.json came
+//                                       back as .index.json.migrated.
+//   sessionManager.persistSchedules()   unlinkSync(schedulesPath()) when the
+//                                       schedule list goes empty. The decoy
+//                                       .scheduled-prompts.json in the
+//                                       checkout was gone.
+//   sessionManager.gracefulShutdown()   writeFileSync(savedSessionsPath())
 //   groupManager.persistGroups() and
-//   its docs/files siblings              unlinkSync() their file when the last
+//   its docs/files siblings             unlinkSync() their file when the last
 //                                       group is destroyed
+//
+// On a developer's machine $HOME is their real home, so those same three
+// lines land on their real DB, their real sidecar index and their real state
+// files. That inference is the point of the decoy: it is what the code does
+// with whatever $HOME and repoRoot() resolve to.
 //
 // About a dozen test files are exposed, and the fix used to be "remember to
 // set the right CCSERVER_* in this file's before() hook". That is a

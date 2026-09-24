@@ -346,9 +346,73 @@ export const PATH_IDS = Object.freeze(
   Object.fromEntries(REGISTRY.map((e) => [e.id, e.id])),
 );
 
+// --- the test-process guard --------------------------------------------------
+//
+// Everything above answers with the operator's live locations by default,
+// which is what production needs and what makes a TEST that resolves a
+// default dangerous: it gets handed the real SQLite DB, the real sidecar
+// index, the real state files. That has happened repeatedly on this branch --
+// a wizard spawned with the real $HOME, `getDb()` migrating a real database,
+// db migration v2 renaming a real .index.json, persistSchedules() deleting a
+// real .scheduled-prompts.json -- and every time, the thing that was supposed
+// to prevent it was a convention: "remember to set CCSERVER_* in this file's
+// before() hook". db.test.js even carried a long comment warning about it,
+// and the warning did not reach settingsStore.test.js when that was written
+// months later. Conventions do not propagate, and when they break they break
+// SILENTLY.
+//
+// server/testEnvDefaults.js turns the convention into a mechanism: it gives
+// every test process a scratch default for all 19 entries. But it is wired in
+// through `node --test --import ./testEnvDefaults.js`, so it is still one
+// layer of convention -- `node --test server/foo.test.js` run by hand, which
+// happens constantly while debugging, skips it and the guard silently
+// vanishes again.
+//
+// So: in a test process, resolving an entry that has NO env var override is
+// refused outright. That is the invariant stated directly ("a test must not
+// resolve a default path") rather than a proxy for whether some import ran,
+// and it converts "quietly touches real data" into "fails on the first line".
+//
+// Why process.execArgv and not NODE_TEST_CONTEXT: both identify a node:test
+// file process, but NODE_TEST_CONTEXT is an env var and is INHERITED by child
+// processes (measured), so a server or wizard spawned BY a test would look
+// like a test too and refuse to boot. execArgv is per-process and comes back
+// empty in a spawned child (measured), which is exactly the scope wanted
+// here: this guard covers in-process test code, while spawned children get
+// their isolation from testIsolation.js's isolatedEnv/checkoutEnv.
+//
+// Production cannot trip this. `node server/index.js` and `node --watch
+// server/index.js` both have execArgv without any --test* entry (measured),
+// and Node refuses --test in NODE_OPTIONS. Evaluated once: it is a fact about
+// the process, not about paths, so unlike everything else in this file it is
+// safe to freeze at load.
+const IN_TEST_PROCESS = process.execArgv.some((a) => a.startsWith('--test'));
+
+// The escape hatch, for the tests whose subject IS the default resolution --
+// paths.test.js's legacy-reproduction table (the regression net that proves
+// deploying this code moves nothing) and db.test.js's dbPath() defaults.
+// Reading it per call rather than freezing it lets a single test turn it on
+// around one assertion.
+function defaultPathsAllowed() {
+  return process.env.CCSERVER_ALLOW_DEFAULT_PATHS === '1';
+}
+
+function refuseDefaultPath(def) {
+  throw new Error(
+    `server/paths.js: refusing to resolve '${def.id}' from its default location inside a test process. `
+    + `${def.envVar} is not set, so this would hand the test the real host path `
+    + `(${def.legacy()[0]}) -- tests have destroyed real data that way. `
+    + 'Run the suite through `npm test`, which loads server/testEnvDefaults.js and points every '
+    + 'registry entry at a scratch directory; if you are running a single file by hand, add '
+    + '`--import ./testEnvDefaults.js`. If this test\'s subject really is the default resolution, '
+    + 'set CCSERVER_ALLOW_DEFAULT_PATHS=1 around it.',
+  );
+}
+
 function buildEntry(def) {
   const raw = process.env[def.envVar];
   const envValue = typeof raw === 'string' && raw !== '' ? raw : null;
+  if (envValue === null && IN_TEST_PROCESS && !defaultPathsAllowed()) refuseDefaultPath(def);
   const target = def.target();
   const legacyPaths = def.legacy();
   const version = layoutVersion();

@@ -14,10 +14,13 @@ const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-db-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
-  // The v2 importLegacy reads sandbox.js's legacy sidecar index under
-  // CCSERVER_SANDBOX_HOME_ROOT. Without this override a host that still has a
-  // real .index.json would leak its entries into every fresh test DB -- and
-  // postApply would RENAME the user's real index as a test side effect.
+  // Redundant with server/testEnvDefaults.js, which now points every registry
+  // entry at a scratch directory for every test process; kept because this
+  // file wants its OWN temp root. It is no longer load-bearing, and there is
+  // deliberately no warning comment here any more: the long one that used to
+  // be at this spot explained the hazard well and still did not reach
+  // settingsStore.test.js when that was written, which is why the guard moved
+  // into paths.js + testEnvDefaults.js. Read those, not a comment.
   process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
 });
 
@@ -160,12 +163,16 @@ test('dbPath() defaults under ~/.local/share/ccserver-sandbox and honors CCSERVE
   // With no layout marker (issue #201) this is still the pre-#201 default,
   // byte for byte. See the XDG sibling below.
   const saved = process.env.CCSERVER_DB_PATH;
+  // Asserting the DEFAULT is this test's subject, so it opts out of the
+  // test-process guard in paths.js (see that file). It only reads the path.
+  process.env.CCSERVER_ALLOW_DEFAULT_PATHS = '1';
   try {
     delete process.env.CCSERVER_DB_PATH;
     assert.equal(dbPath(), join(homedir(), '.local', 'share', 'ccserver-sandbox', 'ccserver.sqlite3'));
     process.env.CCSERVER_DB_PATH = '/tmp/somewhere/x.sqlite3';
     assert.equal(dbPath(), '/tmp/somewhere/x.sqlite3');
   } finally {
+    delete process.env.CCSERVER_ALLOW_DEFAULT_PATHS;
     if (saved === undefined) delete process.env.CCSERVER_DB_PATH;
     else process.env.CCSERVER_DB_PATH = saved;
   }
@@ -175,6 +182,7 @@ test('dbPath() moves to $XDG_DATA_HOME/ccserver once the layout marker says v2 (
   const savedDb = process.env.CCSERVER_DB_PATH;
   const savedLayout = process.env.CCSERVER_LAYOUT;
   const savedData = process.env.XDG_DATA_HOME;
+  process.env.CCSERVER_ALLOW_DEFAULT_PATHS = '1';   // see the test above
   try {
     delete process.env.CCSERVER_DB_PATH;
     process.env.XDG_DATA_HOME = join(tmpRoot, 'xdg-data');
@@ -182,6 +190,7 @@ test('dbPath() moves to $XDG_DATA_HOME/ccserver once the layout marker says v2 (
     resetLayoutCache();
     assert.equal(dbPath(), join(tmpRoot, 'xdg-data', 'ccserver', 'ccserver.sqlite3'));
   } finally {
+    delete process.env.CCSERVER_ALLOW_DEFAULT_PATHS;
     if (savedDb === undefined) delete process.env.CCSERVER_DB_PATH; else process.env.CCSERVER_DB_PATH = savedDb;
     if (savedLayout === undefined) delete process.env.CCSERVER_LAYOUT; else process.env.CCSERVER_LAYOUT = savedLayout;
     if (savedData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = savedData;

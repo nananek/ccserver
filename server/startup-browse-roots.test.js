@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isolatedEnv } from './testIsolation.js';
+import { isolatedEnv, checkoutEnv } from './testIsolation.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(__dirname, 'index.js');
@@ -55,6 +55,11 @@ async function boot(dir, config, extraEnv = {}) {
   const proc = spawn(process.execPath, [SERVER_ENTRY], {
     cwd: __dirname,
     env: isolatedEnv(dir, {
+      // Same reason startup-setup-gate.test.js does this: the legacy-layout
+      // case below resolves the state files to the real checkout, and the
+      // DB's pre-#190 spelling to the checkout's PARENT, which getDb()
+      // relocates on boot.
+      ...checkoutEnv(dir),
       XDG_CONFIG_HOME: configHome,
       // Pinned at the file this function just wrote, which is where the
       // registry would resolve it anyway in the migrated layout. It matters
