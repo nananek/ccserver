@@ -624,7 +624,25 @@ export function loadSandboxConfig() {
   let configError = null;
   let configText = null;
   try {
-    configText = readRegularFileText(configPath);
+    // followSymlinks, and ONLY here among the files regularFile.js reads.
+    //
+    // The line that matters: sandbox.config.json belongs to the OPERATOR,
+    // every other file that reader handles belongs to the SERVER. Since the
+    // #201 XDG split moved this one out of the checkout, keeping it under
+    // version control is the operator's own business, and symlinking it in
+    // from a dotfiles repo is the obvious way to do that. O_NOFOLLOW would
+    // turn that setup into a refusal to boot. The server's own state files
+    // have no such workflow -- nobody symlinks saved-groups.json -- so they
+    // keep O_NOFOLLOW.
+    //
+    // Nothing #212 cares about is given up. The FIFO block is stopped by
+    // O_NONBLOCK plus the fstat isFile() check, not by O_NOFOLLOW: measured,
+    // a symlink pointing at a FIFO is still refused in under a millisecond.
+    // O_NOFOLLOW only governs symlinks to regular files, and against an
+    // attacker who can already write this 0700 directory it buys nothing
+    // anyway -- planting a regular file there is strictly easier than
+    // planting a link, and neither is stopped by the flag.
+    configText = readRegularFileText(configPath, { followSymlinks: true });
   } catch (err) {
     if (err.code !== 'ENOENT') configError = err.message;
   }

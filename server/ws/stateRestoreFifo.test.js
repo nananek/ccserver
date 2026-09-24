@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -27,6 +27,7 @@ import { getGroupFilesManifestPath } from './groupFiles.js';
 import { restoreSchedules, peekSavedSessions, savedSessionsPath, schedulesPath } from './sessionManager.js';
 import { restoreNotify, notifyPath } from './notify.js';
 import { loadSandboxConfig } from './sandbox.js';
+import { layoutMarkerPath, readLayout, resetLayoutCache } from '../paths.js';
 
 const CASE_TIMEOUT = 5000;
 
@@ -94,6 +95,93 @@ test('#212: restoreNotify refuses a FIFO at the notification registry (pre-liste
   if (!withState(t, { fifoAt: 'savedNotifications' })) return;
   const res = restoreNotify();
   assert.ok(Array.isArray(res.subscriptions), 'restore falls back to the seed, as for a missing file');
+});
+
+// --- sandbox.config.json follows symlinks; nothing else does ---------------
+
+test('#212: loadSandboxConfig reads a config that is a symlink (operator dotfiles)',
+  { timeout: CASE_TIMEOUT }, (t) => {
+  // The one file regularFile.js opens WITHOUT O_NOFOLLOW. sandbox.config.json
+  // is the operator's, not the server's: since #201 moved it out of the
+  // checkout, keeping it in a dotfiles repo and symlinking it in is the
+  // obvious way to version it, and O_NOFOLLOW would make that a boot refusal.
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-cfglink-'));
+  const real = join(dir, 'dotfiles-sandbox.config.json');
+  const link = join(dir, 'sandbox.config.json');
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  t.after(() => {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  writeFileSync(real, JSON.stringify({ docker: false }));
+  symlinkSync(real, link);
+  process.env.CCSERVER_SANDBOX_CONFIG = link;
+
+  const cfg = loadSandboxConfig();
+  assert.equal(cfg.configError, null, 'a symlinked config must not be a boot refusal');
+  assert.equal(cfg.docker, false, 'and its contents must actually be applied');
+});
+
+test('#212: dropping O_NOFOLLOW did NOT give back the block: a symlink to a FIFO is still refused',
+  { timeout: CASE_TIMEOUT }, (t) => {
+  // The measurement behind the decision. O_NOFOLLOW is not what stops the
+  // hang -- O_NONBLOCK is, because it makes open(2) return immediately even
+  // when the final target is a FIFO, and the fstat isFile() check then
+  // refuses it. Following the link changes WHICH file we look at, never
+  // whether we can be made to wait on it.
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-cfglinkfifo-'));
+  const real = join(dir, 'dotfiles-sandbox.config.json');
+  const link = join(dir, 'sandbox.config.json');
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  t.after(() => {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  if (!mkfifo(t, real)) return;
+  symlinkSync(real, link);
+  process.env.CCSERVER_SANDBOX_CONFIG = link;
+
+  const cfg = loadSandboxConfig();
+  assert.ok(cfg.configError, 'a config that resolves to a FIFO is still refused');
+  assert.match(cfg.configError, /not a regular file/);
+});
+
+// --- earlier than any of the above -----------------------------------------
+
+test('#212: readLayout refuses a FIFO at layout.json (earliest reader of all)',
+  { timeout: CASE_TIMEOUT }, (t) => {
+  // layout.json is read by layoutVersion() and keptAt(), both of which sit
+  // under resolvePath() -- so this runs on the FIRST path resolution, ahead
+  // of loadSandboxConfig() (index.js:407) and far ahead of listen (:593). A
+  // FIFO here stopped the boot before any other reader was reached.
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-layout-'));
+  const prevCfgHome = process.env.XDG_CONFIG_HOME;
+  t.after(() => {
+    if (prevCfgHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevCfgHome;
+    resetLayoutCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  process.env.XDG_CONFIG_HOME = dir;
+  resetLayoutCache();
+  mkdirSync(join(dir, 'ccserver'), { recursive: true });
+  const marker = layoutMarkerPath();
+  assert.equal(marker, join(dir, 'ccserver', 'layout.json'), 'the override must actually move the marker');
+
+  // The memo is keyed on the marker PATH, so a stale entry from another case
+  // would serve this one from cache and never open the FIFO at all -- the
+  // test would pass without exercising anything. Prove the read is live by
+  // reading a real marker at this exact path first, then swapping in the
+  // FIFO and resetting.
+  writeFileSync(marker, JSON.stringify({ layoutVersion: 2 }));
+  assert.deepEqual(readLayout(), { layoutVersion: 2 }, 'the read path is live at this path');
+  rmSync(marker);
+  if (!mkfifo(t, marker)) return;
+  resetLayoutCache();
+
+  assert.equal(readLayout(), null, 'a FIFO reads as "no marker", exactly like a missing file');
 });
 
 // --- after fastify.listen() ------------------------------------------------

@@ -48,10 +48,11 @@
 // of node:fs only the readers. NOTHING here writes to disk -- relocation is
 // server/pathMigration.js, driven by an explicit operator CLI.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readJsonFileIfRegular } from './ws/regularFile.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -136,7 +137,14 @@ export function readLayout() {
   if (markerCache && markerCache.path === path) return markerCache.value;
   let value = null;
   try {
-    value = JSON.parse(readFileSync(path, 'utf-8'));
+    // Not readFileSync: this is the EARLIEST of ccserver's file reads, so a
+    // FIFO planted here blocks before any other reader is even reached. It
+    // runs on the first resolvePath() call -- layoutVersion() and keptAt()
+    // both consult it -- which puts it ahead of loadSandboxConfig()
+    // (index.js:407), the previous front-runner, and far ahead of
+    // fastify.listen() (index.js:593). Blocking here means the process never
+    // reaches a JS frame at all, so SIGTERM is ignored too (issue #212).
+    value = readJsonFileIfRegular(path);
     if (!value || typeof value !== 'object') value = null;
   } catch {
     // Absent is the normal pre-migration state. Corrupt reads as absent too:

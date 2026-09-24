@@ -45,9 +45,20 @@ export const STATE_FILE_MAX_BYTES = 64 * 1024 * 1024;
  * already catch around `readFileSync`, keep their current behaviour without
  * a second error path. ENOENT passes through from open(2) unchanged, so
  * callers that distinguish "absent" from "unreadable" still can.
+ *
+ * `followSymlinks` drops O_NOFOLLOW for ONE caller -- see loadSandboxConfig.
+ * It does not weaken the protection this module exists for: measured, every
+ * hostile shape is still refused in under a millisecond through a symlink
+ * (link -> FIFO is REJECTED as FIFO, link -> /dev/zero as a chardev, link ->
+ * directory as a dir, link -> socket with ENXIO). What stops the hang is
+ * O_NONBLOCK, which makes open(2) return immediately, plus the fstat
+ * isFile() test on the descriptor; O_NOFOLLOW only decides whether a symlink
+ * to a REGULAR FILE is followed, which is the one row of that table that
+ * changes.
  */
-export function readRegularFileText(file, { maxBytes = STATE_FILE_MAX_BYTES } = {}) {
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW || 0));
+export function readRegularFileText(file, { maxBytes = STATE_FILE_MAX_BYTES, followSymlinks = false } = {}) {
+  const noFollow = followSymlinks ? 0 : (constants.O_NOFOLLOW || 0);
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | noFollow);
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) {

@@ -110,6 +110,47 @@ test('#212: a symlinked final component is refused, not followed', { timeout: 50
   assert.throws(() => readRegularFileText(link), (err) => err.code === 'ELOOP');
 });
 
+// followSymlinks: the measurement behind dropping O_NOFOLLOW for one caller.
+test('followSymlinks follows a link to a regular file', { timeout: 5000 }, (t) => {
+  const dir = tmp(t);
+  const real = join(dir, 'real.json');
+  const link = join(dir, 'link.json');
+  writeFileSync(real, '{"followed":true}');
+  symlinkSync(real, link);
+  assert.throws(() => readRegularFileText(link), (err) => err.code === 'ELOOP');
+  assert.equal(readRegularFileText(link, { followSymlinks: true }), '{"followed":true}');
+});
+
+test('followSymlinks does NOT reopen the block: every hostile target is still refused',
+  { timeout: 5000 }, (t) => {
+  // This is the whole argument for the exemption. O_NOFOLLOW is not what
+  // stops a FIFO from hanging the process -- O_NONBLOCK is, and it applies
+  // to the final open regardless of how many links were walked to get there.
+  // So following a link can change WHICH file is read, never whether the
+  // read can be made to block.
+  const dir = tmp(t);
+  const fifo = join(dir, 'fifo');
+  if (!mkfifo(t, fifo)) return;
+  const adir = join(dir, 'adir');
+  mkdirSync(adir);
+
+  const cases = [
+    ['link-to-fifo', fifo, 'ENOTREGULAR'],
+    ['link-to-dir', adir, 'ENOTREGULAR'],
+    ['link-to-devzero', '/dev/zero', 'ENOTREGULAR'],
+    ['link-to-missing', join(dir, 'nowhere'), 'ENOENT'],
+  ];
+  for (const [name, target, code] of cases) {
+    const link = join(dir, name);
+    symlinkSync(target, link);
+    assert.throws(
+      () => readRegularFileText(link, { followSymlinks: true }),
+      (err) => err.code === code,
+      `${name} -> ${target} must fail with ${code}`,
+    );
+  }
+});
+
 test('a file over the cap is refused rather than allocated', { timeout: 10000 }, (t) => {
   const f = join(tmp(t), 'big.json');
   writeFileSync(f, 'x'.repeat(4096));
