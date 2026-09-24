@@ -57,7 +57,7 @@
 //     the toggle is instant and needs no sandbox restart.
 
 import { lookup as dnsLookup } from 'node:dns';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { createServer, request as httpRequest } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -326,6 +326,23 @@ export function readPortFile(portFile) {
   }
   const port = Number(raw.trim());
   return Number.isInteger(port) && port > 0 ? port : null;
+}
+
+// What the port file looked like when the readiness wait gave up. Waiting on
+// the parsed value (rather than on existsSync) means 'absent' and 'present but
+// garbage' now reach the same timeout, and the thrown message is the only
+// artifact that survives -- startNetworkBroker removes the runtime dir on the
+// way out. Issue #222's complaint about the old failure was precisely that it
+// named no cause, so the reason has to carry the distinction.
+function describeUnreadablePortFile(portFile) {
+  let raw;
+  try {
+    raw = readFileSync(portFile, 'utf-8');
+  } catch (e) {
+    return e.code === 'ENOENT' ? 'never created' : `unreadable: ${e.code || e.message}`;
+  }
+  if (raw === '') return 'created but still empty';
+  return `unparseable: ${JSON.stringify(raw.slice(0, 64))}`;
 }
 
 function runServer({ allowlist, denylist, mode, portFile, state: initialState, adminToken }) {
@@ -719,7 +736,7 @@ export async function startNetworkBroker(
   }
 
   if (spawnError || proc.exitCode !== null || proc.signalCode !== null || port === null) {
-    const reason = spawnError ? spawnError.message : proc.exitCode !== null ? `exited code=${proc.exitCode}` : proc.signalCode ? `signal=${proc.signalCode}` : 'port file not ready within 2s';
+    const reason = spawnError ? spawnError.message : proc.exitCode !== null ? `exited code=${proc.exitCode}` : proc.signalCode ? `signal=${proc.signalCode}` : `port file not ready within 2s (${describeUnreadablePortFile(portFile)})`;
     try { proc.kill('SIGKILL'); } catch { /* already dead */ }
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
     throw new Error(`network broker failed to start: ${reason}`);

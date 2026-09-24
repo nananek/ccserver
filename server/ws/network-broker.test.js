@@ -8,7 +8,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, connect as netConnect } from 'node:net';
 import { spawn as spawnFn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -582,7 +582,7 @@ test('client RST after 403/407/400 does not kill the broker', async () => {
 // Both halves are pinned here: the writer must publish the value atomically
 // (nothing partial is ever visible at the destination), and the reader must
 // treat "exists but does not parse yet" as not-ready rather than as a failure.
-test('#222 writePortFileAtomic: the destination never holds a partial value', () => {
+test('#222 writePortFileAtomic: publishes the value and leaves no temp file behind', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-portfile-'));
   try {
     const portFile = join(dir, 'port');
@@ -596,15 +596,40 @@ test('#222 writePortFileAtomic: the destination never holds a partial value', ()
   }
 });
 
-test('#222 writePortFileAtomic: replaces an existing (even empty) destination', () => {
+test('#222 writePortFileAtomic: replaces the destination instead of writing in place', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-portfile-'));
   try {
     const portFile = join(dir, 'port');
     // The exact state the old code could leave behind mid-write.
     writeFileSync(portFile, '');
+    const before = statSync(portFile).ino;
     writePortFileAtomic(portFile, 3000);
     assert.equal(readPortFile(portFile), 3000);
     assert.deepEqual(readdirSync(dir), ['port']);
+    // This is the assertion that a plain writeFileSync cannot satisfy, and so
+    // the one that actually pins atomicity: writing in place means
+    // open(O_TRUNC) on THIS inode, which is exactly the window where a reader
+    // sees the file empty. rename() swaps in a different inode that already
+    // holds the full value, so the destination is only ever complete. The tmp
+    // file is created before the old inode is unlinked, so the numbers cannot
+    // coincide by reuse.
+    assert.notEqual(statSync(portFile).ino, before, 'the destination must be replaced by rename, not truncated in place');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#222 writePortFileAtomic: a failed publish throws and leaves no temp file behind', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-portfile-'));
+  try {
+    // A directory at the destination makes renameSync fail with EISDIR, which
+    // is the cheapest deterministic way to reach the cleanup path. A surviving
+    // temp file would accumulate in the broker's runtime dir and would hide
+    // the fact that the publish never completed.
+    const portFile = join(dir, 'port');
+    mkdirSync(portFile);
+    assert.throws(() => writePortFileAtomic(portFile, 3000), /EISDIR/);
+    assert.deepEqual(readdirSync(dir), ['port'], 'no port.tmp-<pid> may be left behind');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -619,9 +644,12 @@ test('#222 readPortFile: an empty or unparseable file is not-ready, not a failur
     // Created but not yet written -- the exact window issue #222 reported.
     writeFileSync(portFile, '');
     assert.equal(readPortFile(portFile), null, 'an empty port file must read as not-ready');
-    // Half a number is still not a port.
+    // A truncated value is indistinguishable from a legitimate small one --
+    // '4' could be port 4 or the first digit of 45678. That is precisely why
+    // the reader cannot be the only defence and the writer has to publish
+    // atomically; the issue notes this case as theoretically possible.
     writeFileSync(portFile, '4');
-    assert.equal(readPortFile(portFile), 4, 'a complete small value is a value');
+    assert.equal(readPortFile(portFile), 4, 'a value that parses is a value; the reader cannot tell it was truncated');
     writeFileSync(portFile, 'nope');
     assert.equal(readPortFile(portFile), null);
     writeFileSync(portFile, '0');
@@ -631,4 +659,52 @@ test('#222 readPortFile: an empty or unparseable file is not-ready, not a failur
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// The parent half of issue #222. These drive startNetworkBroker with a stub
+// child that reproduces the race directly: it creates the port file empty
+// (what writeFileSync's O_CREAT used to expose) and only later publishes a
+// value. A parent that waits on existsSync reads the empty file and fails the
+// launch; a parent that waits on the parsed value keeps waiting and succeeds.
+const stubBrokerSpawn = (extraEnv) => (_command, args, options) => {
+  const portFile = args[args.indexOf('--port-file') + 1];
+  return spawnFn(process.execPath, [
+    '-e',
+    // Create the path with no value in it, then optionally publish one late.
+    'const fs = require("node:fs");' +
+    'const pf = process.env.STUB_PORT_FILE;' +
+    'fs.writeFileSync(pf, "");' +
+    'if (process.env.STUB_PORT) setTimeout(() => fs.writeFileSync(pf, process.env.STUB_PORT), 400);' +
+    'setTimeout(() => process.exit(0), 10000);',
+  ], { ...options, env: { ...options.env, STUB_PORT_FILE: portFile, ...extraEnv } });
+};
+
+test('#222 startNetworkBroker waits past an empty port file for the real value', async () => {
+  // probeBroker has to find something listening, so stand in for the broker's
+  // HTTP server and hand the stub child this port to publish.
+  const listener = createServer((sock) => sock.destroy());
+  await new Promise((resolve) => listener.listen(0, '127.0.0.1', resolve));
+  const { port: listenerPort } = listener.address();
+  try {
+    const broker = await startNetworkBroker({}, { spawnProcess: stubBrokerSpawn({ STUB_PORT: String(listenerPort) }) });
+    brokers.push(broker);
+    assert.equal(broker.port, listenerPort, 'the parent must report the value the child published, not the empty read');
+  } finally {
+    await new Promise((resolve) => listener.close(resolve));
+  }
+});
+
+test('#222 startNetworkBroker gives up on a never-published port file and names the cause', async () => {
+  // Also pins that the wait is bounded: the stub child stays alive for 10s, so
+  // only the 2s deadline can end this.
+  const started = Date.now();
+  await assert.rejects(
+    () => startNetworkBroker({}, { spawnProcess: stubBrokerSpawn({}) }),
+    // 'port file not ready' alone would leave an operator with nowhere to go;
+    // the reason has to separate "the child never wrote" from "it wrote
+    // something unusable" -- the distinction the old 'malformed port file'
+    // carried and a bare timeout loses.
+    /network broker failed to start: port file not ready within 2s \(created but still empty\)/,
+  );
+  assert.ok(Date.now() - started < 10000, 'the readiness wait must be bounded by its own deadline');
 });
