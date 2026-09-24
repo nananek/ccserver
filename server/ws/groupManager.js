@@ -28,6 +28,7 @@ import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker
 import { isValidApp } from './appLaunch.js';
 import { loadSandboxConfig } from './sandbox.js';
 import { resolveMemberWorktree, removeMemberWorktree, listWorktreeDirs } from './worktree.js';
+import { readJsonFileIfRegular } from './regularFile.js';
 import { sendNotification } from './notify.js';
 import {
   getGroupFilesRoot,
@@ -540,7 +541,7 @@ function persistGroups() {
 export function restoreGroups() {
   let arr;
   try {
-    arr = JSON.parse(readFileSync(groupsPath(), 'utf-8'));
+    arr = readJsonFileIfRegular(groupsPath());
   } catch {
     return { restored: 0, ids: [] }; // no file / unreadable
   }
@@ -627,7 +628,7 @@ export function restoreGroups() {
   // counterpart, so this can never fail for the same reasons a worktree
   // restore could.
   try {
-    const rawDocs = JSON.parse(readFileSync(groupDocsPath(), 'utf-8'));
+    const rawDocs = readJsonFileIfRegular(groupDocsPath());
     if (rawDocs && typeof rawDocs === 'object') {
       for (const [gid, docsObj] of Object.entries(rawDocs)) {
         const group = groups.get(gid);
@@ -650,7 +651,7 @@ export function restoreGroups() {
   // whose blob is missing or not a regular file under the group's root are
   // ignored.
   try {
-    const rawFiles = JSON.parse(readFileSync(getGroupFilesManifestPath(), 'utf-8'));
+    const rawFiles = readJsonFileIfRegular(getGroupFilesManifestPath());
     if (rawFiles && typeof rawFiles === 'object') {
       for (const [gid, filesObj] of Object.entries(rawFiles)) {
         const group = groups.get(gid);

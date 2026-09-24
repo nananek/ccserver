@@ -37,6 +37,7 @@ import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forget
 import { APPS } from './appLaunch.js';
 import { normalizeBrowseRoots, isContained, isCcserverScratchPath } from '../pathPolicy.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
+import { readRegularFileText } from './regularFile.js';
 import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
 
 const execFileAsync = promisify(execFile);
@@ -623,7 +624,7 @@ export function loadSandboxConfig() {
   let configError = null;
   let configText = null;
   try {
-    configText = readFileSync(configPath, 'utf-8');
+    configText = readRegularFileText(configPath);
   } catch (err) {
     if (err.code !== 'ENOENT') configError = err.message;
   }
