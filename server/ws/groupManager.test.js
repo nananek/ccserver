@@ -302,13 +302,17 @@ test('#245: aborting a wait returns its claimed event and retires the waiter', a
   assert.deepEqual(next, { type: 'done', from: 'workerA', summary: 'reclaimed on abort' });
 });
 
-// An already-aborted signal must never register a consumer at all.
+// An already-aborted signal must never register a consumer at all. Note the
+// timeoutMs of 0 (= never times out on its own): it has to be the aborted
+// check that settles this, not a timer. Adding an 'abort' listener to a signal
+// that has ALREADY fired does nothing (the event is long gone), so without the
+// up-front check this waiter would hang forever as the group's sole consumer.
 test('#245: a wait whose signal is already aborted consumes nothing', async () => {
   const gid = await makeGroup();
 
   const ac = new AbortController();
   ac.abort();
-  assert.deepEqual(await groupManager.takeHandoff(gid, 60000, { signal: ac.signal }), { timedOut: true });
+  assert.deepEqual(await groupManager.takeHandoff(gid, 0, { signal: ac.signal }), { timedOut: true });
   assert.equal(groupManager.getGroup(gid).pendingTakes.size, 0);
 
   groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'still here' });

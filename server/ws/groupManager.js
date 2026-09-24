@@ -1896,6 +1896,9 @@ const groupManagerApi = {
   setCurrentTurn,
   pushHandoff,
   takeHandoff,
+  // waitForHandoff's last-chance re-queue when it finds the request was
+  // cancelled after takeHandoff already handed the event over (#245).
+  requeueHandoff,
   addMember,
   removeMember,
   getOrchestratorSandboxOpts,

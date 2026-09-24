@@ -485,6 +485,48 @@ test('listGroupSessions: autoYes reflects each live session state', async () => 
   }
 });
 
+// #245, the last slice takeHandoff cannot see: the request is aborted AFTER
+// takeHandoff has already handed the event over, before waitForHandoff
+// returns. Nothing downstream will deliver it, so it has to go back.
+// Stubbed rather than driven through the broker on purpose -- this is exactly
+// the window that cannot be hit reliably from the wire.
+test('#245: an abort landing after takeHandoff resolves re-queues the event', async () => {
+  const ac = new AbortController();
+  const event = { fromRole: 'workerA', summary: 'must not vanish in the last slice' };
+  const requeued = [];
+  const deps = {
+    groupId: 'g-last-slice',
+    groupManager: {
+      // Resolves with the event, but the client gives up in the same turn.
+      takeHandoff: async () => { ac.abort(); return event; },
+      requeueHandoff: (groupId, ev) => { requeued.push({ groupId, ev }); return true; },
+    },
+  };
+
+  const res = await tools.waitForHandoff(deps, { timeoutMs: 500 }, { signal: ac.signal });
+  assert.deepEqual(res, { timedOut: true }, 'the caller is told nothing arrived, not handed a doomed event');
+  assert.deepEqual(requeued, [{ groupId: 'g-last-slice', ev: event }],
+    'and the event is back in the queue for the next wait');
+});
+
+// The same guard must not fire when the request is healthy, or every handoff
+// would be delivered twice.
+test('#245: a live (unaborted) wait is not re-queued', async () => {
+  const ac = new AbortController();
+  const event = { fromRole: 'workerA', summary: 'ordinary delivery' };
+  const requeued = [];
+  const deps = {
+    groupId: 'g-ok',
+    groupManager: {
+      takeHandoff: async () => event,
+      requeueHandoff: (groupId, ev) => { requeued.push({ groupId, ev }); return true; },
+    },
+  };
+
+  assert.deepEqual(await tools.waitForHandoff(deps, { timeoutMs: 500 }, { signal: ac.signal }), event);
+  assert.deepEqual(requeued, [], 'nothing is re-queued on a normal delivery');
+});
+
 test('waitForHandoff: empty queue times out with a tiny timedOut result (not an error)', async () => {
   const g = await makeGroupAsync();
   const started = Date.now();
