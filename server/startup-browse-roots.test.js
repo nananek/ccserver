@@ -175,6 +175,61 @@ test('a browseRoot INSIDE a ccserver root warns but does not refuse',
     assert.match(res.logs, /points inside ccserver's own directories/);
   }));
 
+// --- the gh usage aggregate guards (#198), across the #201 merge -----------
+//
+// master added two boot refusals for sandbox.config.json's
+// ghUsageRecording.file, and #201 rewrote the second one's data structure
+// (the hardcoded internalPaths array became the registry-driven candidates
+// list). Merging those is the kind of edit where a guard disappears without
+// anything failing, and neither refusal had a test. So: both get one.
+
+test('★ #198+#201: a gh usage aggregate inside the ccserver scratch tree refuses to boot',
+  withDir(async (dir) => {
+    // Unconditional -- it holds with NO browseRoots, because pathPolicy
+    // exempts the scratch tree from browseRoots precisely so that combo
+    // worktrees and persistent HOMEs can be rw-bound into sandboxes. A
+    // session could otherwise forge or suppress its own usage counts.
+    const res = await boot(dir, {
+      ghUsageRecording: { enabled: true, file: join(dir, 'data', 'ccserver', 'gh-usage.json') },
+    });
+    assert.equal(res.booted, false, `must refuse; logs:\n${res.logs}`);
+    assert.notEqual(res.code, 0);
+    assert.match(res.logs, /ghUsageRecording\.file/);
+    assert.match(res.logs, /sandbox scratch tree/);
+  }));
+
+test('★ #198+#201: a gh usage aggregate inside browseRoots refuses to boot and is named',
+  withDir(async (dir) => {
+    // This one goes through #201's registry-driven candidates list. The entry
+    // is appended outside the layout ternary, so it has to hold in the
+    // migrated layout (which boot() sets up via the marker) as well as the
+    // legacy one.
+    const projects = join(dir, 'projects');
+    mkdirSync(projects, { recursive: true });
+    const res = await boot(dir, {
+      browseRoots: [projects],
+      ghUsageRecording: { enabled: true, file: join(projects, 'gh-usage.json') },
+    });
+    assert.equal(res.booted, false, `must refuse; logs:\n${res.logs}`);
+    assert.match(res.logs, /Refusing to start: .*browseRoots.* is set/);
+    assert.match(res.logs, /gh usage aggregate/, 'the message must name what is exposed');
+  }));
+
+test('#198+#201: the same aggregate outside both trees boots normally',
+  withDir(async (dir) => {
+    // Without this, the two refusals above could both be passing for the
+    // wrong reason (e.g. any ghUsageRecording config refusing to boot).
+    const projects = join(dir, 'projects');
+    const elsewhere = join(dir, 'elsewhere');
+    mkdirSync(projects, { recursive: true });
+    mkdirSync(elsewhere, { recursive: true });
+    const res = await boot(dir, {
+      browseRoots: [projects],
+      ghUsageRecording: { enabled: true, file: join(elsewhere, 'gh-usage.json') },
+    });
+    assert.equal(res.booted, true, `must boot; logs:\n${res.logs}`);
+  }));
+
 test('an un-migrated host keeps the pre-#201 per-entry check',
   withDir(async (dir) => {
     // With CCSERVER_LAYOUT=legacy the internal files are still at their old

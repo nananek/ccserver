@@ -40,7 +40,7 @@ import { warmCodexUsage } from './codexUsage.js';
 import { warmOpencodeUsage } from './opencodeUsage.js';
 import { initDb, dbPath } from './db.js';
 import { selectableAppIds, installedApps, loadSandboxConfig } from './ws/sandbox.js';
-import { isContained } from './pathPolicy.js';
+import { isCcserverScratchPath, isContained } from './pathPolicy.js';
 import { guardedPaths, allPaths, configRoot, dataRoot, stateRoot, layoutVersion, CURRENT_LAYOUT_VERSION } from './paths.js';
 import { verifySessionCookie } from './authSessions.js';
 import { resolveAuthMode } from './authMode.js';
@@ -400,7 +400,7 @@ try {
 // browseRootsInvalid), and a running server that keeps re-reading a broken
 // config would fail open at runtime too.
 {
-  const { browseRoots, browseRootsInvalid, configError, configPath } = loadSandboxConfig();
+  const { browseRoots, browseRootsInvalid, configError, configPath, ghUsageRecording } = loadSandboxConfig();
   if (configError) {
     fastify.log.error(
       `Refusing to start: sandbox.config.json (${configPath}) exists but could not be read/parsed: ${configError}. `
@@ -415,6 +415,20 @@ try {
     );
     process.exit(1);
   }
+  // The opt-in gh usage aggregate (issue #198) must not sit anywhere a
+  // sandboxed session can write, and the ccserver scratch tree is exactly
+  // that: pathPolicy exempts it from browseRoots precisely because combo
+  // worktrees and each session's persistent HOME live there and are rw-bound
+  // into the sandbox. So this check is unconditional -- unlike the
+  // browseRoots block below, it holds even in the default configuration.
+  if (ghUsageRecording.enabled && isCcserverScratchPath(resolve(ghUsageRecording.file))) {
+    fastify.log.error(
+      `Refusing to start: sandbox.config.json's ghUsageRecording.file (${ghUsageRecording.file}) is inside the `
+      + 'ccserver sandbox scratch tree, which sessions can write (persistent HOME and combo worktrees are rw-bound '
+      + 'from there). A session could forge or suppress its own usage counts. Move it outside that tree, then restart.',
+    );
+    process.exit(1);
+  }
   if (browseRoots.length > 0) {
     // Registry-driven (decision D4). On a migrated host three roots cover
     // every internal file, which is the point of the whole issue: a unified
@@ -422,14 +436,31 @@ try {
     // three roots plus whatever an operator has pulled out with an env var
     // or the wizard left behind). An un-migrated host keeps today's exact
     // behavior, entry by entry.
-    const candidates = layoutVersion() >= CURRENT_LAYOUT_VERSION
-      ? [
-        { label: 'ccserver 設定ディレクトリ', envVar: 'XDG_CONFIG_HOME', path: configRoot() },
-        { label: 'ccserver データディレクトリ', envVar: 'XDG_DATA_HOME', path: dataRoot() },
-        { label: 'ccserver 状態ディレクトリ', envVar: 'XDG_STATE_HOME', path: stateRoot() },
-        ...allPaths().filter((e) => e.overridden || e.keptLegacy),
-      ]
-      : guardedPaths();
+    const candidates = [
+      ...(layoutVersion() >= CURRENT_LAYOUT_VERSION
+        ? [
+          { label: 'ccserver 設定ディレクトリ', envVar: 'XDG_CONFIG_HOME', path: configRoot() },
+          { label: 'ccserver データディレクトリ', envVar: 'XDG_DATA_HOME', path: dataRoot() },
+          { label: 'ccserver 状態ディレクトリ', envVar: 'XDG_STATE_HOME', path: stateRoot() },
+          ...allPaths().filter((e) => e.overridden || e.keptLegacy),
+        ]
+        : guardedPaths()),
+      // The gh usage aggregate (#198), checked against browseRoots: inside
+      // it, the file is a session cwd away from being rewritten by the very
+      // agents it counts. Appended OUTSIDE the layout ternary on purpose --
+      // it is not a registry entry (the operator names an absolute path in
+      // sandbox.config.json), so it is an outlier in BOTH layouts and would
+      // be easy to add to one branch and forget in the other.
+      //
+      // Note this block is browseRoots-only: without browseRoots any
+      // directory can be a session cwd, so there is nothing general to check
+      // against and the operator has to place the file outside the checkout
+      // themselves (the configuration guide says so). The scratch-tree check
+      // above is the one case that can be checked unconditionally.
+      ...(ghUsageRecording.enabled
+        ? [{ label: "gh usage aggregate (sandbox.config.json's ghUsageRecording.file)", envVar: null, path: ghUsageRecording.file }]
+        : []),
+    ];
     const exposed = candidates.filter((e) => isContained(resolve(e.path), browseRoots));
     if (exposed.length > 0) {
       fastify.log.error(

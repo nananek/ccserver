@@ -19,6 +19,7 @@ import { useSessionSidebarPrefs } from './hooks/useSessionSidebarPrefs.js';
 import { NARROW_DRAWER_QUERY } from './hooks/viewportQuery.js';
 import { useNotifications } from './hooks/useNotifications.js';
 import { useRemoteSessions } from './hooks/useRemoteSessions.js';
+import { useVisiblePolling } from './hooks/useVisiblePolling.js';
 import { loadNavGuardMode, saveNavGuardMode, useNavGuard } from './hooks/useNavGuard.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
@@ -300,7 +301,7 @@ export default function App() {
     // the first tab stuck on "Session taken over". Guard on cwd: the server
     // assigns a fresh groupId per POST, so a groupId-based lookup could never
     // match an existing tab.
-    const existing = tabs.find((t) => t.type === 'group' && t.cwd === cwd);
+    const existing = tabs.find((t) => t.type === 'group' && !t.remote && t.cwd === cwd);
     if (existing) {
       setActiveTabId(existing.id);
       setLastDir(cwd);
@@ -461,19 +462,29 @@ export default function App() {
     });
   }, [activeTabId]);
 
+  // リモート (ペアリング先) のセッション一覧。destroyGroupTab /
+  // terminateSessionById が終了後に一覧から外すため、その宣言より前で呼ぶ。
+  const { remoteSessions, remoteGroups, refreshRemoteSessions, dropRemoteSession, dropRemoteGroup } = useRemoteSessions();
+
   // Server-side teardown for a group tab: DELETE /api/groups/:id destroys the
   // 3 member sessions + MCP brokers. Must run even when the close-confirm is
   // skipped ("次回以降確認しない"), otherwise the sessions and their Unix
   // sockets leak for as long as the server runs.
   const destroyGroupTab = useCallback(async (tab) => {
     try {
+      if (tab.remote) {
+        await authFetch(`/api/federation/instances/${encodeURIComponent(tab.remote.instanceId)}/groups/${encodeURIComponent(tab.groupId)}`, { method: 'DELETE' });
+        dropRemoteGroup(tab.remote.instanceId, tab.groupId);
+        refreshRemoteSessions();
+        return;
+      }
       await authFetch(`/api/groups/${tab.groupId}`, { method: 'DELETE' });
       setGroupsVersion((v) => v + 1);
     } catch {
       // group teardown already happened server-side or is unreachable;
       // closing the tab is still the right move
     }
-  }, []);
+  }, [dropRemoteGroup, refreshRemoteSessions]);
 
   // 対象タブのセッションを完全に終了する (DELETE /api/sessions/:id) 後に
   // タブを閉じる。閉じる確認ダイアログの「セッションを終了」ボタンと、
@@ -483,9 +494,6 @@ export default function App() {
   // there was nothing to terminate), false on failure or when a concurrent
   // call is already in flight -- callers that persist "次回以降確認しない"
   // only after success (terminateSessionAndCloseTab below) rely on this.
-  // リモート (ペアリング先) のセッション一覧。terminateSessionById が
-  // 終了後に一覧から外すため、その宣言より前で呼ぶ。
-  const { remoteSessions, refreshRemoteSessions, dropRemoteSession } = useRemoteSessions();
 
   const terminateSessionById = useCallback(async (tabId) => {
     if (terminatingTabIdsRef.current.has(tabId)) return false;
@@ -536,9 +544,12 @@ export default function App() {
     // スキップの対象外にする (スキップ設定のまま✕を押すと、切断のつもりが
     // ピア側セッションの破棄になってしまう)。スキップはローカルタブの
     // 従来挙動にだけ効かせる。
+    // リモートグループタブも同じ: ✕はピア側のコンボを破棄する破壊操作で、
+    // このダイアログには「次回以降確認しない」自体を出していない (下記) ため、
+    // 他所で保存されたスキップ設定をここで暗黙に適用しない。
     const tab = tabs.find((t) => t.id === tabId);
     if (tab?.type === 'group') {
-      if (skipCloseConfirm) {
+      if (skipCloseConfirm && !tab.remote) {
         // サーバ側のグループ破棄は完了させてからタブを閉じる: 先にタブだけ
         // 閉じて DELETE が後追いで走ると、その間に Groups リストから再
         // オープンしたときにサーバ側 teardown と競合する (attach→404→
@@ -668,6 +679,12 @@ export default function App() {
     // on tab changes too.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionPanelOpen, sessionSidebarMode, fetchServerSessions, fetchServerGroups, groupsVersion, sessionTabsKey]);
+  // The events above are enough to keep membership right, but not the
+  // per-session activity level (SessionList's dots), which changes on its own
+  // as the agents work. Poll while the panel is actually on screen; the hook
+  // skips ticks for a backgrounded browser tab and stops entirely when the
+  // panel is closed.
+  useVisiblePolling(fetchServerSessions, 3000, sessionPanelOpen);
   const closeSessionMenu = useCallback(() => setSessionMenuOpen(false), []);
   const toggleSessionMenu = useCallback(() => {
     setSessionMenuOpen((v) => !v);
@@ -725,18 +742,24 @@ export default function App() {
   }, [openRemoteTerminalTab, sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
   // 下段 (未オープン / リモート) の ✕: 開いているタブと同じ確認モーダル
   // (closeConfirm kind 'unopened') を出し、「次回以降確認しない」の設定も共有する。
-  // target は { kind: 'local', session } | { kind: 'remote', instance, session }。
+  // target は { kind: 'local', session } | { kind: 'remote', instance, session }
+  // | { kind: 'remote-group', instance, group }。
   // 成功時 true、失敗 (alert 済み) や同一対象の二重実行時は false を返す。
   const terminatingUnopenedRef = useRef(new Set());
   const terminateUnopened = useCallback(async (target) => {
-    const { session } = target;
+    const { session, group } = target;
     const remote = target.kind === 'remote';
-    const key = remote ? `${target.instance.id}:${session.id}` : session.id;
+    const remoteGroup = target.kind === 'remote-group';
+    const key = remoteGroup
+      ? `${target.instance.id}:group:${group.groupId}`
+      : remote ? `${target.instance.id}:${session.id}` : session.id;
     if (terminatingUnopenedRef.current.has(key)) return false;
     terminatingUnopenedRef.current.add(key);
     setIsTerminatingSession(true);
     try {
-      const url = remote
+      const url = remoteGroup
+        ? `/api/federation/instances/${encodeURIComponent(target.instance.id)}/groups/${encodeURIComponent(group.groupId)}`
+        : remote
         ? `/api/federation/instances/${encodeURIComponent(target.instance.id)}/sessions/${encodeURIComponent(session.id)}`
         : `/api/sessions/${session.id}`;
       const res = await authFetch(url, { method: 'DELETE' });
@@ -747,13 +770,16 @@ export default function App() {
         throw new Error(body.error || `HTTP ${res.status}`);
       }
     } catch (err) {
-      window.alert(`セッションを終了できませんでした: ${err.message}`);
+      window.alert(`${remoteGroup ? 'グループを破棄' : 'セッションを終了'}できませんでした: ${err.message}`);
       return false;
     } finally {
       terminatingUnopenedRef.current.delete(key);
       setIsTerminatingSession(terminatingTabIdsRef.current.size > 0 || terminatingUnopenedRef.current.size > 0);
     }
-    if (remote) {
+    if (remoteGroup) {
+      dropRemoteGroup(target.instance.id, group.groupId);
+      refreshRemoteSessions();
+    } else if (remote) {
       dropRemoteSession(target.instance.id, session.id);
       refreshRemoteSessions();
     } else {
@@ -761,7 +787,7 @@ export default function App() {
       fetchServerSessions();
     }
     return true;
-  }, [dropRemoteSession, refreshRemoteSessions, fetchServerSessions]);
+  }, [dropRemoteSession, dropRemoteGroup, refreshRemoteSessions, fetchServerSessions]);
   const requestTerminateUnopened = useCallback((target) => {
     if (skipCloseConfirm) {
       terminateUnopened(target);
@@ -773,6 +799,43 @@ export default function App() {
   const handleTerminateRemoteSession = useCallback(({ instance, session }) => {
     requestTerminateUnopened({ kind: 'remote', instance, session });
   }, [requestTerminateUnopened]);
+  const handleDestroyRemoteGroup = useCallback(({ instance, group }) => {
+    requestTerminateUnopened({ kind: 'remote-group', instance, group });
+  }, [requestTerminateUnopened]);
+  // リモートのコンボもローカル同様にグループタブで開く。メンバーは
+  // federation の members リレーで取得し、各ターミナルは remote-terminal
+  // 経由で接続する (GroupTabView の remote prop)。
+  const handleOpenRemoteGroup = useCallback(async ({ instance, group }) => {
+    if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
+    else closeSessionSidebarIfOverlay();
+    const existing = tabs.find((t) => t.type === 'group' && t.remote?.instanceId === instance.id && t.groupId === group.groupId);
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    try {
+      const res = await authFetch(`/api/federation/instances/${encodeURIComponent(instance.id)}/groups/${encodeURIComponent(group.groupId)}/members`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const id = `group-${++tabIdCounter}`;
+      const dirName = (group.cwd || '').split(/[/\\]/).filter(Boolean).pop() || group.groupId;
+      setTabs((prev) => [...prev, {
+        id,
+        type: 'group',
+        label: dirName,
+        cwd: group.cwd,
+        groupId: group.groupId,
+        members: data.members || [],
+        remote: { instanceId: instance.id, label: instance.label || instance.fingerprint?.slice(0, 8) || instance.id },
+      }]);
+      setActiveTabId(id);
+    } catch (err) {
+      window.alert(`グループを開けませんでした: ${err.message}`);
+    }
+  }, [tabs, sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
   const handleTerminateUnopenedSession = useCallback((session) => {
     requestTerminateUnopened({ kind: 'local', session });
   }, [requestTerminateUnopened]);
@@ -865,10 +928,18 @@ export default function App() {
   // `session` message instead, so its open header badge doesn't depend on
   // serverSessions' event-driven (not continuously polled) refresh cadence.
   const serverSessionsById = new Map(serverSessions.map((s) => [s.id, s]));
+  // Remote tabs are not in serverSessions (that list is this instance's own
+  // sessions): their reading comes from the peer's listing, relayed through
+  // useRemoteSessions. Without this second index an OPENED remote tab would
+  // be the only row in the list with no activity dot.
+  const remoteSessionsByKey = new Map(
+    remoteSessions.map(({ instance, session }) => [`${instance.id}:${session.id}`, session]),
+  );
   const sessionTabsForList = sessionTabs.map((t) => {
     const sid = t.sessionId || t.attachSessionId || null;
     const srv = sid ? serverSessionsById.get(sid) : null;
-    return { ...t, gpgVaultActive: srv?.gpgVaultActive ?? false };
+    const remoteSrv = t.remote && sid ? remoteSessionsByKey.get(`${t.remote.instanceId}:${sid}`) : null;
+    return { ...t, gpgVaultActive: srv?.gpgVaultActive ?? false, activity: (srv || remoteSrv)?.activity ?? null };
   });
   const groupTabs = tabs.filter((t) => t.type === 'group');
   const openedTabCount = sessionTabs.length + groupTabs.length;
@@ -894,9 +965,14 @@ export default function App() {
   // 開き済みグループタブのあるグループを除いた未オープン一覧。
   const openedGroupIds = new Set();
   for (const t of tabs) {
-    if (t.type === 'group' && t.groupId) openedGroupIds.add(t.groupId);
+    if (t.type === 'group' && t.groupId && !t.remote) openedGroupIds.add(t.groupId);
   }
   const unopenedGroups = serverGroups.filter((g) => !openedGroupIds.has(g.groupId));
+  const openedRemoteGroupKeys = new Set();
+  for (const t of tabs) {
+    if (t.type === 'group' && t.remote) openedRemoteGroupKeys.add(`${t.remote.instanceId}:${t.groupId}`);
+  }
+  const unopenedRemoteGroups = remoteGroups.filter(({ instance, group }) => !openedRemoteGroupKeys.has(`${instance.id}:${group.groupId}`));
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   // Close-confirm dialog's "セッションを終了" availability: terminal tabs with
@@ -910,11 +986,14 @@ export default function App() {
   // 「次回以降確認しない」も出さない (handleCloseTab のスキップ対象外と揃える)。
   const isRemoteTabCloseConfirm = !!closeConfirmTab?.remote;
   const canDetachCloseConfirm = isRemoteTabCloseConfirm && canTerminateTab(closeConfirmTab);
+  const closeConfirmIsGroup = closeConfirm?.kind === 'group' || closeConfirm?.target?.kind === 'remote-group';
   let closeConfirmTargetText = null;
   if (closeConfirm?.kind === 'unopened') {
     const { target } = closeConfirm;
-    const where = target.session.cwd || target.session.id;
-    closeConfirmTargetText = target.kind === 'remote'
+    const where = target.kind === 'remote-group'
+      ? (target.group.cwd || target.group.groupId)
+      : (target.session.cwd || target.session.id);
+    closeConfirmTargetText = target.kind !== 'local'
       ? `⇄ ${target.instance.label || target.instance.fingerprint?.slice(0, 8) || target.instance.id}: ${where}`
       : where;
   } else if (isRemoteTabCloseConfirm) {
@@ -1004,6 +1083,9 @@ export default function App() {
             unopenedRemoteSessions={unopenedRemoteSessions}
             onOpenRemoteSession={handleOpenRemoteSession}
             onTerminateRemoteSession={handleTerminateRemoteSession}
+            unopenedRemoteGroups={unopenedRemoteGroups}
+            onOpenRemoteGroup={handleOpenRemoteGroup}
+            onDestroyRemoteGroup={handleDestroyRemoteGroup}
             onOpenGroup={handleOpenGroupFromList}
             customLabels={labelBySessionId}
             onRowContextMenu={handleRowContextMenu}
@@ -1096,6 +1178,9 @@ export default function App() {
           unopenedRemoteSessions={unopenedRemoteSessions}
           onOpenRemoteSession={handleOpenRemoteSession}
           onTerminateRemoteSession={handleTerminateRemoteSession}
+          unopenedRemoteGroups={unopenedRemoteGroups}
+          onOpenRemoteGroup={handleOpenRemoteGroup}
+          onDestroyRemoteGroup={handleDestroyRemoteGroup}
           onOpenGroup={handleOpenGroupFromList}
           customLabels={labelBySessionId}
           onRowContextMenu={handleRowContextMenu}
@@ -1106,7 +1191,7 @@ export default function App() {
           <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} initialPath={lastDir} sandboxDefaults={sandboxDefaults} />
         </div>
         <div style={{ display: activeTabId === 'remote' ? 'flex' : 'none', height: '100%', flexDirection: 'column', overflow: 'auto' }}>
-          <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} />
+          <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} onOpenRemoteGroup={handleOpenRemoteGroup} visible={activeTabId === 'remote'} />
         </div>
         {tabs.some((t) => t.type === 'settings') && (
           <div style={{ display: activeTabId === 'settings' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
@@ -1187,6 +1272,7 @@ export default function App() {
                 onCurrentTurnChange={(turn) => handleGroupTurnChange(tab.id, turn)}
                 tabId={tab.id}
                 onFocusTab={() => handleTabClick(tab.id)}
+                remote={tab.remote || null}
               />
             </div>
           ))}
@@ -1290,8 +1376,8 @@ export default function App() {
       {closeConfirm && (
         <div className="resume-overlay" onClick={() => { if (!isTerminatingSession) setCloseConfirm(null); }}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : closeConfirm.kind === 'unopened' ? 'セッションを終了しますか?' : 'タブを閉じますか?'}</h3>
-            <p>{closeConfirm.kind === 'group'
+            <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : closeConfirmIsGroup ? 'グループを破棄しますか?' : closeConfirm.kind === 'unopened' ? 'セッションを終了しますか?' : 'タブを閉じますか?'}</h3>
+            <p>{closeConfirmIsGroup
               ? 'グループの3つのセッション（ワーカー2つとオーケストレーター）を終了します。'
               : canDetachCloseConfirm
                 ? '「セッションを終了」はピア側のセッションも破棄します。「切断」はタブを閉じるだけで、セッションはリモート一覧から再接続できます。'
@@ -1313,7 +1399,9 @@ export default function App() {
             <div className="resume-actions">
               {canTerminateCloseConfirm ? (
                 <button className="btn btn-danger btn-left" onClick={terminateSessionAndCloseTab} disabled={isTerminatingSession}>
-                  {isTerminatingSession ? '終了中...' : 'セッションを終了'}
+                  {isTerminatingSession
+                    ? (closeConfirmIsGroup ? '破棄中...' : '終了中...')
+                    : (closeConfirmIsGroup ? 'グループを破棄' : 'セッションを終了')}
                 </button>
               ) : null}
               <button className="btn btn-secondary" onClick={() => setCloseConfirm(null)} disabled={isTerminatingSession}>

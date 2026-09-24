@@ -36,6 +36,10 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
   "gpg": true,
   "sshAgent": false,
   "gitBroker": true,
+  "ghUsageRecording": {
+    "enabled": false,
+    "file": "/absolute/path/gh-usage-recording.json"
+  },
   "commitMessageGuard": {
     "enabled": true,
     "blockedPatterns": []
@@ -72,6 +76,7 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 | `gpg` | `false` | コミット署名用に gpg-agent を転送 ([認証情報の受け渡し](/ccserver/sandbox/credentials/) 参照)。UI で上書き可。 |
 | `sshAgent` | `false` | ssh-agent を転送 (同上)。UI で上書き可。 |
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (同上)。 |
+| `ghUsageRecording` | 未設定（無効） | Issue #198 の任意・ローカル集計。`{ "enabled": true, "file": "/absolute/path/gh-usage-recording.json" }` を指定した新規サンドボックスセッションだけが、gh ブローカー経由の結果を固定カテゴリのカウンタとして保存する。コマンドライン・リポジトリ名・本文・パス・出力・認証情報・識別子は記録せず、ccserver が送信・アップロードすることもない。`node server/cli/gh-usage-report.js enable --file /absolute/path/gh-usage-recording.json`、`show`、`reset`、`disable` で管理できる。 |
 | `commitMessageGuard` | `{ enabled: true, blockedPatterns: [] }` | サンドボックス内の `git commit` を、メッセージが禁止パターンに一致する場合ブロックする commit-msg フック ([認証情報の受け渡し](/ccserver/sandbox/credentials/) 参照)。組み込みパターン (常時有効、設定不要): `Claude-Session:` 行、`https://claude.ai/code/session_...` の裸URL。`gitBroker` とは独立のフラグで、`gitBroker: false` でも有効なまま。`blockedPatterns` に正規表現の文字列を追加すると (例: `Co-Authored-By: ... noreply@anthropic.com` の行)、組み込みパターンに加えてブロックできる。`gitBroker` も有効な場合は、同じ禁止パターンで `gh pr create`/`edit`/`comment`/`review` の title/body/body-file もチェックされる (gh はローカルの commit-msg フックを通らないため別経路が必要 — 詳細は [認証情報の受け渡し](/ccserver/sandbox/credentials/) の gh CLI 節)。 |
 | `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (Claude の `/usage` / Codex のレート制限取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 |
 | `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (コンボのロール別選択は別途ブラウザの `localStorage` に記憶され、copilot はそもそも選択不可)。 |
@@ -88,6 +93,86 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 | `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 ([通知と Vikunja 連携](/ccserver/guides/notify/) 参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。`vikunja` は Vikunja タスク連携の設定 (`baseUrl`+`apiToken` で有効化)。 |
 | `federation` | `{}` | 拠点間ペアリング ([federation](/ccserver/guides/federation/) 参照) の設定。`requireTokenForPairing: true` でペアリング開始リクエストに `CCSERVER_TOKEN` の提示を必須化 (既定 `false`)。機能自体の有効/無効は `CCSERVER_FEDERATION_PORT` 環境変数で制御し、ここでは切り替えられません。 |
 | `network` | `{ isolate: false, initialState: "enforce", mode: "enforce", allowedHosts: [], deniedHosts: [] }` | ネットワーク隔離 ([下記](#ネットワーク隔離)参照)。`isolate` は機能全体の on/off (`true` で隔離が有効になる)。`initialState` は隔離を有効にして起動したセッションの開始state (`"enforce"`/`"open"`)、`mode` は `"enforce"`/`"audit"`、`allowedHosts`/`deniedHosts` は完全一致か先頭ドット (`.example.com`) のみの許可/拒否リスト (各最大200件)。設定 UI (設定 → ネットワーク隔離) からも編集可能で、`allowedHosts`/`deniedHosts` の保存は稼働中セッションへ自動反映されます。 |
+
+## gh 利用記録（任意・ローカルのみ）
+
+これは Issue #198 の検証用機能です。既定では完全に無効で、**有効化しても ccserver がネットワーク送信、アップロード、Issue コメント投稿を行うことはありません**。保存先は利用者が指定し、共有するか、編集するか、削除するかも利用者自身が決めます。
+
+記録されるのは、**有効化後に新しく起動したサンドボックス**で `gitBroker` を通った `gh` の集計結果だけです。既に動いているセッション、サンドボックス外の `gh`、broker が起動しなかった操作は対象外です。生のイベント列は保存しません。
+
+### 有効化
+
+ccserver を起動しているホスト上で、保存したいローカル絶対パスを指定します。親ディレクトリは必要に応じて作られ、集計ファイルは初回の操作時に作成されます。
+
+```bash
+node server/cli/gh-usage-report.js enable \
+  --file /absolute/path/gh-usage-recording.json
+```
+
+このコマンドは `sandbox.config.json` の `ghUsageRecording` を次の形で更新します。反映されるのは新規セッションだけなので、記録を始める前に対象のサンドボックスセッションを起動し直してください。
+
+```json
+{
+  "ghUsageRecording": {
+    "enabled": true,
+    "file": "/absolute/path/gh-usage-recording.json"
+  }
+}
+```
+
+**保存先はサンドボックスから書き換えられない場所にしてください。** セッションの cwd はサンドボックス内に rw で bind されるため、集計ファイルがセッションの cwd 配下にあると、エージェントが件数を改ざんしたり記録を止めたりできます。`file` は絶対パス必須です (相対パスは無効として無視されます)。
+
+起動時チェックの適用範囲に注意してください。
+
+- **`browseRoots` を設定している場合**: 有効な集計ファイルが browseRoots 配下にあると、ccserver は他の内部状態ファイル (SQLite DB、federation 鍵など) と同様に**起動を拒否します**。`gh-usage-report.js enable` も同じ条件を先に検査して拒否するので、起動不能な設定を書き込んでしまうことはありません。
+- **`browseRoots` を設定していない場合 (既定)**: この browseRoots 判定は**何もしません**。browseRoots が無ければ任意のディレクトリをセッションの cwd にできるため、「サンドボックスから書き込めない場所」を機械的に判定する方法がないからです。とくに `--file` を省略した既定の保存先 (`sandbox.config.json` と同じディレクトリ = 通常は ccserver のチェックアウト内) は保護されません。**ccserver のチェックアウト外で、セッションを開くことのない絶対パスを明示的に指定してください。**
+- **ccserver のサンドボックス作業ツリー (`~/.local/share/ccserver-sandbox` 配下) は browseRoots の設定に関わらず拒否されます。** ここには各セッションの永続 HOME やコンボ起動の worktree が置かれ、サンドボックスへ rw で bind されるため、browseRoots の例外として扱われる領域です。集計ファイルをここに置くとセッションから書き換えられるので、起動時チェックと `enable` の双方が無条件で拒否します。
+
+### 記録が止まったときの検知
+
+集計ファイル・lock ファイル・tmp ファイルの位置に通常ファイル以外 (ディレクトリ、FIFO、デバイス、シンボリックリンク) が置かれていたり、lock が異常な更新時刻を持っていたりすると、記録が進まないことがあります。ccserver が自動で取り除くのは **通常ファイル・シンボリックリンク・FIFO・デバイス、および空のディレクトリだけ**です。
+
+**中身のあるディレクトリは決して削除しません。** ccserver がこの3つのパスに作るのは通常ファイルだけなので、そこにある中身入りのディレクトリは ccserver の成果物ではなく、削除すれば取り返しがつかないためです。この場合は記録を進めずに警告し、パスはそのまま残します — 手で退かしてください。
+
+除去できなかった場合、ccserver のログに `[gh-usage] not recording (...)` が出ます。gh コマンド自体は成功し続け `show` も動き続けるため、集計が止まったことはこの警告でのみ分かります。同じ理由の警告は繰り返しを避けるため1時間に1回までに抑えられます。`show` の件数が伸びていないときも同じ原因を疑ってください。集計ファイルが読めない状態のときは `show` が標準エラーにその旨を出すので、「まだ何も記録されていない」との区別がつきます。
+
+**集計ファイルには完全性保護 (署名・MAC) がありません。** 行の形式は固定カテゴリに正規化され、任意テキストがレポートに混入することはありませんが、ファイルに書ける者はその固定カテゴリの範囲内で件数や開始日を偽造でき、次回の書き込みでそのまま残ります。レポートの数値は「そのファイルに書ける全員を信頼できる」範囲でのみ意味を持ちます。
+
+### 確認・共有
+
+いつでも集計をプレーンテキストで確認できます。出力は表示するだけで、送信はしません。
+
+```bash
+node server/cli/gh-usage-report.js show
+```
+
+期間を出力したくない場合は `--no-period` を加えます。共有する場合も、まずこの出力を確認し、必要なら編集したコピーを Issue コメントなどへ手動で貼り付けてください。
+
+```text
+ccserver-gh-usage-report: 1
+period: 2026-09-01..2026-09-30
+recording: opted-in-local-aggregate
+
+client=codex sandbox=sandboxed broker=on
+  target=issue operation=create result=success count=3
+  target=pr operation=edit result=broker-denied:not-allowlisted count=1
+```
+
+保存される値は、クライアント種別、固定の対象・操作分類、成功/CLI エラー/broker 拒否などの結果分類、および件数だけです。`gh` の引数、owner/repo、URL、Issue/PR 番号、本文、ファイルパス、標準出力/標準エラー、トークン、安定した利用者・端末・セッション ID は保存しません。
+
+### リセット・停止
+
+集計だけをゼロから始めるには、次を実行します。設定は有効のままです。
+
+```bash
+node server/cli/gh-usage-report.js reset
+```
+
+停止すると以後に起動するサンドボックスでは記録されません。すでにある集計ファイルは削除しないため、必要なら利用者自身が内容を確認して保持または削除できます。
+
+```bash
+node server/cli/gh-usage-report.js disable
+```
 
 ## ネットワーク隔離
 

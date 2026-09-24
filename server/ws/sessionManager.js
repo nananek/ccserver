@@ -2,8 +2,13 @@ import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync, statSync } from 'node:fs';
+// `dirname` / `fileURLToPath` were only here to build __dirname for the
+// repo-root state-file paths; #201 moved those to the registry (see
+// savedSessionsPath/schedulesPath below), so they are gone. master's
+// opencodeSupportsStandalone (#200) is kept -- it is used by the
+// opencodeStandalone flag further down.
 import { basename, join, resolve } from 'node:path';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools, opencodeSupportsStandalone } from './sandbox.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
 import { releaseSeatbeltOverlay } from './sandbox-seatbelt.js';
 import { setNetworkBrokerLists } from './network-broker.js';
@@ -13,6 +18,17 @@ import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunni
 import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
 import { shouldInjectReviewer, reviewerEnabled, getReviewerSockPath, reviewerBrokerRunning } from './reviewer.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
+import {
+  MAX_ROWS_PER_SAMPLE,
+  MAX_SAMPLES,
+  NO_ACTIVITY,
+  RATE_HOLD_WINDOW_MS,
+  RATE_WINDOW_MS,
+  SAMPLE_MS,
+  changeRateFromSamples,
+  classifyActivity,
+  normalizeRowsForWidth,
+} from './activity.js';
 import { bunTmpdirEnv } from './bunTmpdir.js';
 import { buildSessionEnv } from './sessionEnv.js';
 import { isContained, isCcserverScratchPath } from '../pathPolicy.js';
@@ -380,6 +396,14 @@ function buildSessionRecord(id, ptyProcess, meta) {
     // every byte) -- the basis of read_output's screenIdleMs / get_tab_status.
     screen: createScreenModel({ cols: meta.cols, rows: SCREEN_ROWS }),
     screenLastChangeAt: null,
+    // Activity sampling (see activity.js): a small ring of
+    // { at, rows } slices -- how many DISTINCT screen rows changed in each
+    // ~SAMPLE_MS window. That is what separates "thinking" (a spinner
+    // rewriting one row) from "working" (output painting many), which
+    // screenLastChangeAt alone cannot. Bounded at MAX_SAMPLES entries.
+    screenSamples: [],
+    screenSampleAt: null, // when the current slice started
+    activityLevel: null, // last level reported, so activitySnapshot's red/yellow hysteresis has a history
   };
 
   ptyProcess.onData((rawData) => {
@@ -443,6 +467,12 @@ function buildSessionRecord(id, ptyProcess, meta) {
     if (session.screen.version() !== screenVersion) {
       session.screenLastChangeAt = Date.now();
     }
+    // Bank a slice of the dirty-row tally whenever one is due. Sampling here
+    // (rather than on an interval) keeps the cost proportional to output:
+    // a session nobody is writing to does no work at all. activitySnapshot
+    // closes the remaining slice when it reads, so output that stops mid-slice
+    // is still counted.
+    sampleScreenActivity(session);
 
     broadcast(session, { type: 'output', data });
 
@@ -830,11 +860,16 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     // appLaunchArgs combines resume + model + permission-mode args in this
     // exact order; appLaunch.test.js exercises the same function so a
     // reordering here can't drift away from what's tested (see PR#108 review).
+    // opencodeStandalone is probed against the actually-resolved binary
+    // (resolved.hostCommand) rather than assumed -- see appLaunch.js's
+    // appStandaloneArgs comment: an opencode <2.0.0 install rejects the flag
+    // outright, so this must never be passed without checking first.
     args = appLaunchArgs(sessionApp, {
       resumeId: claudeSessionId,
       resumeLast,
       model: sessionModel,
       permissionMode: sessionPermissionMode,
+      opencodeStandalone: sessionApp === 'opencode' && opencodeSupportsStandalone(resolved.hostCommand),
     });
   }
   command = resolveCommand(command);
@@ -1879,6 +1914,59 @@ export function restoreSchedules() {
   return { restored, missed };
 }
 
+// Close the current dirty-row slice if SAMPLE_MS has passed, banking it in
+// the session's ring. Called from the output path (so a busy session samples
+// at its own cadence) and again from activitySnapshot (so a burst that ended
+// mid-slice is not lost when nothing else arrives to trigger a sample).
+function sampleScreenActivity(session, now = Date.now()) {
+  if (!session?.screen) return;
+  if (session.screenSampleAt == null) {
+    // First data for this session: start the slice, nothing to bank yet.
+    session.screenSampleAt = now;
+    return;
+  }
+  if (now - session.screenSampleAt < SAMPLE_MS) return;
+  session.screenSampleAt = now;
+  // Two corrections before the slice is banked:
+  //   - clamp, because a whole-screen change (a clear, an alternate-screen
+  //     switch) is reported as every row the model holds -- up to its
+  //     200-row scrollback cap, which is not a screen;
+  //   - normalize for width, because the same output wraps into more rows on
+  //     a narrow terminal than a wide one, and the thresholds were calibrated
+  //     at REFERENCE_COLS.
+  const rows = Math.min(session.screen.takeDirtyRowCount(), MAX_ROWS_PER_SAMPLE);
+  session.screenSamples.push({ at: now, rows: normalizeRowsForWidth(rows, session.cols) });
+  if (session.screenSamples.length > MAX_SAMPLES) session.screenSamples.shift();
+}
+
+// How active this session's agent is right now -- the tab colour's source of
+// truth (see activity.js for the rules). Derived on READ, exactly like
+// idleForMs/screenIdleMs: no timer runs to keep it fresh, and a session
+// nobody looks at costs nothing.
+//
+// The one piece of state kept between reads is the previous level, which the
+// red/yellow hysteresis needs; it is written back here so every reader
+// (browser poll, MCP tool, federation) advances the same history.
+export function activitySnapshot(session) {
+  if (!session) return NO_ACTIVITY;
+  const now = Date.now();
+  sampleScreenActivity(session, now);
+  const round = (n) => Math.round(n * 10) / 10;
+  const result = classifyActivity({
+    app: session.app ?? null,
+    live: true,
+    exited: !!session.exited,
+    shell: !!session.shell,
+    screenRows: session.screen ? session.screen.screenRows() : null,
+    screenIdleMs: session.screenLastChangeAt != null ? now - session.screenLastChangeAt : null,
+    changeRate: round(changeRateFromSamples(session.screenSamples, now, RATE_WINDOW_MS)),
+    holdRate: round(changeRateFromSamples(session.screenSamples, now, RATE_HOLD_WINDOW_MS)),
+    previousLevel: session.activityLevel,
+  });
+  session.activityLevel = result.level;
+  return result;
+}
+
 export function listSessions() {
   const result = [];
   for (const [id, session] of sessions) {
@@ -1898,6 +1986,11 @@ export function listSessions() {
       groupId: session.groupId || null,
       groupRole: session.groupRole || null,
       customLabel: session.customLabel || null,
+      // How hard this session's agent is working right now (see activity.js):
+      // { level: 'idle'|'low'|'busy'|null, reason, marker, markerVerified,
+      // screenIdleMs, changeRate }. Rides along to federation peers too --
+      // rpcSessionsList returns this listing verbatim.
+      activity: activitySnapshot(session),
     });
   }
   return result;
