@@ -357,20 +357,25 @@ test('a realistic SGR run is not mistaken for an over-long one', () => {
 //   - a stream of complete escapes must draw nothing at all.
 //
 // WHAT THEY CANNOT CATCH. Both compare the parser against ITSELF, so a parser
-// that is consistently wrong passes both. This is not theoretical: a one-line
-// mutant that ignores CUU (`ESC[nA`) passes all of these AND every hand
-// written case in this file, while drawing the wrong screen -- `AAAA\r\nBBBB`
-// then `ESC[1A\rX` gives ["AAAA","XBBB"] where it should give ["XAAA","BBBB"]
-// (measured in review). A comparison against a reference implementation would
-// have caught it; self-consistency cannot, and neither can it catch a wrong
-// wrap position, a wrong erase extent, or a sequence nobody put in the
-// corpus.
+// that is consistently wrong passes both. This is not theoretical: when these
+// properties were added, a one-line mutant that ignores CUU (`ESC[nA`) passed
+// all of them AND every hand written case the file had at that point, while
+// drawing the wrong screen -- `AAAA\r\nBBBB` then `ESC[1A\rX` gave
+// ["AAAA","XBBB"] where it should give ["XAAA","BBBB"] (measured in review).
+// That mutant dies now, but only because the block below was written for it;
+// nothing in the fuzz noticed then and nothing would notice the next one.
+// A comparison against a reference implementation would have caught it;
+// self-consistency cannot, and neither can it catch a wrong wrap position, a
+// wrong erase extent, or a sequence nobody put in the corpus.
 //
 // So the semantics are carried by explicit expected-screen tests -- the ones
 // above for CUP / EL / ED / wrapping / scrolling, and the block right below
-// for the cursor moves and the alternate-screen switches that had no coverage
-// until that mutant pointed it out. When a supported sequence is added here,
-// it needs a case there too; the fuzz will not cover for it.
+// for the cursor moves and the alternate-screen switches. That block is only
+// as strong as the cases actually written in it: each supported sequence
+// needs its exact distance, its default parameter, its clamps and its effect
+// on version()/takeDirtyRowCount() pinned separately, because a mutant that
+// breaks any one of those in isolation passes everything else. The fuzz will
+// not cover for a missing case.
 
 // --- semantics: what each sequence is supposed to draw --------------------
 
@@ -381,6 +386,32 @@ test('CUU / CUD move the write target by whole rows', () => {
   assert.deepEqual(s.screenRows(), ['XAAA', 'BBBB', 'CCCC']);
   s.feed('\x1b[1B\rY'); // one row back down
   assert.deepEqual(s.screenRows(), ['XAAA', 'YBBB', 'CCCC']);
+});
+
+test('CUU moves exactly n rows when the top is not in the way', () => {
+  // Every other CUU case in this file starts close enough to the top that the
+  // clamp decides the answer, which pins "ends up at the top" rather than
+  // "moves n rows" -- a mutant that goes one row too far passes them all.
+  const s = createScreenModel();
+  s.feed('AAAA\r\nBBBB\r\nCCCC'); // cursor on the third row
+  s.feed('\x1b[1A\rX'); // exactly one row up: the middle row, not the top
+  assert.deepEqual(s.screenRows(), ['AAAA', 'XBBB', 'CCCC']);
+});
+
+test('CUD / CUF / CUB default to one step when the parameter is omitted', () => {
+  // `ESC[B` means `ESC[1B`. Only CUU exercised the bare form, so a mutant
+  // reading the omitted parameter as 0 -- i.e. not moving at all -- passed.
+  const rows = createScreenModel();
+  rows.feed('x\r\ny');
+  rows.feed('\r\x1b[Bz'); // bare CUD: onto a new third row
+  assert.deepEqual(rows.screenRows(), ['x', 'y', 'z']);
+
+  const cols = createScreenModel();
+  cols.feed('ABCDEF');
+  cols.feed('\r\x1b[CX'); // bare CUF: one column in from the left
+  assert.deepEqual(cols.screenRows(), ['AXCDEF']);
+  cols.feed('\x1b[DY'); // bare CUB: back one from just after the X
+  assert.deepEqual(cols.screenRows(), ['AYCDEF']);
 });
 
 test('CUU / CUD default to one row and stop at the top', () => {
@@ -408,6 +439,41 @@ test('CUB stops at the left margin, CUF at the right', () => {
   assert.deepEqual(s.screenRows(), ['XBCDEF']);
   s.feed('\r\x1b[99CY'); // past the right edge: clamps to the last column
   assert.deepEqual(s.screenRows(), ['XBCDEY']);
+});
+
+test('CUD counts as a visible change exactly when it adds rows', () => {
+  // Moving below the last row scrolls new ones onto the screen, so it has to
+  // register on both counters the server reads: version() feeds screenIdleMs
+  // and takeDirtyRowCount() feeds the activity rate. A mutant that skips the
+  // bump leaves a screen that visibly grew while both counters say nothing
+  // happened.
+  const s = createScreenModel();
+  s.feed('a\r\nb');
+  s.takeDirtyRowCount();
+  const before = s.version();
+  s.feed('\x1b[5B'); // five rows down, past the bottom
+  assert.ok(s.screenRows().length > 2, 'the screen grew');
+  assert.ok(s.version() > before, 'a new row on screen is a visible change');
+  assert.equal(s.takeDirtyRowCount(), 1, 'the row that appeared is the dirty one');
+
+  // The contrast: moving inside the existing screen draws nothing, so neither
+  // counter may move.
+  const quiet = createScreenModel();
+  quiet.feed('a\r\nb\r\nc');
+  quiet.takeDirtyRowCount();
+  const quietBefore = quiet.version();
+  quiet.feed('\x1b[2A\x1b[1B\x1b[3C\x1b[2D');
+  assert.equal(quiet.version(), quietBefore, 'cursor motion alone is not a change');
+  assert.equal(quiet.takeDirtyRowCount(), 0);
+});
+
+test('CHA clamps to the last column and defaults to the first', () => {
+  const s = createScreenModel({ cols: 6 });
+  s.feed('ABCDEF');
+  s.feed('\r\x1b[99GX'); // past the right edge: lands on the last column
+  assert.deepEqual(s.screenRows(), ['ABCDEX']);
+  s.feed('\x1b[GY'); // no parameter means column 1
+  assert.deepEqual(s.screenRows(), ['YBCDEX']);
 });
 
 test('alternate screen: ?47 h/l toggles the flag like ?1049 does', () => {
