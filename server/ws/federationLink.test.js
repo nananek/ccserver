@@ -487,9 +487,10 @@ test('#237 duplicate dials: a late winning candidate is waited out, not asserted
   );
   assert.equal(linkA.connected, true, 'both sides read as connected here -- that is the whole problem');
   assert.equal(linkB.connected, true);
-  assert.equal(duplicateDialState().dropped, 0, 'nothing has been dropped yet: resolution has not run');
+  assert.equal(duplicateDialState().dropped, 0, 'nothing has been dropped yet: both sides adopted a first candidate, but neither has superseded it');
 
-  // Let the winning hello through; now resolution can finish.
+  // Let the winning hello through; the second candidate can now be resolved,
+  // and with it the supersede that settles the duplicate.
   assert.equal(releaseHeldAccepts(), 1, 'exactly the winning dialer\'s connection was held');
   await waitForDuplicateDialToSettle();
 
