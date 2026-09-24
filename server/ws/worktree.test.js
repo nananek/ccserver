@@ -8,13 +8,15 @@
 //     itself checked out)
 //   - a worktree lost from disk is recreated -- reattached to its branch if
 //     it survives (lostWork:true), or freshly detached if not
+//   - recreation only ever unregisters this worktree's own entry, never
+//     other sessions' registrations in the shared repo (issue #224)
 //   - removeMemberWorktree is a no-op success for a non-git cwd / missing
 //     worktree, and never --force's a removal blocked by local changes
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -127,6 +129,93 @@ test('resolveMemberWorktree: disk loss with the branch also gone falls back to a
   assert.equal(recreated.branch, null);
 });
 
+test("resolveMemberWorktree: recreating a lost worktree leaves other sessions' registrations alone (#224)", () => {
+  // Two other sessions' worktrees sharing this repo. Their directories are
+  // moved aside so this process cannot see them -- exactly the state a
+  // sandbox is in for every worktree but its own (only its role's checkout
+  // is bind-mounted), where all of them look "prunable" to git and a bare
+  // `git worktree prune` unregisters them for real.
+  const siblingA = worktree.worktreePathFor(repo, 'siblingA');
+  const siblingB = worktree.worktreePathFor(repo, 'siblingB');
+  worktree.resolveMemberWorktree(repo, 'siblingA');
+  worktree.resolveMemberWorktree(repo, 'siblingB');
+  const hiddenA = `${siblingA}.hidden`;
+  const hiddenB = `${siblingB}.hidden`;
+  renameSync(siblingA, hiddenA);
+  renameSync(siblingB, hiddenB);
+
+  // This role's own registration is stale (its checkout directory is gone),
+  // which used to trigger `git worktree prune` before recreating it.
+  const first = worktree.resolveMemberWorktree(repo, 'workerH');
+  rmSync(first.cwd, { recursive: true, force: true });
+  const recreated = worktree.resolveMemberWorktree(repo, 'workerH');
+  assert.equal(recreated.created, true);
+
+  // The siblings' registrations must survive, so simply putting their
+  // directories back makes their checkouts usable again.
+  const listed = git(repo, ['worktree', 'list', '--porcelain']);
+  assert.ok(listed.includes(`worktree ${siblingA}`), "sibling A's registration must survive");
+  assert.ok(listed.includes(`worktree ${siblingB}`), "sibling B's registration must survive");
+  renameSync(hiddenA, siblingA);
+  renameSync(hiddenB, siblingB);
+  assert.equal(git(siblingA, ['rev-parse', '--is-inside-work-tree']).trim(), 'true', 'sibling A works again');
+  assert.equal(git(siblingB, ['rev-parse', '--is-inside-work-tree']).trim(), 'true', 'sibling B works again');
+});
+
+test('resolveMemberWorktree: recreates a lost worktree when the worktree root is a symlink', () => {
+  // git records/prints worktree paths as realpaths, while worktreePathFor()
+  // builds a lexical path from CCSERVER_WORKTREE_ROOT (or $HOME). A root
+  // that sits behind a symlink (macOS tmpdir /var -> /private/var, a
+  // symlinked $HOME, or an operator's CCSERVER_WORKTREE_ROOT) must still
+  // line up, or the stale-registration lookup and removal both miss and
+  // recreation wedges forever with "missing but already registered
+  // worktree".
+  const realRoot = join(runtimeDir, 'worktrees-real');
+  const linkRoot = join(runtimeDir, 'worktrees-link');
+  mkdirSync(realRoot, { recursive: true });
+  symlinkSync(realRoot, linkRoot, 'dir');
+  const prev = process.env.CCSERVER_WORKTREE_ROOT;
+  process.env.CCSERVER_WORKTREE_ROOT = linkRoot;
+  try {
+    const first = worktree.resolveMemberWorktree(repo, 'workerSymRoot');
+    assert.equal(first.created, true);
+    rmSync(first.cwd, { recursive: true, force: true }); // disk loss -- prunable now
+
+    const recreated = worktree.resolveMemberWorktree(repo, 'workerSymRoot');
+    assert.equal(recreated.created, true, 'symlink spelling must still match the recorded realpath');
+    assert.equal(recreated.cwd, first.cwd);
+    assert.equal(git(recreated.cwd, ['rev-parse', '--is-inside-work-tree']).trim(), 'true', 'checkout is usable again');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_WORKTREE_ROOT;
+    else process.env.CCSERVER_WORKTREE_ROOT = prev;
+  }
+});
+
+test('resolveMemberWorktree: recovers an orphaned checkout when the project path is a symlink', () => {
+  // Same realpath-vs-lexical split, but on the project side: the dangling
+  // gitlink's admin dir is under the *real* project's .git/worktrees while
+  // commonDirOfProject() returns the lexical (symlinked) spelling, so the
+  // dead-checkout containment check must canonicalize both sides or the
+  // role can never be relaunched into its own path.
+  const realRepo = join(runtimeDir, 'symproj-real');
+  const linkRepo = join(runtimeDir, 'symproj-link');
+  mkdirSync(realRepo, { recursive: true });
+  git(realRepo, ['init', '-q']);
+  git(realRepo, ['-c', 'user.name=t', '-c', 'user.email=t@t.com', 'commit', '-q', '--allow-empty', '-m', 'init']);
+  symlinkSync(realRepo, linkRepo, 'dir');
+
+  const first = worktree.resolveMemberWorktree(linkRepo, 'workerSymProj');
+  writeFileSync(join(first.cwd, 'scratch.txt'), 'about to be discarded');
+  // External interference: admin dir deleted, checkout survives with a
+  // dangling .git gitlink (exactly the worker-orphaned scenario above).
+  const adminRoot = join(realRepo, '.git', 'worktrees');
+  for (const name of readdirSync(adminRoot)) rmSync(join(adminRoot, name), { recursive: true, force: true });
+
+  const recreated = worktree.resolveMemberWorktree(linkRepo, 'workerSymProj');
+  assert.equal(recreated.created, true, 'the dead checkout must be recognized as this project\'s own and replaced');
+  assert.ok(!existsSync(join(recreated.cwd, 'scratch.txt')), 'dead checkout was discarded, not reused');
+});
+
 test('removeMemberWorktree removes a clean worktree and is idempotent', () => {
   const res = worktree.resolveMemberWorktree(repo, 'workerF');
   assert.equal(worktree.removeMemberWorktree(repo, 'workerF'), true);
@@ -173,4 +262,73 @@ test('worktreePathFor still resolves an ordinary role normally, inside the confi
 test('resolveMemberWorktree propagates the escape rejection instead of creating anything outside the root', () => {
   assert.throws(() => worktree.resolveMemberWorktree(repo, '../../../escape'), /escapes the project's worktree directory/);
   assert.equal(existsSync(join(runtimeDir, 'escape')), false, 'nothing was created outside CCSERVER_WORKTREE_ROOT');
+});
+
+// --- hostile shared-metadata bounds (attacker view of issue #224) -----------
+//
+// Every sandboxed session sharing this repo can write the project's .git
+// (sandbox.js rw-binds the common dir), so <admin>/gitdir and a worktree's
+// .git must be treated as untrusted input: a FIFO there used to make git
+// (and the hand-rolled readFileSync scan) block the server's event loop
+// forever. Both tests run with a short git timeout override so the bound is
+// observable without the 30s production default.
+
+test('resolveMemberWorktree: a FIFO in .git/worktrees is bounded by the git timeout, not an event-loop hang', (t) => {
+  const fifoEntry = join(repo, '.git', 'worktrees', 'evil-fifo');
+  try {
+    mkdirSync(fifoEntry, { recursive: true });
+    execFileSync('mkfifo', [join(fifoEntry, 'gitdir')]);
+  } catch {
+    rmSync(fifoEntry, { recursive: true, force: true });
+    t.skip('mkfifo unavailable');
+    return;
+  }
+  const prev = process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS;
+  process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS = '500';
+  const path = worktree.worktreePathFor(repo, 'workerFifo');
+  try {
+    const started = Date.now();
+    let threw = false;
+    try { worktree.resolveMemberWorktree(repo, 'workerFifo'); } catch { threw = true; }
+    const elapsed = Date.now() - started;
+    // git list/add both hang on the FIFO; the timeout turns that into a
+    // (fail-closed) refusal within a second or two instead of a frozen
+    // process.
+    assert.ok(elapsed < 5000, `resolve must be bounded by the git timeout (took ${elapsed}ms, threw=${threw})`);
+    assert.ok(existsSync(fifoEntry), 'the hostile entry is left in place');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS;
+    else process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS = prev;
+    rmSync(fifoEntry, { recursive: true, force: true });
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+test("resolveMemberWorktree: a FIFO at a role checkout's .git cannot block the metadata read", (t) => {
+  // This one is read directly (worktreeGitdirTarget), not through git, so it
+  // pins readGitdirFile's O_NONBLOCK/fstat guard independently of the git
+  // timeout: a plain readFileSync would block forever on the FIFO.
+  const path = worktree.worktreePathFor(repo, 'workerFifoGit');
+  mkdirSync(path, { recursive: true });
+  writeFileSync(join(path, 'keep.txt'), 'stale non-empty dir');
+  try {
+    execFileSync('mkfifo', [join(path, '.git')]);
+  } catch {
+    rmSync(path, { recursive: true, force: true });
+    t.skip('mkfifo unavailable');
+    return;
+  }
+  const prev = process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS;
+  process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS = '500';
+  try {
+    const started = Date.now();
+    assert.throws(() => worktree.resolveMemberWorktree(repo, 'workerFifoGit'));
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 5000, `metadata read must not block on the FIFO (took ${elapsed}ms)`);
+    assert.ok(existsSync(join(path, 'keep.txt')), 'never removes a non-empty unrecognized directory');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS;
+    else process.env.CCSERVER_WORKTREE_GIT_TIMEOUT_MS = prev;
+    rmSync(path, { recursive: true, force: true });
+  }
 });
