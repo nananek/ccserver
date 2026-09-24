@@ -97,3 +97,34 @@ export function readRegularFileText(file, { maxBytes = STATE_FILE_MAX_BYTES, fol
 export function readJsonFileIfRegular(file, opts) {
   return JSON.parse(readRegularFileText(file, opts));
 }
+
+/**
+ * True only if `file` is a regular file, decided without ever blocking.
+ *
+ * For callers that do not read the file themselves but hand the PATH to
+ * something else that will open it -- dindLockHeld() passes one to flock(1).
+ * `existsSync` is not enough there: it is true for a FIFO, and the program
+ * that opens it next blocks in open(2) with no way back. Same open/fstat
+ * dance as readRegularFileText, minus the read.
+ *
+ * This is a check on a path, so it is inherently TOCTOU: the answer describes
+ * the moment it was taken. Callers that then spawn a helper on the same path
+ * still need that helper bounded (a timeout), because the file can be swapped
+ * in between.
+ */
+export function isRegularFile(file, { followSymlinks = false } = {}) {
+  const noFollow = followSymlinks ? 0 : (constants.O_NOFOLLOW || 0);
+  let fd;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | noFollow);
+  } catch {
+    return false; // missing, a symlink, a socket (ENXIO), unreadable
+  }
+  try {
+    return fstatSync(fd).isFile();
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}

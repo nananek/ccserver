@@ -13,12 +13,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
-  accessSync, constants as fsConstants, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync,
+  accessSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
-import { readRegularFileText, readJsonFileIfRegular, STATE_FILE_MAX_BYTES } from './regularFile.js';
+import { readRegularFileText, readJsonFileIfRegular, isRegularFile, STATE_FILE_MAX_BYTES } from './regularFile.js';
 
 function tmp(t) {
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-regfile-'));
@@ -175,4 +176,41 @@ test('a file over the cap is refused rather than allocated', { timeout: 10000 },
 test('a missing file still reports ENOENT, so callers can tell absent from unreadable',
   { timeout: 5000 }, (t) => {
   assert.throws(() => readRegularFileText(join(tmp(t), 'nope.json')), (err) => err.code === 'ENOENT');
+});
+
+// ---------------------------------------------------------------------------
+// isRegularFile: for paths handed to something else that will open them
+// ---------------------------------------------------------------------------
+
+test('isRegularFile answers without blocking, and says no to what existsSync says yes to',
+  { timeout: 5000 }, async (t) => {
+  const dir = tmp(t);
+  const reg = join(dir, 'reg');
+  writeFileSync(reg, 'x');
+  assert.equal(isRegularFile(reg), true);
+
+  const adir = join(dir, 'adir');
+  mkdirSync(adir);
+  assert.equal(isRegularFile(adir), false);
+
+  assert.equal(isRegularFile(join(dir, 'missing')), false);
+  assert.equal(isRegularFile('/dev/zero'), false, 'a chardev is not a regular file');
+
+  const link = join(dir, 'link');
+  symlinkSync(reg, link);
+  assert.equal(isRegularFile(link), false, 'O_NOFOLLOW by default');
+  assert.equal(isRegularFile(link, { followSymlinks: true }), true);
+
+  const sock = join(dir, 'sock');
+  const srv = net.createServer();
+  await new Promise((r) => srv.listen(sock, r));
+  t.after(() => srv.close());
+  assert.equal(isRegularFile(sock), false, 'a socket is not a regular file');
+
+  // The case it exists for: existsSync is true here, and whatever opens this
+  // path next blocks forever. A regression does not fail this, it hangs.
+  const fifo = join(dir, 'fifo');
+  if (!mkfifo(t, fifo)) return;
+  assert.equal(existsSync(fifo), true, 'existsSync says yes...');
+  assert.equal(isRegularFile(fifo), false, '...and this says no');
 });
