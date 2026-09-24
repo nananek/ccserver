@@ -544,17 +544,24 @@ export class FederationLink {
       // still on the link.
       //
       // What this order depends on (a review raised it): _foldConnectionState
-      // calls handleClose() and onClose() synchronously, and it clears each map
-      // right after iterating it. A callback that re-entered this link -- rpc()
-      // or openTerminalChannel() -- would put an entry into a map that has just
-      // been cleared, on a connection about to be destroyed, and nothing would
-      // fold it. Checked here, not assumed: the inbound handler's handleClose
-      // calls sessionManager's detachSocket (no link calls), and the outbound
-      // onClose used by remoteTerminal.js writes to the browser socket and
-      // closes it. Neither re-enters, so the window is not reachable today.
-      // That is a statement about these two callbacks as they are now, not a
-      // property of the ordering -- a future callback that calls back into the
-      // link would reopen it.
+      // calls handleClose() and onClose() synchronously, so a callback that
+      // re-entered this link could add state mid-fold. The two re-entries do
+      // NOT behave the same, so spelling them out rather than generalising:
+      //   - rpc(): pendingRpc is iterated and cleared BEFORE either channel
+      //     loop runs, so a request started from a channel callback lands in a
+      //     map the fold is already finished with. It is not folded, and the
+      //     socket it went out on is about to be destroyed.
+      //   - openTerminalChannel(): it adds to outboundChannels, which is
+      //     iterated and cleared LAST -- and a Map iterator also visits entries
+      //     added while it is running (checked). From the inbound handleClose
+      //     loop or from the outbound onClose loop, the new channel is still
+      //     reached and then cleared. This one is folded.
+      // Checked here, not assumed: the inbound handler's handleClose calls
+      // sessionManager's detachSocket (no link calls), and the outbound onClose
+      // used by remoteTerminal.js writes to the browser socket and closes it.
+      // Neither re-enters, so neither case arises today. That is a statement
+      // about these two callbacks as they are now, not a property of the
+      // ordering.
       this._foldConnectionState('federation link superseded by a duplicate connection');
       this._adopt(candidate);
       try { old.socket.destroy(); } catch { /* ignore */ }
