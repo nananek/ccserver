@@ -57,7 +57,7 @@
 //     the toggle is instant and needs no sandbox restart.
 
 import { lookup as dnsLookup } from 'node:dns';
-import { mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { createServer, request as httpRequest } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -328,21 +328,44 @@ export function readPortFile(portFile) {
   return Number.isInteger(port) && port > 0 ? port : null;
 }
 
+// How much of an unusable port file is quoted back in the failure message.
+// Only ever enough to recognise what landed there ('a stray log line', 'an
+// HTML error page'), never enough to be a channel in its own right.
+const PORT_FILE_SNIPPET_BYTES = 64;
+
 // What the port file looked like when the readiness wait gave up. Waiting on
 // the parsed value (rather than on existsSync) means 'absent' and 'present but
 // garbage' now reach the same timeout, and the thrown message is the only
 // artifact that survives -- startNetworkBroker removes the runtime dir on the
 // way out. Issue #222's complaint about the old failure was precisely that it
 // named no cause, so the reason has to carry the distinction.
+//
+// The snippet is quoted with JSON.stringify, which turns control bytes into
+// escapes. That matters more than it looks: this string is thrown, and the
+// error reaches a session-startup failure and the server log, so a terminal
+// escape or a newline reaching either verbatim would let the FILE's bytes
+// dress themselves up as log structure. The read is bounded too -- the cap
+// belongs on the read, not just on the output, so that whatever sits at the
+// path cannot decide how much is pulled into memory to describe it.
 function describeUnreadablePortFile(portFile) {
-  let raw;
+  let fd;
   try {
-    raw = readFileSync(portFile, 'utf-8');
+    fd = openSync(portFile, 'r');
   } catch (e) {
-    return e.code === 'ENOENT' ? 'never created' : `unreadable: ${e.code || e.message}`;
+    // e.code only: e.message embeds the full path, which adds nothing here
+    // and is the noisiest part of the resulting failure.
+    return e.code === 'ENOENT' ? 'never created' : `unreadable: ${e.code || 'open failed'}`;
   }
-  if (raw === '') return 'created but still empty';
-  return `unparseable: ${JSON.stringify(raw.slice(0, 64))}`;
+  try {
+    const buf = Buffer.alloc(PORT_FILE_SNIPPET_BYTES);
+    const n = readSync(fd, buf, 0, PORT_FILE_SNIPPET_BYTES, 0);
+    if (n === 0) return 'created but still empty';
+    return `unparseable: ${JSON.stringify(buf.subarray(0, n).toString('utf-8'))}`;
+  } catch (e) {
+    return `unreadable: ${e.code || 'read failed'}`;
+  } finally {
+    try { closeSync(fd); } catch { /* nothing left to close */ }
+  }
 }
 
 function runServer({ allowlist, denylist, mode, portFile, state: initialState, adminToken }) {

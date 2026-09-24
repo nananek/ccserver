@@ -673,7 +673,8 @@ const stubBrokerSpawn = (extraEnv) => (_command, args, options) => {
     // Create the path with no value in it, then optionally publish one late.
     'const fs = require("node:fs");' +
     'const pf = process.env.STUB_PORT_FILE;' +
-    'fs.writeFileSync(pf, "");' +
+    'const b64 = process.env.STUB_RAW_B64;' +
+    'fs.writeFileSync(pf, b64 ? Buffer.from(b64, "base64") : "");' +
     'if (process.env.STUB_PORT) setTimeout(() => fs.writeFileSync(pf, process.env.STUB_PORT), 400);' +
     'setTimeout(() => process.exit(0), 10000);',
   ], { ...options, env: { ...options.env, STUB_PORT_FILE: portFile, ...extraEnv } });
@@ -707,4 +708,30 @@ test('#222 startNetworkBroker gives up on a never-published port file and names 
     /network broker failed to start: port file not ready within 2s \(created but still empty\)/,
   );
   assert.ok(Date.now() - started < 10000, 'the readiness wait must be bounded by its own deadline');
+});
+
+test('#222 the failure message quotes an unusable port file bounded and escaped', async () => {
+  // The message is thrown into a session-startup failure and the server log,
+  // so the file's own bytes must not be able to pose as log structure, and the
+  // file must not get to choose how much is read to describe it.
+  const esc = String.fromCharCode(27);
+  const nul = String.fromCharCode(0);
+  const garbage = `${esc}[31m<html>not a port${nul}\n${'A'.repeat(4096)}`;
+  let err = null;
+  try {
+    await startNetworkBroker({}, {
+      spawnProcess: stubBrokerSpawn({ STUB_RAW_B64: Buffer.from(garbage, 'utf-8').toString('base64') }),
+    });
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err, 'a port file that never parses must fail the launch');
+  assert.match(err.message, /port file not ready within 2s \(unparseable: /, 'the reason must name what was wrong, not just that time ran out');
+  // Neutralised: no raw control byte survives into the message.
+  assert.ok(!err.message.includes(esc), 'a terminal escape must not reach the message verbatim');
+  assert.ok(!err.message.includes(nul), 'a NUL must not reach the message verbatim');
+  assert.ok(!err.message.includes('\n'), 'a newline must not reach the message verbatim');
+  // Bounded: the 4KiB of padding cannot drag itself into the message.
+  assert.ok(!err.message.includes('A'.repeat(200)), 'the quoted snippet must be capped');
+  assert.ok(err.message.length < 400, `message stayed bounded (was ${err.message.length})`);
 });
