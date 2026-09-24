@@ -28,6 +28,10 @@ before(async () => {
   process.env.CCSERVER_REVIEW_WORKTREE_ROOT = join(runtimeDir, 'review-worktrees');
   process.env.CCSERVER_DB_PATH = join(runtimeDir, 'test.sqlite3');
   process.env.CCSERVER_SANDBOX_HOME_ROOT = join(runtimeDir, 'home');
+  // #252: read at module load, so it has to be set before the import below.
+  // Every git call here is local and finishes in milliseconds; a short budget
+  // keeps the blocked-git test from paying the production default.
+  process.env.CCSERVER_REVIEWER_GIT_TIMEOUT_MS = '1500';
 
   reviewer = await import('./reviewer.js');
   dbMod = await import('../db.js');
@@ -273,6 +277,49 @@ test('runReview refuses a repo outside browseRoots before any git/session work',
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
   }
+});
+
+// --- #252: a git that cannot return ------------------------------------------
+//
+// run_review's cwd is the CALLER's own project directory, which that session
+// can write. Replacing .git/config with a FIFO makes git block in open(2), and
+// because reviewer.js shells out with execFileSync the whole ccserver process
+// blocks with it -- SIGTERM included. Measured: with no timeout the call never
+// returns at all.
+//
+// Two things have to hold, and they are separate. Without the timeout this
+// test does not fail, it HANGS (run this file with an external timeout).
+// Without the tagging, it fails on the message instead: a timed-out git would
+// be reported as "cwd is not a git repository" about a directory that is
+// plainly a repository, which is the wrong answer wearing a normal one's
+// clothes.
+test('#252: a blocked git is bounded and reported as a timeout, not as "not a repo"', () => {
+  const fifoRepo = join(runtimeDir, 'fifo-repo');
+  mkdirSync(fifoRepo, { recursive: true });
+  git(fifoRepo, ['init', '-q']);
+  rmSync(join(fifoRepo, '.git', 'config'));
+  execFileSync('mkfifo', [join(fifoRepo, '.git', 'config')]);
+
+  const started = Date.now();
+  const res = reviewer.validateRunReviewArgs({ cwd: fifoRepo, headRef: 'feature' });
+  const took = Date.now() - started;
+
+  assert.equal(res.ok, false);
+  assert.match(res.error, /did not respond/,
+    'a timed-out git must not be reported as "not a git repository"');
+  assert.ok(took >= 1000, `the timeout must be what ended it, took ${took}ms`);
+  assert.ok(took < 10000, `and it must be BOUNDED, took ${took}ms`);
+});
+
+// The tagging must not fire for an ordinary non-repo: that one really is
+// "not a git repository" and has to keep saying so.
+test('#252: an ordinary non-repo is still reported as not a git repository', () => {
+  const plain = join(runtimeDir, 'plain-dir');
+  mkdirSync(plain, { recursive: true });
+  const res = reviewer.validateRunReviewArgs({ cwd: plain, headRef: 'feature' });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /not a git repository/);
+  assert.doesNotMatch(res.error, /did not respond/);
 });
 
 // --- validateRunReviewArgs ---------------------------------------------------

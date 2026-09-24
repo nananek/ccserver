@@ -23,7 +23,7 @@
 //
 // The mapped result uses the same shape parseUsage()/mapRateLimits()
 // produce, so UsageWidget.jsx needs no app-specific rendering logic.
-import { readFileSync } from 'node:fs';
+import { readRegularFileText } from './ws/regularFile.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { loadSandboxConfig, isAppHidden } from './ws/sandbox.js';
@@ -90,9 +90,30 @@ export function extractGoKey(authObj) {
   return null;
 }
 
+// auth.json lives in an agent config directory that every sandboxed session
+// gets bound READ-WRITE (sandbox.js's appBinds, from AGENT_CONFIG_REL_PATHS --
+// `.local/share/opencode` is a DIRECTORY bind, so a session can unlink the
+// file and put a FIFO in its place). A plain readFileSync there does not throw
+// on a FIFO, it BLOCKS in open(2) forever, and because it is synchronous the
+// whole event loop stops with it -- including the SIGTERM handler, so the host
+// cannot be shut down short of SIGKILL (#252, the same shape as #212).
+//
+// This is reachable without any privilege: GET /api/dirs/home calls
+// opencodeGoAvailable() synchronously, so a viewer merely opening the UI
+// fires it, and warmOpencodeUsage() fires it again on every boot.
+//
+// readRegularFileText opens with O_NONBLOCK (so a FIFO returns immediately)
+// and O_NOFOLLOW, then fstats the descriptor it already holds and refuses
+// anything that is not a regular file. O_NOFOLLOW only rejects a symlinked
+// auth.json itself -- a symlinked ~/.local/share/opencode directory still
+// resolves normally, which is the shape a real install can have.
+//
+// The throw lands in the same catch the parse error already used, so the
+// behaviour for a hostile file is what it has always been for a corrupt one:
+// no key, opencode reads as unavailable.
 function readAuthFile() {
   try {
-    return JSON.parse(readFileSync(authFilePath(), 'utf-8'));
+    return JSON.parse(readRegularFileText(authFilePath()));
   } catch {
     return null;
   }

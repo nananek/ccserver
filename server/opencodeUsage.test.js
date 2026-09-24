@@ -8,7 +8,8 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -340,4 +341,39 @@ test('getOpencodeUsage: 403 with an existing cache still returns usage:null (no 
   const res = await getOpencodeUsage({ force: true });
   assert.equal(res.usage, null, 'a 403 is final: it must not fall back to the stale cached usage');
   assert.match(res.error, /No OpenCode Go subscription/);
+});
+
+// #252: ~/.local/share/opencode is bound READ-WRITE into every sandboxed
+// session (sandbox.js's appBinds, from AGENT_CONFIG_REL_PATHS), and as a
+// DIRECTORY bind -- so a session can unlink auth.json and leave a FIFO there.
+// A plain readFileSync does not throw on a FIFO, it blocks in open(2) with no
+// writer, and being synchronous it takes the whole event loop (and the SIGTERM
+// handler) down with it. GET /api/dirs/home reaches this on any viewer's first
+// page load, so it is not a privileged path.
+//
+// If this test ever regresses it does NOT fail -- it HANGS, which is the
+// symptom itself. Run this file with an external timeout.
+test('#252: a FIFO at auth.json is refused, not waited on', () => {
+  const authPath = join(dataHome, 'opencode', 'auth.json');
+  mkdirSync(join(dataHome, 'opencode'), { recursive: true });
+  try { unlinkSync(authPath); } catch { /* not there */ }
+  execFileSync('mkfifo', [authPath]);
+
+  const started = Date.now();
+  // No key, same as a corrupt or absent file -- the hostile shape lands in the
+  // catch that a parse error already used.
+  assert.equal(readOpencodeGoKey(), null);
+  assert.equal(opencodeGoAvailable(), false);
+  // Generous, but far below any "it blocked" reading: an O_NONBLOCK open of a
+  // writerless FIFO returns immediately.
+  assert.ok(Date.now() - started < 2000, `reading a FIFO must return at once, took ${Date.now() - started}ms`);
+});
+
+// The same guard must not reject the ordinary case.
+test('#252: a regular auth.json still reads normally', () => {
+  const authPath = join(dataHome, 'opencode', 'auth.json');
+  try { unlinkSync(authPath); } catch { /* not there */ }
+  mkdirSync(join(dataHome, 'opencode'), { recursive: true });
+  writeFileSync(authPath, JSON.stringify({ 'opencode-go': { type: 'api', key: 'sk-plain' } }));
+  assert.equal(readOpencodeGoKey(), 'sk-plain');
 });
