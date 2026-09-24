@@ -85,6 +85,52 @@ jobs:
       - name: Build client
         run: npm run build --workspace=client
 
+  # Issue #221 step 0. docs.yml builds docs-site only on a push to master that
+  # touches docs-site/**, so until this job existed the site was never built for
+  # a pull request: a change that breaks the docs merged green, and a PR that
+  # rewrites the docs wholesale (which #221 is) had nothing verifying it.
+  #
+  # Here rather than as a pull_request trigger on docs.yml, because that
+  # workflow's build job is wired to deployment -- it configures Pages, uploads
+  # a Pages artifact, and feeds a deploy job in the github-pages environment,
+  # under `concurrency: group: pages`. Running that on PRs would put PR builds
+  # in the same concurrency group as real deploys. This job only builds.
+  #
+  # Unconditional, not filtered on docs-site/**. The build is ~16s locally
+  # (8s npm ci + 8s astro build), which is about what one client-build leg
+  # costs and a twentieth of e2e, so a filter would buy very little. What it
+  # would cost is the case the filter cannot see: docs-site is self-contained
+  # today (no symlinks, no reads outside its own tree, its own lockfile), and a
+  # path filter would silently bake that assumption in -- the day someone
+  # generates a page from a file in the repo root, the filter stops covering it
+  # without anyone noticing. That is the failure mode #223 was about.
+  #
+  # Node 22 and not matrixed: this checks that the docs still build, and
+  # docs.yml deploys on 22, so 22 is the version that has to keep working.
+  docs-build:
+    name: Docs build (docs-site)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          # docs-site is a separate npm project with its own lockfile; the
+          # default would key the cache on the root one and `npm ci` below
+          # would not be covered by it.
+          cache-dependency-path: docs-site/package-lock.json
+
+      - name: Install dependencies
+        working-directory: docs-site
+        run: npm ci
+
+      - name: Build docs-site
+        working-directory: docs-site
+        run: npm run build
+
   # Deliberately NOT matrixed. It is by far the most expensive job (~3m30s plus
   # a browser download) and the least discriminating for a Node difference: it
   # exercises the browser/server seam, and anything a Node version changes in
