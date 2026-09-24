@@ -29,9 +29,10 @@ import { terminalWs } from './ws/terminal.js';
 import { remoteTerminalWs } from './ws/remoteTerminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
-import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
+import {
+  restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled, setWebpushReachable,
+} from './ws/notify.js';
 import { ensureVapidKeys, countSubscriptions } from './ws/pushSubscriptions.js';
-import { setWebpushReachable } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/reviewer.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
@@ -532,7 +533,8 @@ try {
     fastify.log.warn(
       'ccserver-notify is DISABLED: no delivery target is configured, so the notify MCP tool will not be '
       + 'injected into any session and agents have no way to call a human. Set notify.discordWebhook '
-      + '(or CCSERVER_DISCORD_WEBHOOK), or seed notify.subscriptions, in sandbox.config.json. '
+      + '(or CCSERVER_DISCORD_WEBHOOK), or seed notify.subscriptions, in sandbox.config.json -- or '
+      + 'subscribe a browser to Web Push from Settings > 通知, which counts as a delivery target too (#234). '
       + 'NOTE: the Vikunja channel was removed and no longer counts as a delivery target -- see '
       + 'https://github.com/nananek/ccserver/issues/207',
     );

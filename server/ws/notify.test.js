@@ -364,6 +364,39 @@ test('sendNotification: naming only an unbacked channel is reported too', async 
   });
 });
 
+// The warning is the operator's half of "the notification died" (the ok:false
+// is the agent's), so it has to survive the case it was written for: an agent
+// looping on a broken channel must not bury the log in one repeated line, and
+// a LATER outage must still be reported rather than swallowed by the first
+// one's flag.
+test('sendNotification: the unreachable warning is once per outage, not once per process', async () => {
+  await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
+    restoreNotify();
+    const realFetch = _getDeliverFetch();
+    _setDeliverFetchForTests(async () => ({ ok: true }));
+    const realWarn = console.warn;
+    const warnings = [];
+    console.warn = (...args) => { warnings.push(args.join(' ')); };
+    try {
+      // An agent in a loop on a channel nothing backs.
+      for (let i = 0; i < 5; i += 1) await sendNotification({ title: 'x', body: 'y', channels: ['webpush'] });
+      assert.equal(warnings.length, 1, 'five dead calls, one line -- a loop must not flood the log');
+
+      // A delivery that works clears the outage...
+      await sendNotification({ title: 'x', body: 'y', channels: ['discord'] });
+      assert.equal(warnings.length, 1, 'a successful send says nothing');
+
+      // ...so the NEXT outage is reported instead of being hidden by the first.
+      await sendNotification({ title: 'x', body: 'y', channels: ['webpush'] });
+      assert.equal(warnings.length, 2, 'the flag resets, so a second outage is not silent');
+      assert.match(warnings[1], /webpush/, 'and it names what was asked for');
+    } finally {
+      console.warn = realWarn;
+      _setDeliverFetchForTests(realFetch);
+    }
+  });
+});
+
 // Attribution footer: sendNotification(args, identity) appends
 // "_from: host · project · group <groupShort> · session <sessionShort>" to the
 // payload content. host comes from the resolved notify hostname, project from
