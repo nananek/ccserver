@@ -165,6 +165,63 @@ test('deliverPush itself is guarded: the dispatcher is live on the real path', a
   assert.ok(!received.some((r) => r.url === '/real-path'), 'nothing reached the listener');
 });
 
+test('deliverPush does not call the platform fetch on the real delivery path', async () => {
+  // The identity case above pins what `deliveryFetch()` RETURNS. It says
+  // nothing about what `deliverPush` CALLS. webPush.js:321 is
+  // `fetchImpl || deliveryFetch()`, and if that call site ever goes back to
+  // `globalThis.fetch`, the helper stays correct and the identity assertion
+  // stays green -- while every delivery breaks on Node >= 24. That is the
+  // exact path F2 took the first time, and on Node 22 it is not yet fatal, so
+  // CI would have stayed green and only production would have broken.
+  //
+  // So assert the call site directly, from the outside: count invocations of
+  // `globalThis.fetch` across a real delivery and require the count to stay at
+  // zero. This needs no new export and no setter -- `deliveryFetch()` stays a
+  // pure accessor -- and, unlike a probe of what the platform fetch does with
+  // our Agent, it holds identically on every Node.
+  const ecdh = createECDH('prime256v1');
+  ecdh.generateKeys();
+  const realFetch = globalThis.fetch;
+  let platformFetchCalls = 0;
+  let res;
+  try {
+    globalThis.fetch = (...args) => {
+      platformFetchCalls += 1;
+      return realFetch(...args);
+    };
+    res = await deliverPush({
+      subscription: {
+        endpoint: `https://localhost:${port}/no-platform-fetch`,
+        p256dh: b64u(ecdh.getPublicKey()),
+        auth: b64u(randomBytes(16)),
+      },
+      payload: 'x',
+      vapidKeys: generateVapidKeys(),
+      subject: 'mailto:ops@example.com',
+    });
+  } finally {
+    // Restore unconditionally: every later case in this file, and anything
+    // node:test itself does, would otherwise run against the counting wrapper.
+    globalThis.fetch = realFetch;
+  }
+
+  assert.equal(platformFetchCalls, 0,
+    'deliverPush must call the `undici` package fetch, never globalThis.fetch');
+
+  // ...and the delivery has to have actually REACHED a fetch, or the count
+  // above proves nothing. Both of deliverPush's early exits -- the endpoint
+  // re-validation at webPush.js:329 and the encryption at :335 -- return
+  // before the `doFetch` call at :343, and either one would leave the counter
+  // at zero no matter which fetch the call site picked. The connect-time SSRF
+  // refusal is the evidence that we got past them: only the dispatcher handed
+  // to a real fetch produces it. Hence a hostname rather than an IP literal,
+  // and real ECDH key material rather than placeholders.
+  assert.equal(res.ok, false);
+  assert.match(res.error, /private\/reserved address|SSRF guard/,
+    `the delivery never reached a fetch, so the count above is vacuous: ${res.error}`);
+  assert.ok(!received.some((r) => r.url === '/no-platform-fetch'), 'nothing reached the listener');
+});
+
 test('validateDeliveryEndpoint mirrors the registration rules', () => {
   assert.equal(validateDeliveryEndpoint('https://push.example.net/p/abc'), null);
   assert.match(validateDeliveryEndpoint('http://push.example.net/p/abc'), /https/);
