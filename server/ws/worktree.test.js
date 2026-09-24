@@ -8,13 +8,15 @@
 //     itself checked out)
 //   - a worktree lost from disk is recreated -- reattached to its branch if
 //     it survives (lostWork:true), or freshly detached if not
+//   - recreation only ever unregisters this worktree's own entry, never
+//     other sessions' registrations in the shared repo (issue #224)
 //   - removeMemberWorktree is a no-op success for a non-git cwd / missing
 //     worktree, and never --force's a removal blocked by local changes
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -125,6 +127,39 @@ test('resolveMemberWorktree: disk loss with the branch also gone falls back to a
   assert.equal(recreated.created, true);
   assert.equal(recreated.lostWork, false, 'the resolver never observed the branch, so it cannot flag its loss');
   assert.equal(recreated.branch, null);
+});
+
+test("resolveMemberWorktree: recreating a lost worktree leaves other sessions' registrations alone (#224)", () => {
+  // Two other sessions' worktrees sharing this repo. Their directories are
+  // moved aside so this process cannot see them -- exactly the state a
+  // sandbox is in for every worktree but its own (only its role's checkout
+  // is bind-mounted), where all of them look "prunable" to git and a bare
+  // `git worktree prune` unregisters them for real.
+  const siblingA = worktree.worktreePathFor(repo, 'siblingA');
+  const siblingB = worktree.worktreePathFor(repo, 'siblingB');
+  worktree.resolveMemberWorktree(repo, 'siblingA');
+  worktree.resolveMemberWorktree(repo, 'siblingB');
+  const hiddenA = `${siblingA}.hidden`;
+  const hiddenB = `${siblingB}.hidden`;
+  renameSync(siblingA, hiddenA);
+  renameSync(siblingB, hiddenB);
+
+  // This role's own registration is stale (its checkout directory is gone),
+  // which used to trigger `git worktree prune` before recreating it.
+  const first = worktree.resolveMemberWorktree(repo, 'workerH');
+  rmSync(first.cwd, { recursive: true, force: true });
+  const recreated = worktree.resolveMemberWorktree(repo, 'workerH');
+  assert.equal(recreated.created, true);
+
+  // The siblings' registrations must survive, so simply putting their
+  // directories back makes their checkouts usable again.
+  const listed = git(repo, ['worktree', 'list', '--porcelain']);
+  assert.ok(listed.includes(`worktree ${siblingA}`), "sibling A's registration must survive");
+  assert.ok(listed.includes(`worktree ${siblingB}`), "sibling B's registration must survive");
+  renameSync(hiddenA, siblingA);
+  renameSync(hiddenB, siblingB);
+  assert.equal(git(siblingA, ['rev-parse', '--is-inside-work-tree']).trim(), 'true', 'sibling A works again');
+  assert.equal(git(siblingB, ['rev-parse', '--is-inside-work-tree']).trim(), 'true', 'sibling B works again');
 });
 
 test('removeMemberWorktree removes a clean worktree and is idempotent', () => {

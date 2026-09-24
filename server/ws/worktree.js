@@ -160,6 +160,41 @@ function commonDirOfProject(projectCwd) {
   }
 }
 
+// Removes ONLY the .git/worktrees/<name> admin entry belonging to
+// `worktreePath` (matched through each entry's `gitdir` back-reference),
+// leaving every other registration in the shared repo alone. Deliberately
+// NOT `git worktree prune`: prune clears every registration git considers
+// stale, and from inside a sandbox every other session's worktree directory
+// is invisible, so it would delete their very much alive registrations --
+// see resolveMemberWorktree's call site (issue #224). Best effort: a
+// failure here surfaces as `git worktree add`'s own "missing but already
+// registered" error, exactly like the old prune path.
+function removeWorktreeRegistration(projectCwd, worktreePath) {
+  const commonDir = commonDirOfProject(projectCwd);
+  if (!commonDir) return;
+  const worktreesDir = join(commonDir, 'worktrees');
+  let names;
+  try {
+    names = readdirSync(worktreesDir);
+  } catch {
+    return;
+  }
+  const gitlink = resolve(worktreePath, '.git');
+  for (const name of names) {
+    let target;
+    try {
+      // The file holds the absolute path back to the worktree's `.git`
+      // gitlink; resolving against the worktrees dir keeps a relative value
+      // (never written by git itself) from resolving against process.cwd().
+      target = resolve(worktreesDir, readFileSync(join(worktreesDir, name, 'gitdir'), 'utf-8').trim());
+    } catch {
+      continue; // unreadable/non-entry -- nothing to remove
+    }
+    if (target !== gitlink) continue;
+    try { rmSync(join(worktreesDir, name), { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
 function branchOf(worktreePath) {
   try {
     const ref = git(worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim();
@@ -266,9 +301,18 @@ export function resolveMemberWorktree(projectCwd, role, hintBranch = null) {
   }
 
   // Registered in .git/worktrees/ but the directory itself is gone
-  // (prunable) -- prune the stale registration before adding again at the
+  // (prunable) -- drop that stale registration before adding again at the
   // same path, and remember whether a working branch was checked out there
-  // (the prune drops that information from `git worktree list`).
+  // (dropping it removes that information from `git worktree list`).
+  //
+  // Scoped to this worktree's OWN entry on purpose. `git worktree prune`
+  // would also clear every OTHER registration git considers prunable -- and
+  // inside a sandbox every other session's worktree directory is
+  // invisible (only this role's checkout and the project dir are bind-
+  // mounted), so all of them look prunable. One prune then unregisters
+  // checkouts that are alive and well on the host, leaving their sessions
+  // with "fatal: not a git repository: (null)" and no way to run
+  // `gh pr create` (issue #224).
   const priorBranchFromGit = existing && !existing.detached ? branchShortName(existing.branch) : null;
   // External interference may have already pruned the stale registration
   // (rm -rf + `git worktree prune`), leaving `existing` null and
@@ -279,7 +323,7 @@ export function resolveMemberWorktree(projectCwd, role, hintBranch = null) {
   // only when git no longer reports the branch.
   const priorBranch = priorBranchFromGit || (typeof hintBranch === 'string' ? hintBranch : null);
   if (existing) {
-    try { git(projectCwd, ['worktree', 'prune']); } catch { /* best effort */ }
+    removeWorktreeRegistration(projectCwd, path);
   }
 
   if (priorBranch && branchExists(projectCwd, priorBranch)) {
