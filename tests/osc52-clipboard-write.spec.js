@@ -130,3 +130,53 @@ test('the dialog preview cannot forge dialog lines or hide its content', async (
   expect(shown).toContain('␣');
   expect(shown.startsWith('innocent.txt')).toBe(true);
 });
+
+// The dialog swaps its content in place when a newer write arrives (a burst
+// collapses to the newest payload). A click is only meaningful for what was on
+// screen when it BEGAN: press on A, have the session swap in B while the button
+// is still held, release -- the click must not write B. It is refused, and the
+// viewer is asked again about what is now shown.
+//
+// B is emitted by the shell 3s after A, so the swap lands deterministically
+// while the button is held down; the poll on the preview text is what proves the
+// swap really happened before the release.
+test('a click acts only on the payload on screen when it began: a swap mid-click is refused and asked again', async ({ page }) => {
+  await openShell(page);
+
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+  expect(await readClipboard(page)).toBe(SENTINEL);
+
+  const A = 'A'.repeat(48);
+  const B = 'B'.repeat(48);
+  await page.locator('.terminal-container').click();
+  await page.keyboard.type(
+    `printf '\\033]52;c;%s\\007' ${b64(A)}; sleep 3; printf '\\033]52;c;%s\\007' ${b64(B)}; echo OSC52-EMITTED-7`,
+  );
+  await page.keyboard.press('Enter');
+
+  const preview = page.getByTestId('osc52-write-preview');
+  const allow = page.getByRole('button', { name: '許可', exact: true });
+  await expect(preview).toHaveText(A);
+
+  // Press on 許可 while A is what the dialog shows...
+  const box = await allow.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  // ...the session replaces it with B while the button is still held...
+  await expect(preview).toHaveText(B, { timeout: 10_000 });
+  // ...and the release lands on a dialog that now shows something else.
+  await page.mouse.up();
+  await page.waitForTimeout(500);
+
+  // Not written: the viewer never saw B when they pressed.
+  expect(await readClipboard(page)).toBe(SENTINEL);
+  // Asked again, about B, and told why nothing happened.
+  await expect(prompt(page)).toBeVisible();
+  await expect(preview).toHaveText(B);
+  await expect(page.getByTestId('osc52-write-swapped')).toBeVisible();
+
+  // A whole click on what is now on screen is a real decision, and writes B.
+  await allow.click();
+  await expect(prompt(page)).toBeHidden();
+  await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(B);
+});

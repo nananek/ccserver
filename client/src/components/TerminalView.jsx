@@ -316,6 +316,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // { text, preview } or null. Assigning a new one replaces any pending one,
   // which is also the burst policy -- see the onWrite handler below.
   const [clipboardPrompt, setClipboardPrompt] = useState(null);
+  // The prompt that was on screen when 許可 was PRESSED (pointer or key down).
+  // The click that follows is only a decision about THAT prompt: a later write
+  // replaces the dialog's content in place, so without this a press on A that
+  // is released after B has been swapped in would write B, which the viewer
+  // never saw when they committed to the press.
+  const clipboardPressedRef = useRef(null);
   // Sticky refusal for this terminal session (a ref, not state: the osc52
   // handler below is built once per session inside an effect and must see the
   // live value without being rebuilt).
@@ -2010,6 +2016,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             <p className="osc52-write-preview" data-testid="osc52-write-preview">
               {clipboardPrompt.preview.text || '(空 — クリップボードの内容が消去されます)'}
             </p>
+            {clipboardPrompt.swapped && (
+              <p className="osc52-write-meta" data-testid="osc52-write-swapped">
+                クリックの間に内容が入れ替わったため、書き込みませんでした。
+                いま表示されている内容を確認して、もう一度押してください。
+              </p>
+            )}
             <p className="osc52-write-meta">
               {clipboardPrompt.preview.chars} 文字
               {clipboardPrompt.preview.truncated ? ' (先頭のみ表示)' : ''}
@@ -2024,9 +2036,26 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               </button>
               <button
                 className="btn btn-primary"
+                onPointerDown={() => { clipboardPressedRef.current = clipboardPrompt; }}
+                onKeyDown={() => { clipboardPressedRef.current = clipboardPrompt; }}
                 // Synchronous inside the click handler on purpose: that is
                 // what gives navigator.clipboard.writeText its activation.
-                onClick={() => { const { text } = clipboardPrompt; setClipboardPrompt(null); writeClipboardText(text); }}
+                onClick={() => {
+                  const pressed = clipboardPressedRef.current;
+                  clipboardPressedRef.current = null;
+                  // The dialog content changed between the press and this
+                  // click: refuse, keep the dialog open on what is shown now,
+                  // and let the viewer decide again. (No recorded press means
+                  // a click with no press phase at all -- e.g. assistive tech
+                  // -- so there is no window in which a swap could sit.)
+                  if (pressed && pressed !== clipboardPrompt) {
+                    setClipboardPrompt((p) => p && { ...p, swapped: true });
+                    return;
+                  }
+                  const { text } = clipboardPrompt;
+                  setClipboardPrompt(null);
+                  writeClipboardText(text);
+                }}
               >
                 許可
               </button>
