@@ -210,6 +210,7 @@ test('docs persist to .saved-group-docs.json independently of .saved-groups.json
   const originalBroker = groupManager.getGroup(gid).controlBroker;
   try {
     groupManager.publishGroupDoc(gid, 'workerA', 'plan', 'persisted content');
+    groupManager.publishGroupDoc(gid, 'orchestrator', 'brief', 'persisted instruction');
     const raw = JSON.parse(readFileSync(process.env.CCSERVER_GROUP_DOCS_PATH, 'utf-8'));
     assert.ok(raw[gid], 'group entry present in the docs file');
     assert.equal(raw[gid].plan.content, 'persisted content');
@@ -221,6 +222,11 @@ test('docs persist to .saved-group-docs.json independently of .saved-groups.json
     assert.ok(restored.ids.includes(gid));
     const fetched = groupManager.fetchGroupDoc(gid, 'plan');
     assert.equal(fetched.content, 'persisted content', 'restoreGroups() reattached the persisted doc');
+    // The orchestrator boundary must survive the restart: a restored doc that
+    // lost its publisher would read as the worker side and become overwritable.
+    assert.equal(groupManager.fetchGroupDoc(gid, 'brief').publishedBy, 'orchestrator');
+    assert.equal(groupManager.publishGroupDoc(gid, 'workerB', 'brief', 'rewritten').error, 'key-owned-by-other-side');
+    assert.equal(groupManager.publishGroupDoc(gid, 'orchestrator', 'plan', 'x').error, 'key-owned-by-other-side');
   } finally {
     if (originalBroker) stopBroker(originalBroker);
     groupManager.destroyGroup(gid);

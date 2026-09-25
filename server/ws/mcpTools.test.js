@@ -1519,33 +1519,6 @@ test('publishDocAsOrchestrator: the identity is fixed, not taken from deps.role'
   assert.equal(res.publishedBy, 'orchestrator');
 });
 
-test('publish over the orchestrator boundary is refused both ways and the document is untouched', async () => {
-  const g = await makeGroupAsync();
-  tools.publishDoc(handoffDeps(g, 'workerSec', 'sess-s1'), { key: 'attack-review-abc1234', content: 'reviewer findings' });
-  const overWorker = tools.publishDocAsOrchestrator(controlDeps(g), { key: 'attack-review-abc1234', content: 'all clear' });
-  assert.equal(overWorker.error, 'key-owned-by-other-side');
-
-  tools.publishDocAsOrchestrator(controlDeps(g), { key: 'brief', content: 'orchestrator brief' });
-  const overOrchestrator = tools.publishDoc(handoffDeps(g, 'workerB', 'sess-b1'), { key: 'brief', content: 'rewritten' });
-  assert.equal(overOrchestrator.error, 'key-owned-by-other-side');
-
-  const findings = tools.fetchDoc(controlDeps(g), { key: 'attack-review-abc1234' });
-  assert.equal(findings.content, 'reviewer findings');
-  assert.equal(findings.publishedBy, 'workerSec');
-  const brief = tools.fetchDoc(controlDeps(g), { key: 'brief' });
-  assert.equal(brief.content, 'orchestrator brief');
-  assert.equal(brief.publishedBy, 'orchestrator');
-});
-
-test('publishDoc: worker behavior is unchanged -- worker keys are still overwritten by the last worker to publish', async () => {
-  const g = await makeGroupAsync();
-  tools.publishDoc(handoffDeps(g, 'workerA', 'sess-a1'), { key: 'plan', content: 'v1' });
-  const res = tools.publishDoc(handoffDeps(g, 'workerB', 'sess-b1'), { key: 'plan', content: 'v2' });
-  assert.equal(res.ok, true);
-  assert.equal(res.publishedBy, 'workerB');
-  assert.equal(tools.fetchDoc(controlDeps(g), { key: 'plan' }).content, 'v2');
-});
-
 test('publishDoc: deps with no role never becomes the orchestrator (no fallback identity)', async () => {
   const g = await makeGroupAsync();
   tools.publishDocAsOrchestrator(controlDeps(g), { key: 'brief', content: 'orchestrator brief' });

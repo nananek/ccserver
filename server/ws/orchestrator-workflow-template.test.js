@@ -103,13 +103,6 @@ test('mcpServer.js: read_output description states the discipline, status tools 
   assert.match(mcpServerSource, /Call this once per turn instead of polling read_output/);
 });
 
-// The attacker-perspective review is a required gate before the final review
-// -> push -> PR stage, not an optional extra. Every load-bearing instruction
-// below has a failure mode if it silently disappears, so each is pinned:
-// drop "actually run the attacks" and the review decays into a static
-// read-through; drop the detached checkout and the reviewer hits git's
-// same-branch-in-two-worktrees refusal; drop the separate-worker rule and the
-// author reviews its own intent instead of its result.
 // The orchestrator has publish_doc (control MCP server), and the template says
 // so. What is pinned here is that the text matches the tool list AND that
 // the addition stayed a plain description: the review gate's own wording is
@@ -146,6 +139,13 @@ test('mcpServer.js: publish_doc is registered on BOTH servers and each descripti
   assert.match(handoff, /tools\.publishDoc\(deps, args\)/);
 });
 
+// The attacker-perspective review is a required gate before the final review
+// -> push -> PR stage, not an optional extra. Every load-bearing instruction
+// below has a failure mode if it silently disappears, so each is pinned:
+// drop "actually run the attacks" and the review decays into a static
+// read-through; drop the detached checkout and the reviewer hits git's
+// same-branch-in-two-worktrees refusal; drop the separate-worker rule and the
+// author reviews its own intent instead of its result.
 test('template: the attacker-perspective review gate is mandatory and fully specified', () => {
   // The stage exists and is marked mandatory in the heading itself.
   assert.match(template, /^## Attacker-perspective review stage \(MANDATORY before the final review\)$/m);
