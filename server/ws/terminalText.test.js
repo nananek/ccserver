@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, sessionOutputText } from './mcpTools.js';
+import { stripAnsi, sessionOutputText, readOutput } from './mcpTools.js';
 
 const ESC = '\x1b';
 const BEL = '\x07';
@@ -181,4 +181,90 @@ test('sessionOutputText: the F1 shapes never reach the modal, in a buffer of pty
   assert.equal(truncated, false);
   assert.equal(text, 'COLON-SGR\nCURSORSTYLE\nDCS:AFTER-DCS\nPLAIN-DCS:END\nC0:ABCDEF\nsafespoiled\n');
   assertClean(text, 'modal text');
+});
+
+// --- F3: what is kept is decided by size, not by how the writer chunked it ------
+//
+// sessionOutputText used to keep the last 200 buffer CHUNKS and only then apply
+// the 16 KiB cap. A program that writes in small pieces makes 200 chunks a few
+// hundred bytes, so nearly the whole screen was left out -- and `truncated` said
+// false, because the cap never bit. The modal offers no way to ask for more.
+const CAP = 16 * 1024;
+
+// n one-character writes, cycling through the digits so that the text says
+// where in the stream each character came from.
+function digitWrites(n) {
+  return Array.from({ length: n }, (_, i) => String(i % 10));
+}
+
+test('sessionOutputText: 3000 one-byte writes are all there, and truncated stays false', () => {
+  const chunks = digitWrites(3000);
+  const out = sessionOutputText({ outputBuffer: chunks });
+  assert.equal(out.text, chunks.join(''), 'nothing of a 3000-byte screen may be left out');
+  assert.equal(out.text.length, 3000);
+  assert.equal(out.truncated, false);
+});
+
+test('sessionOutputText: small writes past the cap keep the NEWEST 16 KiB and say truncated', () => {
+  // 20000 two-byte writes = 40000 chars. 200 chunks would have been 400 chars.
+  const chunks = Array.from({ length: 20000 }, (_, i) => String(i % 100).padStart(2, '0'));
+  const all = chunks.join('');
+  const out = sessionOutputText({ outputBuffer: chunks });
+  assert.equal(out.truncated, true, 'older output was left out, so it must be reported');
+  assert.equal(out.text, all.slice(-CAP), 'and what is kept is the newest 16 KiB exactly');
+  assert.equal(out.raw, all.slice(-CAP));
+});
+
+test('sessionOutputText: whatever is left out is reported, for any way of chunking the same stream', () => {
+  const stream = 'the quick brown fox\n'.repeat(1500); // 30000 chars
+  for (const size of [1, 2, 7, 199, 200, 201, 1000, 30000]) {
+    const chunks = [];
+    for (let at = 0; at < stream.length; at += size) chunks.push(stream.slice(at, at + size));
+    const out = sessionOutputText({ outputBuffer: chunks });
+    // Chunking must make no difference to the answer.
+    assert.equal(out.text, stream.slice(-CAP), `chunk size ${size}`);
+    assert.equal(out.truncated, true, `chunk size ${size}`);
+  }
+  // ...and a stream that fits is never reported as cut, however finely it was written.
+  const short = 'short output\n'.repeat(100);
+  for (const size of [1, 3, 50]) {
+    const chunks = [];
+    for (let at = 0; at < short.length; at += size) chunks.push(short.slice(at, at + size));
+    const out = sessionOutputText({ outputBuffer: chunks });
+    assert.equal(out.text, short, `chunk size ${size}`);
+    assert.equal(out.truncated, false, `chunk size ${size}`);
+  }
+});
+
+// read_output is the other caller of the same helper, and its default read
+// follows: the newest 16 KiB of the buffer, not the newest 200 chunks of it.
+function readOutputOf(session, args = {}) {
+  return readOutput({
+    groupId: 'g',
+    groupManager: { isSessionInGroup: () => true },
+    sessionManager: { getSession: () => session },
+  }, { sessionId: 's', ...args });
+}
+
+test('readOutput: by default it returns the newest 16 KiB whatever size the writes were', () => {
+  const session = { cwd: '/x', app: 'claude', exited: false, outputBuffer: digitWrites(3000) };
+  const out = readOutputOf(session);
+  assert.equal(out.text, session.outputBuffer.join(''));
+  assert.equal(out.raw, out.text);
+  assert.equal(out.truncated, false);
+});
+
+test('readOutput: an explicit tail is still the caller\'s own count of chunks', () => {
+  // The caller asked for the last 200 chunks, and gets exactly those: the
+  // parameter keeps its documented meaning. (It is the DEFAULT that no longer
+  // counts chunks.)
+  const session = { cwd: '/x', app: 'claude', exited: false, outputBuffer: digitWrites(3000) };
+  const out = readOutputOf(session, { tail: 200 });
+  assert.equal(out.text, session.outputBuffer.slice(-200).join(''));
+  assert.equal(out.truncated, false, 'a narrowing the caller asked for is not the server dropping output');
+
+  // Larger than the buffer, or absurd: clamped, never an error, and still bounded by the cap.
+  assert.equal(readOutputOf(session, { tail: 1e9 }).text.length, 3000);
+  assert.equal(readOutputOf(session, { tail: 0 }).text, session.outputBuffer.at(-1));
+  assert.equal(readOutputOf(session, { tail: Number.NaN }).text.length, 3000, 'not a number: treated as absent');
 });

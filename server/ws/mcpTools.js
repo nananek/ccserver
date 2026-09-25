@@ -97,15 +97,20 @@ export function listGroupSessions(deps) {
 // `screenIdleMs` for stuck/busy judgments over `text`/`raw`.
 //
 // Cost control: this feature exists to keep the orchestrator's context
-// small, so a default call must not balloon it. `tail` counts output chunks
-// (default 200 -- the server buffers up to ~512KB in chunks), and the
-// returned text is hard-capped at MAX_READOUTPUT_CHARS; when the cap bites,
-// the tail of the buffer is returned and `truncated: true` is set so the
-// caller knows the head of the output was dropped. The text cap cuts at a
-// boundary that never splits an escape sequence (a split one would leak
-// bare control bytes through stripAnsi). The `screen` view gets its own cap
-// (a row count well under the char cap by construction).
-const DEFAULT_OUTPUT_TAIL_CHUNKS = 200;
+// small, so a default call must not balloon it. The returned text is
+// hard-capped at MAX_READOUTPUT_CHARS; when the cap bites, the tail of the
+// buffer (the server keeps ~512KB) is returned and `truncated: true` is set
+// so the caller knows the head of the output was dropped. That cap, in
+// characters, is the ONLY thing that decides how much a default call keeps:
+// a chunk is one write from the terminal and says nothing about size (3000
+// one-byte writes are 3000 chunks of one byte), so counting chunks made a
+// program that writes in small pieces lose nearly the whole screen while
+// `truncated` said false (#265 attack review, F3). `tail`, when the caller
+// passes it, is their own request to look at only the last N chunks. The text
+// cap cuts at a boundary that never splits an escape sequence (a split one
+// would leak the rest of it into the text as literal characters). The
+// `screen` view gets its own cap (a row count well under the char cap by
+// construction).
 const MAX_OUTPUT_TAIL_CHUNKS = 100000;
 const MAX_READOUTPUT_CHARS = 16 * 1024;
 // The screen view is capped independently of the text cap: at most this many
@@ -206,8 +211,6 @@ function escapeSequenceEnd(text, start) {
 }
 
 export function readOutput(deps, { sessionId, tail }) {
-  const t = Number.isFinite(tail) ? tail : DEFAULT_OUTPUT_TAIL_CHUNKS;
-  const n = Math.min(Math.max(t, 1), MAX_OUTPUT_TAIL_CHUNKS);
   if (!deps.groupManager.isSessionInGroup(deps.groupId, sessionId)) {
     return { error: 'unauthorized', message: 'session is not a member of this group' };
   }
@@ -215,7 +218,7 @@ export function readOutput(deps, { sessionId, tail }) {
   if (!session) {
     return { error: 'not-found', message: 'session not found' };
   }
-  const { raw, text, truncated } = sessionOutputText(session, n);
+  const { raw, text, truncated } = sessionOutputText(session, tail);
   return {
     sessionId,
     cwd: session.cwd,
@@ -237,10 +240,17 @@ export function readOutput(deps, { sessionId, tail }) {
 // is that it does NOT get to re-derive terminal text in the client, nor
 // carry a cap of its own: it inherits MAX_READOUTPUT_CHARS and the
 // sequence-safe cut, whatever those become (#253).
-export function sessionOutputText(session, tail = DEFAULT_OUTPUT_TAIL_CHUNKS) {
-  const t = Number.isFinite(tail) ? tail : DEFAULT_OUTPUT_TAIL_CHUNKS;
-  const n = Math.min(Math.max(t, 1), MAX_OUTPUT_TAIL_CHUNKS);
-  const joined = session.outputBuffer.slice(-n).join('');
+//
+// `tail` is read_output's optional "only the last N chunks" (clamped to
+// 1..MAX_OUTPUT_TAIL_CHUNKS; anything that is not a finite number means "not
+// given"). Without it the whole buffer is the input and the character cap
+// alone decides what is kept, so `truncated` is true exactly when the cap left
+// older output out. The copy modal passes no `tail`.
+export function sessionOutputText(session, tail) {
+  const chunks = Number.isFinite(tail)
+    ? session.outputBuffer.slice(-Math.min(Math.max(tail, 1), MAX_OUTPUT_TAIL_CHUNKS))
+    : session.outputBuffer;
+  const joined = chunks.join('');
   const truncated = joined.length > MAX_READOUTPUT_CHARS;
   return {
     raw: truncated ? joined.slice(-MAX_READOUTPUT_CHARS) : joined,
