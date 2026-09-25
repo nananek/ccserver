@@ -246,11 +246,11 @@ test('restoreGroups treats a non-finite publishedAt as missing and keeps a finit
 // restored manifest entry: `size` also went through typeof, so a hand-edited or
 // corrupt 1e999 (Infinity once parsed) was accepted -- and sizes are what the
 // group's quota arithmetic adds up.
-test('restoreGroups treats a non-finite size as missing (0, like an absent one) and keeps a finite one', async () => {
+test('restoreGroups treats a non-finite or negative size as missing (0, like an absent one) and keeps a finite non-negative one', async () => {
   const gid = await makeGroup('/srv/proj-files-size-non-finite');
   const originalBroker = groupManager.getGroup(gid)?.controlBroker || null;
   try {
-    const names = ['pos-inf.txt', 'neg-inf.txt', 'absent.txt', 'finite.txt'];
+    const names = ['pos-inf.txt', 'neg-inf.txt', 'absent.txt', 'finite.txt', 'negative.txt', 'negative-huge.txt', 'zero.txt'];
     groupManager.publishGroupFilesFromUpload(gid, names.map((name) => ({ name, mimeType: 'text/plain', data: Buffer.from(name) })));
     const idOf = (name) => groupManager.listGroupFiles(gid).files.find((f) => f.name === name).id;
     const ids = Object.fromEntries(names.map((name) => [name, idOf(name)]));
@@ -261,6 +261,10 @@ test('restoreGroups treats a non-finite size as missing (0, like an absent one) 
     raw[gid][ids['neg-inf.txt']].size = '-INF';
     delete raw[gid][ids['absent.txt']].size;
     raw[gid][ids['finite.txt']].size = 7;
+    // finite, but a negative "size" is no size: it would be summed into the quota and make room
+    raw[gid][ids['negative.txt']].size = -5;
+    raw[gid][ids['negative-huge.txt']].size = -1e300;
+    raw[gid][ids['zero.txt']].size = 0;
     const text = JSON.stringify(raw).replaceAll('"+INF"', '1e999').replaceAll('"-INF"', '-1e999');
     writeFileSync(process.env.CCSERVER_GROUP_FILES_PATH, text);
     const planted = JSON.parse(text)[gid];
@@ -276,6 +280,11 @@ test('restoreGroups treats a non-finite size as missing (0, like an absent one) 
     assert.equal(restored.get('pos-inf.txt').size, 0, 'a non-finite size is treated as absent');
     assert.equal(restored.get('neg-inf.txt').size, 0);
     assert.equal(restored.get('finite.txt').size, 7);
+    assert.equal(restored.get('negative.txt').size, 0, 'a negative size is treated as absent');
+    assert.equal(restored.get('negative-huge.txt').size, 0);
+    assert.equal(restored.get('zero.txt').size, 0, 'control: zero is a size and stays');
+    // and the sum the quota is checked against is the sum of the real ones, never below it
+    assert.equal([...restored.values()].reduce((sum, f) => sum + f.size, 0), 7);
   } finally {
     if (originalBroker) stopBroker(originalBroker);
     groupManager.destroyGroup(gid);

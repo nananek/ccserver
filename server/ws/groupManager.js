@@ -898,8 +898,10 @@ export function restoreGroups() {
             id: meta.id,
             name: sanitizeDisplayName(meta.name),
             // Number.isFinite, not typeof: see the docs restore above. A size is
-            // what the group's quota arithmetic adds up.
-            size: Number.isFinite(meta.size) ? meta.size : 0,
+            // what the group's quota arithmetic adds up, and a byte count is never
+            // negative: one that is would make room in the quota, so it is as
+            // missing as a non-finite one.
+            size: Number.isFinite(meta.size) && meta.size >= 0 ? meta.size : 0,
             mimeType: typeof meta.mimeType === 'string' ? meta.mimeType : mimeForName(meta.name),
             direction: meta.direction === 'agent' ? 'agent' : 'user',
             publishedBy: typeof meta.publishedBy === 'string' ? meta.publishedBy : null,
