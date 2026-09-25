@@ -181,6 +181,8 @@ async function pinParent(parent, roots, platform) {
     if (err.code === 'ENOENT') return fail('not-found', 'Parent directory not found');
     if (err.code === 'ENOTDIR') return fail('validation', 'Parent is not a directory');
     if (err.code === 'EACCES') return fail('forbidden', 'Permission denied');
+    // A NUL byte or an over-long name never names a directory.
+    if (err.code === 'ERR_INVALID_ARG_VALUE' || err.code === 'ENAMETOOLONG') return fail('validation', 'Invalid parent path');
     return null;
   };
 

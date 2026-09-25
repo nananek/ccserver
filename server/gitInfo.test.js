@@ -275,6 +275,11 @@ test('an ancestor repository above browseRoots is not described', async () => {
   assert.deepEqual(res.data, { path: inner, isRepo: false, reason: 'outside-roots' });
 });
 
+test('a path that cannot name a directory (NUL byte, over-long name) is a validation error, not a crash', async () => {
+  assert.equal((await readGitInfo(`${base}/a\0b`, [])).code, 'validation');
+  assert.equal((await readGitInfo(`${base}/${'x'.repeat(5000)}`, [])).code, 'validation');
+});
+
 test('bad requests: no path, missing directory, a file', async () => {
   assert.equal((await readGitInfo(undefined, [])).code, 'validation');
   assert.equal((await readGitInfo('', [])).code, 'validation');

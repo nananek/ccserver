@@ -290,6 +290,16 @@ test('parent handling: outside browseRoots, missing, and not a directory', async
   assert.deepEqual(readdirSync(outside), [], 'nothing is written outside the roots');
 });
 
+test('a parent that cannot name a directory (NUL byte, over-long name) is a validation error, not a crash', async () => {
+  const a = arena();
+  const ghBin = fakeGh(a.rec, ghBody(a.rec));
+  for (const parent of [`${a.parent}/a\0b`, `${a.parent}/${'x'.repeat(5000)}`]) {
+    const res = await clone(a, { parent, url: 'o/r' }, { ghBin });
+    assert.equal(res.code, 'validation', JSON.stringify(res));
+  }
+  assert.ok(!existsSync(join(a.rec, 'called')));
+});
+
 test('an existing non-empty directory, file, or symlink at the final name is a conflict; gh is not run', async () => {
   const a = arena();
   const ghBin = fakeGh(a.rec, ghBody(a.rec));

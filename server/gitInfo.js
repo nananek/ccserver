@@ -186,6 +186,8 @@ export async function readGitInfo(requestedPath, roots, opts = {}) {
     if (err.code === 'ENOENT') return fail('not-found', 'Directory not found');
     if (err.code === 'ENOTDIR') return fail('validation', 'Not a directory');
     if (err.code === 'EACCES') return fail('forbidden', 'Permission denied');
+    // A NUL byte or an over-long name never names a directory.
+    if (err.code === 'ERR_INVALID_ARG_VALUE' || err.code === 'ENAMETOOLONG') return fail('validation', 'Invalid path');
     throw err;
   }
   // The realpath actually used, not the one checked a moment ago.
