@@ -336,8 +336,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // mounted that way) still receives writes, but its dialog is not rendered:
   // counting from the write would let 許可 go live unseen, so the first thing
   // a click made just as the tab is switched to lands on is a live button.
+  //
+  // Leaving the screen also forgets a count already served: the same click made
+  // just as the tab is shown again would otherwise meet a button that went live
+  // before the tab was left. It has to be reset here, while hidden, not when the
+  // tab is shown -- a reset on show would run after the frame that shows it.
   useEffect(() => {
-    if (clipboardSeq === null || !visible) return undefined;
+    if (clipboardSeq === null) return undefined;
+    if (!visible) { setClipboardArmedSeq(null); return undefined; }
     const timer = setTimeout(() => setClipboardArmedSeq(clipboardSeq), CLIPBOARD_ALLOW_DELAY_MS);
     return () => clearTimeout(timer);
   }, [clipboardSeq, visible]);

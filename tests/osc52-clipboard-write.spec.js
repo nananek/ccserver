@@ -373,6 +373,22 @@ test('swaps that keep coming keep 許可 inert for as long as they do', async ({
   await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe('burst-6');
 });
 
+// Clicks 許可 in the very task that puts the dialog on screen (the moment its
+// tab is shown), and records what aria-disabled said at that moment. Arm it
+// while the dialog is hidden; read the result from window.__osc52Shown.
+async function clickAllowWhenShown(page) {
+  await page.evaluate(() => {
+    const allow = document.querySelector('[data-testid="osc52-write-allow"]');
+    const shown = (window.__osc52Shown = { disabled: null });
+    new MutationObserver((_, observer) => {
+      if (allow.getClientRects().length === 0) return; // still hidden
+      shown.disabled = allow.getAttribute('aria-disabled');
+      allow.click();
+      observer.disconnect();
+    }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+  });
+}
+
 // An inactive tab stays mounted under display:none and still receives writes, so
 // its dialog can come up where nobody can see it. The delay must be spent on
 // screen: if it ran out unseen, 許可 would already be live in the very frame the
@@ -395,17 +411,7 @@ test('the delay is spent on screen: a dialog that came up while its tab was hidd
   // ...and stays that way for longer than the delay (the time that must not count).
   await page.waitForTimeout(CLIPBOARD_ALLOW_DELAY_MS + 500);
 
-  // Click 許可 in the very task that puts the dialog on screen.
-  await page.evaluate(() => {
-    const allow = document.querySelector('[data-testid="osc52-write-allow"]');
-    const shown = (window.__osc52Shown = { disabled: null });
-    new MutationObserver((_, observer) => {
-      if (allow.getClientRects().length === 0) return; // still hidden
-      shown.disabled = allow.getAttribute('aria-disabled');
-      allow.click();
-      observer.disconnect();
-    }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
-  });
+  await clickAllowWhenShown(page);
   await terminalItem.click();
   await expect(prompt(page)).toBeVisible();
 
@@ -414,6 +420,40 @@ test('the delay is spent on screen: a dialog that came up while its tab was hidd
   await expect(prompt(page)).toBeVisible();
 
   // The delay runs from when it is shown, so it does become live, and works.
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+  await allowButton(page).click();
+  await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(PAYLOAD);
+});
+
+// The count is not banked. 許可 having gone live once does not survive the
+// tab being hidden: the same click-as-the-tab-is-shown lands on it otherwise.
+test('the delay is spent again when the tab is shown again: a dialog that had gone live is inert on return', async ({ page }) => {
+  await openShell(page);
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+
+  await emitWrite(page, PAYLOAD, 'OSC52-EMITTED-19');
+  await expect(prompt(page)).toBeVisible();
+  // It went live while it was on screen...
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+
+  // ...and the tab is left, then come back to. The dialog's backdrop covers the
+  // tab bar, so the switch away is one that does not go through the pointer
+  // (a notification click, a tab opened by the session's own group): dispatched
+  // straight to the tab.
+  const terminalItem = page.locator('.left-sidebar [data-section="opened"] .session-menu-item').first();
+  await page.locator('.tab-list').getByTitle('Files').dispatchEvent('click');
+  await expect(page.locator('.terminal-container')).toBeHidden();
+  await expect(prompt(page)).toBeHidden();
+
+  await clickAllowWhenShown(page);
+  await terminalItem.click();
+  // First what 許可 said when the dialog came back: a live one has already been
+  // clicked (and has written and closed the dialog) by the time anything else
+  // here could look.
+  await expect.poll(() => page.evaluate(() => window.__osc52Shown.disabled)).toBe('true');
+  expect(await readClipboard(page)).toBe(SENTINEL);
+  await expect(prompt(page)).toBeVisible();
+
   await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
   await allowButton(page).click();
   await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(PAYLOAD);
