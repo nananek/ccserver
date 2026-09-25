@@ -22,33 +22,23 @@
 // live group ever owns a dir at once.
 
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, statSync, rmSync, existsSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { mkdirSync, rmSync, existsSync } from 'node:fs';
+import { basename, resolve } from 'node:path';
 import * as groupManager from '../ws/groupManager.js';
 import { createSession, getSession, isInfrastructureError, retireSessionForReuse } from '../ws/sessionManager.js';
-import { sandboxAvailable, sandboxUnavailableReason, loadSandboxConfig } from '../ws/sandbox.js';
+import { sandboxAvailable, sandboxUnavailableReason } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
-import { projectHashForCwd } from '../ws/projectHash.js';
 import { normalizePresetInput } from '../ws/workerPresets.js';
-import { isContained } from '../pathPolicy.js';
-import { resolvePath, PATH_IDS } from '../paths.js';
-
-// Was a hardcoded literal with no env override at all; now a registry
-// entry (CCSERVER_ORCHESTRATOR_ROOT, issue #201) resolved per call.
-function orchestratorRoot() { return resolvePath(PATH_IDS.orchestrator); }
 
 // Initial workers per group: MAX_GROUP_MEMBERS includes the orchestrator, so
 // the canonical workers[] payload accepts at most that many minus one.
 export const MAX_WORKERS = groupManager.MAX_GROUP_MEMBERS - 1;
 
 // The orchestrator dir is derived deterministically from the project path
-// (not the random groupId), so it can be reused as the orchestrator's cwd
-// (scratch space) across the group being destroyed and a new group launching
-// for the same project -- see destroyGroup's comment in groupManager.js.
-// CLAUDE.md/AGENTS.md themselves are never persisted here (see the header
-// comment above); only the dir itself is reused.
+// (see groupManager.orchestratorDirForCwd, shared with restoreGroups); kept as
+// this module's export for its callers and tests.
 export function orchestratorDirForCwd(cwd) {
-  return join(orchestratorRoot(), projectHashForCwd(cwd));
+  return groupManager.orchestratorDirForCwd(cwd);
 }
 
 // Pure duplicate-project detection for POST /groups: two groups for the same
@@ -58,15 +48,6 @@ export function orchestratorDirForCwd(cwd) {
 export function groupExistsForCwd(cwd, groups) {
   const target = resolve(cwd);
   return groups.find((g) => resolve(g.cwd) === target) || null;
-}
-
-function validCwd(cwd) {
-  if (typeof cwd !== 'string' || !cwd.startsWith('/') || cwd === '/') return false;
-  try {
-    return statSync(cwd).isDirectory();
-  } catch {
-    return false;
-  }
 }
 
 function memberSpecFromBody(spec) {
@@ -218,25 +199,12 @@ export async function launchGroupFromSpec(body) {
   const input = body || {};
   const { cwd } = input;
 
-  if (!validCwd(cwd)) {
-    return { ok: false, code: 'validation', message: 'cwd must be an existing directory (not /)' };
-  }
-  // browseRoots (issue #189): the group's own project cwd IS the
-  // client-supplied, potentially-arbitrary path browseRoots exists to bound
-  // -- unlike orchestratorDir/worktree paths (createSession's own browseRoots
-  // check exempts those as server-synthesized scratch dirs, see
-  // pathPolicy.js's isCcserverScratchPath), which are never themselves
-  // checked against browseRoots. Checked here, once, at group creation: every
-  // worker's actual launch cwd is a worktree that shares this project's git
-  // object database (see worktree.js), so without this check a group could
-  // still be created for -- and read git history from -- a project outside
-  // browseRoots even though no individual session's cwd would ever expose it.
-  const { browseRoots, browseRootsInvalid } = loadSandboxConfig();
-  if (browseRootsInvalid) {
-    return { ok: false, code: 'validation', message: 'sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed working directories cannot be determined. Fix the config and reload.' };
-  }
-  if (browseRoots.length > 0 && !isContained(resolve(cwd), browseRoots)) {
-    return { ok: false, code: 'validation', message: `cwd is outside the allowed browseRoots (sandbox.config.json's "browseRoots"). Choose a directory under one of: ${browseRoots.join(', ')}` };
+  // One rule for "may this be a group's project cwd" -- the same one
+  // restoreGroups applies to a saved group (groupManager.validateGroupCwd: an
+  // absolute directory that is not "/", inside browseRoots when those are set).
+  const cwdCheck = groupManager.validateGroupCwd(cwd);
+  if (!cwdCheck.ok) {
+    return { ok: false, code: 'validation', message: cwdCheck.message };
   }
   // The orchestrator dir is derived from cwd, so a second group for the same
   // project would share it (cross-talk through resumeLast, CLAUDE.md fights).

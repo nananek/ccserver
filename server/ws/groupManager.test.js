@@ -20,7 +20,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, cpSync, statSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, cpSync, statSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -39,6 +39,7 @@ const fakeActivitySnapshot = (session) => classifyActivity({
 
 let runtimeDir;
 let groupManager;
+let worktreePathForTest;
 let groupsToDestroy = [];
 // A throwaway copy of the real template, seeded from it once up front. The
 // "template edit lands on the next generation" test below mutates this copy
@@ -64,6 +65,7 @@ before(async () => {
   cpSync(join(import.meta.dirname, 'orchestrator-template.md'), templateCopyPath);
   process.env.CCSERVER_ORCHESTRATOR_TEMPLATE_PATH = templateCopyPath;
   groupManager = await import('./groupManager.js');
+  ({ worktreePathFor: worktreePathForTest } = await import('./worktree.js'));
 });
 
 after(() => {
@@ -157,12 +159,17 @@ test('restoreGroups rebuilds a group from the persisted file (restart survival)'
 
 test('restoreGroups does not write CLAUDE.md/AGENTS.md (generation happens only at actual spawn time)', async () => {
   const gid = randomUUID();
-  const orchDir = join(runtimeDir, `orch-nowrite-${gid}`);
+  // What a real saved file carries: the dir derived from the project cwd (a
+  // unique cwd, so the dir is this test's own). An arbitrary persisted path is
+  // NOT created -- see the tampered-file tests below.
+  const cwd = `/srv/proj-nowrite-${gid}`;
+  const orchDir = groupManager.orchestratorDirForCwd(cwd);
+  rmSync(orchDir, { recursive: true, force: true });
   writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([{
     id: gid,
     createdAt: 1,
-    cwd: '/srv/proj',
-    allowedCwds: ['/srv/proj'],
+    cwd,
+    allowedCwds: [cwd],
     orchestratorDir: orchDir,
     orchestratorApp: 'claude',
     instructions: '# Orchestrator instructions',
@@ -176,6 +183,201 @@ test('restoreGroups does not write CLAUDE.md/AGENTS.md (generation happens only 
   assert.equal(existsSync(join(orchDir, 'CLAUDE.md')), false, 'restoreGroups no longer writes CLAUDE.md');
   assert.equal(existsSync(join(orchDir, 'AGENTS.md')), false, 'restoreGroups no longer writes AGENTS.md');
   groupsToDestroy.push(gid);
+});
+
+// --- restoreGroups admits a saved group by the rules a NEW group had to meet ---
+// (#279 made a restart an ordinary way for a group to come back, so the saved
+// file is input to everything restoreGroups sets up). Each case below is one
+// field of a hand-edited saved-groups.json; the control (an untouched entry)
+// is asserted first in each, so a "not restored" result cannot be the fixture
+// being wrong.
+
+// Restores from `entries` (an array, or raw JSON text for keys JSON.stringify
+// cannot write, like an own "__proto__"), collecting console.warn.
+function restoreFrom(entries) {
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, typeof entries === 'string' ? entries : JSON.stringify(entries));
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => warnings.push(a.join(' '));
+  try {
+    return { info: groupManager.restoreGroups(), warnings };
+  } finally {
+    console.warn = realWarn;
+  }
+}
+
+// A saved entry exactly as the running server writes it for `cwd`.
+function savedEntry(cwd, extra = {}) {
+  const id = randomUUID();
+  groupsToDestroy.push(id);
+  return {
+    id,
+    createdAt: 1,
+    cwd,
+    allowedCwds: [cwd],
+    orchestratorDir: typeof cwd === 'string' ? groupManager.orchestratorDirForCwd(cwd) : null,
+    orchestratorApp: 'claude',
+    instructions: null,
+    sandboxOpts: null,
+    members: { workerA: 'dead-a', orchestrator: 'dead-o' },
+    ...extra,
+  };
+}
+
+// browseRoots for the duration of fn: an allowed root, a sibling outside it,
+// and a symlink INSIDE the allowed root that points at the outside one.
+async function withBrowseRoots(fn) {
+  const base = mkdtempSync(join(tmpdir(), 'ccs-restore-roots-'));
+  const allowed = join(base, 'allowed');
+  const outside = join(base, 'outside');
+  mkdirSync(allowed);
+  mkdirSync(outside);
+  symlinkSync(outside, join(allowed, 'link-out'));
+  const cfg = join(base, 'sandbox.config.json');
+  writeFileSync(cfg, JSON.stringify({ browseRoots: [allowed] }));
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfg;
+  try {
+    return await fn({ base, allowed, outside, cfg });
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG; else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
+test('restoreGroups refuses a group whose cwd creation would have refused (not absolute, "/", outside browseRoots, a ".." or a symlink out of them)', async () => {
+  await withBrowseRoots(async ({ allowed, outside }) => {
+    const inside = join(allowed, 'proj');
+    mkdirSync(inside);
+    const control = restoreFrom([savedEntry(inside)]);
+    assert.equal(control.info.restored, 1, `control: an untouched entry inside browseRoots is restored (${control.warnings.join(' | ')})`);
+    assert.deepEqual(control.warnings, [], 'and restoring it says nothing');
+
+    const bad = {
+      '/etc': '/etc',
+      '"/"': '/',
+      relative: 'srv/proj',
+      empty: '',
+      'not a string': 12,
+      '.. out of browseRoots': `${allowed}/../outside`,
+      'symlink out of browseRoots': join(allowed, 'link-out'),
+      'symlink out, then a child': join(allowed, 'link-out', 'child'),
+    };
+    for (const [what, cwd] of Object.entries(bad)) {
+      const { info, warnings } = restoreFrom([savedEntry(cwd)]);
+      assert.equal(info.restored, 0, `${what}: not restored`);
+      assert.match(warnings.join('\n'), /not restoring saved group/, `${what}: says why`);
+    }
+    assert.equal(existsSync(outside), true);
+  });
+});
+
+test('restoreGroups still restores a group whose project directory is not there right now (an unmounted disk is not a tampered file)', async () => {
+  const cwd = `/srv/proj-missing-${randomUUID()}`;
+  const { info } = restoreFrom([savedEntry(cwd)]);
+  assert.equal(info.restored, 1);
+});
+
+test('restoreGroups with an unreadable browseRoots config restores the group, with a warning, instead of dropping every saved group', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'ccs-restore-badcfg-'));
+  const cfg = join(base, 'sandbox.config.json');
+  writeFileSync(cfg, JSON.stringify({ browseRoots: 'not-an-array' }));
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfg;
+  try {
+    const cwd = join(base, 'proj');
+    mkdirSync(cwd);
+    // creation refuses in this state; restoring must not lose the group over it
+    assert.equal(groupManager.validateGroupCwd(cwd).code, 'browse-roots-invalid', 'control: the config really is unusable');
+    const { info, warnings } = restoreFrom([savedEntry(cwd)]);
+    assert.equal(info.restored, 1);
+    assert.match(warnings.join('\n'), /without the browseRoots containment check/);
+    // ... while the checks that do not need the config still apply
+    assert.equal(restoreFrom([savedEntry('/')]).info.restored, 0);
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG; else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('restoreGroups never creates an orchestratorDir the saved file names: it derives it from cwd, as creation does', async () => {
+  const cwd = `/srv/proj-orchdir-${randomUUID()}`;
+  const derived = groupManager.orchestratorDirForCwd(cwd);
+  rmSync(derived, { recursive: true, force: true });
+  const control = restoreFrom([savedEntry(cwd)]);
+  assert.equal(control.info.restored, 1);
+  assert.equal(groupManager.getGroup(control.info.ids[0]).orchestratorDir, derived, 'control: the derived dir is the one used');
+  assert.equal(existsSync(derived), true);
+  assert.deepEqual(control.warnings, []);
+
+  const evilRoot = mkdtempSync(join(tmpdir(), 'ccs-restore-evil-'));
+  try {
+    for (const evil of [join(evilRoot, 'made', 'by', 'a-saved-file'), '/proc/ccs-should-never-exist', `${derived}/../../escaped-${randomUUID()}`]) {
+      const { info, warnings } = restoreFrom([savedEntry(cwd, { orchestratorDir: evil })]);
+      assert.equal(info.restored, 1, `the group is still restored (${evil})`);
+      assert.equal(groupManager.getGroup(info.ids[0]).orchestratorDir, derived, 'and uses the derived dir');
+      assert.equal(existsSync(evil), false, `the path the file named was not created (${evil})`);
+      assert.match(warnings.join('\n'), /not the one derived from its cwd/);
+    }
+    assert.deepEqual(readdirSync(evilRoot), [], 'nothing was created under the tampered location');
+  } finally {
+    rmSync(evilRoot, { recursive: true, force: true });
+  }
+});
+
+test('restoreGroups normalizes sandboxOpts like createGroup: known flags as booleans, everything else gone', async () => {
+  const cwd = `/srv/proj-opts-${randomUUID()}`;
+  const tampered = { gpgVault: 'yes', gpg: 1, sshAgent: { x: 1 }, evil: true, bindEverything: '/', tools: { rtk: 1, codeReviewGraph: '', extra: true } };
+  const { info } = restoreFrom([savedEntry(cwd, { sandboxOpts: tampered })]);
+  const group = groupManager.getGroup(info.ids[0]);
+  assert.deepEqual(group.sandboxOpts, groupManager.normalizeSandboxOpts(tampered));
+  assert.deepEqual(group.sandboxOpts, { gpg: true, sshAgent: true, gpgVault: true, tools: { rtk: true, codeReviewGraph: false } });
+  for (const junk of ['a string', 42, ['x'], true]) {
+    const r = restoreFrom([savedEntry(`/srv/proj-opts-junk-${randomUUID()}`, { sandboxOpts: junk })]);
+    assert.deepEqual(groupManager.getGroup(r.info.ids[0]).sandboxOpts, groupManager.normalizeSandboxOpts(junk), `${JSON.stringify(junk)} normalizes the way creation would`);
+  }
+});
+
+test('restoreGroups keeps only members that addMember could have created (no "__proto__", no path-shaped role)', async () => {
+  const cwd = `/srv/proj-members-${randomUUID()}`;
+  const entry = savedEntry(cwd);
+  const text = JSON.stringify([entry]).replace(
+    '"members":{"workerA":"dead-a","orchestrator":"dead-o"}',
+    '"members":{"workerA":"dead-a","orchestrator":"dead-o","__proto__":"dead-p","../escape":"dead-e","workerB/../x":"dead-x","worker":"dead-w","":"dead-empty","workerC":"dead-c"}',
+  );
+  assert.match(text, /"__proto__":"dead-p"/, 'control: the fixture really carries an own __proto__ key');
+  const { info, warnings } = restoreFrom(text);
+  assert.equal(info.restored, 1);
+  assert.deepEqual([...groupManager.getGroup(info.ids[0]).members.keys()].sort(), ['orchestrator', 'workerA', 'workerC']);
+  assert.equal(warnings.filter((w) => /dropping member/.test(w)).length, 5);
+});
+
+test('restoreGroups keeps allowedCwds and memberWorktrees to what creation can produce: the cwd and its own per-role worktrees', async () => {
+  const cwd = `/srv/proj-wt-${randomUUID()}`;
+  const good = worktreePathForTest(cwd, 'workerA');
+  const control = restoreFrom([savedEntry(cwd, {
+    allowedCwds: [cwd, good],
+    memberWorktrees: { workerA: { path: good, gitCommonDir: '/srv/x/.git', branch: 'feat/a' } },
+  })]);
+  const g0 = groupManager.getGroup(control.info.ids[0]);
+  assert.deepEqual([...g0.allowedCwds].sort(), [cwd, good].sort(), 'control: the legitimate entries are kept');
+  assert.deepEqual([...g0.memberWorktrees.keys()], ['workerA']);
+  assert.deepEqual(control.warnings, []);
+
+  const { info, warnings } = restoreFrom([savedEntry(cwd, {
+    allowedCwds: [cwd, good, '/etc', '/', worktreePathForTest(`${cwd}-other`, 'workerA'), `${good}/../../elsewhere`, 7, null],
+    memberWorktrees: {
+      workerA: { path: good, gitCommonDir: null, branch: null },
+      workerB: { path: '/etc', gitCommonDir: null, branch: null },
+      '../escape': { path: worktreePathForTest(cwd, 'workerZ'), gitCommonDir: null, branch: null },
+      orchestrator: { path: worktreePathForTest(cwd, 'orchestrator'), gitCommonDir: null, branch: null },
+    },
+  })]);
+  const g = groupManager.getGroup(info.ids[0]);
+  assert.deepEqual([...g.allowedCwds].sort(), [cwd, good].sort());
+  assert.deepEqual([...g.memberWorktrees.keys()], ['workerA']);
+  assert.ok(warnings.some((w) => /dropping allowed cwd/.test(w)));
+  assert.ok(warnings.some((w) => /dropping worktree entry/.test(w)));
 });
 
 test('groupExistsForCwd matches a real registered group (POST /groups 409 detection)', async () => {

@@ -27,7 +27,9 @@ import { NO_ACTIVITY } from './activity.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
 import { loadSandboxConfig } from './sandbox.js';
-import { resolveMemberWorktree, removeMemberWorktree, listWorktreeDirs } from './worktree.js';
+import { resolveMemberWorktree, removeMemberWorktree, listWorktreeDirs, worktreePathFor } from './worktree.js';
+import { projectHashForCwd } from './projectHash.js';
+import { isContained } from '../pathPolicy.js';
 import { readJsonFileIfRegular, readRegularFileText } from './regularFile.js';
 import { sendNotification } from './notify.js';
 import {
@@ -210,6 +212,59 @@ export function generateOrchestratorClaudeMdSrc(groupId) {
   mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
   writeFileSync(dest, content);
   return dest;
+}
+
+// The orchestrator dir is derived deterministically from the project path
+// (not the random groupId), so it can be reused as the orchestrator's cwd
+// (scratch space) across the group being destroyed and a new group launching
+// for the same project -- see destroyGroup's comment below. CLAUDE.md/AGENTS.md
+// themselves are never persisted here; only the dir itself is reused. Shared by
+// POST /groups (routes/groups.js) and restoreGroups: a group's orchestratorDir
+// is never something a request or a saved file gets to choose.
+function orchestratorRoot() { return resolvePath(PATH_IDS.orchestrator); }
+export function orchestratorDirForCwd(cwd) {
+  return join(orchestratorRoot(), projectHashForCwd(cwd));
+}
+
+// May `cwd` be the project directory of a group? One rule for both places that
+// admit a group: POST /groups (launchGroupFromSpec) and restoreGroups.
+// { ok: true } or { ok: false, code, message }; codes: 'shape' (not an absolute
+// path, or "/"), 'not-a-directory', 'browse-roots-invalid' (the config that
+// bounds the answer cannot be read), 'outside-browse-roots'.
+//
+// browseRoots (issue #189): the group's own project cwd IS the client-supplied,
+// potentially-arbitrary path browseRoots exists to bound -- unlike
+// orchestratorDir/worktree paths (createSession's own browseRoots check exempts
+// those as server-synthesized scratch dirs, see pathPolicy.js's
+// isCcserverScratchPath), which are never themselves checked against
+// browseRoots. Checked once, when a group is admitted: every worker's actual
+// launch cwd is a worktree that shares this project's git object database (see
+// worktree.js), so without this check a group could still be created for -- and
+// read git history from -- a project outside browseRoots even though no
+// individual session's cwd would ever expose it.
+//
+// `requireDirectory: false` skips only the "exists right now" test. Whether the
+// directory exists is a fact about the machine at that moment, not about the
+// group: restoreGroups must not turn an unmounted project disk at boot into
+// the permanent loss of the group (the next persist rewrites the file).
+export function validateGroupCwd(cwd, { requireDirectory = true } = {}) {
+  const notADirectory = { ok: false, message: 'cwd must be an existing directory (not /)' };
+  if (typeof cwd !== 'string' || !cwd.startsWith('/') || cwd === '/') return { ...notADirectory, code: 'shape' };
+  if (requireDirectory) {
+    try {
+      if (!statSync(cwd).isDirectory()) return { ...notADirectory, code: 'not-a-directory' };
+    } catch {
+      return { ...notADirectory, code: 'not-a-directory' };
+    }
+  }
+  const { browseRoots, browseRootsInvalid } = loadSandboxConfig();
+  if (browseRootsInvalid) {
+    return { ok: false, code: 'browse-roots-invalid', message: 'sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed working directories cannot be determined. Fix the config and reload.' };
+  }
+  if (browseRoots.length > 0 && !isContained(resolve(cwd), browseRoots)) {
+    return { ok: false, code: 'outside-browse-roots', message: `cwd is outside the allowed browseRoots (sandbox.config.json's "browseRoots"). Choose a directory under one of: ${browseRoots.join(', ')}` };
+  }
+  return { ok: true };
 }
 
 export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts = null, orchestratorApp = null, orchestratorModel, orchestratorSandboxOpts, memberPrefs = null, instructions = null }) {
@@ -607,20 +662,59 @@ export function restoreGroups() {
   let restored = 0;
   for (const e of arr) {
     if (!e || typeof e.id !== 'string') continue;
+    // A saved group is admitted by the rules a NEW group had to meet, because
+    // since #279 a restart is an ordinary way for a group to come back and this
+    // file is trusted input to everything below (cwd names a directory whose
+    // .git is shared into the sandboxes; orchestratorDir gets created on disk;
+    // sandboxOpts decide which host credentials a member is offered).
+    // POST /groups REFUSES a bad cwd rather than picking another one, and so
+    // does this: there is no default to fall back to for a project directory.
+    // Every other field below is DERIVED or NORMALIZED the way creation does it,
+    // never taken as written.
+    const cwdCheck = validateGroupCwd(e.cwd, { requireDirectory: false });
+    if (!cwdCheck.ok && cwdCheck.code !== 'browse-roots-invalid') {
+      console.warn(`[groupManager] not restoring saved group ${e.id}: cwd ${JSON.stringify(e.cwd)} is not admissible (${cwdCheck.message})`);
+      continue;
+    }
+    if (!cwdCheck.ok) {
+      // Creation refuses in this case. Restoring refuses nothing: a typo in
+      // sandbox.config.json must not cost every saved group, and the next
+      // persist would make that loss permanent. The other checks still apply.
+      console.warn(`[groupManager] saved group ${e.id}: ${cwdCheck.message} Restoring it without the browseRoots containment check.`);
+    }
+    const cwd = e.cwd;
+    // Never the persisted value: creation derives it from cwd, and a saved
+    // path would otherwise be mkdir'd below wherever the file says.
+    const orchestratorDir = orchestratorDirForCwd(cwd);
+    if (typeof e.orchestratorDir === 'string' && e.orchestratorDir !== orchestratorDir) {
+      console.warn(`[groupManager] saved group ${e.id}: orchestratorDir ${JSON.stringify(e.orchestratorDir)} is not the one derived from its cwd; using ${orchestratorDir}`);
+    }
+    // Only what creation can ever put there: the project cwd and the
+    // per-role worktrees derived from it (resolveMemberLaunchCwd adds those).
+    const allowedCwds = new Set([cwd]);
+    for (const c of Array.isArray(e.allowedCwds) ? e.allowedCwds : []) {
+      if (typeof c !== 'string' || c === cwd) continue;
+      const role = basename(c);
+      if (WORKER_ROLE_RE.test(role) && c === worktreePathFor(cwd, role)) allowedCwds.add(c);
+      else console.warn(`[groupManager] saved group ${e.id}: dropping allowed cwd ${JSON.stringify(c)} (not the project cwd or one of its worker worktrees)`);
+    }
     const group = {
       id: e.id,
       createdAt: e.createdAt || Date.now(),
-      cwd: typeof e.cwd === 'string' ? e.cwd : null,
-      allowedCwds: new Set(Array.isArray(e.allowedCwds) ? e.allowedCwds.filter((c) => typeof c === 'string') : []),
+      cwd,
+      allowedCwds,
       members: new Map(),
       // Restored groups are complete by definition (they were persisted
       // after assembly finished): never subject them to the assembly grace.
       assembling: false,
-      orchestratorDir: typeof e.orchestratorDir === 'string' ? e.orchestratorDir : null,
+      orchestratorDir,
       orchestratorApp: typeof e.orchestratorApp === 'string' ? e.orchestratorApp : null,
       orchestratorModel: normalizeModel(e.orchestratorModel),
       instructions: typeof e.instructions === 'string' ? e.instructions : null,
-      sandboxOpts: e.sandboxOpts || null,
+      // The same normalization createGroup applies: only the known flags, as
+      // booleans. (A well-formed {gpgVault:true, ...} is indistinguishable from
+      // a group that was created that way, so this cannot refuse one.)
+      sandboxOpts: normalizeSandboxOpts(e.sandboxOpts),
       memberPrefs: normalizeMemberPrefs(e.memberPrefs, e.orchestratorApp, e.sandboxOpts),
       memberWorktrees: new Map(),
       docs: new Map(),
@@ -645,6 +739,13 @@ export function restoreGroups() {
     if (e.memberWorktrees && typeof e.memberWorktrees === 'object') {
       for (const [role, wt] of Object.entries(e.memberWorktrees)) {
         if (wt && typeof wt === 'object' && typeof wt.path === 'string') {
+          // addMember's role rule, and the path worktreePathFor derives for it:
+          // the role keys drive removeMemberWorktree() at destroy, and the
+          // path is what the orphan scan trusts as "claimed".
+          if (!WORKER_ROLE_RE.test(role) || wt.path !== worktreePathFor(cwd, role)) {
+            console.warn(`[groupManager] saved group ${e.id}: dropping worktree entry for role ${JSON.stringify(role)} (not a worker role, or not its derived worktree path)`);
+            continue;
+          }
           group.memberWorktrees.set(role, {
             path: wt.path,
             gitCommonDir: typeof wt.gitCommonDir === 'string' ? wt.gitCommonDir : null,
@@ -659,7 +760,14 @@ export function restoreGroups() {
     if (!group.orchestratorApp) group.orchestratorApp = group.memberPrefs.orchestrator.app;
     if (e.members && typeof e.members === 'object') {
       for (const [role, sid] of Object.entries(e.members)) {
-        if (typeof sid === 'string') group.members.set(role, sid);
+        if (typeof sid !== 'string') continue;
+        // 'orchestrator' or what addMember accepts; a role also becomes part of
+        // socket and worktree paths, so anything else is not a member.
+        if (role !== 'orchestrator' && !WORKER_ROLE_RE.test(role)) {
+          console.warn(`[groupManager] saved group ${e.id}: dropping member ${JSON.stringify(role)} (not a valid role)`);
+          continue;
+        }
+        group.members.set(role, sid);
       }
     }
     for (const s of savedSessions) {
@@ -678,11 +786,9 @@ export function restoreGroups() {
         });
       }
     }
-    if (group.orchestratorDir) {
-      try {
-        mkdirSync(group.orchestratorDir, { recursive: true, mode: 0o700 });
-      } catch { /* nothing to do */ }
-    }
+    try {
+      mkdirSync(group.orchestratorDir, { recursive: true, mode: 0o700 });
+    } catch { /* nothing to do */ }
     groups.set(group.id, group);
     ids.push(group.id);
     restored++;
