@@ -688,9 +688,11 @@ const gitExec = promisify(execFile);
 // GIT_CONFIG_PARAMETERS / GIT_CONFIG_GLOBAL (measured).
 //
 // The other three were what `status` needed. Measured: none of the three commands
-// left runs anything through them, even unpinned. They stay as layers, not as
-// something the tests hold: git versions other than 2.55 were not measured, and a
-// pin that costs nothing is a cheaper thing to keep than to re-derive.
+// left runs anything through them, even unpinned. They stay as layers: git
+// versions other than 2.55 were not measured, and a pin that costs nothing is a
+// cheaper thing to keep than to re-derive. No trap can go red without them, so
+// what is held is that they are PASSED (the argument test in mcpTools.test.js),
+// not that they matter.
 const GIT_READ_ONLY_ARGS = [
   '--no-optional-locks',              // layer: a read-only tool writes nothing to the project's .git
   '-c', 'core.fsmonitor=false',       // layer

@@ -1951,6 +1951,47 @@ test('repoInfo: control characters in a commit subject do not reach the orchestr
   }
 });
 
+// #283 review: three of the pins (--no-optional-locks, core.fsmonitor=false,
+// core.hooksPath=/dev/null) are LAYERS: none of the three commands left runs
+// anything through them today (measured, git 2.55), so no trap can go red
+// without them, and nothing else held them. What repo_info hands to git is
+// therefore pinned from the outside: a `git` first on PATH that records its
+// argv and the environment variables that matter, then runs the real one.
+// Changing a pin (dropping one, or adding one) is meant to fail here, so that it
+// is a decision and not a slip; the two the measurements do need
+// (log.showSignature, GIT_NO_LAZY_FETCH) and GIT_NO_REPLACE_OBJECTS are held by
+// their own traps above as well.
+test('repoInfo hands git exactly the pinned arguments and environment, for each of the three commands and nothing else', async () => {
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf-8' }).trim();
+  const bin = makeTmpRepo('recorder');
+  const calls = join(bin, 'calls.log');
+  writeFileSync(join(bin, 'git'), [
+    '#!/bin/sh',
+    '{ printf ARGV; for a in "$@"; do printf \'\\t%s\' "$a"; done; printf \'\\n\'',
+    '  printf \'ENV\\tGIT_NO_LAZY_FETCH=%s\\tGIT_NO_REPLACE_OBJECTS=%s\\n\' "${GIT_NO_LAZY_FETCH-<unset>}" "${GIT_NO_REPLACE_OBJECTS-<unset>}"',
+    `} >> "${calls}"`,
+    `exec "${realGit}" "$@"`,
+    '',
+  ].join('\n'));
+  chmodSync(join(bin, 'git'), 0o755);
+
+  const r = makeTrapRepo('pins');
+  const out = await repoInfoOf(r, { PATH: `${bin}:${process.env.PATH}` });
+  assert.ok(out.git && out.git.head, 'repo_info still works through the recorder');
+
+  const lines = readFileSync(calls, 'utf-8').split('\n').filter(Boolean).map((l) => l.split('\t'));
+  const argvs = lines.filter((l) => l[0] === 'ARGV').map((l) => l.slice(1));
+  const envs = lines.filter((l) => l[0] === 'ENV').map((l) => l.slice(1));
+  const pins = ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'log.showSignature=false'];
+  assert.deepEqual(argvs, [
+    [...pins, '-C', r.dir, 'branch', '--show-current'],
+    [...pins, '-C', r.dir, 'rev-parse', '--short', 'HEAD'],
+    [...pins, '-C', r.dir, 'log', '--oneline', '-5'],
+  ]);
+  assert.equal(envs.length, 3);
+  for (const e of envs) assert.deepEqual(e, ['GIT_NO_LAZY_FETCH=1', 'GIT_NO_REPLACE_OBJECTS=1']);
+});
+
 test('repoInfo: config injected through the environment (GIT_CONFIG_COUNT) cannot start a command either', async () => {
   const r = makeTrapRepo('envcfg');
   restat(r);
