@@ -18,14 +18,62 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 
-const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Z0-9]|[>=<]|#[0-9])/g;
-
 // Handoff summaries are orchestrator input (context) -- cap their size so a
 // noisy worker can't balloon the queue's memory beyond the count cap.
 const MAX_HANDOFF_SUMMARY_CHARS = 32 * 1024;
 
+// --- Terminal bytes -> text ------------------------------------------------
+//
+// stripAnsi() turns what a pty printed into text that is safe to show and to
+// copy out: it is the source of read_output's `text` and of the copy modal
+// (GET /api/sessions/:id/text, #253), where an operator selects it with the
+// OS's own menu and pastes it somewhere else. Whatever survives here is on
+// their clipboard, and it is whatever the program in the terminal chose to
+// print -- so this is written against the grammar of escape sequences, not
+// against a list of the ones seen so far (the list is how colon-separated SGR,
+// space-intermediate CSI, DCS and tmux passthrough got through).
+//
+// Two layers, and the second is what carries the guarantee:
+//   1. escapeSequenceEnd() parses each sequence the way a terminal does, so
+//      the whole sequence goes -- body included -- and no `[31m` is left
+//      behind as literal text.
+//   2. Whatever is still there is then dropped by class: every control
+//      character except newline and tab (C0, DEL, C1 -- ESC included) and
+//      every bidi control. A malformed or exotic sequence the parser
+//      mis-measures can leave harmless printable residue, but never a control
+//      byte, so the output can never carry an ESC or reorder its own display.
+//
+// CR goes with the other C0: pty output is CRLF, so this turns "a\r\nb" into
+// "a\nb" (what the textarea would normalize to anyway), and a bare CR -- a
+// line overwritten in place -- can no longer overwrite the copied text.
+const UNSAFE_TEXT_CHARS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]|\p{Bidi_Control}/gu;
+
+// The 8-bit C1 introducers, each standing for ESC plus the character on the
+// right. xterm.js honors them, so they cannot be passed through as "just
+// characters".
+const C1_INTRODUCERS = { 0x90: 'P', 0x98: 'X', 0x9b: '[', 0x9d: ']', 0x9e: '^', 0x9f: '_' };
+// DCS, SOS, OSC, PM and APC: a string that runs to a terminator.
+const STRING_INTRODUCERS = 'PX]^_';
+
+function isIntroducer(code) {
+  return code === 0x1b || (code >= 0x90 && code <= 0x9f && C1_INTRODUCERS[code] !== undefined);
+}
+
 export function stripAnsi(text) {
-  return text.replace(ANSI_RE, '');
+  let out = '';
+  let from = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (!isIntroducer(text.charCodeAt(i))) continue;
+    out += text.slice(from, i);
+    const end = escapeSequenceEnd(text, i);
+    if (end === -1) { // the input stops inside the sequence: that is all that is left
+      from = text.length;
+      break;
+    }
+    from = end;
+    i = end - 1;
+  }
+  return (out + text.slice(from)).replace(UNSAFE_TEXT_CHARS, '');
 }
 
 // deps: { groupId, groupManager, sessionManager }
@@ -68,70 +116,93 @@ const MAX_SCREEN_ROWS = 40;
 // Cut `text` to at most `maxChars` chars at a boundary that does not split
 // an escape sequence, keeping the tail. stripAnsi() only removes *complete*
 // sequences, so a plain `.slice(-maxChars)` can land mid-sequence and leak
-// bare control bytes into the text view. Walk the stream from the front,
-// skip complete sequences, and cut at the last clean position at or before
-// the cap -- when the cap splits a sequence, cut right after that sequence
-// (the tail then starts clean and stays at or under the cap).
+// the rest of it into the text view as literal characters. Walk the stream
+// from the front, sequence by sequence: when the cap splits one, start right
+// after it (the tail then starts clean and stays at or under the cap).
+//
+// The stream itself may also end mid-sequence (a pty chunk boundary split it),
+// cap or no cap; that dangling sequence is dropped from the end. Only the last
+// one can dangle -- an incomplete sequence runs to the end of the input.
 function cleanTextCut(text, maxChars) {
-  if (text.length > maxChars) {
-    const limit = text.length - maxChars;
-    let cut = limit;
-    let i = 0;
-    while (i <= limit && i < text.length) {
-      if (text[i] === '\x1b') {
-        const end = ansiSequenceEnd(text, i);
-        if (end === -1) break; // dangling sequence to the end -- cut at the limit
-        if (end > limit) { // the cap splits this sequence
-          cut = end;
-          break;
-        }
-        i = end;
-      } else {
-        i++;
-      }
+  const limit = text.length - maxChars;
+  let start = Math.max(limit, 0);
+  let end = text.length;
+  for (let i = 0; i < text.length;) {
+    if (!isIntroducer(text.charCodeAt(i))) {
+      i++;
+      continue;
     }
-    text = text.slice(cut);
-  }
-  // The stream itself may end mid-sequence (a pty chunk boundary split it),
-  // even when the cap did not: trim a dangling escape from the tail so bare
-  // control bytes never leak through stripAnsi. Only the last sequence can
-  // dangle (a dangling sequence runs to the end of the input).
-  for (let k = 0; k < text.length; k++) {
-    if (text[k] === '\x1b' && ansiSequenceEnd(text, k) === -1) {
-      return text.slice(0, k);
+    const seqEnd = escapeSequenceEnd(text, i);
+    if (seqEnd === -1) {
+      end = i;
+      break;
     }
+    if (i < limit && seqEnd > limit) start = seqEnd; // the cap splits this one
+    i = seqEnd;
   }
-  return text;
+  return text.slice(start, end);
 }
 
-// End index (exclusive) of the escape sequence starting at `start` (which
-// must be an ESC byte), or -1 when the sequence is incomplete at the end of
-// the input. Mirrors the ANSI_RE grammar (CSI/OSC/charset/single-char).
-function ansiSequenceEnd(text, start) {
-  const next = text[start + 1];
-  if (next === '[') {
-    let j = start + 2;
-    while (j < text.length && /[0-9;?]/.test(text[j])) j++;
-    if (j >= text.length) return -1;
-    return j + 1; // final byte 0x40-0x7E (anything else still terminates it)
+// End index (exclusive) of the escape sequence starting at `start` -- which
+// must be an ESC or a C1 introducer -- or -1 when the input ends before the
+// sequence does. This is the ONE place that knows what a sequence looks like;
+// stripAnsi() and cleanTextCut() both go through it, so they cannot disagree
+// about where a sequence ends (which is how a cap once cut one byte inside
+// the next sequence, #213).
+//
+// The grammar is ECMA-48 as terminals implement it (the VT500 parser model
+// that xterm.js follows):
+//   CSI  ESC [  then bytes 0x20-0x3F  then a final byte 0x40-0x7E
+//        (parameters 0x30-0x3F, including ':' and the private markers
+//        <=>?, and intermediates 0x20-0x2F such as the space in `CSI 1 SP q`;
+//        an out-of-order mix is consumed the same way -- the parser's
+//        "ignore" state -- rather than left half-eaten)
+//   OSC / DCS / SOS / PM / APC  ESC ] P X ^ _  then a string up to ST
+//        (ESC \) or BEL. CAN and SUB abort a string, and an ESC that does
+//        not begin ST ends it and starts a new sequence (it is not consumed):
+//        a sequence that never terminates cannot swallow what follows it.
+//        tmux's `ESC P tmux; ESC ESC ] ... ESC \` passthrough is ordinary DCS
+//        to this parser; its inner ESC ESC is what ends the DCS body here.
+//   ESC  then intermediates 0x20-0x2F  then a final 0x30-0x7E
+//        (charset designators `ESC ( B`, DEC line attributes `ESC # 8`, ...),
+//        which with no intermediate is the two-byte form (`ESC 7`, `ESC M`,
+//        `ESC =`, `ESC \`).
+// An ESC followed by anything else is a lone ESC (length 1).
+function escapeSequenceEnd(text, start) {
+  const len = text.length;
+  let j = start + 1;
+  let kind = C1_INTRODUCERS[text.charCodeAt(start)]; // undefined for a 7-bit ESC
+  if (kind === undefined) {
+    if (j >= len) return -1;
+    kind = text[j++];
   }
-  if (next === ']') {
-    let j = start + 2;
-    while (j < text.length && text[j] !== '\x07' && !(text[j] === '\x1b' && text[j + 1] === '\\')) j++;
-    if (j >= text.length) return -1;
-    return text[j] === '\x07' ? j + 1 : j + 2;
+
+  if (kind === '[') {
+    while (j < len && text.charCodeAt(j) >= 0x20 && text.charCodeAt(j) <= 0x3f) j++;
+    if (j >= len) return -1;
+    const finalByte = text.charCodeAt(j);
+    return finalByte >= 0x40 && finalByte <= 0x7e ? j + 1 : j;
   }
-  // Two bytes, matching ANSI_RE's `[>=<]` -- DECKPAM/DECKPNM take no
-  // argument. Measuring them as three put the cut one byte inside the next
-  // sequence, leaking its body (`[31m`) into the text view as literal
-  // characters, which carry no ESC for stripAnsi to catch (#213).
-  if (next === '=' || next === '>') return start + 2;
-  if (next === '(' || next === ')' || next === '#') {
-    if (text.length < start + 3) return -1;
-    return start + 3;
+
+  if (STRING_INTRODUCERS.includes(kind)) {
+    for (; j < len; j++) {
+      const c = text.charCodeAt(j);
+      if (c === 0x07 || c === 0x18 || c === 0x1a || c === 0x9c) return j + 1; // BEL, CAN, SUB, C1 ST
+      if (c === 0x1b) {
+        if (j + 1 >= len) return -1;
+        return text[j + 1] === '\\' ? j + 2 : j; // ESC \ is ST; any other ESC starts something new
+      }
+    }
+    return -1;
   }
-  if (next === undefined) return -1;
-  return start + 2;
+
+  let c = kind.charCodeAt(0);
+  if (c >= 0x30 && c <= 0x7e) return j; // the two-byte form
+  if (c < 0x20 || c > 0x2f) return start + 1; // not a sequence: a lone ESC
+  while (j < len && text.charCodeAt(j) >= 0x20 && text.charCodeAt(j) <= 0x2f) j++;
+  if (j >= len) return -1;
+  c = text.charCodeAt(j);
+  return c >= 0x30 && c <= 0x7e ? j + 1 : j;
 }
 
 export function readOutput(deps, { sessionId, tail }) {
