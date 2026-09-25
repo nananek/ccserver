@@ -18,7 +18,10 @@ import { fileURLToPath } from 'node:url';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, statSync, symlinkSync, readFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startGitBroker, ensureHostRuntimeDir } from './git-broker.js';
+import {
+  startGitBroker, ensureHostRuntimeDir,
+  brokerStartupBudgetMs, awaitBrokerReady, brokerStartFailureReason,
+} from './git-broker.js';
 
 let root;
 let repoDir;
@@ -53,7 +56,7 @@ function request(broker, req) {
   });
 }
 
-before(() => {
+before(async () => {
   root = mkdtempSync(join(tmpdir(), 'ccserver-git-broker-test-'));
   repoDir = join(root, 'repo');
   mkdirSync(repoDir, { recursive: true });
@@ -76,7 +79,7 @@ before(() => {
   originalPath = process.env.PATH;
   process.env.PATH = `${binDir}:${originalPath}`;
 
-  broker = startGitBroker({ cwd: repoDir });
+  broker = await startGitBroker({ cwd: repoDir });
 });
 
 after(async () => {
@@ -250,7 +253,7 @@ test('gh-exec: malformed argv fails closed', async () => {
 
 test('gh usage recording: a gh CLI non-zero exit is cli-error, not broker-denied', async () => {
   const file = join(root, 'usage-cli-error.json');
-  const b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+  const b = await startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
   try {
     const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1', '--json', '__exit7__'] });
     assert.equal(r.ok, true);
@@ -273,7 +276,7 @@ test('gh usage recording: a gh spawn failure is broker-unavailable, not a denial
   process.env.PATH = gitOnly;
   let b;
   try {
-    b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+    b = await startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
     const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1'] });
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'exec-failed');
@@ -299,7 +302,7 @@ test('gh usage recording: a FIFO aggregate cannot wedge the broker past SIGTERM'
   process.env.PATH = gitOnly;
   let b;
   try {
-    b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+    b = await startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
     // The gh call itself still answers...
     const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1'] });
     assert.equal(r.ok, false);
@@ -346,7 +349,7 @@ for (const [name, plant] of [
     let b;
     let log = '';
     try {
-      b = startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
+      b = await startGitBroker({ cwd: repoDir, app: 'codex', ghUsageRecording: { enabled: true, file } });
       b.proc.stderr.on('data', (d) => { log += d; });
       b.proc.stdout.on('data', (d) => { log += d; });
       const r = await request(b, { op: 'gh-exec', argv: ['pr', 'view', '1'] });
@@ -362,10 +365,10 @@ for (const [name, plant] of [
   });
 }
 
-test('startGitBroker returns null for non-git cwd (no dead wrapper)', () => {
+test('startGitBroker returns null for non-git cwd (no dead wrapper)', async () => {
   const dir = join(root, 'not-a-repo2');
   mkdirSync(dir, { recursive: true });
-  const b = startGitBroker({ cwd: dir });
+  const b = await startGitBroker({ cwd: dir });
   assert.equal(b, null);
 });
 
@@ -381,7 +384,7 @@ test('linked worktree broker allowlist matches main checkout', async () => {
   git(main, ['commit', '-qm', 'init']);
   const worker = join(root, 'worker-for-broker');
   execFileSync('git', ['worktree', 'add', '--detach', worker], { cwd: main });
-  const wb = startGitBroker({ cwd: worker });
+  const wb = await startGitBroker({ cwd: worker });
   try {
     assert.ok(wb, 'broker should start for linked worktree');
     assert.deepEqual(wb.allowlist, ['github.com/nananek/ccserver']);
@@ -417,8 +420,8 @@ test('broker readiness probe: socket responds to probe op', async () => {
 describe('gh-exec PR-body guard (plan8)', () => {
   let guardedBroker;
 
-  before(() => {
-    guardedBroker = startGitBroker({ cwd: repoDir, blockedPatterns: [] });
+  before(async () => {
+    guardedBroker = await startGitBroker({ cwd: repoDir, blockedPatterns: [] });
   });
 
   after(async () => {
@@ -741,4 +744,245 @@ test('ensureHostRuntimeDir is a no-op outside the darwin /tmp fallback', () => {
     if (prev === undefined) delete process.env.XDG_RUNTIME_DIR;
     else process.env.XDG_RUNTIME_DIR = prev;
   }
+});
+
+// --- #248: the broker startup budget ----------------------------------------
+//
+// The 2s both brokers used to allow was not a budget for the broker's own
+// work, it was a bet on the host having CPU to spare; under parallel load the
+// bet lost often enough to redden CI on its own. Raising it is not something a
+// red-then-green test can show, so what is pinned here instead is the part
+// that MUST stay true whatever the number is: the wait is still bounded, it
+// still stops early when the child dies, and the failure still says which of
+// those two happened.
+describe('#248: broker startup budget', () => {
+  test('the budget defaults to 10s and the override replaces it', () => {
+    const prev = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    try {
+      delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+      assert.equal(brokerStartupBudgetMs(), 10_000);
+      process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = '250';
+      assert.equal(brokerStartupBudgetMs(), 250, 'read per call, not captured at module load');
+      // Junk must not silently become 0 and turn the wait into "never wait".
+      for (const bad of ['', 'soon', '0', '-1']) {
+        process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = bad;
+        assert.equal(brokerStartupBudgetMs(), 10_000, `${JSON.stringify(bad)} must fall back to the default`);
+      }
+    } finally {
+      if (prev === undefined) delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+      else process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prev;
+    }
+  });
+
+  test('the wait gives up on its budget instead of waiting for ever', async () => {
+    const started = Date.now();
+    const { value, waitedMs } = await awaitBrokerReady({
+      probe: () => false,           // never becomes ready
+      isDead: () => false,          // and the child never dies, so only the budget can end it
+      budgetMs: 300,
+    });
+    const elapsed = Date.now() - started;
+    assert.equal(value, false, 'it must report that readiness never arrived');
+    assert.ok(elapsed >= 250, `the budget must be what ended it, took ${elapsed}ms`);
+    assert.ok(elapsed < 5000, `and it must be BOUNDED, took ${elapsed}ms`);
+    assert.ok(waitedMs >= 250, 'the reported wait must be the real one -- the message quotes it');
+  });
+
+  test('a child that dies is not waited out', async () => {
+    let dead = false;
+    setTimeout(() => { dead = true; }, 50);
+    const started = Date.now();
+    await awaitBrokerReady({ probe: () => false, isDead: () => dead, budgetMs: 10_000 });
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 2000, `a dead child must end the wait at once, took ${elapsed}ms`);
+  });
+
+  test('readiness is returned as soon as it appears', async () => {
+    let ready = false;
+    setTimeout(() => { ready = true; }, 40);
+    const started = Date.now();
+    const { value } = await awaitBrokerReady({ probe: () => ready, isDead: () => false, budgetMs: 10_000 });
+    assert.equal(value, true);
+    assert.ok(Date.now() - started < 2000, 'a healthy broker must not pay the budget');
+  });
+
+  test('the failure tells a slow broker apart from a dead one', () => {
+    const base = { waitedMs: 10_000, budgetMs: 10_000, waitingFor: 'the broker socket /run/b.sock' };
+
+    // The load case: still alive, just not ready. This is the only one raising
+    // the budget can fix, so it has to be the one that says so.
+    const slow = brokerStartFailureReason({ ...base, spawnError: null, proc: { exitCode: null, signalCode: null, pid: 4242 } });
+    assert.match(slow, /timed out after 10000ms waiting for the broker socket \/run\/b\.sock/);
+    assert.match(slow, /still alive/, 'an operator must learn the process was not dead');
+    assert.match(slow, /pid 4242/, 'and be given something to look at');
+    assert.match(slow, /CCSERVER_BROKER_STARTUP_TIMEOUT_MS/, 'and be told the knob');
+
+    // The crashed case must NOT claim it ran out of time.
+    const crashed = brokerStartFailureReason({ ...base, spawnError: null, proc: { exitCode: 1, signalCode: null, pid: 7 } });
+    assert.match(crashed, /exited code=1/);
+    assert.match(crashed, /waiting for the broker socket/, 'it still says what was being waited on');
+    assert.doesNotMatch(crashed, /timed out|CCSERVER_BROKER_STARTUP_TIMEOUT_MS/,
+      'a crash is not a timeout, and a bigger budget would not have helped');
+
+    const killed = brokerStartFailureReason({ ...base, spawnError: null, proc: { exitCode: null, signalCode: 'SIGKILL', pid: 7 } });
+    assert.match(killed, /terminated signal=SIGKILL/);
+    assert.doesNotMatch(killed, /timed out/);
+
+    // A spawn error speaks for itself and must not be dressed up as either.
+    const failed = brokerStartFailureReason({ ...base, spawnError: new Error('EACCES'), proc: { exitCode: null, signalCode: null, pid: 7 } });
+    assert.equal(failed, 'EACCES');
+  });
+});
+
+// --- #248: a broker child that dies must be noticed at once ------------------
+//
+// This is the half that matters more than the budget. The wait used to be a
+// synchronous Atomics.wait busy-wait, which blocks the event loop -- so the
+// child's 'exit' event could not be delivered while it ran, proc.exitCode
+// stayed null for the whole budget, and a child that died in 60ms was still
+// reported as "socket not ready" after the full wait. Raising that budget to
+// 10s would have made a dead child cost 10s of frozen event loop.
+//
+// Measured on the old sync loop against a child that exits immediately: 5/5
+// runs waited the full 2000-2018ms and exitCode was still null at the end.
+// The async loop notices the same child in 61-127ms.
+//
+// So these pin the property, not the number: a dead child ends the wait
+// immediately and is REPORTED as dead. Restore the busy-wait, or drop the
+// isDead check from awaitBrokerReady, and both assertions below fail.
+describe('#248: a dead broker child is detected, not waited out', () => {
+  const dyingSpawn = (code) => (_cmd, _args, opts) =>
+    spawn(process.execPath, ['-e', `process.exit(${code})`], opts);
+
+  test('a child that exits at once fails the launch at once, and says it exited', async () => {
+    // Deliberately the full production budget: if death is not detected, this
+    // does not merely fail, it takes 10s to do it -- which is the regression.
+    const prev = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    const started = Date.now();
+    let err = null;
+    try {
+      await startGitBroker({ cwd: repoDir }, { spawnProcess: dyingSpawn(3) });
+    } catch (e) {
+      err = e;
+    } finally {
+      if (prev !== undefined) process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prev;
+    }
+    const elapsed = Date.now() - started;
+
+    assert.ok(err, 'a child that dies immediately must fail the launch');
+    assert.match(err.message, /exited code=3/, 'the reason must be the death, not the missing socket');
+    assert.doesNotMatch(err.message, /timed out/,
+      'a dead child is not a timeout -- reporting it as one is what sent operators after the wrong cause');
+    assert.ok(elapsed < 1500,
+      `a dead child must end the wait at once, took ${elapsed}ms (the sync busy-wait took the full budget)`);
+  });
+
+  test('a child that lives but never publishes its socket is reported as slow, not dead', async () => {
+    // The other branch of the same message: still alive, just not ready. Short
+    // budget so the test does not pay the production one.
+    const prev = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = '600';
+    let err = null;
+    let hung = null;
+    try {
+      await startGitBroker({ cwd: repoDir }, {
+        spawnProcess: (_cmd, _args, opts) => {
+          hung = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], opts);
+          return hung;
+        },
+      });
+    } catch (e) {
+      err = e;
+    } finally {
+      if (prev === undefined) delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+      else process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prev;
+      try { hung?.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+
+    assert.ok(err, 'a child that never listens must fail the launch');
+    assert.match(err.message, /timed out after \d+ms waiting for the broker socket/,
+      'it must name what it was waiting for');
+    assert.match(err.message, /still alive/, 'and separate "too slow" from "dead"');
+    assert.doesNotMatch(err.message, /exited code=/, 'nothing exited here');
+  });
+});
+
+// --- #248 F1: the readiness probe is no longer a second fixed budget --------
+//
+// After the socket wait was fixed, the launch still ran a probe that spawned a
+// FRESH NODE PROCESS on its own fixed 500ms budget. Under load that budget was
+// mostly node's own boot (374-717ms at 8x oversubscription), so it expired
+// before the probe ran: the gate measured 6/20 launches on master failing here
+// -- on the path this PR had supposedly fixed. The probe now speaks the
+// protocol from the parent, and shares ONE deadline with the socket wait.
+//
+// Measured, 20 alternating launches per side under 8x oversubscription:
+//   master 2/20 failed (both on the probe); this branch 0/20, and faster
+//   (p50 1079ms vs 1715ms) because the probe no longer boots a node.
+describe('#248: the readiness probe', () => {
+  const sockOf = (args) => args[args.indexOf('--sock') + 1];
+
+  test('a socket file that is not a live broker is rejected, not taken as ready', async () => {
+    // existsSync(sockPath) is true, so the socket WAIT is satisfied -- only the
+    // probe can catch this. Without a probe the launch would hand the sandbox a
+    // bind-mounted dead file and fail later, inside the session.
+    const prev = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = '800';
+    let err = null;
+    let child = null;
+    try {
+      await startGitBroker({ cwd: repoDir }, {
+        spawnProcess: (_cmd, args, opts) => {
+          const script = `require('fs').writeFileSync(${JSON.stringify(sockOf(args))}, ''); setTimeout(() => {}, 30000);`;
+          child = spawn(process.execPath, ['-e', script], opts);
+          return child;
+        },
+      });
+    } catch (e) {
+      err = e;
+    } finally {
+      if (prev === undefined) delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+      else process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prev;
+      try { child?.kill('SIGKILL'); } catch { /* gone */ }
+    }
+    assert.ok(err, 'a dead socket must fail the launch');
+    assert.match(err.message, /readiness probe failed/);
+    assert.match(err.message, /exists but the broker did not answer/,
+      'the message must say the socket was there and the broker was not');
+  });
+
+  test('a broker that accepts but never replies is bounded by the shared deadline', async () => {
+    // The probe's own timeout path: a real listener, so connect() succeeds and
+    // only the deadline can end it. Restoring a fixed budget here would still
+    // pass -- what this pins is that the wait is BOUNDED and attributed to the
+    // probe rather than hanging the launch.
+    const prev = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = '900';
+    const started = Date.now();
+    let err = null;
+    let child = null;
+    try {
+      await startGitBroker({ cwd: repoDir }, {
+        spawnProcess: (_cmd, args, opts) => {
+          const script = `const net=require('net');`
+            + `net.createServer(() => { /* accept and say nothing, ever */ }).listen(${JSON.stringify(sockOf(args))});`
+            + `setTimeout(() => {}, 30000);`;
+          child = spawn(process.execPath, ['-e', script], opts);
+          return child;
+        },
+      });
+    } catch (e) {
+      err = e;
+    } finally {
+      if (prev === undefined) delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+      else process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prev;
+      try { child?.kill('SIGKILL'); } catch { /* gone */ }
+    }
+    const elapsed = Date.now() - started;
+    assert.ok(err, 'a broker that never answers must fail the launch');
+    assert.match(err.message, /readiness probe failed/);
+    assert.match(err.message, /still alive/, 'it was slow, not dead -- say so');
+    assert.ok(elapsed < 5000, `the probe must be bounded, took ${elapsed}ms`);
+  });
 });

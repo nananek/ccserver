@@ -2531,7 +2531,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // null when commitMessageGuard is disabled, which the broker treats as
   // "no PR-body check", matching pre-plan8 behavior exactly.
   const gitBroker = gitBrokerEnabled
-    ? startGitBroker({ cwd, app, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null, ghUsageRecording })
+    ? await startGitBroker({ cwd, app, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null, ghUsageRecording })
     : null;
 
   // Commit-message guard (see commitGuard.js / startCommitGuard above):

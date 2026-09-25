@@ -64,7 +64,10 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
+import {
+  hostRuntimeDir, ensureHostRuntimeDir,
+  brokerStartupBudgetMs, awaitBrokerReady, brokerStartFailureReason,
+} from './git-broker.js';
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -761,17 +764,23 @@ export async function startNetworkBroker(
   // healthy child -- but keying on the value keeps this loop correct even if
   // something else ever creates the path first, and it removes the empty-file
   // window entirely rather than narrowing it.
-  const deadline = Date.now() + 2000;
-  let port = readPortFile(portFile);
-  while (port === null && Date.now() < deadline) {
-    if (spawnError) break;
-    if (proc.exitCode !== null || proc.signalCode !== null) break;
-    await sleep(20);
-    port = readPortFile(portFile);
-  }
+  // Budget and failure wording are shared with git-broker.js: the two are the
+  // same bet on host responsiveness and #248 hit both, so they move together.
+  const budgetMs = brokerStartupBudgetMs();
+  const { value: port, waitedMs } = await awaitBrokerReady({
+    probe: () => readPortFile(portFile),
+    isDead: () => spawnError !== null || proc.exitCode !== null || proc.signalCode !== null,
+    budgetMs,
+  });
 
   if (spawnError || proc.exitCode !== null || proc.signalCode !== null || port === null) {
-    const reason = spawnError ? spawnError.message : proc.exitCode !== null ? `exited code=${proc.exitCode}` : proc.signalCode ? `signal=${proc.signalCode}` : `port file not ready within 2s (${describeUnreadablePortFile(portFile)})`;
+    const reason = brokerStartFailureReason({
+      spawnError, proc, waitedMs, budgetMs,
+      // describeUnreadablePortFile stays in the message: "never created" vs
+      // "created but still empty" vs "unparseable" is the other half of the
+      // diagnosis, and #222 added it for exactly that reason.
+      waitingFor: `the port file (${describeUnreadablePortFile(portFile)})`,
+    });
     try { proc.kill('SIGKILL'); } catch { /* already dead */ }
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
     throw new Error(`network broker failed to start: ${reason}`);
@@ -785,10 +794,6 @@ export async function startNetworkBroker(
   }
 
   return { proc, dir, port, token, adminToken, allowedHosts, deniedHosts, mode, state };
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Async readiness probe: connect and confirm the port actually accepts TCP

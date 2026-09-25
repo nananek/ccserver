@@ -697,17 +697,27 @@ test('#222 startNetworkBroker waits past an empty port file for the real value',
 
 test('#222 startNetworkBroker gives up on a never-published port file and names the cause', async () => {
   // Also pins that the wait is bounded: the stub child stays alive for 10s, so
-  // only the 2s deadline can end this.
+  // only the budget can end this. #248 raised the production budget to 10s --
+  // the same order as the stub's own lifetime -- so pin a short one here
+  // rather than race it and pay 10s on every run.
+  const prev = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+  process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = '600';
   const started = Date.now();
-  await assert.rejects(
-    () => startNetworkBroker({}, { spawnProcess: stubBrokerSpawn({}) }),
-    // 'port file not ready' alone would leave an operator with nowhere to go;
-    // the reason has to separate "the child never wrote" from "it wrote
-    // something unusable" -- the distinction the old 'malformed port file'
-    // carried and a bare timeout loses.
-    /network broker failed to start: port file not ready within 2s \(created but still empty\)/,
-  );
-  assert.ok(Date.now() - started < 10000, 'the readiness wait must be bounded by its own deadline');
+  try {
+    await assert.rejects(
+      () => startNetworkBroker({}, { spawnProcess: stubBrokerSpawn({}) }),
+      // 'port file not ready' alone would leave an operator with nowhere to go;
+      // the reason has to separate "the child never wrote" from "it wrote
+      // something unusable" -- the distinction the old 'malformed port file'
+      // carried and a bare timeout loses. #248 adds the other half: whether
+      // the child was still alive, i.e. slow rather than broken.
+      /network broker failed to start: timed out after \d+ms waiting for the port file \(created but still empty\)/,
+    );
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    else process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prev;
+  }
+  assert.ok(Date.now() - started < 5000, 'the readiness wait must be bounded by its own budget');
 });
 
 test('#222 the failure message quotes an unusable port file bounded and escaped', async () => {
@@ -718,15 +728,20 @@ test('#222 the failure message quotes an unusable port file bounded and escaped'
   const nul = String.fromCharCode(0);
   const garbage = `${esc}[31m<html>not a port${nul}\n${'A'.repeat(4096)}`;
   let err = null;
+  const prev = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+  process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = '600';
   try {
     await startNetworkBroker({}, {
       spawnProcess: stubBrokerSpawn({ STUB_RAW_B64: Buffer.from(garbage, 'utf-8').toString('base64') }),
     });
   } catch (e) {
     err = e;
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    else process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prev;
   }
   assert.ok(err, 'a port file that never parses must fail the launch');
-  assert.match(err.message, /port file not ready within 2s \(unparseable: /, 'the reason must name what was wrong, not just that time ran out');
+  assert.match(err.message, /waiting for the port file \(unparseable: /, 'the reason must name what was wrong, not just that time ran out');
   // Neutralised: no raw control byte survives into the message.
   assert.ok(!err.message.includes(esc), 'a terminal escape must not reach the message verbatim');
   assert.ok(!err.message.includes(nul), 'a NUL must not reach the message verbatim');
@@ -734,4 +749,34 @@ test('#222 the failure message quotes an unusable port file bounded and escaped'
   // Bounded: the 4KiB of padding cannot drag itself into the message.
   assert.ok(!err.message.includes('A'.repeat(200)), 'the quoted snippet must be capped');
   assert.ok(err.message.length < 400, `message stayed bounded (was ${err.message.length})`);
+});
+
+// #248: the same dead-child property as git-broker.test.js pins for its side.
+// This wait was already async (the H1 review moved it off Atomics.wait), so the
+// detection already worked here -- what changed is that both brokers now share
+// one budget, one readiness wait and one failure wording, so neither can drift
+// into reporting a dead child as a timeout while the other does not.
+test('#248 a broker child that dies at once is reported as dead, not waited out', async () => {
+  // The full production budget on purpose: undetected death costs 10s, which is
+  // the regression, not merely a wrong message.
+  const prev = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+  delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+  const started = Date.now();
+  let err = null;
+  try {
+    await startNetworkBroker({}, {
+      spawnProcess: (_cmd, _args, opts) => spawnFn(process.execPath, ['-e', 'process.exit(4)'], opts),
+    });
+  } catch (e) {
+    err = e;
+  } finally {
+    if (prev !== undefined) process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prev;
+  }
+  const elapsed = Date.now() - started;
+
+  assert.ok(err, 'a child that dies immediately must fail the launch');
+  assert.match(err.message, /exited code=4|write EPIPE/,
+    'the reason must be the death, not the missing port file');
+  assert.doesNotMatch(err.message, /timed out/, 'a dead child is not a timeout');
+  assert.ok(elapsed < 1500, `a dead child must end the wait at once, took ${elapsed}ms`);
 });
