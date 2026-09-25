@@ -180,7 +180,7 @@ export function orchestratorRestartSessionOpts({ group, app, model = null, sandb
     mcpToken,
     orchestratorClaudeMdSrc,
     // orchestratorDir is server-synthesized under the scratch tree (see
-    // orchestratorRoot()) -- the trusted in-process flag that skips the
+    // groupManager.orchestratorDirForCwd) -- the trusted in-process flag that skips the
     // browseRoots cwd check (the group's PROJECT cwd was already validated
     // against browseRoots at group creation).
     scratchCwd: true,

@@ -191,8 +191,8 @@ function mergeOrchestratorInstructions(customInstructions) {
   return `${template}\n\n---\n\n## プロジェクト固有の指示 (ユーザー設定)\n\n${customInstructions}\n`;
 }
 
-// orchestratorDir's basename is already the cwd hash (orchestratorDirForCwd
-// in routes/groups.js) -- no need to re-hash cwd here.
+// orchestratorDir's basename is already the cwd hash (orchestratorDirForCwd,
+// below) -- no need to re-hash cwd here.
 function generatedClaudeMdPath(orchestratorDir) {
   return join(orchestratorGeneratedRoot(), `${basename(orchestratorDir)}.md`);
 }
