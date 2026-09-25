@@ -286,54 +286,45 @@ test('init: claiming a role the group never had is refused before anything is la
 // the session from the entry. An entry written while a member ran on the host -- the
 // hole above -- says sandbox:false and whatever sandboxOpts its client chose; the
 // entry survives an upgrade, so it must not decide the launch.
+//
+// What the resume asks createSession for is what is asserted, through the launcher seam
+// (as for `init` above): it needs no sandbox on the host running the test, and what
+// createSession would report back (effective, normalized options) cannot blur it.
 async function fireScheduleOf(t, gid, role, entryExtra = {}) {
   const warn = t.mock.method(console, 'warn', () => {});
+  const launches = [];
+  sessionManager.setScheduleLaunchForTests(async (opts) => { launches.push(opts); return { error: 'stopped by the test' }; });
+  t.after(() => sessionManager.setScheduleLaunchForTests(null));
   writeFileSync(process.env.CCSERVER_SCHEDULES_PATH, JSON.stringify([{
     at: Date.now() + 200, text: 'noop', cwd: projectDir, shell: true, app: 'claude', permissionMode: 'standard',
     groupId: gid, groupRole: role, source: 'manual', ...entryExtra,
   }]));
   assert.equal(sessionManager.restoreSchedules().restored, 1);
-  const launched = () => {
-    const member = groupManager.listGroupMembers(gid).find((m) => m.role === role);
-    return member && member.sessionId ? sessionManager.getSession(member.sessionId) : null;
-  };
-  const dropped = () => warn.mock.calls.map((c) => c.arguments.join(' ')).find((l) => l.includes('[scheduler] dropping prompt'));
-  await until(() => launched() || dropped(), 'the schedule to fire');
-  return { session: launched(), dropped: dropped() };
+  const dropped = () => warn.mock.calls.map((c) => c.arguments.join(' ')).find((l) => l.includes('[scheduler] dropping prompt') && l.includes('not a registered member'));
+  await until(() => launches.length > 0 || dropped(), 'the schedule to fire');
+  return { launches, dropped: dropped() };
 }
 
 test('a scheduled prompt resumes a member sandboxed with its registered options, whatever the entry recorded', async (t) => {
-  // Registered: gpg OFF. The entry (what a member that ran on the host with a client-chosen
-  // gpg:true recorded) says the opposite; gpg is one of the options whose effective value
-  // session.sandboxOpts reports as asked, so the two cannot be told apart by anything but the launch.
   const OFF = { gpg: false, sshAgent: false, gpgVault: false };
   const gid = await makeGroup({ roles: ['workerA'], memberPrefs: { workerA: { sandboxOpts: OFF } } });
-  let session = null;
   try {
     simulateRestart(gid);
-    let dropped;
-    ({ session, dropped } = await fireScheduleOf(t, gid, 'workerA', { sandbox: false, sandboxOpts: BROAD }));
-    if (sandboxModule.sandboxAvailable()) {
-      assert.ok(session, `the member is resumed (it was dropped: ${dropped})`);
-      assert.equal(session.sandbox, true, 'a member whose entry said sandbox:false is resumed sandboxed');
-      assert.equal(session.sandboxOpts?.gpg, false, 'and does not get the gpg the entry recorded');
-      assert.equal(session.groupRole, 'workerA');
-    } else {
-      // No sandbox can be built here: the prompt is dropped for that reason, and nothing runs on the host.
-      assert.equal(session, null);
-      assert.match(dropped, /Failed to build sandbox/);
-    }
-  } finally {
-    if (session) sessionManager.destroySession(session.id);
-    groupManager.destroyGroup(gid);
-  }
+    const { launches, dropped } = await fireScheduleOf(t, gid, 'workerA', { sandbox: false, sandboxOpts: BROAD });
+    assert.equal(launches.length, 1, `the resume reached createSession (dropped: ${dropped})`);
+    assert.equal(launches[0].sandbox, true, 'a member whose entry said sandbox:false is resumed sandboxed');
+    assert.deepEqual(launches[0].sandboxOpts, OFF, 'with what was registered for it, not what the entry recorded');
+    assert.equal(launches[0].groupId, gid);
+    assert.equal(launches[0].groupRole, 'workerA');
+    assert.ok(launches[0].mcpSocketPath, 'and still with its handoff channel');
+  } finally { groupManager.destroyGroup(gid); }
 });
 
 test('a scheduled prompt of a role the group never had is dropped, and no channel is made for it', async (t) => {
   const gid = await makeGroup({ roles: ['workerA'] });
   try {
-    const { session, dropped } = await fireScheduleOf(t, gid, 'workerZ', { sandbox: false });
-    assert.equal(session, null);
+    const { launches, dropped } = await fireScheduleOf(t, gid, 'workerZ', { sandbox: false });
+    assert.equal(launches.length, 0, 'nothing was launched for it');
     assert.match(dropped, /workerZ of .*not a registered member/);
     assert.equal(groupManager.getGroup(gid).handoffChannels.has('workerZ'), false, 'nothing was minted for the unknown role');
     assert.equal(groupManager.getGroup(gid).members.has('workerZ'), false);

@@ -90,6 +90,21 @@ async function shellMember(cwd, groupId, groupRole) {
   return res.session;
 }
 
+// A resumed group member is launched with sandbox:true (see fireSchedule), which needs a
+// sandbox this file does not assume: most CI runners have no bwrap, and a ccserver sandbox
+// cannot always assemble one. What the resume tests below are about is the resume's channel /
+// role / overlay handling, so the launch is recorded and let through as the plain shell that
+// shellMember stands in with. That the resume ASKS for the sandbox is asserted on the recorded call.
+function watchScheduleLaunches(t) {
+  const calls = [];
+  sessionManager.setScheduleLaunchForTests((opts) => {
+    calls.push(opts);
+    return sessionManager.createSession({ ...opts, sandbox: false });
+  });
+  t.after(() => sessionManager.setScheduleLaunchForTests(null));
+  return calls;
+}
+
 before(async () => {
   runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-sched-test-'));
   process.env.XDG_RUNTIME_DIR = runtimeDir;
@@ -1221,7 +1236,8 @@ test('matchesScheduleTarget is permission-mode-scoped (no cross-mode injection)'
 
 // Fix 3: auto-resume of a dead group member recreates its handoff channel,
 // binds it to the new session, and re-registers the role.
-test('fireSchedule auto-resume of a group member recreates its MCP channel and rebinds the role', async () => {
+test('fireSchedule auto-resume of a group member recreates its MCP channel and rebinds the role', async (t) => {
+  const launches = watchScheduleLaunches(t);
   const gid = randomUUID();
   await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir: `/srv/orch-${gid}` });
 
@@ -1243,6 +1259,8 @@ test('fireSchedule auto-resume of a group member recreates its MCP channel and r
   assert.ok(channel, 'a fresh handoff channel was created');
   assert.equal(channel.sessionId, member, 'channel bound to the resumed session');
   assert.ok(channel.sockPath, 'channel has a socket path');
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].sandbox, true, 'the member (dead session: sandbox:false) is resumed sandboxed');
 
   sessionManager.destroySession(member, { keepSchedule: false });
   sessionManager.destroySession(orch.id, { keepSchedule: false });
@@ -1282,7 +1300,8 @@ test('fireSchedule drops the prompt when the member group no longer exists', asy
 // ran end-to-end is the role being rebound at all -- had resolution failed,
 // the fail-closed guard below would have dropped the resume entirely and
 // left the role bound to the dead session forever.
-test('fireSchedule auto-resume of a dead orchestrator regenerates its CLAUDE.md overlay and rebinds the role', async () => {
+test('fireSchedule auto-resume of a dead orchestrator regenerates its CLAUDE.md overlay and rebinds the role', async (t) => {
+  const launches = watchScheduleLaunches(t);
   const gid = randomUUID();
   const orchestratorDir = join(runtimeDir, `orch-resume-${gid}`);
   await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir });
@@ -1308,6 +1327,8 @@ test('fireSchedule auto-resume of a dead orchestrator regenerates its CLAUDE.md 
   assert.ok(existsSync(generatedPath), 'the CLAUDE.md/AGENTS.md overlay source was (re)generated for the resume');
   const template = readFileSync(join(import.meta.dirname, 'orchestrator-template.md'), 'utf-8');
   assert.equal(readFileSync(generatedPath, 'utf-8'), template);
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].sandbox, true, 'the orchestrator (dead session: sandbox:false) is resumed sandboxed');
 
   sessionManager.destroySession(member, { keepSchedule: false });
   sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });
@@ -1321,7 +1342,8 @@ test('fireSchedule auto-resume of a dead orchestrator regenerates its CLAUDE.md 
 // no ownership, and the predecessor's later teardown unlinks the live
 // successor's overlay mid-session. Here the pty is killed directly so onExit
 // marks it exited while it stays registered (open viewer tab).
-test('fireSchedule retires an exited seatbelt-overlay predecessor before auto-resume', async () => {
+test('fireSchedule retires an exited seatbelt-overlay predecessor before auto-resume', async (t) => {
+  const launches = watchScheduleLaunches(t);
   const gid = randomUUID();
   const orchestratorDir = join(runtimeDir, `orch-retire-${gid}`);
   await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir });
@@ -1344,6 +1366,8 @@ test('fireSchedule retires an exited seatbelt-overlay predecessor before auto-re
   assert.equal(sessionManager.getSession(deadOrchId), undefined, 'exited predecessor retired before resume');
   const member = groupManager.getGroup(gid).members.get('orchestrator');
   assert.ok(member && member !== deadOrchId, 'role rebound to the resumed session');
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].sandbox, true);
 
   sessionManager.destroySession(member, { keepSchedule: false });
   sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });

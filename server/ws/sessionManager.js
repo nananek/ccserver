@@ -1726,6 +1726,14 @@ export function matchesScheduleTarget(session, entry) {
     && (session.groupRole ?? null) === (entry.groupRole ?? null);
 }
 
+// What fireSchedule launches an auto-resume with. A `let` so a test can watch what a
+// resume asks createSession for (setScheduleLaunchForTests), the same arrangement as
+// terminal.js's launcher; nothing outside tests ever replaces it.
+let scheduleLauncher = createSession;
+export function setScheduleLaunchForTests(fn) {
+  scheduleLauncher = fn || createSession;
+}
+
 async function fireSchedule(scheduleId) {
   const entry = schedules.get(scheduleId);
   if (!entry) return;
@@ -1843,7 +1851,7 @@ async function fireSchedule(scheduleId) {
       }
     }
   }
-  const res = await createSession({
+  const res = await scheduleLauncher({
     cwd,
     cols: 80,
     rows: 24,
