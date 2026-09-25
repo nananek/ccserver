@@ -308,6 +308,31 @@ test('a tool "git" clone gets the same environment and pins as a gh one', async 
   });
 });
 
+test('GH_TOKEN / GITHUB_TOKEN reach gh and github.com, and no other host a plain git clones from', async () => {
+  const sourceEnv = { ...SOURCE_ENV(), GITHUB_TOKEN: 'test-github-token' };
+  // The env the fake `tool` was started with. Only the tool under test is faked: after a gh clone
+  // the real git does the read-only `git config`, so nothing overwrites the recording.
+  const envSeenBy = async (tool, url, hosts) => {
+    const a = arena();
+    const bin = fakeGh(a.rec, ghBody(a.rec));
+    const res = await clone(a, { parent: a.parent, url }, { hosts, [tool === 'gh' ? 'ghBin' : 'gitBin']: bin, sourceEnv });
+    assert.equal(res.ok, true, `${url}: ${JSON.stringify(res)}`);
+    return readEnv(join(a.rec, 'env'));
+  };
+  const withTokens = (env) => env.GH_TOKEN === 'test-gh-token' && env.GITHUB_TOKEN === 'test-github-token';
+
+  const gitea = await envSeenBy('git', 'https://gitea.example.org/o/r', HOSTS);
+  assert.equal(gitea.HOME, hostHome, 'the rest of the environment still reaches it (positive control)');
+  assert.ok(!('GH_TOKEN' in gitea) && !('GITHUB_TOKEN' in gitea), 'no GitHub token for a plain git clone of another host');
+
+  assert.ok(withTokens(await envSeenBy('git', 'https://github.com/o/r', [{ host: 'github.com', tool: 'git' }])), 'github.com cloned with git');
+  assert.ok(withTokens(await envSeenBy('gh', 'https://ghe.example.com/o/r', HOSTS)), 'a gh host (gh decides where a token may go)');
+  assert.ok(withTokens(await envSeenBy('gh', 'o/r', HOSTS)), 'github.com cloned with gh');
+
+  assert.ok(!('GH_TOKEN' in buildCloneEnv(sourceEnv, { githubToken: false })));
+  assert.ok(withTokens(buildCloneEnv(sourceEnv)), 'the default keeps them');
+});
+
 test('a tool "gh" host (github.com, or a GHES host) runs gh with --no-upstream; git is never asked to clone', async () => {
   for (const url of ['o/r', 'https://github.com/o/r', 'https://ghe.example.com/o/r']) {
     const a = arena();

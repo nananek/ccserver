@@ -30,8 +30,8 @@ const BASE_ENV = [
   'PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR',
   'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES', 'TZ',
 ];
-// Only for a child that talks to the network as the operator (gh repo
-// clone): the operator's own gh / git credentials come from HOME and the
+// Only for a child that talks to the network as the operator (clone, via gh
+// or git): the operator's own gh / git credentials come from HOME and the
 // gh config dir, or from these when the service sets them. XDG_RUNTIME_DIR
 // and DBUS_SESSION_BUS_ADDRESS are how gh reaches a keyring on a desktop
 // host.

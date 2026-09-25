@@ -36,7 +36,8 @@
 //     matched host and two validated path elements, the directory is our own
 //     random name. Both tools get the same environment, pins, pinned parent,
 //     staging directory, limits and cleanup.
-//   - The child's environment is an allowlist (hostGit.js), plus prompt /
+//   - The child's environment is an allowlist (hostGit.js; GH_TOKEN /
+//     GITHUB_TOKEN only for gh or github.com, see buildCloneEnv), plus prompt /
 //     protocol / config pins: GIT_TERMINAL_PROMPT=0, GH_PROMPT_DISABLED=1,
 //     GIT_ALLOW_PROTOCOL=https, GIT_LFS_SKIP_SMUDGE=1 and GIT_CONFIG_COUNT
 //     entries (CLONE_GIT_CONFIG). Config from the environment outranks the
@@ -114,8 +115,14 @@ export const CLONE_GIT_CONFIG = Object.freeze([
   ['filter.lfs.required', 'false'],
 ]);
 
-export function buildCloneEnv(source = process.env) {
-  return buildChildEnv(source, {
+// GH_TOKEN / GITHUB_TOKEN are GitHub's. gh keeps them off other hosts itself; a
+// plain git never reads them, but every credential helper it starts inherits
+// them, so a git clone of anything but github.com runs without (`githubToken:
+// false`) rather than hand a GitHub token to whatever that host's helper is.
+const GITHUB_TOKEN_VARS = ['GH_TOKEN', 'GITHUB_TOKEN'];
+
+export function buildCloneEnv(source = process.env, { githubToken = true } = {}) {
+  const env = buildChildEnv(source, {
     network: true,
     extra: {
       GIT_TERMINAL_PROMPT: '0',
@@ -125,6 +132,8 @@ export function buildCloneEnv(source = process.env) {
       ...gitConfigEnv(CLONE_GIT_CONFIG),
     },
   });
+  if (!githubToken) for (const key of GITHUB_TOKEN_VARS) delete env[key];
+  return env;
 }
 
 const ok = (data) => ({ ok: true, data });
@@ -471,7 +480,7 @@ export async function cloneRepository(request, roots, deps = {}) {
   }
   opts.slots.active += 1;
   try {
-    return await cloneInto({ parent, dirName, url: parsed.url, tool: parsed.tool }, roots, opts);
+    return await cloneInto({ parent, dirName, url: parsed.url, tool: parsed.tool, host: parsed.host }, roots, opts);
   } finally {
     opts.slots.active -= 1;
   }
@@ -503,11 +512,11 @@ function commandFor(tool, url, stageName, opts) {
   return { name: 'gh', label: 'gh repo clone', bin: opts.ghBin, args: ['repo', 'clone', url, stageName, '--no-upstream'] };
 }
 
-async function cloneInto({ parent, dirName, url, tool }, roots, opts) {
+async function cloneInto({ parent, dirName, url, tool, host }, roots, opts) {
   const pinned = await pinParent(parent, roots, opts.platform).catch(fsFailure);
   if (!pinned.ok) return pinned;
   const pin = pinned.data;
-  const env = buildCloneEnv(opts.sourceEnv);
+  const env = buildCloneEnv(opts.sourceEnv, { githubToken: tool === 'gh' || host === GITHUB_HOST });
   let stageName = null;
 
   // Removes the staging directory. `rm` runs with the pinned directory as
