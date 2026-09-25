@@ -144,24 +144,39 @@ export function readOutput(deps, { sessionId, tail }) {
   if (!session) {
     return { error: 'not-found', message: 'session not found' };
   }
-  const joined = session.outputBuffer.slice(-n).join('');
-  let raw = joined;
-  let truncated = false;
-  if (joined.length > MAX_READOUTPUT_CHARS) {
-    raw = joined.slice(-MAX_READOUTPUT_CHARS);
-    truncated = true;
-  }
+  const { raw, text, truncated } = sessionOutputText(session, n);
   return {
     sessionId,
     cwd: session.cwd,
     app: session.app,
     exited: !!session.exited,
     raw,
+    text,
+    truncated,
+    ...screenView(session),
+  };
+}
+
+// The `raw`/`text` views of a session's recent output, built once here so
+// every caller gets the same answer to "what is on this terminal".
+//
+// read_output (above) is one caller; the browser's copy-the-terminal modal
+// (GET /api/sessions/:id/text) is the other. That modal replaced the
+// hand-rolled on-canvas selection handles, and the point of routing it here
+// is that it does NOT get to re-derive terminal text in the client, nor
+// carry a cap of its own: it inherits MAX_READOUTPUT_CHARS and the
+// sequence-safe cut, whatever those become (#253).
+export function sessionOutputText(session, tail = DEFAULT_OUTPUT_TAIL_CHUNKS) {
+  const t = Number.isFinite(tail) ? tail : DEFAULT_OUTPUT_TAIL_CHUNKS;
+  const n = Math.min(Math.max(t, 1), MAX_OUTPUT_TAIL_CHUNKS);
+  const joined = session.outputBuffer.slice(-n).join('');
+  const truncated = joined.length > MAX_READOUTPUT_CHARS;
+  return {
+    raw: truncated ? joined.slice(-MAX_READOUTPUT_CHARS) : joined,
     // The text view cuts the FULL stream at a sequence-safe boundary (raw
     // stays backward-compatible byte tail); see cleanTextCut.
     text: stripAnsi(cleanTextCut(joined, MAX_READOUTPUT_CHARS)),
     truncated,
-    ...screenView(session),
   };
 }
 

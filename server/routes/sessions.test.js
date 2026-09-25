@@ -84,3 +84,14 @@ test('PATCH /sessions/:id rejects primitive JSON bodies with 400 (no 500)', asyn
     assert.ok(res.json().error);
   }
 });
+
+// #253: the copy modal's source. The happy path needs a live pty, so it is
+// covered by mcpTools.test.js (the shared helper) and the e2e spec; what is
+// pinned here is that an unknown id is a clean 404 rather than a 500 -- the
+// modal fires on a session the client believes exists, and a race with
+// teardown must not surface as a server error.
+test('GET /sessions/:id/text 404s for an unknown session', async () => {
+  const res = await app.inject({ method: 'GET', url: '/api/sessions/no-such-session/text' });
+  assert.equal(res.statusCode, 404);
+  assert.ok(res.json().error);
+});

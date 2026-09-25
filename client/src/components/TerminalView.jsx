@@ -5,7 +5,6 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { authWsUrl, authFetch } from '../auth.js';
 import { createOsc52Handler } from '../osc52.js';
-import { dewrapSelection } from '../dewrap.js';
 import { displayPath } from '../displayPath.js';
 import { isElevatedPermissionMode } from '../permissionMode.js';
 import { useGpgVaultStatusContext } from './GpgVaultStatusProvider.jsx';
@@ -348,46 +347,29 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       })
       .catch(() => {});
   }, []);
-  // Explicit mobile "select text" mode: a long-press gesture alone gives no
-  // feedback in a PWA (no OS haptics), so entering selection is a deliberate
-  // toggle instead -- its on/off state IS the confirmation. While active,
-  // any single-finger drag starts a selection immediately (no long-press
-  // wait) and the terminal is blurred/kept unfocused so the on-screen
-  // keyboard doesn't pop up and shift the layout underneath it.
+  // Mobile copy: a one-shot snapshot of this session's output, shown in a
+  // plain textarea (the modal at the bottom of this render).
   //
-  // Blurring alone isn't enough: xterm.js focuses its input textarea on
-  // every mousedown (including the synthetic ones we dispatch for
-  // touch-selection), which would pop the IME right back up. So we set
-  // disableStdin -- xterm turns the textarea readonly in response, and
-  // iOS/Android never open an IME for a readonly input -- but only for the
-  // instant of the synthetic mousedown dispatch (see `dispatchMouse`),
-  // not for the whole selection session. disableStdin is "stop stdin
-  // entirely", not "make the textarea readonly": leaving it on would also
-  // silently kill paste (its handlers funnel into triggerDataEvent, which
-  // early-returns while disableStdin is set).
-  const [selectionMode, setSelectionMode] = useState(false);
-  const selectionModeRef = useRef(false);
+  // What this replaced drew its own selection handles on the canvas, because
+  // xterm renders glyphs that the OS cannot select natively. Keeping those
+  // handles on the right rows meant recomputing them on every scroll -- and
+  // xterm scrolls once per line of output, so an idle viewer watching an
+  // agent stream queued one React update per line and never freed them
+  // (#253). A textarea needs none of that: iOS's own selection and copy menu
+  // work on it directly.
+  //
+  // The snapshot is taken ONCE, when the modal opens. Making it follow live
+  // output would rebuild exactly the thing that leaked.
+  const [copyText, setCopyText] = useState(null);
+  const [copyLoading, setCopyLoading] = useState(false);
+  const copyTextareaRef = useRef(null);
+  // Open at the newest output, like the terminal itself -- the operator came
+  // for what just happened, not for the top of the buffer.
   useEffect(() => {
-    selectionModeRef.current = selectionMode;
-    const term = xtermRef.current;
-    if (!term) return;
-    if (selectionMode) {
-      term.blur();
-    } else {
-      term.focus();
-    }
-  }, [selectionMode]);
-  // Whether a touch-selection has text selected and the floating copy
-  // button should show; positioned off the (reactively-updated) end
-  // handle rather than its own tracked coordinates -- see `handles`.
-  const [copyBtn, setCopyBtn] = useState(false);
-  // { start: {x,y}, end: {x,y} } (viewport coords) for the two draggable
-  // selection-adjustment handles; null when there's no active selection.
-  const [handles, setHandles] = useState(null);
-  // Mirrors `handles` synchronously for use inside touch event listeners,
-  // which close over state from whenever the effect last ran and would
-  // otherwise see a stale value across renders.
-  const handlesRef = useRef(null);
+    if (copyText === null) return;
+    const el = copyTextareaRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [copyText]);
   const onSessionIdRef = useRef(onSessionId);
   useEffect(() => { onSessionIdRef.current = onSessionId; }, [onSessionId]);
   const onExitedRef = useRef(onExited);
@@ -560,11 +542,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
     });
 
-    // Click on terminal container to restore focus, unless selection mode
-    // is deliberately keeping the keyboard closed.
+    // Click on terminal container to restore focus.
     const containerEl = terminalRef.current;
     const handleContainerClick = () => {
-      if (!selectionModeRef.current) term.focus();
+      term.focus();
     };
     containerEl.addEventListener('click', handleContainerClick);
 
@@ -574,158 +555,18 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // mouse sequences, which scroll the TUI's internal conversation history;
     // without tracking (shells, claude) it scrolls its own buffer instead.
     //
-    // Text selection is a separate, explicit mode (see `selectionMode`)
-    // rather than a long-press gesture -- a PWA gets no OS haptic feedback,
-    // so there was no way to tell a long-press had actually landed. While
-    // the mode is on, any single-finger drag starts a selection immediately:
-    // xterm.js already has full mouse-driven selection (SelectionService,
-    // bound to real mouse events) -- iOS just never gets a chance to
-    // trigger it, because canvas-rendered glyphs aren't selectable DOM text
-    // for the OS's native gestures, and touch-action: none on the container
-    // (see app.css) suppresses them anyway so our own handling can own
-    // touch-drag unambiguously. So a drag dispatches synthetic
-    // mousedown/mousemove/mouseup at the touch coordinates instead of wheel
-    // events, letting xterm's own selection logic do the rest exactly as it
-    // would for a real mouse. A floating "コピー" button appears afterward
-    // since iOS has no native copy menu for a canvas selection either.
-    const HANDLE_HIT_RADIUS = 28;
-    let touchStartX = 0;
+    // Selection itself is NOT handled here any more: the copy modal owns it
+    // (see `copyText`). This is only the scroll gesture.
     let touchStartY = 0;
     let touchScrolling = false;
-    let selecting = false;
-    const dispatchMouse = (type, x, y, buttons) => {
-      // detail must be 1 (a real single click) -- xterm's SelectionService
-      // branches on event.detail to pick single/double/triple-click
-      // handling (handleMouseDown), and a MouseEvent's detail defaults to 0
-      // when unset, which matches none of those branches and silently no-ops.
-      //
-      // A mousedown makes xterm focus its input textarea, which pops the
-      // IME back up unless the textarea is readonly at that instant. Set
-      // disableStdin just around the dispatch (dispatchEvent runs listeners
-      // synchronously) so the readonly window covers exactly the focus
-      // moment -- and nothing else, keeping paste and other stdin paths
-      // working during the rest of selection mode.
-      const isMousedown = type === 'mousedown';
-      if (isMousedown) term.options.disableStdin = true;
-      term.element.dispatchEvent(new MouseEvent(type, {
-        clientX: x, clientY: y, button: 0, buttons, detail: 1, bubbles: true, cancelable: true,
-      }));
-      if (isMousedown) term.options.disableStdin = false;
-    };
-    // Converts a buffer cell position (x/y, as returned by
-    // term.getSelectionPosition() -- 0-based in practice despite the
-    // "(1-based)" wording in xterm's own type declarations, confirmed by
-    // round-tripping term.select(0, row, n)) into pixel coords -- rows are
-    // real DOM nodes under .xterm-rows, one per visible line, so their rect
-    // gives us cell size.
-    //
-    // Returns both viewport-relative coords (x/y/anchorY -- for touch
-    // hit-testing and synthetic mouse dispatch, which the DOM always
-    // reports in viewport space) and terminal-view-relative coords
-    // (relX/relY -- for CSS position:absolute rendering). The relative
-    // pair is what actually survives an iOS keyboard open/close: a fixed,
-    // viewport-space handle needs every scroll/resize event caught and
-    // recomputed, but an absolutely-positioned one anchored to a normal-flow
-    // ancestor moves together with the row it marks for free, since both
-    // are offset from the same shifting reference point identically.
-    //
-    // y/anchorY: `y` hangs below the row (for drawing a handle that
-    // doesn't cover the character it marks); `anchorY` sits at the row's
-    // own vertical center (for precisely re-establishing a selection
-    // anchor -- landing exactly on a row boundary is ambiguous for
-    // xterm's own hit-testing).
-    const cellPixel = (bufY, bufX) => {
-      const viewportRow = bufY - term.buffer.active.viewportY;
-      if (viewportRow < 0 || viewportRow >= term.rows) return null;
-      const rowEl = containerEl.querySelectorAll('.xterm-rows > div')[viewportRow];
-      if (!rowEl) return null;
-      const rect = rowEl.getBoundingClientRect();
-      const anchorRect = terminalViewRef.current.getBoundingClientRect();
-      const cellWidth = rect.width / term.cols;
-      const x = rect.x + bufX * cellWidth;
-      const y = rect.y + rect.height;
-      return {
-        x, y, anchorY: rect.y + rect.height / 2,
-        relX: x - anchorRect.x, relY: y - anchorRect.y,
-      };
-    };
-    // Two handle positions are the same when every coordinate matches.
-    // Identity is useless here: cellPixel() builds a fresh object each call,
-    // so an unchanged selection still produced a new object every time.
-    const samePoint = (a, b) => a.x === b.x && a.y === b.y && a.anchorY === b.anchorY
-      && a.relX === b.relX && a.relY === b.relY;
-    const sameHandles = (a, b) => {
-      if (a === b) return true;            // both null
-      if (!a || !b) return false;          // one appeared or disappeared
-      return samePoint(a.start, b.start) && samePoint(a.end, b.end);
-    };
-    // Only enqueue a React update when the value actually CHANGES (#253).
-    //
-    // term.onScroll fires once per rendered line and xterm scrolls on every
-    // new line of pty output, so with no selection -- the normal case while
-    // an agent streams -- this used to call setHandles(null) once per line.
-    // React does not bail out early here, so each call enqueued an Update
-    // object that sat in the pending queue until some OTHER state change
-    // forced a re-render: measured at roughly one object per line and about
-    // 0.5x the output's byte count retained, not freed by GC, and an agent
-    // controls both the content and the volume of that output. Comparing
-    // first makes the no-selection case a pure no-op.
-    const updateHandles = () => {
-      let next = null;
-      if (term.hasSelection()) {
-        const pos = term.getSelectionPosition();
-        const start = pos ? cellPixel(pos.start.y, pos.start.x) : null;
-        const end = pos ? cellPixel(pos.end.y, pos.end.x) : null;
-        next = start && end ? { start, end } : null;
-      }
-      if (sameHandles(handlesRef.current, next)) return;
-      handlesRef.current = next;
-      setHandles(next);
-    };
-    const nearHandle = (x, y) => {
-      const h = handlesRef.current;
-      if (!h) return null;
-      if (Math.hypot(x - h.start.x, y - h.start.y) <= HANDLE_HIT_RADIUS) return 'start';
-      if (Math.hypot(x - h.end.x, y - h.end.y) <= HANDLE_HIT_RADIUS) return 'end';
-      return null;
-    };
     const handleTouchStart = (e) => {
       if (e.touches.length !== 1) return;
-      const { clientX, clientY } = e.touches[0];
-      touchStartX = clientX;
-      touchStartY = clientY;
+      touchStartY = e.touches[0].clientY;
       touchScrolling = false;
-
-      // Grabbing an existing handle re-anchors the selection at the OTHER
-      // end (using its precise row-center Y, not the handle's own
-      // below-row drawing position) and immediately starts following the
-      // touch, so dragging either handle adjusts that side independently
-      // without disturbing the rest of the selection.
-      const grabbed = nearHandle(clientX, clientY);
-      if (grabbed) {
-        selecting = true;
-        const fixed = grabbed === 'start' ? handlesRef.current.end : handlesRef.current.start;
-        dispatchMouse('mousedown', fixed.x, fixed.anchorY, 1);
-        dispatchMouse('mousemove', clientX, clientY, 1);
-        return;
-      }
-
-      if (selectionModeRef.current) {
-        selecting = true;
-        setCopyBtn(false);
-        dispatchMouse('mousedown', clientX, clientY, 1);
-        return;
-      }
-
-      selecting = false;
     };
     const handleTouchMove = (e) => {
       if (e.touches.length !== 1) return;
       const touch = e.touches[0];
-      if (selecting) {
-        dispatchMouse('mousemove', touch.clientX, touch.clientY, 1);
-        return;
-      }
       const dy = touchStartY - touch.clientY;
       if (Math.abs(dy) >= 20) {
         term.element.dispatchEvent(new WheelEvent('wheel', {
@@ -740,30 +581,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
     };
     const handleTouchEnd = (e) => {
-      if (selecting) {
-        selecting = false;
-        const { clientX, clientY } = e.changedTouches[0] || {};
-        dispatchMouse('mouseup', clientX, clientY, 0);
-        updateHandles();
-        setCopyBtn(term.hasSelection() && clientX != null);
-        e.preventDefault();
-        return;
-      }
-      if (touchScrolling) {
-        e.preventDefault();
-        return;
-      }
-      // A plain tap that wasn't a drag: if a selection is still showing
-      // from an earlier one, treat the tap as "dismiss" rather than
-      // leaving stale handles on screen.
-      if (term.hasSelection()) {
-        term.clearSelection();
-      }
+      if (touchScrolling) e.preventDefault();
     };
-    const selectionChangeDisposable = term.onSelectionChange(() => {
-      updateHandles();
-      if (!term.hasSelection()) setCopyBtn(false);
-    });
     if (isMobile) {
       containerEl.addEventListener('touchstart', handleTouchStart, { passive: true });
       containerEl.addEventListener('touchmove', handleTouchMove, { passive: true });
@@ -927,7 +746,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             if (typeof msg.viewers === 'number' && msg.viewers > 1) {
               term.writeln(`\r\n[このセッションは他${msg.viewers - 1}台の端末でも開いています。画面は最も小さい端末に合わせて${term.cols}x${term.rows}になります]`);
             }
-            if (!selectionModeRef.current) term.focus();
+            term.focus();
             break;
           case 'output':
             writeToTerm(msg.data);
@@ -1184,9 +1003,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
       fitAddon.fit();
       pinToBottom();
-      // Rows re-rendered at (possibly) new screen positions -- any visible
-      // selection handles were computed against the old layout.
-      updateHandles();
       const dims = fitAddon.proposeDimensions();
       const ws = wsRef.current;
       if (dims && ws && ws.readyState === WebSocket.OPEN) {
@@ -1211,14 +1027,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
 
     window.addEventListener('resize', handleResize);
 
-    // Scrolling the buffer moves every row's position within the
-    // container without changing the selection itself -- handles need
-    // recomputing. (A page-level shift from the iOS keyboard opening does
-    // NOT need a separate visualViewport listener: handles are positioned
-    // relative to .terminal-view via cellPixel's relX/relY, so they move
-    // together with the rows they mark for free.)
-    const scrollDisposable = term.onScroll(() => updateHandles());
-
     return () => {
       intentionalCloseRef.current = true;
       clearTimeout(reconnectTimerRef.current);
@@ -1226,9 +1034,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
-      scrollDisposable.dispose();
       containerEl.removeEventListener('click', handleContainerClick);
-      selectionChangeDisposable.dispose();
       if (isMobile) {
         containerEl.removeEventListener('touchstart', handleTouchStart);
         containerEl.removeEventListener('touchmove', handleTouchMove);
@@ -1247,7 +1053,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       // Small delay to let layout settle after display:none → flex
       const timer = setTimeout(() => {
         fitAddonRef.current.fit();
-        if (!selectionModeRef.current) xtermRef.current.focus();
+        xtermRef.current.focus();
         const dims = fitAddonRef.current.proposeDimensions();
         const ws = wsRef.current;
         if (dims && ws && ws.readyState === WebSocket.OPEN) {
@@ -1434,6 +1240,31 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     [inputText, sendInput]
   );
 
+  // Snapshot the session's recent output for the copy modal.
+  //
+  // The text comes from the SERVER, through the same helper read_output uses
+  // (GET /api/sessions/:id/text). That is deliberate: the browser does not
+  // get a second implementation of "what is on this terminal", and the modal
+  // inherits that path's existing cap instead of carrying one of its own.
+  const openCopyModal = async () => {
+    const id = sessionIdRef.current;
+    if (!id) return;
+    setCopyLoading(true);
+    setCopyText('');
+    try {
+      const res = await fetch(`/api/sessions/${id}/text`);
+      if (!res.ok) throw new Error(String(res.status));
+      const data = await res.json();
+      setCopyText(typeof data.text === 'string' ? data.text : '');
+    } catch {
+      // No partial-failure UI: an empty modal the operator can close is
+      // better than a stuck spinner, and the terminal itself is still there.
+      setCopyText('');
+    } finally {
+      setCopyLoading(false);
+    }
+  };
+
   const handleSpecialKey = useCallback((key) => {
     if (key.modifier) {
       setModifiers((prev) => ({ ...prev, [key.modifier]: !prev[key.modifier] }));
@@ -1519,7 +1350,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   }, [showScheduler, schedule, scheduleTime, serverTz, app]);
 
   return (
-    <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}${selectionMode ? ' selection-mode' : ''}`} ref={terminalViewRef}>
+    <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}`} ref={terminalViewRef}>
       <div className={`terminal-header${!sandbox && !shell ? ' no-sandbox' : ''}`}>
         {remoteInstanceLabel && <span className="terminal-remote-badge" title={`リモート: ${remoteInstanceLabel} (${remoteInstanceId})`}>⇄ {remoteInstanceLabel}</span>}
         <span
@@ -1702,34 +1533,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           </button>
         </div>
       )}
-      {handles && (
-        <>
-          <div className="selection-handle" style={{ left: handles.start.relX, top: handles.start.relY }} />
-          <div className="selection-handle" style={{ left: handles.end.relX, top: handles.end.relY }} />
-        </>
-      )}
-      {copyBtn && handles && (
-        <button
-          className="selection-copy-btn"
-          // Anchored to the (reactively-updated) end handle rather than the
-          // touch point that was live when the button first appeared, so a
-          // keyboard show/hide or scroll afterward can't leave it stranded.
-          style={{
-            left: Math.min(handles.end.relX, (terminalViewRef.current?.clientWidth ?? window.innerWidth) - 90),
-            top: Math.max(handles.end.relY - 40, 8),
-          }}
-          onClick={() => {
-            const term = xtermRef.current;
-            if (term) {
-              writeClipboardText(dewrapSelection(term.getSelection(), term.cols));
-              term.clearSelection();
-            }
-            setCopyBtn(false);
-          }}
-        >
-          📋 コピー
-        </button>
-      )}
       {!keyboardOpen && (
         <div className="terminal-scroll-controls">
           {/* opencode's TUI owns the conversation (mouse tracking + internal
@@ -1755,11 +1558,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           </button>
           {isMobile && (
             <button
-              className={'scroll-btn selection-mode-btn' + (selectionMode ? ' active' : '')}
-              onClick={() => setSelectionMode((v) => !v)}
-              title={selectionMode ? 'テキスト選択モードを終了' : 'テキスト選択モード'}
+              className="scroll-btn copy-text-btn"
+              onClick={openCopyModal}
+              title="画面のテキストをコピー"
             >
-              選択
+              コピー
             </button>
           )}
         </div>
@@ -1990,6 +1793,27 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               </button>
               <button className="btn btn-primary" onClick={confirmNoSandboxAutoYes}>
                 有効にする
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {copyText !== null && (
+        <div className="resume-overlay" onClick={() => setCopyText(null)}>
+          <div className="resume-dialog copy-text-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>画面のテキスト</h3>
+            <textarea
+              ref={copyTextareaRef}
+              className="copy-text-area"
+              readOnly
+              value={copyLoading ? '' : copyText}
+              // No autoFocus: focusing a textarea on iOS opens the keyboard,
+              // which would cover the text the operator came here to select.
+              // They tap into it themselves when they want to select.
+            />
+            <div className="resume-actions">
+              <button className="btn btn-secondary" onClick={() => setCopyText(null)}>
+                閉じる
               </button>
             </div>
           </div>
