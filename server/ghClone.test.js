@@ -707,6 +707,7 @@ test('junk in the session list is ignored; a failing or missing check refuses th
   const missing = await cloneRepository({ parent: b.parent, url: 'o/r' }, b.roots, { ghBin: ghB, sourceEnv: SOURCE_ENV(), slots: fastSlots() });
   assert.equal(missing.ok, false, 'no provider, no clone');
   assert.equal(missing.code, 'internal');
+  assert.match(missing.message, /running-session check/, 'refused up front, with its own reason (not as a TypeError in the log)');
   assert.ok(!existsSync(join(b.rec, 'called')));
   assert.deepEqual(readdirSync(b.parent), []);
 });
