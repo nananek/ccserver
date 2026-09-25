@@ -331,21 +331,43 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [clipboardArmedSeq, setClipboardArmedSeq] = useState(null);
   const clipboardSeq = clipboardPrompt ? clipboardPrompt.seq : null;
   const clipboardAllowArmed = clipboardSeq !== null && clipboardArmedSeq === clipboardSeq;
-  // The delay is only spent while this terminal is on screen. A hidden tab
-  // (an ancestor is display:none, and group members / background tabs stay
-  // mounted that way) still receives writes, but its dialog is not rendered:
-  // counting from the write would let 許可 go live unseen, so the first thing
-  // a click made just as the tab is switched to lands on is a live button.
+  // The delay is only spent while the viewer can see this terminal: it is the
+  // active tab (an ancestor is display:none otherwise, and group members /
+  // background tabs stay mounted that way and still receive writes), the
+  // browser tab is visible, and the window has focus. Counted any other way it
+  // runs out unseen, and the first thing a click made just as the viewer comes
+  // back (often the very click that re-focuses the window) lands on a live
+  // button.
   //
-  // Leaving the screen also forgets a count already served: the same click made
-  // just as the tab is shown again would otherwise meet a button that went live
-  // before the tab was left. It has to be reset here, while hidden, not when the
-  // tab is shown -- a reset on show would run after the frame that shows it.
+  // Losing any of the three also forgets a count already served, and coming
+  // back starts it over. The reset has to happen on the way out, while nothing
+  // is on screen, not on the way back in: a reset on return would run after the
+  // frame that shows the dialog.
   useEffect(() => {
     if (clipboardSeq === null) return undefined;
-    if (!visible) { setClipboardArmedSeq(null); return undefined; }
-    const timer = setTimeout(() => setClipboardArmedSeq(clipboardSeq), CLIPBOARD_ALLOW_DELAY_MS);
-    return () => clearTimeout(timer);
+    let timer = null;
+    let focused = document.hasFocus();
+    const restart = () => {
+      clearTimeout(timer);
+      setClipboardArmedSeq(null);
+      if (!visible || document.visibilityState !== 'visible' || !focused) return;
+      timer = setTimeout(() => setClipboardArmedSeq(clipboardSeq), CLIPBOARD_ALLOW_DELAY_MS);
+    };
+    // Focus is tracked from the events themselves, not re-read in restart():
+    // whether document.hasFocus() has already flipped by the time a focus/blur
+    // handler runs is up to the browser; the event's direction is not.
+    const onFocus = () => { focused = true; restart(); };
+    const onBlur = () => { focused = false; restart(); };
+    restart();
+    document.addEventListener('visibilitychange', restart);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', restart);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
   }, [clipboardSeq, visible]);
   const notePress = () => {
     clipboardPressedRef.current = { prompt: clipboardPrompt, armed: clipboardAllowArmed };

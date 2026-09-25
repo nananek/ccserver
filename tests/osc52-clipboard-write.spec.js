@@ -459,6 +459,133 @@ test('the delay is spent again when the tab is shown again: a dialog that had go
   await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(PAYLOAD);
 });
 
+// Not only the tab inside the app: the delay is also spent only while the
+// browser tab is visible and the window has focus. Otherwise it runs out while
+// nobody is looking, and the first click on coming back (often the one that
+// re-focuses the window) lands on a live button. Coming back starts it over.
+//
+// In the page, at the moment the viewer returns (the `type` event on the
+// window / document), clicks 許可 in that very task, and records what it said
+// and when -- and when it later went live. Arm it just before the return.
+async function clickAllowOnReturn(page, type) {
+  await page.evaluate((t) => {
+    const allow = document.querySelector('[data-testid="osc52-write-allow"]');
+    const ret = (window.__osc52Return = { disabled: null, at: null, liveAt: null });
+    (t === 'focus' ? window : document).addEventListener(t, () => {
+      ret.at = performance.now();
+      ret.disabled = allow.getAttribute('aria-disabled');
+      allow.click();
+    }, { once: true });
+    new MutationObserver((_, observer) => {
+      if (ret.at === null || allow.getAttribute('aria-disabled') !== 'false') return;
+      ret.liveAt = performance.now();
+      observer.disconnect();
+    }).observe(allow, { attributes: true, attributeFilter: ['aria-disabled'] });
+  }, type);
+}
+
+// After the return: the click made in the task of the return did nothing, the
+// delay was served again from then, and only then did a click decide.
+async function expectDelayStartedOver(page, payload) {
+  const ret = await page.evaluate(() => window.__osc52Return);
+  expect(ret.at, 'the return event never reached the page').not.toBeNull();
+  expect(ret.disabled).toBe('true');
+  expect(await readClipboard(page)).toBe(SENTINEL);
+  await expect(prompt(page)).toBeVisible();
+
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+  const { at, liveAt } = await page.evaluate(() => window.__osc52Return);
+  expect(liveAt - at).toBeGreaterThanOrEqual(CLIPBOARD_ALLOW_DELAY_MS - 30);
+  await allowButton(page).click();
+  await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(payload);
+}
+
+// Real window focus, not a stand-in. Playwright keeps Chromium's focus
+// emulation on, so a page always believes it has focus; with it off, the real
+// focus (which the page holds once it has had mouse input) has to be taken by
+// another page before the window blurs for real -- `blur` on the window,
+// document.hasFocus() false. Measured on the system Chromium: switching the
+// emulation off alone leaves hasFocus() true.
+async function blurWindow(page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false });
+  await page.context().newPage();
+  // The input arrived: the window really is unfocused.
+  expect(await page.evaluate(() => document.hasFocus())).toBe(false);
+  return cdp;
+}
+// Focus comes back to the page: a `focus` event on the window.
+const refocusWindow = (cdp) => cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+
+test('the delay is only counted while the window has focus: losing focus ends a served count, and it starts over on return', async ({ page }) => {
+  await openShell(page);
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+
+  await emitWrite(page, PAYLOAD, 'OSC52-EMITTED-20');
+  await expect(prompt(page)).toBeVisible();
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+
+  const cdp = await blurWindow(page);
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'true');
+  // Unfocused for longer than the delay: none of it counts.
+  await page.waitForTimeout(CLIPBOARD_ALLOW_DELAY_MS + 500);
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'true');
+
+  await clickAllowOnReturn(page, 'focus');
+  await refocusWindow(cdp);
+  await expectDelayStartedOver(page, PAYLOAD);
+});
+
+test('a dialog that comes up while the window has no focus does not count the delay until it has', async ({ page }) => {
+  await openShell(page);
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+
+  // The write is 1s away: it lands after the window has lost focus.
+  await typeInShell(page, `sleep 1; ${osc(PAYLOAD)}`);
+  const cdp = await blurWindow(page);
+
+  await expect(prompt(page)).toBeVisible();
+  await page.waitForTimeout(CLIPBOARD_ALLOW_DELAY_MS + 500);
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'true');
+
+  await clickAllowOnReturn(page, 'focus');
+  await refocusWindow(cdp);
+  await expectDelayStartedOver(page, PAYLOAD);
+});
+
+// Playwright pins document.visibilityState to 'visible' whatever it does to the
+// tabs (checked: headless and headed, a second page brought to front, a tab
+// opened from this one, a minimised window), so the browser's own transition
+// cannot be produced here. This drives the page's `visibilitychange` handling
+// against a stubbed visibilityState -- it pins how the page reacts, not that
+// the browser reports the change.
+test('the delay is only counted while the browser tab is visible: hiding it ends a served count, and it starts over on return', async ({ page }) => {
+  await openShell(page);
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+  await page.evaluate(() => {
+    window.__osc52Vis = 'visible';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => window.__osc52Vis });
+  });
+  const setVisibility = (state) => page.evaluate((v) => {
+    window.__osc52Vis = v;
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, state);
+
+  await emitWrite(page, PAYLOAD, 'OSC52-EMITTED-21');
+  await expect(prompt(page)).toBeVisible();
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+
+  await setVisibility('hidden');
+  expect(await page.evaluate(() => document.visibilityState)).toBe('hidden');
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'true');
+  await page.waitForTimeout(CLIPBOARD_ALLOW_DELAY_MS + 500);
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'true');
+
+  await clickAllowOnReturn(page, 'visibilitychange');
+  await setVisibility('visible');
+  await expectDelayStartedOver(page, PAYLOAD);
+});
+
 test('拒否 is never inert: refusing during the delay closes the dialog and stays refused', async ({ page }) => {
   await openShell(page);
   await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
