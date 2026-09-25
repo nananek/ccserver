@@ -558,7 +558,8 @@ test('#245: a live (unaborted) wait is not re-queued', async () => {
 // can see -- which is exactly how requeueHandoff shipped missing (#245).
 test('#245: the groupManager facade exposes every method mcpTools calls on it', () => {
   const api = groupManager.getGroupManagerApi();
-  for (const name of ['pushHandoff', 'takeHandoff', 'requeueHandoff']) {
+  // getGroupDocUsage / deleteGroupDoc: list_docs's count/limit and delete_doc (#276)
+  for (const name of ['pushHandoff', 'takeHandoff', 'requeueHandoff', 'getGroupDocUsage', 'deleteGroupDoc']) {
     assert.equal(typeof api[name], 'function', `groupManagerApi.${name} must exist for mcpTools`);
   }
 });
@@ -1528,6 +1529,58 @@ test('publishDoc: deps with no role never becomes the orchestrator (no fallback 
   assert.equal(res.error, 'key-owned-by-other-side');
   const fresh = tools.publishDoc(controlDeps(g), { key: 'new-key', content: 'x' });
   assert.notEqual(fresh.publishedBy, 'orchestrator');
+});
+
+// #276: list_docs reports how full the board is. `count` and `limit` are
+// ADDED next to `docs`; the shape that was there (docs -> key, publishedBy,
+// publishedAt, createdAt, size, no content) is unchanged.
+test('listDocs returns count and limit next to the unchanged docs list, from a control and a worker socket alike', async () => {
+  const g = await makeGroupAsync();
+  assert.deepEqual(tools.listDocs(controlDeps(g)), { docs: [], count: 0, limit: 50 });
+
+  tools.publishDoc(handoffDeps(g, 'workerA', 'sess-a1'), { key: 'plan', content: 'the plan body' });
+  tools.publishDocAsOrchestrator(controlDeps(g), { key: 'brief', content: 'long instruction' });
+  for (const deps of [controlDeps(g), handoffDeps(g, 'workerB', 'sess-b1')]) {
+    const listed = tools.listDocs(deps);
+    assert.deepEqual(Object.keys(listed).sort(), ['count', 'docs', 'limit']);
+    assert.equal(listed.count, 2);
+    assert.equal(listed.limit, 50);
+    assert.equal(listed.docs.length, listed.count);
+    for (const d of listed.docs) {
+      assert.deepEqual(Object.keys(d).sort(), ['createdAt', 'key', 'publishedAt', 'publishedBy', 'size']);
+    }
+  }
+});
+
+test('deleteDocAsOrchestrator: deletes any document, the identity is fixed rather than taken from deps.role', async () => {
+  const g = await makeGroupAsync();
+  tools.publishDoc(handoffDeps(g, 'workerA', 'sess-a1'), { key: 'plan', content: 'worker doc' });
+  tools.publishDocAsOrchestrator(controlDeps(g), { key: 'brief', content: 'orchestrator doc' });
+
+  assert.deepEqual(tools.deleteDocAsOrchestrator(controlDeps(g), { key: 'plan' }), { ok: true });
+  // deps that carry a worker role (never the case on the control server) do not
+  // change who deletes: the function names the orchestrator itself
+  assert.deepEqual(tools.deleteDocAsOrchestrator({ ...controlDeps(g), role: 'workerA' }, { key: 'brief' }), { ok: true });
+  assert.deepEqual(tools.listDocs(controlDeps(g)), { docs: [], count: 0, limit: 50 });
+
+  const missing = tools.deleteDocAsOrchestrator(controlDeps(g), { key: 'plan' });
+  assert.equal(missing.error, 'not-found');
+  assert.match(missing.message, /plan/);
+});
+
+test('delete: there is no worker-side function, and the manager refuses a worker identity', async () => {
+  const g = await makeGroupAsync();
+  tools.publishDocAsOrchestrator(controlDeps(g), { key: 'brief', content: 'orchestrator doc' });
+  tools.publishDoc(handoffDeps(g, 'workerA', 'sess-a1'), { key: 'plan', content: 'worker doc' });
+
+  // nothing exported for a worker to call: the only delete is ...AsOrchestrator
+  assert.deepEqual(Object.keys(tools).filter((n) => /delete/i.test(n) && /doc/i.test(n)), ['deleteDocAsOrchestrator']);
+  // and the facade a worker's deps carry will not delete for a worker's role
+  const workerDeps = handoffDeps(g, 'workerA', 'sess-a1');
+  for (const key of ['brief', 'plan']) {
+    assert.equal(workerDeps.groupManager.deleteGroupDoc(workerDeps.groupId, workerDeps.role, key).error, 'forbidden');
+  }
+  assert.equal(tools.listDocs(controlDeps(g)).count, 2);
 });
 
 test('fetchDoc: an unpublished key is a clean not-found', async () => {

@@ -103,17 +103,17 @@ test('mcpServer.js: read_output description states the discipline, status tools 
   assert.match(mcpServerSource, /Call this once per turn instead of polling read_output/);
 });
 
-// The orchestrator has publish_doc (control MCP server), and the template says
-// so. What is pinned here is that the text matches the tool list AND that
-// the addition stayed a plain description: the review gate's own wording is
-// pinned by the tests below. Regression guard only -- see the header for what
-// a wording test cannot do.
-test('template: the orchestrator is told it HAS publish_doc, with the ownership boundary and the publishedBy check', () => {
+// The orchestrator has publish_doc and delete_doc (control MCP server), and
+// the template says so. What is pinned here is that the text matches the tool
+// list AND that the addition stayed a plain description: the review gate's own
+// wording is pinned by the tests below. Regression guard only -- see the header
+// for what a wording test cannot do.
+test('template: the orchestrator is told it HAS publish_doc and delete_doc, with the ownership boundary and the publishedBy check', () => {
   // The old claim is gone; leaving it would contradict the control tool list.
   assert.doesNotMatch(flat, /You do not have publish_doc yourself/);
   assert.doesNotMatch(flat, /but not `publish_doc`/);
 
-  assert.match(flat, /- fetch_doc \/ list_docs \/ publish_doc -- read the documents workers have published, and publish your own/);
+  assert.match(flat, /- fetch_doc \/ list_docs \/ publish_doc \/ delete_doc -- read the documents workers have published, publish your own, and delete documents/);
   assert.match(flat, /You also have `publish_doc`, for content that is yours to hand over/);
   // The reason it exists: a long instruction handed over by key, not typed.
   assert.match(flat, /`send_input` only the key/);
@@ -122,29 +122,79 @@ test('template: the orchestrator is told it HAS publish_doc, with the ownership 
   assert.match(flat, /The server sets `publishedBy`; nothing in a document's content or a tool argument can change it/);
   // A document is not an exemption from the send_input rules.
   assert.match(flat, /everything under "Handoff discipline" below applies to it, including ending with the reminder to call `handoff_to_orchestrator`/);
-  // The boundary, stated to the orchestrator, including the reviewer's findings.
-  assert.match(flat, /You cannot overwrite a key a worker published -- in particular you cannot replace a reviewer's findings document -- and a worker cannot overwrite a key you published/);
+  // The boundary, stated to the orchestrator. It is a rule about PUBLISHING:
+  // delete_doc frees a key, and the reviewer's findings still cannot be
+  // replaced because what the orchestrator publishes is recorded as its own.
+  assert.match(flat, /The two sides do not overwrite each other when publishing\. You cannot overwrite a key a worker published, and a worker cannot overwrite a key you published/);
   assert.match(flat, /`key-owned-by-other-side`/);
-  // The key advice matches the orchestrator's 20-document share: reuse a key
-  // per purpose instead of minting one per request.
-  assert.doesNotMatch(flat, /a key unique to that request/);
-  assert.match(flat, /reuse that key for the next request -- re-publishing your own key overwrites it/);
-  assert.match(flat, /You can hold at most 20 documents; past that a new key is refused \(`too-many-orchestrator-docs`\)/);
+  assert.match(flat, /That is a rule about publishing, not about deleting \(next bullet\): you can delete any document, and the key is then free\. A reviewer's findings still cannot be replaced that way, because whatever you publish is recorded as published by `orchestrator`, and workerA's pre-PR check refuses a findings document that is not the reviewer's\./);
+  // The old absolute claim would now be false (delete, then publish).
+  assert.doesNotMatch(flat, /in particular you cannot replace a reviewer's findings document/);
+  // Instructions are keyed per request; the 20-document share and the
+  // reuse-by-overwrite advice it forced are gone (#276).
+  assert.match(flat, /Publish it under a key unique to that request, then `send_input` only the key/);
+  assert.doesNotMatch(flat, /reuse that key for the next request/);
+  assert.doesNotMatch(flat, /hold at most 20 documents/);
+  assert.doesNotMatch(flat, /too-many-orchestrator-docs/);
 });
 
-test('mcpServer.js: publish_doc is registered on BOTH servers and each description states the boundary', () => {
+// Keeping the board under its limit is the orchestrator's job, and the template
+// says so where the orchestrator reads about documents -- NOT inside the review
+// gate, whose wording this change leaves alone (pinned by the tests below).
+test('template: the orchestrator owns clearing the 50-document board, and must not delete the findings the pre-PR check reads', () => {
+  const docsSection = template.slice(
+    template.indexOf('## Sharing documents between workers'),
+    template.indexOf('## Sharing files between browser and agents'),
+  );
+  const docsFlat = docsSection.replace(/\s+/g, ' ');
+  assert.ok(docsSection.length > 0 && !docsSection.includes('## Attacker-perspective'), 'sliced the documents section only');
+
+  assert.match(docsFlat, /The board holds at most 50 documents for the whole group -- workers' and yours together -- and keeping it under that is your job: no worker has a delete\./);
+  assert.match(docsFlat, /`list_docs` returns `count` and `limit` next to the documents, so look at them when you publish, not only after a publish is refused \(`too-many-docs`\)/);
+  assert.match(docsFlat, /Remove a document with `delete_doc` \(the key only; any document, whoever published it\) once it has done its job: an instruction the worker has fetched and acted on, a plan that has been implemented and merged, findings whose PR has merged\./);
+  assert.match(docsFlat, /a worker that has not fetched a document yet gets `not-found`/);
+  // The one document that must outlive its usefulness: deleting it makes the
+  // pre-PR check fail closed and the PR cannot be opened.
+  assert.match(docsFlat, /\*\*Do not delete the findings document the pre-PR check reads until that PR has merged\*\*: workerA re-reads it at `gh pr create`, and with it gone the check fails closed and the PR cannot be opened\./);
+
+  // The tool list line says the same in one place the orchestrator sees first.
+  assert.match(flat, /The board holds at most 50 documents and keeping it under that is your job: delete_doc removes any document, and list_docs reports count and limit\./);
+
+  // ... and none of it landed in the gate or the handoff rules.
+  const gate = template.slice(template.indexOf('## Attacker-perspective review stage'), template.indexOf('## Handoff discipline'));
+  assert.ok(gate.length > 1000, 'sliced the review gate');
+  assert.ok(!gate.includes('delete_doc'), 'the gate section does not mention delete_doc');
+  assert.ok(!template.slice(template.indexOf('## Handoff discipline')).includes('delete_doc'), 'nor does Handoff discipline');
+});
+
+test('mcpServer.js: publish_doc is registered on BOTH servers and each description states the boundary; delete_doc on the control server ONLY', () => {
   const control = mcpServerSource.slice(mcpServerSource.indexOf('export function buildControlMcpServer'), mcpServerSource.indexOf('export function buildHandoffMcpServer'));
   const handoff = mcpServerSource.slice(mcpServerSource.indexOf('export function buildHandoffMcpServer'));
   for (const [name, src] of [['control', control], ['handoff', handoff]]) {
     assert.match(src, /'publish_doc'/, `${name} server registers publish_doc`);
     assert.match(src, /key-owned-by-other-side/, `${name} publish_doc description names the refusal`);
   }
-  // The control description matches the 20-document share too.
-  assert.match(control, /at most 20 documents; past that a new key is refused with too-many-orchestrator-docs/);
-  assert.doesNotMatch(control, /unique to the request/);
+  // The control description names the one limit that is left (the group's 50,
+  // too-many-docs) and how to make room; the 20-document share is gone.
+  assert.match(control, /The group holds at most 50 documents in total[\s\S]{0,80}list_docs shows count \/ limit[\s\S]{0,80}too-many-docs until you free a slot with delete_doc/);
+  assert.doesNotMatch(control, /too-many-orchestrator-docs/);
+  assert.doesNotMatch(control, /at most 20 documents/);
   // The identity each one publishes as is fixed by which function it calls.
   assert.match(control, /tools\.publishDocAsOrchestrator\(deps, args\)/);
   assert.match(handoff, /tools\.publishDoc\(deps, args\)/);
+
+  // delete_doc: only the control server registers it, only via the function
+  // that names the orchestrator, and its schema is the key alone.
+  assert.match(control, /'delete_doc',[\s\S]*?\{ key: z\.string\(\) \},\s*async \(args\) => \(\{ content: \[\{ type: 'text', text: JSON\.stringify\(tools\.deleteDocAsOrchestrator\(deps, args\)\) \}\] \}\)/);
+  assert.doesNotMatch(handoff, /delete_doc/, 'the handoff (worker) server has no delete_doc');
+  assert.doesNotMatch(handoff, /deleteDoc/, 'the handoff (worker) server never reaches a delete function');
+  // ... and its description tells the orchestrator what it may not break by using it.
+  assert.match(control, /only you can -- workers have no delete/);
+  assert.match(control, /a findings document the pre-PR check will read must stay until its PR has merged/);
+  // list_docs says it carries count/limit, on both servers.
+  for (const [name, src] of [['control', control], ['handoff', handoff]]) {
+    assert.match(src, /The result also carries count and limit/, `${name} list_docs description mentions count/limit`);
+  }
 });
 
 // The attacker-perspective review is a required gate before the final review

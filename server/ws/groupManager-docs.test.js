@@ -1,6 +1,7 @@
 // Tests for groupManager's group-scoped document sharing (publish_doc/
-// fetch_doc/list_docs, plan section 7): publish/overwrite/fetch/list,
-// per-doc and per-group size caps, persistence across a restart
+// fetch_doc/list_docs/delete_doc, plan section 7): publish/overwrite/fetch/
+// list/delete (delete is the orchestrator's alone), per-doc and per-group
+// size caps, persistence across a restart
 // (.saved-group-docs.json, independent of .saved-groups.json), and cleanup
 // on destroyGroup.
 
@@ -154,10 +155,96 @@ test('fetchGroupDoc reports not-found for an unpublished key; deleteGroupDoc rem
   try {
     assert.equal(groupManager.fetchGroupDoc(gid, 'missing').error, 'not-found');
     groupManager.publishGroupDoc(gid, 'workerA', 'temp', 'x');
-    const del = groupManager.deleteGroupDoc(gid, 'workerA', 'temp');
+    const del = groupManager.deleteGroupDoc(gid, 'orchestrator', 'temp');
     assert.equal(del.ok, true);
     assert.equal(groupManager.fetchGroupDoc(gid, 'temp').error, 'not-found');
-    assert.equal(groupManager.deleteGroupDoc(gid, 'workerA', 'temp').error, 'not-found', 'deleting twice is a clean not-found, not a crash');
+    assert.equal(groupManager.deleteGroupDoc(gid, 'orchestrator', 'temp').error, 'not-found', 'deleting twice is a clean not-found, not a crash');
+  } finally {
+    groupManager.destroyGroup(gid);
+  }
+});
+
+// Deleting is the orchestrator's alone (#276), and it reaches every document:
+// the publish-side ownership boundary does not apply to it.
+test('the orchestrator deletes any document, its own and every worker\'s', async () => {
+  const gid = await makeGroup();
+  try {
+    groupManager.publishGroupDoc(gid, 'workerA', 'plan', 'a');
+    groupManager.publishGroupDoc(gid, 'workerSec', 'attack-review-abc1234', 'findings');
+    groupManager.publishGroupDoc(gid, 'orchestrator', 'brief', 'b');
+    for (const key of ['plan', 'attack-review-abc1234', 'brief']) {
+      assert.deepEqual(groupManager.deleteGroupDoc(gid, 'orchestrator', key), { ok: true }, `delete ${key}`);
+      assert.equal(groupManager.fetchGroupDoc(gid, key).error, 'not-found');
+    }
+    assert.equal(groupManager.listGroupDocs(gid).length, 0);
+  } finally {
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('no role but the orchestrator can delete, and a refused delete leaves the document intact', async () => {
+  const gid = await makeGroup();
+  try {
+    groupManager.publishGroupDoc(gid, 'workerA', 'plan', 'worker doc');
+    groupManager.publishGroupDoc(gid, 'orchestrator', 'brief', 'orchestrator doc');
+    // A worker role (its own doc and the orchestrator's), an absent role, and
+    // near-misses of the string: none of them is the orchestrator.
+    for (const role of ['workerA', 'workerSec', null, undefined, '', 'Orchestrator', 'orchestrator ', 'orchestrator\n']) {
+      for (const key of ['plan', 'brief']) {
+        const res = groupManager.deleteGroupDoc(gid, role, key);
+        assert.equal(res.error, 'forbidden', `role ${JSON.stringify(role)} deleting ${key}`);
+        assert.equal(res.ok, undefined);
+      }
+    }
+    assert.equal(groupManager.fetchGroupDoc(gid, 'plan').content, 'worker doc');
+    assert.equal(groupManager.fetchGroupDoc(gid, 'brief').content, 'orchestrator doc');
+    assert.equal(groupManager.fetchGroupDoc(gid, 'brief').publishedBy, 'orchestrator');
+    assert.equal(groupManager.listGroupDocs(gid).length, 2);
+    // Refused before the group is looked up, so a forged role learns nothing
+    // about which groups exist.
+    assert.equal(groupManager.deleteGroupDoc('no-such-group', 'workerA', 'k').error, 'forbidden');
+  } finally {
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('a deleted key is free again: a worker publishes it, and so does the orchestrator', async () => {
+  const gid = await makeGroup();
+  try {
+    // orchestrator's key -> a worker takes it over (it could not while it was held)
+    groupManager.publishGroupDoc(gid, 'orchestrator', 'brief', 'first');
+    assert.equal(groupManager.publishGroupDoc(gid, 'workerB', 'brief', 'x').error, 'key-owned-by-other-side');
+    assert.equal(groupManager.deleteGroupDoc(gid, 'orchestrator', 'brief').ok, true);
+    const taken = groupManager.publishGroupDoc(gid, 'workerB', 'brief', 'worker text');
+    assert.equal(taken.ok, true);
+    assert.equal(groupManager.fetchGroupDoc(gid, 'brief').publishedBy, 'workerB');
+
+    // worker's key -> the orchestrator takes it over, and what it publishes is
+    // recorded as the orchestrator's, never as the reviewer's
+    groupManager.publishGroupDoc(gid, 'workerSec', 'attack-review-abc1234', 'reviewer findings');
+    assert.equal(groupManager.publishGroupDoc(gid, 'orchestrator', 'attack-review-abc1234', 'all clear').error, 'key-owned-by-other-side');
+    assert.equal(groupManager.deleteGroupDoc(gid, 'orchestrator', 'attack-review-abc1234').ok, true);
+    const replaced = groupManager.publishGroupDoc(gid, 'orchestrator', 'attack-review-abc1234', 'all clear');
+    assert.equal(replaced.ok, true);
+    assert.equal(replaced.publishedBy, 'orchestrator');
+    assert.equal(groupManager.fetchGroupDoc(gid, 'attack-review-abc1234').publishedBy, 'orchestrator');
+    assert.notEqual(groupManager.fetchGroupDoc(gid, 'attack-review-abc1234').publishedBy, 'workerSec');
+  } finally {
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('getGroupDocUsage reports count and the group limit, and follows publish and delete', async () => {
+  const gid = await makeGroup();
+  try {
+    assert.deepEqual(groupManager.getGroupDocUsage(gid), { count: 0, limit: 50 });
+    groupManager.publishGroupDoc(gid, 'workerA', 'a', 'x');
+    groupManager.publishGroupDoc(gid, 'orchestrator', 'b', 'x');
+    groupManager.publishGroupDoc(gid, 'workerA', 'a', 'again');
+    assert.deepEqual(groupManager.getGroupDocUsage(gid), { count: 2, limit: 50 }, 'an overwrite is not a second document');
+    groupManager.deleteGroupDoc(gid, 'orchestrator', 'a');
+    assert.deepEqual(groupManager.getGroupDocUsage(gid), { count: 1, limit: 50 });
+    assert.deepEqual(groupManager.getGroupDocUsage('no-such-group'), { count: 0, limit: 50 });
   } finally {
     groupManager.destroyGroup(gid);
   }
@@ -193,34 +280,49 @@ test('publishGroupDoc refuses a new key once the group hits the doc-count cap, b
   }
 });
 
-// The orchestrator has no delete_doc and used to be told to publish a fresh key
-// per request, so without its own ceiling it could fill all 50 slots and leave
-// the workers unable to publish a plan or findings. 20 of the 50 are the most it
-// may hold; the other 30 are always the workers'.
-test('the orchestrator holds at most 20 documents (overwriting its own key is exempt) and leaves the workers their slots', async () => {
+// #276: the orchestrator has no ceiling of its own (#274's 20 was removed).
+// The one limit is the group's 50, whoever the documents belong to; the
+// orchestrator keeps under it by deleting, and sees the usage in list_docs.
+test('the orchestrator has no ceiling of its own: the 21st document and beyond are accepted, up to the group limit', async () => {
   const gid = await makeGroup();
   try {
-    // Worker documents do not count against the orchestrator's share.
-    for (let i = 0; i < 5; i++) groupManager.publishGroupDoc(gid, 'workerA', `w${i}`, 'x');
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 50; i++) {
       const res = groupManager.publishGroupDoc(gid, 'orchestrator', `o${i}`, 'x');
       assert.equal(res.error, undefined, `orchestrator doc ${i} should succeed: ${res.message || ''}`);
     }
-    const over = groupManager.publishGroupDoc(gid, 'orchestrator', 'o20', 'x');
-    assert.equal(over.error, 'too-many-orchestrator-docs');
-    assert.match(over.message, /re-publish under one of your existing keys/);
-    assert.equal(groupManager.fetchGroupDoc(gid, 'o20').error, 'not-found', 'the refused doc was not stored');
-    // The cap is on distinct keys: re-publishing one of its own still works.
-    assert.equal(groupManager.publishGroupDoc(gid, 'orchestrator', 'o0', 'y').ok, true);
-    assert.equal(groupManager.fetchGroupDoc(gid, 'o0').content, 'y');
-
-    // The workers keep the other 30 slots (5 already used), and only then hit the group cap.
-    for (let i = 5; i < 30; i++) {
-      const res = groupManager.publishGroupDoc(gid, 'workerB', `w${i}`, 'x');
-      assert.equal(res.error, undefined, `worker doc ${i} should succeed: ${res.message || ''}`);
-    }
-    assert.equal(groupManager.publishGroupDoc(gid, 'workerB', 'w30', 'x').error, 'too-many-docs');
     assert.equal(groupManager.listGroupDocs(gid).length, 50);
+    assert.deepEqual(groupManager.getGroupDocUsage(gid), { count: 50, limit: 50 });
+    // 50 is the group limit for everyone: the 51st is refused for either side
+    const over = groupManager.publishGroupDoc(gid, 'orchestrator', 'o50', 'x');
+    assert.equal(over.error, 'too-many-docs');
+    assert.equal(groupManager.publishGroupDoc(gid, 'workerB', 'w0', 'x').error, 'too-many-docs');
+    assert.equal(groupManager.fetchGroupDoc(gid, 'o50').error, 'not-found', 'the refused doc was not stored');
+    // ... and it says who can fix it and how
+    assert.match(over.message, /50 published documents/);
+    assert.match(over.message, /only the orchestrator can free a slot/);
+    assert.match(over.message, /list_docs/);
+    assert.match(over.message, /delete_doc/);
+    // overwriting an existing key adds no document, so it still works at the limit
+    assert.equal(groupManager.publishGroupDoc(gid, 'orchestrator', 'o0', 'y').ok, true);
+    // deleting one frees exactly one slot, for a worker or for the orchestrator
+    assert.equal(groupManager.deleteGroupDoc(gid, 'orchestrator', 'o1').ok, true);
+    assert.equal(groupManager.publishGroupDoc(gid, 'workerB', 'w0', 'x').ok, true);
+    assert.equal(groupManager.publishGroupDoc(gid, 'orchestrator', 'o50', 'x').error, 'too-many-docs', 'the freed slot went to the worker');
+    assert.deepEqual(groupManager.getGroupDocUsage(gid), { count: 50, limit: 50 });
+  } finally {
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('the too-many-orchestrator-docs error no longer exists', async () => {
+  const gid = await makeGroup();
+  try {
+    const seen = new Set();
+    for (let i = 0; i < 60; i++) {
+      const res = groupManager.publishGroupDoc(gid, 'orchestrator', `o${i}`, 'x');
+      if (res.error) seen.add(res.error);
+    }
+    assert.deepEqual([...seen], ['too-many-docs']);
   } finally {
     groupManager.destroyGroup(gid);
   }
@@ -230,7 +332,7 @@ test('unknown groupId is a clean group-not-found error, not a crash', () => {
   assert.equal(groupManager.publishGroupDoc('no-such-group', 'workerA', 'k', 'v').error, 'group-not-found');
   assert.equal(groupManager.fetchGroupDoc('no-such-group', 'k').error, 'group-not-found');
   assert.deepEqual(groupManager.listGroupDocs('no-such-group'), []);
-  assert.equal(groupManager.deleteGroupDoc('no-such-group', 'workerA', 'k').error, 'group-not-found');
+  assert.equal(groupManager.deleteGroupDoc('no-such-group', 'orchestrator', 'k').error, 'group-not-found');
 });
 
 test('docs persist to .saved-group-docs.json independently of .saved-groups.json, and restoreGroups reloads them', async () => {
@@ -261,6 +363,46 @@ test('docs persist to .saved-group-docs.json independently of .saved-groups.json
     assert.equal(groupManager.publishGroupDoc(gid, 'workerB', 'brief', 'rewritten').error, 'key-owned-by-other-side');
     assert.equal(groupManager.publishGroupDoc(gid, 'orchestrator', 'plan', 'x').error, 'key-owned-by-other-side');
   } finally {
+    if (originalBroker) stopBroker(originalBroker);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('a deleted doc stays deleted after a restart, and its key is free to publish again', async () => {
+  const gid = await makeGroup('/srv/proj-persist-delete');
+  const originalBroker = groupManager.getGroup(gid).controlBroker;
+  try {
+    groupManager.publishGroupDoc(gid, 'workerA', 'plan', 'kept');
+    groupManager.publishGroupDoc(gid, 'workerSec', 'attack-review-abc1234', 'findings to delete');
+    groupManager.publishGroupDoc(gid, 'orchestrator', 'brief', 'instruction to delete');
+    assert.equal(groupManager.deleteGroupDoc(gid, 'orchestrator', 'attack-review-abc1234').ok, true);
+    assert.equal(groupManager.deleteGroupDoc(gid, 'orchestrator', 'brief').ok, true);
+
+    // the file already reflects it -- persisted at delete time, not at exit
+    const raw = JSON.parse(readFileSync(process.env.CCSERVER_GROUP_DOCS_PATH, 'utf-8'));
+    assert.deepEqual(Object.keys(raw[gid]), ['plan']);
+
+    // restart: the in-memory group is rebuilt from disk
+    const restored = groupManager.restoreGroups();
+    assert.ok(restored.ids.includes(gid));
+    assert.equal(groupManager.fetchGroupDoc(gid, 'plan').content, 'kept');
+    assert.equal(groupManager.fetchGroupDoc(gid, 'attack-review-abc1234').error, 'not-found', 'the deleted doc did not come back');
+    assert.equal(groupManager.fetchGroupDoc(gid, 'brief').error, 'not-found', 'the deleted doc did not come back');
+    assert.deepEqual(groupManager.getGroupDocUsage(gid), { count: 1, limit: 50 });
+    // and the keys are free for a worker, after the restart too
+    assert.equal(groupManager.publishGroupDoc(gid, 'workerB', 'brief', 'worker text').ok, true);
+    assert.equal(groupManager.publishGroupDoc(gid, 'workerSec', 'attack-review-abc1234', 'new findings').ok, true);
+
+    // deleting the last remaining docs leaves nothing to restore
+    for (const key of ['plan', 'brief', 'attack-review-abc1234']) groupManager.deleteGroupDoc(gid, 'orchestrator', key);
+    if (existsSync(process.env.CCSERVER_GROUP_DOCS_PATH)) {
+      assert.ok(!JSON.parse(readFileSync(process.env.CCSERVER_GROUP_DOCS_PATH, 'utf-8'))[gid], 'no docs entry left for the group');
+    }
+    groupManager.restoreGroups();
+    assert.deepEqual(groupManager.listGroupDocs(gid), []);
+  } finally {
+    const current = groupManager.getGroup(gid);
+    if (current && current.controlBroker && current.controlBroker !== originalBroker) stopBroker(current.controlBroker);
     if (originalBroker) stopBroker(originalBroker);
     groupManager.destroyGroup(gid);
   }

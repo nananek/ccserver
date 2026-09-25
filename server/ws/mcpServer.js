@@ -6,7 +6,8 @@
 // Two distinct servers per group:
 //   control (buildControlMcpServer)  -- reachable only by the orchestrator
 //     socket. Tools can inspect/type into any member and wait for handoffs,
-//     and publish_doc as the orchestrator.
+//     and publish_doc / delete_doc as the orchestrator (delete_doc exists
+//     only here).
 //   handoff (buildHandoffMcpServer)  -- one per worker socket, exposing only
 //     handoffToOrchestrator and the doc/file exchange tools. The worker cannot
 //     read other sessions.
@@ -157,9 +158,16 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'publish_doc',
-    'Publish a document under a key, visible to every member of this group via fetch_doc/list_docs -- use it to hand a worker a long instruction (send only the key through send_input, not the text). It is recorded as published by "orchestrator", which the server sets and no worker can claim. Use a key named for its purpose and re-publish it to replace the content (you can hold at most 20 documents; past that a new key is refused with too-many-orchestrator-docs, so overwrite one of your own). You cannot overwrite a key a worker published, and a worker cannot overwrite a key you published (error key-owned-by-other-side); re-publishing your own key overwrites it.',
+    'Publish a document under a key, visible to every member of this group via fetch_doc/list_docs -- use it to hand a worker a long instruction (send only the key through send_input, not the text). It is recorded as published by "orchestrator", which the server sets and no worker can claim. You cannot overwrite a key a worker published, and a worker cannot overwrite a key you published (error key-owned-by-other-side); re-publishing your own key overwrites it. The group holds at most 50 documents in total (workers\' included); list_docs shows count / limit, and a new key past the limit is refused with too-many-docs until you free a slot with delete_doc.',
     { key: z.string(), content: z.string() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishDocAsOrchestrator(deps, args)) }] }),
+  );
+
+  server.tool(
+    'delete_doc',
+    'Delete the document published under a key, whoever published it (yours or a worker\'s); only you can -- workers have no delete. The key is free again straight away, for either side, and the deletion survives a server restart. An unknown key is an explicit not-found error. This is how you keep the board under its 50-document limit (list_docs shows count / limit): remove documents that have served their purpose, and only once nobody still needs them -- a worker that has not fetched a document yet gets not-found, and a findings document the pre-PR check will read must stay until its PR has merged.',
+    { key: z.string() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.deleteDocAsOrchestrator(deps, args)) }] }),
   );
 
   server.tool(
@@ -171,7 +179,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'list_docs',
-    'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need.',
+    'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need. The result also carries count and limit: how many documents the group holds and the most it can hold.',
     {},
     async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listDocs(deps)) }] }),
   );
@@ -254,7 +262,7 @@ export function buildHandoffMcpServer(deps) {
 
   server.tool(
     'list_docs',
-    'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need.',
+    'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need. The result also carries count and limit: how many documents the group holds and the most it can hold.',
     {},
     async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listDocs(deps)) }] }),
   );
