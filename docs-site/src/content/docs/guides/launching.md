@@ -38,7 +38,7 @@ Files タブ (見出し "Select a Directory") の toolbar にある **Clone** �
 
 - **資格情報はサーバーを動かしているユーザーの gh / git の設定**です。clone はサンドボックスの外で走るため、サンドボックスの git broker・許可リストは関係しません。private リポジトリを clone できるかは、そのユーザーの `gh auth` 次第です。
 - **暫定の受け付け範囲 (オーナー確認待ち)**: 次の範囲は暫定の既定で、確定した仕様ではありません。
-  - 保存先は表示中のディレクトリの直下に新しいディレクトリ 1 つ (browseRoots の内側)。名前は URL の最後の要素、または入力欄で指定 (1 要素のみ。`/` `\` `.` `..`、制御文字、先頭 `-` は不可)。既存の非空ディレクトリは拒否します。
+  - 保存先は表示中のディレクトリの直下に新しいディレクトリ 1 つ (browseRoots の内側)。名前は URL の最後の要素、または入力欄で指定 (1 要素のみ。`/` `\` `.` `..`、制御文字、先頭 `-` は不可)。同じ名前のものが既にある (空のディレクトリ・ファイル・シンボリックリンクを含む) 場合は拒否します。
   - URL は `OWNER/REPO` または `https://github.com/OWNER/REPO[.git]` だけ。ホストは github.com のみで、userinfo・`-` で始まるもの・他のスキーム・ローカルパス・ssh は拒否します。サーバーが URL を検証・正規化し、gh には正規化した https URL を渡します (gh の `git_protocol` 設定で ssh には変わりません)。
 - 実行は `execFile` (shell なし) で、引数は `repo clone <URL> <ディレクトリ> --no-upstream` に固定されます。環境変数は必要なものだけを渡し (`PATH`、`HOME`、gh / プロキシ / 証明書の設定など)、`GIT_ALLOW_PROTOCOL=https` と、`core.hooksPath=/dev/null`・`protocol.ext.allow=never`・`protocol.file.allow=never`・`core.fsmonitor=`・LFS の smudge 無効化を環境変数の git config で固定します。**LFS を使うリポジトリは、LFS のファイルがポインタのまま clone されます** (必要なら clone 後に自分で `git lfs pull`)。サブモジュールは取得しません。
 - clone は保存先の親ディレクトリを fd で固定し、その中の一時ディレクトリ (`.ccserver-clone-*`) に clone してから最終名へ rename します。失敗・タイムアウト時に中途半端なディレクトリは残りません。タイムアウト (10 分)、同時実行数 (2)、取り込む出力量 (64 KiB) には上限があります。

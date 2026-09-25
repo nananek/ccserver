@@ -300,42 +300,33 @@ test('a parent that cannot name a directory (NUL byte, over-long name) is a vali
   assert.ok(!existsSync(join(a.rec, 'called')));
 });
 
-test('an existing non-empty directory, file, or symlink at the final name is a conflict; gh is not run', async () => {
+test('anything already at the final name -- directory (empty or not), file, symlink -- is a conflict; gh is not run', async () => {
   const a = arena();
   const ghBin = fakeGh(a.rec, ghBody(a.rec));
   mkdirSync(join(a.parent, 'full'));
   writeFileSync(join(a.parent, 'full', 'x'), '1');
+  mkdirSync(join(a.parent, 'empty'));
   writeFileSync(join(a.parent, 'file'), '1');
   const target = uniq('symtarget');
   mkdirSync(target);
   symlinkSync(target, join(a.parent, 'link'));
-  for (const name of ['full', 'file', 'link']) {
+  for (const name of ['full', 'empty', 'file', 'link']) {
     const res = await clone(a, { parent: a.parent, url: 'o/r', name }, { ghBin });
     assert.equal(res.code, 'conflict', name);
   }
   assert.ok(!existsSync(join(a.rec, 'called')));
   assert.deepEqual(readdirSync(target), [], 'a symlink at the final name is never cloned through');
   assert.deepEqual(readdirSync(join(a.parent, 'full')), ['x']);
-});
-
-test('an existing EMPTY directory is replaced by the finished clone', async () => {
-  const a = arena();
-  const ghBin = fakeGh(a.rec, ghBody(a.rec));
-  mkdirSync(join(a.parent, 'r'));
-  const res = await clone(a, { parent: a.parent, url: 'o/r' }, { ghBin });
-  assert.equal(res.ok, true);
-  assert.ok(existsSync(join(a.parent, 'r', '.git')));
-  assert.ok(res.data.warnings.includes('Replaced an existing empty directory'));
-  assert.deepEqual(stagingLeft(a.parent), []);
+  assert.deepEqual(readdirSync(join(a.parent, 'empty')), [], 'an empty directory is left as it was, not replaced');
 });
 
 test('the final name filling up while gh runs is a conflict and the staging directory is removed', async () => {
   const a = arena();
   const go = join(a.rec, 'go');
   const ghBin = fakeGh(a.rec, ghBody(a.rec, { middle: `touch '${a.rec}/started'\nn=0; while [ ! -f '${go}' ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done` }));
-  mkdirSync(join(a.parent, 'r'));
   const pending = clone(a, { parent: a.parent, url: 'o/r' }, { ghBin });
   await waitFor(() => existsSync(join(a.rec, 'started')));
+  mkdirSync(join(a.parent, 'r'));
   writeFileSync(join(a.parent, 'r', 'planted'), 'x');
   writeFileSync(go, '');
   const res = await pending;

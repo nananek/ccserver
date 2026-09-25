@@ -9,7 +9,7 @@
 //   Q2 destination: ONE new directory directly under the shown directory,
 //      inside browseRoots; the name comes from the URL's last element or an
 //      explicit override (one path element; no `/` `\` `.` `..`, control
-//      characters, or leading `-`); an existing non-empty directory is refused.
+//      characters, or leading `-`); anything already at that name is refused.
 //   Q3 URL: `OWNER/REPO` or `https://github.com/OWNER/REPO[.git]` only, host
 //      github.com only; userinfo, a leading `-`, other schemes, local paths and
 //      ssh are refused. The server normalizes the URL and hands gh THAT https
@@ -55,7 +55,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, mkdir, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, realpath, rename, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isContained, resolveWithinRoots } from './pathPolicy.js';
@@ -423,22 +423,16 @@ async function cloneInto({ parent, dirName, url }, roots, opts) {
   };
 
   try {
-    // Refuse early when the final name is taken: an existing non-empty
-    // directory (or anything that is not a directory) is a conflict. An empty
-    // directory may be replaced by the rename below, like git clone into one.
+    // Refuse early when the final name is taken by anything at all: the
+    // destination is a NEW directory. (rename below would replace an empty
+    // directory that appears in the meantime; that is all the race can cost.)
     const finalFs = join(pin.fsPath, dirName);
-    let replacesEmptyDir = false;
-    let existing = null;
     try {
-      existing = await lstat(finalFs);
+      await lstat(finalFs);
+      return fail('conflict', 'A file or directory with that name already exists');
     } catch (err) {
       if (err.code === 'ENAMETOOLONG') return fail('validation', 'Folder name is too long');
       if (err.code !== 'ENOENT') throw err;
-    }
-    if (existing) {
-      if (!existing.isDirectory()) return fail('conflict', 'A file with that name already exists');
-      if ((await readdir(finalFs)).length > 0) return fail('conflict', 'Directory already exists and is not empty');
-      replacesEmptyDir = true;
     }
 
     stageName = await makeStagingDir(pin.fsPath);
@@ -477,12 +471,11 @@ async function cloneInto({ parent, dirName, url }, roots, opts) {
     } catch (err) {
       await cleanup();
       if (err.code === 'ENOTEMPTY' || err.code === 'EEXIST' || err.code === 'ENOTDIR') {
-        return fail('conflict', 'Directory already exists and is not empty');
+        return fail('conflict', 'A file or directory with that name already exists');
       }
       throw err;
     }
     stageName = null;
-    if (replacesEmptyDir) warnings.push('Replaced an existing empty directory');
     return ok({ path: join(pin.realPath, dirName), name: dirName, url, warnings });
   } catch (err) {
     await cleanup();
