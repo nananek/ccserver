@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { authWsUrl, authFetch } from '../auth.js';
-import { createOsc52Handler } from '../osc52.js';
+import { createOsc52Handler, clipboardWritePreview } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
 import { displayPath } from '../displayPath.js';
 import { isElevatedPermissionMode } from '../permissionMode.js';
@@ -312,6 +312,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // isolation), so a first-time "are you sure" dialog with a dismiss flag
   // mirrors App.jsx's skip-close-confirm pattern.
   const [showSandboxWarning, setShowSandboxWarning] = useState(false);
+  // Issue #241. Pending OSC 52 clipboard WRITE awaiting the viewer's decision:
+  // { text, preview } or null. Assigning a new one replaces any pending one,
+  // which is also the burst policy -- see the onWrite handler below.
+  const [clipboardPrompt, setClipboardPrompt] = useState(null);
+  // Sticky refusal for this terminal session (a ref, not state: the osc52
+  // handler below is built once per session inside an effect and must see the
+  // live value without being rebuilt).
+  const clipboardWriteDeniedRef = useRef(false);
   const [dontAskNoSandboxWarning, setDontAskNoSandboxWarning] = useState(false);
   const [skipNoSandboxWarning, setSkipNoSandboxWarning] = useState(
     () => localStorage.getItem(SKIP_NOSANDBOX_AUTOY_WARNING_KEY) === '1'
@@ -515,9 +523,42 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // remembered for the rest of the session so a legitimate workflow that
     // checks the clipboard repeatedly isn't nagged on every query, but an
     // agent can never read it without the user having approved at least once.
+    // Issue #241: the WRITE path used to be unconditional. Any byte an agent
+    // wrote to the pty could replace the viewer's clipboard with no prompt and
+    // no trace -- the OSC sequence is stripped here before xterm ever renders
+    // it, so nothing appears on screen. Confirmed in real browsers: with the
+    // tab focused and a recent user gesture, Chromium and Firefox both perform
+    // the write silently, no prior permission grant needed.
+    //
+    // Gated like the read above, with one deliberate asymmetry: an ALLOW is
+    // NOT remembered, while a DENY is.
+    //
+    // Reading is content-independent -- approving it once means "this session
+    // may see my clipboard", and the decision cannot mean less later. A write
+    // IS its content, so remembering an allow would let an agent take approval
+    // on something harmless and then silently replace the clipboard for the
+    // rest of the session. That is precisely the attack, so allow covers
+    // exactly one write. Refusal is remembered because it costs nothing to
+    // stop asking someone who said no, and it is the escape hatch from a
+    // dialog flood: an agent writing in a loop is answered once, not per
+    // sequence. Both halves fail toward "do not touch the clipboard".
+    //
+    // The nagging this could cause in legitimate use is bounded by when OSC 52
+    // writes actually happen: a TUI emits one because the viewer just pressed
+    // its copy key (vim's yank, opencode's copy). The prompt lands right after
+    // a deliberate keystroke. A write nobody asked for is the case worth
+    // interrupting.
     let osc52ReadDecision = null; // null = not asked yet this session
     const osc52 = createOsc52Handler({
-      onWrite: (text) => writeClipboardText(text),
+      onWrite: (text) => {
+        if (clipboardWriteDeniedRef.current) return;
+        // A burst collapses to the newest payload rather than queueing a
+        // modal per sequence. That is not a shortcut: writes overwrite each
+        // other, so only the last one could ever have survived in the
+        // clipboard anyway -- and it denies an agent a way to multiply
+        // dialogs by splitting one payload across many sequences.
+        setClipboardPrompt({ text, preview: clipboardWritePreview(text) });
+      },
       onQuery: () => {
         if (osc52ReadDecision === null) {
           osc52ReadDecision = window.confirm(
@@ -1940,6 +1981,59 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           Send
         </button>
       </div>
+      {clipboardPrompt && (
+        // Issue #241. Deliberately an in-app dialog rather than the
+        // window.confirm() the READ gate uses, and the reason is measured,
+        // not stylistic: a clipboard write needs transient user activation
+        // (~5s since the last real gesture). With window.confirm, the time
+        // the viewer spends reading the dialog is inside that window, so a
+        // slow "yes" lands after activation has expired -- Chromium then
+        // rejects writeText with NotAllowedError AND the execCommand
+        // fallback returns false, i.e. approving would silently do nothing.
+        // Measured on Chromium: accepting at ~0s writes fine, accepting at
+        // 6s fails both paths. Clicking the button below is itself the
+        // gesture, so the write always runs with fresh activation.
+        //
+        // The backdrop dismisses this one write without arming the sticky
+        // refusal: a stray click should not silently turn the gate off for
+        // the session -- only the explicit 拒否 button does that.
+        <div className="resume-overlay" data-testid="osc52-write-prompt" onClick={() => setClipboardPrompt(null)}>
+          <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>クリップボードの書き換えを許可しますか?</h3>
+            <p>
+              このセッションのエージェントが、あなたのクリップボードを書き換えようとしています。
+              許可すると、いま入っている内容は失われます。
+            </p>
+            {/* Agent-controlled text. Flattened to a single line by
+                clipboardWritePreview (see osc52.js) so it cannot forge dialog
+                lines, and rendered as a JSX child so React escapes it. */}
+            <p className="osc52-write-preview" data-testid="osc52-write-preview">
+              {clipboardPrompt.preview.text || '(空 — クリップボードの内容が消去されます)'}
+            </p>
+            <p className="osc52-write-meta">
+              {clipboardPrompt.preview.chars} 文字
+              {clipboardPrompt.preview.truncated ? ' (先頭のみ表示)' : ''}
+              {' / この許可はこの 1 回だけです'}
+            </p>
+            <div className="resume-actions">
+              <button
+                className="btn btn-secondary"
+                onClick={() => { clipboardWriteDeniedRef.current = true; setClipboardPrompt(null); }}
+              >
+                拒否 (以後確認しない)
+              </button>
+              <button
+                className="btn btn-primary"
+                // Synchronous inside the click handler on purpose: that is
+                // what gives navigator.clipboard.writeText its activation.
+                onClick={() => { const { text } = clipboardPrompt; setClipboardPrompt(null); writeClipboardText(text); }}
+              >
+                許可
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showSandboxWarning && (
         <div className="resume-overlay" onClick={() => setShowSandboxWarning(false)}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>

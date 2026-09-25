@@ -97,3 +97,47 @@ export function createOsc52Handler({ onWrite, onQuery }) {
     },
   };
 }
+
+// Longest payload prefix shown in the write-confirmation dialog.
+export const CLIPBOARD_PREVIEW_MAX = 120;
+
+// Flattens an OSC 52 write payload for display in the confirmation dialog.
+//
+// The dialog is a new display surface: to decide, the viewer has to be shown
+// what is about to be written, and that string is chosen by the agent. So it
+// is sanitized before it gets there, on three axes:
+//
+//   - Every C0/C1 control, DEL, and Unicode line/paragraph separator becomes
+//     U+2423 OPEN BOX. The preview is therefore always exactly ONE line, so a
+//     payload cannot forge extra dialog lines (a fake question, a fake
+//     "cancelled" notice) around the real one.
+//   - Bidi overrides/isolates and invisible formatting characters are dropped,
+//     so the preview cannot visually reorder or hide its own content.
+//   - It is truncated to CLIPBOARD_PREVIEW_MAX code points, with the true
+//     length reported separately, so a long payload cannot push the question
+//     out of view.
+//
+// Returns the code-point count of the ORIGINAL text, not of the preview: the
+// viewer is told how much is really being written, not how much is displayed.
+export function clipboardWritePreview(text) {
+  const chars = Array.from(String(text ?? ''));
+  const flat = [];
+  for (const ch of chars) {
+    const cp = ch.codePointAt(0);
+    // Invisible formatting / bidi control -- dropped outright.
+    if (cp === 0x00ad || cp === 0xfeff
+      || (cp >= 0x200b && cp <= 0x200f)
+      || (cp >= 0x202a && cp <= 0x202e)
+      || (cp >= 0x2060 && cp <= 0x2064)
+      || (cp >= 0x2066 && cp <= 0x2069)) continue;
+    const isControl = cp <= 0x1f || cp === 0x7f || (cp >= 0x80 && cp <= 0x9f)
+      || cp === 0x2028 || cp === 0x2029;
+    flat.push(isControl ? '␣' : ch);
+  }
+  const truncated = flat.length > CLIPBOARD_PREVIEW_MAX;
+  return {
+    text: flat.slice(0, CLIPBOARD_PREVIEW_MAX).join('') + (truncated ? '…' : ''),
+    chars: chars.length,
+    truncated,
+  };
+}
