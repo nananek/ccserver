@@ -346,6 +346,36 @@ test('validateGroupCwd: "<root>/<symlink>/.." is refused when the symlink points
   });
 });
 
+// POST /groups answers 409 for a second group on a project: two groups would share one
+// orchestratorDir (cross-talk through resumeLast, CLAUDE.md fights) and the same per-role
+// worktrees. A saved file is held to that too. Which of two is kept is the file's order
+// (the first), so the outcome is the same on every start.
+test('restoreGroups keeps the first group saved for a project and refuses a later one for the same cwd, as creation refuses (409)', async () => {
+  const cwd = `/srv/proj-dup-${randomUUID()}`;
+  const other = `/srv/proj-dup-other-${randomUUID()}`;
+  const first = savedEntry(cwd);
+  const second = savedEntry(cwd);
+  const spelled = savedEntry(`${cwd}/`);          // the same project, spelled differently (resolve() folds it)
+  const elsewhere = savedEntry(other);
+
+  const { info, warnings } = restoreFrom([first, second, elsewhere, spelled]);
+  assert.deepEqual(info.ids, [first.id, elsewhere.id], 'the first group for the project, and the one for another project');
+  assert.equal(groupManager.listGroups().filter((g) => g.groupId === second.id || g.groupId === spelled.id).length, 0, 'the later ones do not exist');
+  const text = warnings.join('\n');
+  for (const dup of [second, spelled]) {
+    assert.ok(text.includes(dup.id) && text.includes(first.id), `the warning names both the refused group ${dup.id} and the one kept`);
+  }
+  assert.match(text, /not restoring saved group .* another group .* same project/);
+
+  // the order decides, nothing else: the same entries the other way round keep the other one
+  const reversed = restoreFrom([spelled, second, first]);
+  assert.deepEqual(reversed.info.ids, [spelled.id]);
+  // control: restoring the same file again is not "a second group" -- a group is not a duplicate of itself
+  const again = restoreFrom([first]);
+  assert.deepEqual(again.info.ids, [first.id]);
+  assert.deepEqual(again.warnings, []);
+});
+
 test('restoreGroups still restores a group whose project directory is not there right now (an unmounted disk is not a tampered file)', async () => {
   const cwd = `/srv/proj-missing-${randomUUID()}`;
   const { info } = restoreFrom([savedEntry(cwd)]);

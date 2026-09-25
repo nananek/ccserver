@@ -23,7 +23,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { basename } from 'node:path';
 import * as groupManager from '../ws/groupManager.js';
 import { createSession, getSession, isInfrastructureError, retireSessionForReuse } from '../ws/sessionManager.js';
 import { sandboxAvailable, sandboxUnavailableReason } from '../ws/sandbox.js';
@@ -41,13 +41,11 @@ export function orchestratorDirForCwd(cwd) {
   return groupManager.orchestratorDirForCwd(cwd);
 }
 
-// Pure duplicate-project detection for POST /groups: two groups for the same
-// project would share one orchestratorDir, cross-talking through resumeLast
-// and fighting over CLAUDE.md. `groups` is a listGroups() listing; resolve()
-// keeps cwd spelling variants from slipping past the check. Exposed for tests.
+// Duplicate-project detection for POST /groups (409). The rule lives in
+// groupManager.groupExistsForCwd, shared with restoreGroups; kept as this
+// module's export for its callers and tests.
 export function groupExistsForCwd(cwd, groups) {
-  const target = resolve(cwd);
-  return groups.find((g) => resolve(g.cwd) === target) || null;
+  return groupManager.groupExistsForCwd(cwd, groups);
 }
 
 function memberSpecFromBody(spec) {

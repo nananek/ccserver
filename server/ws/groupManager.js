@@ -236,6 +236,16 @@ export function orchestratorDirForCwd(cwd) {
   return join(orchestratorRoot(), projectHashForCwd(cwd));
 }
 
+// Pure duplicate-project detection: two groups for the same project would share one
+// orchestratorDir, cross-talking through resumeLast and fighting over CLAUDE.md (and
+// the same per-role worktrees). `groups` is anything shaped like listGroups(): entries
+// with a `cwd`. resolve() keeps cwd spelling variants from slipping past the check.
+// Shared by POST /groups (routes/groups.js answers 409) and restoreGroups.
+export function groupExistsForCwd(cwd, groups) {
+  const target = resolve(cwd);
+  return groups.find((g) => resolve(g.cwd) === target) || null;
+}
+
 // May `cwd` be the project directory of a group? One rule for both places that
 // admit a group: POST /groups (launchGroupFromSpec) and restoreGroups.
 // { ok: true } or { ok: false, code, message }; codes: 'shape' (not an absolute
@@ -669,6 +679,7 @@ export function restoreGroups() {
 
   const savedSessions = peekSavedSessions() || [];
   const ids = [];
+  const admitted = [];   // { groupId, cwd } of the groups this call restored, in file order
   let restored = 0;
   for (const e of arr) {
     if (!e || typeof e.id !== 'string') continue;
@@ -698,6 +709,15 @@ export function restoreGroups() {
       console.warn(`[groupManager] saved group ${e.id}: ${cwdCheck.message} Restoring it without the browseRoots containment check.`);
     }
     const cwd = e.cwd;
+    // One group per project, as POST /groups holds it. The first in the file wins, so
+    // the outcome does not depend on anything but the file. (Among the groups this call
+    // restores: a group is not a duplicate of itself when the file is read again.)
+    const kept = groupExistsForCwd(cwd, admitted);
+    if (kept) {
+      console.warn(`[groupManager] not restoring saved group ${e.id}: another group (${kept.groupId}) for the same project ${JSON.stringify(cwd)} was restored before it (creation refuses a second group for one project)`);
+      continue;
+    }
+    admitted.push({ groupId: e.id, cwd });
     // Never the persisted value: creation derives it from cwd, and a saved
     // path would otherwise be mkdir'd below wherever the file says.
     const orchestratorDir = orchestratorDirForCwd(cwd);
