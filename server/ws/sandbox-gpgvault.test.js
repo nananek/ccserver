@@ -434,14 +434,18 @@ function assuanRoundTrip(sockPath, command, timeoutMs = 3000) {
 // a local agent of its own.
 //
 // gpg does NOT always look for S.gpg-agent inside $GNUPGHOME. When a real
-// /run/user/<uid> exists (true on this host; false inside the bwrap sandbox
-// this is meant to imitate, since sandbox.js mounts a fresh --tmpfs /run
-// there), GnuPG's "socketdir" scheme puts every socket under
+// /run/user/<uid> exists, GnuPG's "socketdir" scheme puts every socket under
 // /run/user/<uid>/gnupg/d.<hash-of-homedir>/ instead and never even stats
 // $GNUPGHOME/S.gpg-agent -- confirmed with strace, not something worth
-// guessing at from the docs. `gpgconf --list-dirs agent-socket` reports
-// whichever path gpg will actually use, so ask it instead of assuming
-// $home/S.gpg-agent.
+// guessing at from the docs. That directory exists on a desktop host, and it
+// also exists INSIDE a plain bwrap sandbox: sandbox.js mounts a fresh
+// --tmpfs /run there but then recreates XDG_RUNTIME_DIR (/run/user/<uid> by
+// default) in it, and the relay alias below is bound into it. Only under
+// rootlesskit (uid 0, no /run/user/0) does gpg fall back to $GNUPGHOME. So
+// this throwaway home imitates the sandbox's view of the agent socket by asking
+// the host's own gpgconf where gpg will look -- `gpgconf --list-dirs agent-socket`
+// reports whichever path gpg will actually use, so ask it instead of assuming
+// $home/S.gpg-agent (which is also right when this host has no /run/user/<uid>).
 function relayOnlyGnupgHome(vaultHomeDir, relayAgentSock) {
   const home = mkdtempSync('/tmp/cgvc');
   execFileSync('cp', [join(vaultHomeDir, 'pubring.kbx'), join(vaultHomeDir, 'trustdb.gpg'), home]);

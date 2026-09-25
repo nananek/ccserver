@@ -114,7 +114,15 @@ export function getRelaySocketPaths() {
 // at the hashed path and quietly starts its own empty agent in the sandbox.
 // Verified equal to `gpgconf --homedir H --list-dirs agent-socket` on GnuPG
 // 2.4.4 and 2.4.9 (sandbox-gpgvault.test.js pins both, and compares against the
-// host's own gpgconf on every run).
+// host's own gpgconf on every run) -- for the input it is meant for: `homedir`
+// must be the string gpg is given as GNUPGHOME, an absolute path as path.join
+// writes it (sandbox.js passes its join()ed target dir, and the same string in
+// --setenv GNUPGHOME). It is hashed exactly as given. GnuPG does two things to
+// the homedir BEFORE hashing that this does not: it drops a trailing slash and
+// it makes a relative path absolute against its own working directory, so for
+// those two spellings the hashes differ (measured, GnuPG 2.4.9: "/x/y/" and
+// "y" hash like "/x/y" in gpgconf, not here). "//", "./" and ".." are hashed as
+// written by both, so they agree.
 const ZBASE32 = 'ybndrfg8ejkmcpqxot1uwisza345h769';
 
 export function gnupgRunUserAgentSocket(homedir, uid) {
