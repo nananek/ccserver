@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { orchestratorRestartSessionOpts, orchestratorDirForCwd, groupExistsForCwd, orchestratorRestartFailureStatus, launchFailureCode, workerLaunchFailureCode, launchGroupFromSpec } from './groups.js';
@@ -377,5 +377,49 @@ test('launchGroupFromSpec refuses a cwd outside browseRoots before touching the 
     rmSync(outside, { recursive: true, force: true });
     rmSync(allowed, { recursive: true, force: true });
     rmSync(cfgDir, { recursive: true, force: true });
+  }
+});
+
+// The cwd rules are groupManager.validateGroupCwd's (restoreGroups applies the
+// same ones to a saved group). The test above cannot tell whether launchGroupFromSpec
+// still asks it: with the containment check removed, createSession's own browseRoots
+// refusal answers in nearly the same words a step later. So each refusal is pinned by
+// its exact code and message -- the first check's, not createSession's "Cannot launch:
+// ..." -- and by nothing having been created.
+test('launchGroupFromSpec: the cwd refusals are validateGroupCwd\'s, with their own code and message, and create no group', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'ccserver-groups-cwd-'));
+  const allowed = join(base, 'allowed');
+  const outside = join(base, 'outside');
+  mkdirSync(allowed);
+  mkdirSync(outside);
+  const aFile = join(base, 'a-file');
+  writeFileSync(aFile, '');
+  const cfgPath = join(base, 'sandbox.config.json');
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  const groupsBefore = groupManagerModule.listGroups().length;
+  const launch = (cwd) => launchGroupFromSpec({ cwd, workerA: { app: 'claude' }, workerB: { app: 'claude' } });
+  try {
+    writeFileSync(cfgPath, JSON.stringify({}));
+    for (const cwd of [undefined, null, 12, '', 'rel/dir', '/', join(base, 'missing'), aFile]) {
+      assert.deepEqual(await launch(cwd), { ok: false, code: 'validation', message: 'cwd must be an existing directory (not /)' }, JSON.stringify(cwd));
+    }
+
+    // browseRoots that cannot be read: creation fails closed
+    writeFileSync(cfgPath, JSON.stringify({ browseRoots: 'not-an-array' }));
+    const unreadable = await launch(allowed);
+    assert.equal(unreadable.code, 'validation');
+    assert.match(unreadable.message, /^sandbox\.config\.json's "browseRoots" is invalid \(must be an array of directory paths\)/);
+
+    writeFileSync(cfgPath, JSON.stringify({ browseRoots: [allowed] }));
+    assert.deepEqual(
+      await launch(outside),
+      { ok: false, code: 'validation', message: `cwd is outside the allowed browseRoots (sandbox.config.json's "browseRoots"). Choose a directory under one of: ${allowed}` },
+    );
+    assert.equal(groupManagerModule.listGroups().length, groupsBefore, 'no group was created by any of them');
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    rmSync(base, { recursive: true, force: true });
   }
 });
