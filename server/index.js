@@ -6,6 +6,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { dirsRoute } from './routes/dirs.js';
+import { gitRoute } from './routes/git.js';
 import { sessionsRoute } from './routes/sessions.js';
 import { filesRoute } from './routes/files.js';
 import { systemRoute } from './routes/system.js';
@@ -307,6 +308,7 @@ if (AUTH_MODE === 'none' && !isLoopbackHost(HOST) && process.env.CCSERVER_ALLOW_
 await fastify.register(websocket);
 await fastify.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } });
 await fastify.register(dirsRoute, { prefix: '/api' });
+await fastify.register(gitRoute, { prefix: '/api' });
 await fastify.register(sessionsRoute, { prefix: '/api' });
 await fastify.register(filesRoute, { prefix: '/api' });
 await fastify.register(systemRoute, { prefix: '/api' });
