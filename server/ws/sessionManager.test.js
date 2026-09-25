@@ -445,7 +445,7 @@ test('createSession refuses a cwd outside browseRoots, for both shells and agent
       sessionManager.destroySession(shellInside.sessionId, { keepSchedule: false });
     } else {
       assert.equal(shellInside.session, null);
-      assert.match(shellInside.error, /shell sessions must run sandboxed/);
+      assert.match(shellInside.error, /every session must run sandboxed/);
     }
   } finally {
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
@@ -505,7 +505,7 @@ test('createSession accepts a scratch-tree cwd only via the trusted scratchCwd f
     } else {
       // No backend: refused by the sandbox mandate, never by the cwd check.
       assert.equal(res.session, null);
-      assert.match(res.error, /shell sessions must run sandboxed/);
+      assert.match(res.error, /every session must run sandboxed/);
     }
   } finally {
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
@@ -601,7 +601,7 @@ test('createSession refuses an unsandboxed shell when browseRoots is set and no 
     const res = await sessionManager.createSession({ cwd: allowed, cols: 80, rows: 24, shell: true, sandbox: false });
     assert.equal(res.session, null, 'a shell must never fall back to unsandboxed when browseRoots mandates sandboxing');
     assert.match(res.error, /^Cannot launch: sandbox\.config\.json sets "browseRoots"/);
-    assert.match(res.error, /shell sessions must run sandboxed/);
+    assert.match(res.error, /every session must run sandboxed/);
   } finally {
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
