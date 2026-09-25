@@ -12,6 +12,7 @@ import { homedir } from 'node:os';
 import { statSync } from 'node:fs';
 import { createSession, getSession, destroySession, listSessions, setSessionLabel } from '../ws/sessionManager.js';
 import { isValidApp } from '../ws/appLaunch.js';
+import { sessionOutputText } from '../ws/mcpTools.js';
 
 export async function sessionsRoute(fastify, opts) {
   fastify.get('/sessions', async (request, reply) => {
@@ -62,6 +63,24 @@ export async function sessionsRoute(fastify, opts) {
       return reply.code(status).send({ error: res.message });
     }
     return { success: true, id, customLabel: res.session.customLabel };
+  });
+
+  // The text behind the mobile "コピー" modal: a one-shot snapshot of this
+  // session's recent output, ANSI stripped.
+  //
+  // It goes through read_output's own helper on purpose. The UI this replaced
+  // reconstructed the terminal's text in the browser (dewrapping xterm's
+  // wrapped rows by hand) and tracked it live as output arrived, which is
+  // what leaked (#253). Reading it here means there is one implementation of
+  // "what is on this terminal", and the modal inherits that path's existing
+  // cap rather than introducing a second, differently-wrong one.
+  fastify.get('/sessions/:id/text', async (request, reply) => {
+    const session = getSession(request.params.id);
+    if (!session) {
+      return reply.code(404).send({ error: 'Session not found' });
+    }
+    const { text, truncated } = sessionOutputText(session);
+    return { text, truncated };
   });
 
   if (process.env.CCSERVER_DEBUG) {

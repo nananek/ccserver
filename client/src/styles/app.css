@@ -2685,9 +2685,6 @@ body {
   height: 100%;
   display: flex;
   flex-direction: column;
-  /* Positioning context for .selection-handle/.selection-copy-btn, which
-     are absolutely positioned relative to it instead of the viewport --
-     see the cellPixel comment in TerminalView.jsx for why. */
   position: relative;
 }
 
@@ -2736,15 +2733,6 @@ body {
   /* Touch drags scroll the terminal (via synthetic wheel events), not the
      page: the browser must not pan while the finger is on the terminal. */
   touch-action: none;
-}
-
-/* Persistent visual confirmation for selection mode -- a PWA has no OS
-   haptics to confirm a gesture landed, so the mode's on/off state itself
-   has to be the feedback, visible independent of where in the terminal
-   the user is currently touching. */
-.terminal-view.selection-mode .terminal-container {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 
 /* opencode draws in the alternate screen: xterm.js keeps no scrollback for
@@ -2805,39 +2793,6 @@ body {
 .disconnected-reconnect-btn:hover {
   background: var(--error);
   color: var(--bg-primary);
-}
-
-/* Floating copy button after a long-press text selection on touch devices
-   (see the long-press handling in TerminalView.jsx). Positioned inline via
-   style={{ left, top }} at the touch point. */
-.selection-copy-btn {
-  position: absolute;
-  z-index: 50;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 8px 14px;
-  background: var(--accent);
-  color: var(--bg-primary);
-  border: none;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 600;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  cursor: pointer;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  -webkit-tap-highlight-color: transparent;
-}
-.selection-handle {
-  position: absolute;
-  z-index: 49;
-  width: 14px;
-  height: 14px;
-  margin-left: -7px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
-  pointer-events: none;
 }
 .terminal-container.tui-scroll .xterm-viewport::-webkit-scrollbar {
   display: none;
@@ -2996,14 +2951,29 @@ body {
   background: var(--border);
 }
 
-/* Selection-mode toggle lives in the scroll-controls row (right of the
-   scroll buttons); its active state is the mode's persistent visual
-   confirmation (see .terminal-view.selection-mode). */
-.scroll-btn.selection-mode-btn.active {
-  background: var(--accent);
-  color: var(--bg-primary);
-  border-color: var(--accent);
-  font-weight: 600;
+/* The copy-text modal's textarea. A plain form control on purpose: the whole
+   point of replacing the canvas selection handles (#253) is that iOS's own
+   selection and copy menu work here with nothing for us to track. */
+.copy-text-dialog {
+  width: min(92vw, 720px);
+}
+.copy-text-area {
+  width: 100%;
+  height: min(60vh, 420px);
+  box-sizing: border-box;
+  resize: none;
+  padding: 10px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre;
+  overflow: auto;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 /* Special Keys Toolbar */

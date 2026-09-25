@@ -1907,3 +1907,54 @@ test('repoInfo: the git state is branch, head and log -- no changes field, howev
   assert.equal(out.git.log.length, 1);
   assert.ok(out.git.log[0].endsWith('initial commit'));
 });
+
+// --- #253: the copy modal reads through read_output's own helper -----------
+//
+// The mobile "copy the terminal" modal replaced a UI that rebuilt the
+// terminal's text in the browser and tracked it live as output arrived --
+// which is what leaked. It now calls sessionOutputText() (via
+// GET /api/sessions/:id/text), the same helper read_output uses, so there is
+// one implementation of "what is on this terminal" and the modal inherits
+// that path's cap instead of carrying its own.
+test('#253: sessionOutputText is the same text read_output returns', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const fakeSession = {
+    cwd: '/srv/project-x',
+    app: 'claude',
+    exited: false,
+    outputBuffer: ['\x1b[31mred\x1b[0m text ', 'more\n'],
+  };
+  const deps = {
+    groupId: g,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+  };
+  const viaTool = tools.readOutput(deps, { sessionId: 'sess-a1' });
+  const viaHelper = tools.sessionOutputText(fakeSession);
+
+  assert.equal(viaHelper.text, viaTool.text, 'the modal must not get a different answer than the tool');
+  assert.equal(viaHelper.raw, viaTool.raw);
+  assert.equal(viaHelper.truncated, viaTool.truncated);
+  assert.equal(viaHelper.text, 'red text more\n', 'ANSI is stripped for the textarea');
+});
+
+test('#253: sessionOutputText carries read_output\'s cap, not one of its own', () => {
+  // 16 KiB is MAX_READOUTPUT_CHARS. The point of the assertion is not the
+  // number -- it is that the modal is bounded by whatever that number is,
+  // so raising or lowering it moves both callers together.
+  const big = { outputBuffer: [ 'x'.repeat(20 * 1024) ] };
+  const out = sessionOutputTextOf(big);
+  assert.equal(out.truncated, true, 'an over-cap buffer must report truncation');
+  assert.ok(out.text.length <= 16 * 1024, `capped, got ${out.text.length}`);
+  assert.equal(out.text, 'x'.repeat(16 * 1024), 'and it keeps the NEWEST output, not the oldest');
+
+  const small = { outputBuffer: ['short'] };
+  const ok = sessionOutputTextOf(small);
+  assert.equal(ok.truncated, false);
+  assert.equal(ok.text, 'short');
+});
+
+function sessionOutputTextOf(session) {
+  return tools.sessionOutputText(session);
+}
