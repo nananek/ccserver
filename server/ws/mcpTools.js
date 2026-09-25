@@ -711,6 +711,13 @@ async function gitRun(cwd, args) {
   }
 }
 
+// A commit subject is text its author chose, and it reaches the orchestrator as
+// "the project's history". Terminal control sequences (ESC [ ... m), BEL, CR,
+// DEL and the C0/C1 control characters are removed; tab and ordinary spaces
+// stay. (git already cuts a line at a NUL, so nothing follows one.) No length
+// limit is applied here: the log had none, and none is added.
+const CONTROL_CHARS_RE = /[\x00-\x08\x0a-\x1f\x7f-\x9f]/g;
+
 async function gitState(cwd) {
   const branch = await gitRun(cwd, ['branch', '--show-current']);
   const head = await gitRun(cwd, ['rev-parse', '--short', 'HEAD']);
@@ -719,7 +726,7 @@ async function gitState(cwd) {
   return {
     branch: branch || null,
     head,
-    log: log ? log.split('\n').filter(Boolean) : [],
+    log: log ? log.split('\n').map((line) => line.replace(CONTROL_CHARS_RE, '')).filter(Boolean) : [],
   };
 }
 

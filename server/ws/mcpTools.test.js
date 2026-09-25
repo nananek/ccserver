@@ -1912,6 +1912,45 @@ test('repoInfo: a refs/replace entry cannot change what the log says', async () 
   assert.doesNotMatch(JSON.stringify(out.git), /FORGED/);
 });
 
+// #283 review: a commit subject is text its author chose, and it goes into the
+// orchestrator's context as the project's history. Terminal control sequences
+// (ESC [ ... m), BEL, CR and the C1 controls have no business in it. Tab and
+// ordinary spaces are kept; there is no length cap here and none was added.
+test('repoInfo: control characters in a commit subject do not reach the orchestrator (tab and spaces stay)', async () => {
+  const cases = [
+    // [what, subject as written, subject as returned, needs hash-object --literally]
+    ['ESC sequence', 'title \x1b[31mRED\x1b[0m end', 'title [31mRED[0m end'],
+    ['BEL', 'ring \x07 bell', 'ring  bell'],
+    ['C1 control (U+009B, the single-character CSI)', 'c1 \x9b31m end', 'c1 31m end'],
+    ['C1 range, both ends (U+0080, U+009F)', 'a\x80b\x9fc', 'abc'],
+    ['CR', 'cr\rback', 'crback'],
+    ['DEL', 'del\x7fx', 'delx'],
+    ['C0 controls, the whole run but tab', 'a\x01\x02\x03\x04\x05\x06\x08\x0b\x0c\x0e\x0f\x10\x1a\x1cz', 'az'],
+    ['TAB and spaces are kept', 'tab\there  two  spaces', 'tab\there  two  spaces'],
+    ['a plain subject (with non-ASCII text) is untouched', 'fix: 日本語の件名 (#1)', 'fix: 日本語の件名 (#1)'],
+    ['NUL (git cuts the line at it; nothing after it is shown)', 'null\x00inside', 'null', true],
+  ];
+  for (const [what, subject, expected, literally] of cases) {
+    const r = makeTrapRepo('ctrl');
+    const head = r.git('rev-parse', 'HEAD').trim();
+    const tree = r.git('rev-parse', 'HEAD^{tree}').trim();
+    const oid = execFileSync('git', ['-C', r.dir, 'hash-object', ...(literally ? ['--literally'] : []), '-t', 'commit', '-w', '--stdin'], {
+      env: r.env, encoding: 'utf-8',
+      input: `tree ${tree}\nparent ${head}\nauthor t <t@t> 1 +0000\ncommitter t <t@t> 1 +0000\n\n${subject}\n`,
+    }).trim();
+    r.git('update-ref', 'HEAD', oid);
+    // the input really is in the repository, and (bar NUL, which git cuts at) git prints it raw
+    assert.ok(r.git('cat-file', 'commit', oid).endsWith(`${subject}\n`), `${what}: the subject is stored as written`);
+    if (subject !== expected) assert.ok(r.git('log', '--oneline', '-1').includes(subject.replace(/\x00.*/, '')), `${what}: control: plain git log prints it raw`);
+
+    const out = await repoInfoOf(r);
+    const line = out.git.log[0];
+    assert.equal(line.slice(line.indexOf(' ') + 1), expected, `${what}: subject as returned`);
+    assert.doesNotMatch(line, /[\x00-\x08\x0a-\x1f\x7f-\x9f]/, `${what}: no control character left`);
+    assert.equal(out.git.log.length, 2, `${what}: still one line per commit`);
+  }
+});
+
 test('repoInfo: config injected through the environment (GIT_CONFIG_COUNT) cannot start a command either', async () => {
   const r = makeTrapRepo('envcfg');
   restat(r);
