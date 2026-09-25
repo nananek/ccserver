@@ -314,20 +314,6 @@ test('the orchestrator has no ceiling of its own: the 21st document and beyond a
   }
 });
 
-test('the too-many-orchestrator-docs error no longer exists', async () => {
-  const gid = await makeGroup();
-  try {
-    const seen = new Set();
-    for (let i = 0; i < 60; i++) {
-      const res = groupManager.publishGroupDoc(gid, 'orchestrator', `o${i}`, 'x');
-      if (res.error) seen.add(res.error);
-    }
-    assert.deepEqual([...seen], ['too-many-docs']);
-  } finally {
-    groupManager.destroyGroup(gid);
-  }
-});
-
 test('unknown groupId is a clean group-not-found error, not a crash', () => {
   assert.equal(groupManager.publishGroupDoc('no-such-group', 'workerA', 'k', 'v').error, 'group-not-found');
   assert.equal(groupManager.fetchGroupDoc('no-such-group', 'k').error, 'group-not-found');
