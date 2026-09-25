@@ -85,9 +85,15 @@ body {
   border-color: var(--error);
 }
 
-.btn:disabled {
+.btn:disabled,
+.btn[aria-disabled='true'] {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* An aria-disabled button still receives hover; keep it from lighting up as if live. */
+.btn-primary[aria-disabled='true']:hover {
+  background: var(--accent);
 }
 
 /* Tab Bar */
@@ -4806,4 +4812,31 @@ body {
   margin-top: 10px;
   max-height: 50vh;
   overflow-y: auto;
+}
+
+/* OSC 52 clipboard-write confirmation (issue #241).
+   The preview holds agent-controlled text, so it is fenced off from the
+   dialog's own wording: its own surface, a border, and a monospace face, so
+   a payload that imitates UI copy still reads as quoted content rather than
+   as something the dialog is saying. clipboardWritePreview() has already
+   flattened it to one line; `pre` + the overflow rules keep it that way even
+   if it is wide, instead of wrapping into something that looks like several
+   dialog lines. */
+.osc52-write-preview {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 12px 0 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  white-space: pre;
+  overflow-x: auto;
+  user-select: text;
+}
+
+.osc52-write-meta {
+  font-size: 12px;
+  opacity: 0.75;
+  margin-bottom: 4px;
 }
