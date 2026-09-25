@@ -1434,6 +1434,11 @@ export function destroyGroup(groupId) {
 // the group's memory footprint must stay bounded regardless of how it's used.
 const MAX_DOC_BYTES = 256 * 1024;
 const MAX_DOCS_PER_GROUP = 50;
+// The orchestrator's share of that cap. It has no delete_doc, so without its
+// own ceiling a document per request would fill all the slots and leave the
+// workers unable to publish (a plan, a findings document): the workers always
+// keep MAX_DOCS_PER_GROUP - MAX_ORCHESTRATOR_DOCS of them.
+const MAX_ORCHESTRATOR_DOCS = 20;
 
 // Re-publishing the same key overwrites it (whoever published most recently
 // wins) -- kept deliberately simple for a "message board", no versioning. See
@@ -1472,6 +1477,14 @@ export function publishGroupDoc(groupId, role, key, content) {
   }
   if (!group.docs.has(key) && group.docs.size >= MAX_DOCS_PER_GROUP) {
     return { error: 'too-many-docs', message: `group already has the maximum of ${MAX_DOCS_PER_GROUP} published documents` };
+  }
+  // Overwriting one of its own keys adds no document, so it is exempt.
+  if (role === 'orchestrator' && !group.docs.has(key)
+    && [...group.docs.values()].filter((d) => d.publishedBy === 'orchestrator').length >= MAX_ORCHESTRATOR_DOCS) {
+    return {
+      error: 'too-many-orchestrator-docs',
+      message: `the orchestrator already holds the maximum of ${MAX_ORCHESTRATOR_DOCS} published documents; re-publish under one of your existing keys (list_docs shows them) to overwrite it instead of adding a new one`,
+    };
   }
   const doc = { content: text, publishedBy: role, publishedAt: Date.now() };
   group.docs.set(key, doc);

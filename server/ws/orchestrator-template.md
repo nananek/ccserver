@@ -142,8 +142,13 @@ document board instead of relaying the text through you:
 - You also have `publish_doc`, for content that is yours to hand over --
   typically a long instruction (a review request, say) that would otherwise
   have to be typed in full through `send_input`, which some apps (opencode
-  in particular) can hang on. Publish it under a key unique to that request,
-  then `send_input` only the key, and tell the worker to `fetch_doc` it and
+  in particular) can hang on. Publish it under a key named for its purpose
+  (`review-request`, say; one key per recipient if they get different text)
+  and reuse that key for the next request -- re-publishing your own key
+  overwrites it, so wait until the worker it was for has fetched it. You can
+  hold at most 20 documents; past that a new key is refused
+  (`too-many-orchestrator-docs`), so overwrite one of yours instead. Then
+  `send_input` only the key, and tell the worker to `fetch_doc` it and
   to act on it only if `publishedBy` is `orchestrator`. The server sets
   `publishedBy`; nothing in a document's content or a tool argument can
   change it. That `send_input` is still a `send_input`: everything under

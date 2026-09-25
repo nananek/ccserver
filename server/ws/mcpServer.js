@@ -157,7 +157,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'publish_doc',
-    'Publish a document under a key, visible to every member of this group via fetch_doc/list_docs -- use it to hand a worker a long instruction (send only the key through send_input, not the text). It is recorded as published by "orchestrator", which the server sets and no worker can claim. Use a key unique to the request. You cannot overwrite a key a worker published, and a worker cannot overwrite a key you published (error key-owned-by-other-side); re-publishing your own key overwrites it.',
+    'Publish a document under a key, visible to every member of this group via fetch_doc/list_docs -- use it to hand a worker a long instruction (send only the key through send_input, not the text). It is recorded as published by "orchestrator", which the server sets and no worker can claim. Use a key named for its purpose and re-publish it to replace the content (you can hold at most 20 documents; past that a new key is refused with too-many-orchestrator-docs, so overwrite one of your own). You cannot overwrite a key a worker published, and a worker cannot overwrite a key you published (error key-owned-by-other-side); re-publishing your own key overwrites it.',
     { key: z.string(), content: z.string() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishDocAsOrchestrator(deps, args)) }] }),
   );

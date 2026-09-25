@@ -106,8 +106,8 @@ test('mcpServer.js: read_output description states the discipline, status tools 
 // The orchestrator has publish_doc (control MCP server), and the template says
 // so. What is pinned here is that the text matches the tool list AND that
 // the addition stayed a plain description: the review gate's own wording is
-// pinned by the tests below and was not touched. Regression guard only -- see
-// the header for what a wording test cannot do.
+// pinned by the tests below. Regression guard only -- see the header for what
+// a wording test cannot do.
 test('template: the orchestrator is told it HAS publish_doc, with the ownership boundary and the publishedBy check', () => {
   // The old claim is gone; leaving it would contradict the control tool list.
   assert.doesNotMatch(flat, /You do not have publish_doc yourself/);
@@ -125,6 +125,11 @@ test('template: the orchestrator is told it HAS publish_doc, with the ownership 
   // The boundary, stated to the orchestrator, including the reviewer's findings.
   assert.match(flat, /You cannot overwrite a key a worker published -- in particular you cannot replace a reviewer's findings document -- and a worker cannot overwrite a key you published/);
   assert.match(flat, /`key-owned-by-other-side`/);
+  // The key advice matches the orchestrator's 20-document share: reuse a key
+  // per purpose instead of minting one per request.
+  assert.doesNotMatch(flat, /a key unique to that request/);
+  assert.match(flat, /reuse that key for the next request -- re-publishing your own key overwrites it/);
+  assert.match(flat, /You can hold at most 20 documents; past that a new key is refused \(`too-many-orchestrator-docs`\)/);
 });
 
 test('mcpServer.js: publish_doc is registered on BOTH servers and each description states the boundary', () => {
@@ -134,6 +139,9 @@ test('mcpServer.js: publish_doc is registered on BOTH servers and each descripti
     assert.match(src, /'publish_doc'/, `${name} server registers publish_doc`);
     assert.match(src, /key-owned-by-other-side/, `${name} publish_doc description names the refusal`);
   }
+  // The control description matches the 20-document share too.
+  assert.match(control, /at most 20 documents; past that a new key is refused with too-many-orchestrator-docs/);
+  assert.doesNotMatch(control, /unique to the request/);
   // The identity each one publishes as is fixed by which function it calls.
   assert.match(control, /tools\.publishDocAsOrchestrator\(deps, args\)/);
   assert.match(handoff, /tools\.publishDoc\(deps, args\)/);

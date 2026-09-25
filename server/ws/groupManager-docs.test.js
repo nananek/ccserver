@@ -193,6 +193,39 @@ test('publishGroupDoc refuses a new key once the group hits the doc-count cap, b
   }
 });
 
+// The orchestrator has no delete_doc and used to be told to publish a fresh key
+// per request, so without its own ceiling it could fill all 50 slots and leave
+// the workers unable to publish a plan or findings. 20 of the 50 are the most it
+// may hold; the other 30 are always the workers'.
+test('the orchestrator holds at most 20 documents (overwriting its own key is exempt) and leaves the workers their slots', async () => {
+  const gid = await makeGroup();
+  try {
+    // Worker documents do not count against the orchestrator's share.
+    for (let i = 0; i < 5; i++) groupManager.publishGroupDoc(gid, 'workerA', `w${i}`, 'x');
+    for (let i = 0; i < 20; i++) {
+      const res = groupManager.publishGroupDoc(gid, 'orchestrator', `o${i}`, 'x');
+      assert.equal(res.error, undefined, `orchestrator doc ${i} should succeed: ${res.message || ''}`);
+    }
+    const over = groupManager.publishGroupDoc(gid, 'orchestrator', 'o20', 'x');
+    assert.equal(over.error, 'too-many-orchestrator-docs');
+    assert.match(over.message, /re-publish under one of your existing keys/);
+    assert.equal(groupManager.fetchGroupDoc(gid, 'o20').error, 'not-found', 'the refused doc was not stored');
+    // The cap is on distinct keys: re-publishing one of its own still works.
+    assert.equal(groupManager.publishGroupDoc(gid, 'orchestrator', 'o0', 'y').ok, true);
+    assert.equal(groupManager.fetchGroupDoc(gid, 'o0').content, 'y');
+
+    // The workers keep the other 30 slots (5 already used), and only then hit the group cap.
+    for (let i = 5; i < 30; i++) {
+      const res = groupManager.publishGroupDoc(gid, 'workerB', `w${i}`, 'x');
+      assert.equal(res.error, undefined, `worker doc ${i} should succeed: ${res.message || ''}`);
+    }
+    assert.equal(groupManager.publishGroupDoc(gid, 'workerB', 'w30', 'x').error, 'too-many-docs');
+    assert.equal(groupManager.listGroupDocs(gid).length, 50);
+  } finally {
+    groupManager.destroyGroup(gid);
+  }
+});
+
 test('unknown groupId is a clean group-not-found error, not a crash', () => {
   assert.equal(groupManager.publishGroupDoc('no-such-group', 'workerA', 'k', 'v').error, 'group-not-found');
   assert.equal(groupManager.fetchGroupDoc('no-such-group', 'k').error, 'group-not-found');
