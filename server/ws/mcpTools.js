@@ -658,7 +658,9 @@ const gitExec = promisify(execFile);
 //                        the index
 //   log --oneline -5     gpg.program, when log.showSignature is on and a commit
 //                        carries a signature; an on-demand fetch of a missing HEAD
-//                        commit
+//                        commit. Not a command but as bad for a reader: a
+//                        refs/replace entry makes log print the subject of some
+//                        other commit next to the real commit's hash
 //   branch --show-current, rev-parse --short HEAD    nothing
 //
 // So `git status` is not run at all, and repo_info reports no working-tree state
@@ -672,6 +674,10 @@ const gitExec = promisify(execFile);
 // What the three commands left do need, each closed at its cause (and each
 // held by a test that goes red without it):
 //   -c log.showSignature=false   no signature check, so no gpg.program
+//   GIT_NO_REPLACE_OBJECTS=1     no refs/replace: the log says what the commits
+//                                say, not what a replace ref planted in the
+//                                shared .git makes them say (measured: only log
+//                                is affected; rev-parse and branch are not)
 //   GIT_NO_LAZY_FETCH=1          no on-demand fetch. It has no per-key switch (a
 //                                protocol.<name>.allow pin loses to a more
 //                                specific one the repo sets), so it is turned off
@@ -697,7 +703,7 @@ async function gitRun(cwd, args) {
     const { stdout } = await gitExec('git', [...GIT_READ_ONLY_ARGS, '-C', cwd, ...args], {
       encoding: 'utf-8',
       timeout: 10000,
-      env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
+      env: { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_NO_REPLACE_OBJECTS: '1' },
     });
     return stdout.trim();
   } catch {
