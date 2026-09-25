@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, statSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { normalizeBrowseRoots, isContained, resolveWithinRoots, isCcserverScratchPath } from './pathPolicy.js';
@@ -111,6 +111,74 @@ test('resolveWithinRoots: relative-path escape attempts collapse via resolve() b
   const res = resolveWithinRoots('../../etc/passwd', roots);
   assert.equal(res.path, resolve('/', '../../etc/passwd'));
   assert.equal(res.ok, false);
+});
+
+// A ".." that follows a symlink goes to the parent of where the link POINTS: that
+// is what the kernel does with a path it is handed (open, chdir, bwrap's --bind
+// source, git -C), and a cwd is handed to it exactly as written. path.resolve() and
+// fs.realpathSync() both collapse ".." lexically FIRST, so "<root>/link/.." read as
+// "<root>" whatever the link pointed at -- a group's cwd, a session's cwd or a review
+// target could be a directory outside browseRoots that passed for one inside it.
+// isContained therefore asks the OS (realpath(3), fs.realpathSync.native) about the
+// path it is given, and callers hand it the path the kernel will get.
+function withEscapeTree(fn) {
+  const base = mkdtempSync(join(tmpdir(), 'ccserver-pathpolicy-dotdot-'));
+  const root = join(base, 'root');
+  const outside = join(base, 'outside');
+  mkdirSync(join(root, 'sub'), { recursive: true });
+  mkdirSync(join(outside, 'deep'), { recursive: true });
+  mkdirSync(join(outside, 'real'));
+  symlinkSync('/', join(root, 'to-fs-root'));
+  symlinkSync(join(outside, 'deep'), join(root, 'to-outside'));
+  symlinkSync(join(root, 'sub'), join(root, 'to-sub'));
+  // "as written": template strings, never join(), which would collapse ".." itself
+  const at = (rel) => `${root}/${rel}`;
+  try {
+    return fn({ base, root, outside, at });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
+test('isContained: ".." after a symlink is judged where the symlink points, as the kernel resolves it', () => {
+  withEscapeTree(({ root, at }) => {
+    // control: the trap is armed. The kernel really does reach outside/real through
+    // "<root>/to-outside/../real", and "<root>/real" (what a lexical reading gives)
+    // does not exist -- so a check that agrees with the lexical reading is wrong.
+    assert.equal(statSync(at('to-outside/../real')).isDirectory(), true, 'control: the kernel finds a directory there');
+    assert.throws(() => statSync(at('real')), /ENOENT/, 'control: the lexical spelling is not that directory');
+
+    for (const rel of ['to-fs-root/..', 'to-fs-root/../etc', 'to-outside/..', 'to-outside/../real', 'to-outside/../deep/../..']) {
+      assert.equal(isContained(at(rel), [root]), false, `${rel}: outside the root`);
+    }
+    // ".." through real directories, or through a link that points back inside, stays inside
+    for (const rel of ['sub/..', 'sub/../sub', 'to-sub/..', 'to-sub/../sub', 'to-sub/../to-sub/..']) {
+      assert.equal(isContained(at(rel), [root]), true, `${rel}: inside the root`);
+    }
+  });
+});
+
+test('isContained: a path with no real location yet is judged by its nearest existing ancestor (missing, dangling, looping, under a file)', () => {
+  withEscapeTree(({ root, at }) => {
+    symlinkSync('/no-such-target-zz', join(root, 'dangling'));
+    symlinkSync(join(root, 'loop'), join(root, 'loop'));
+    writeFileSync(join(root, 'afile'), '');
+    for (const rel of ['missing', 'missing/x', 'missing/../x', 'dangling', 'dangling/x', 'loop', 'loop/x', 'afile/x', 'afile/../sub']) {
+      assert.equal(isContained(at(rel), [root]), true, `${rel}: no throw, and inside`);
+    }
+    // ".." out of a missing directory leaves the root all the same
+    assert.equal(isContained(at('missing/../..'), [root]), false);
+    // and a missing name behind a link that points outside is outside
+    assert.equal(isContained(at('to-outside/missing/../x'), [root]), false);
+  });
+});
+
+// createSession's cwd used to be anchored at "/" (resolve('/', cwd)) before it was
+// checked; isContained now takes the raw cwd, so a relative one keeps that anchoring.
+test('isContained: a relative path is anchored at "/", as the launch paths always did', () => {
+  assert.equal(isContained('srv/projects/x', ['/srv/projects']), true);
+  assert.equal(isContained('etc', ['/srv/projects']), false);
+  assert.equal(isContained('../srv/projects/x', ['/srv/projects']), true);
 });
 
 // isCcserverScratchPath (issue #189): combo-group sessions always run in a

@@ -14,7 +14,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -453,6 +453,45 @@ test('createSession refuses a cwd outside browseRoots, for both shells and agent
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(outside, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// A session's cwd is handed to the kernel as written (the pty's chdir, bwrap's --bind
+// source), and the kernel applies ".." to where a symlink POINTS. The cwd was checked
+// after resolve() had collapsed the ".." lexically, so "<root>/link/.." passed for
+// "<root>" and started a session in the link target's parent, outside browseRoots.
+test('createSession refuses "<root>/<symlink>/.." when the symlink points outside browseRoots', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'ccserver-sess-dotdot-'));
+  const allowed = join(base, 'allowed');
+  const target = join(base, 'outside', 'deep');
+  mkdirSync(allowed);
+  mkdirSync(target, { recursive: true });
+  symlinkSync(target, join(allowed, 'link'));
+  const cfgPath = join(base, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  const started = [];
+  try {
+    // "<allowed>/link/.." is <base>/outside for the kernel and <allowed> for a lexical reading
+    const cwd = `${allowed}/link/..`;
+    assert.equal(realpathSync.native(cwd), join(base, 'outside'), 'control: the kernel puts this cwd outside browseRoots');
+    for (const opts of [{ shell: true, sandbox: false }, { shell: false, app: 'claude', sandbox: false }]) {
+      const res = await sessionManager.createSession({ cwd, cols: 80, rows: 24, ...opts });
+      if (res.session) started.push(res.sessionId);
+      assert.equal(res.session, null, `${opts.shell ? 'a shell' : 'an agent'} with that cwd must be refused`);
+      assert.match(res.error, /outside the allowed browseRoots/);
+    }
+    // control: the same spelling through a real directory is inside, and is not refused for its cwd
+    mkdirSync(join(allowed, 'proj'));
+    const inside = await sessionManager.createSession({ cwd: `${allowed}/proj/..`, cols: 80, rows: 24, shell: true, sandbox: false });
+    if (inside.session) started.push(inside.sessionId);
+    assert.doesNotMatch(inside.error || '', /outside the allowed browseRoots/, 'a real ".." inside the root is not refused by the cwd check');
+  } finally {
+    for (const id of started) { try { sessionManager.destroySession(id, { keepSchedule: false }); } catch { /* ignore */ } }
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(base, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 

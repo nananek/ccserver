@@ -2408,7 +2408,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   if (browseRootsInvalid) {
     throw new Error('Cannot build a sandbox: sandbox.config.json\'s "browseRoots" is invalid, so the allowed working directories cannot be determined.');
   }
-  if (browseRoots.length > 0 && !(scratchCwd === true && isCcserverScratchPath(resolve(cwd))) && !isContained(resolve(cwd), browseRoots)) {
+  if (browseRoots.length > 0 && !(scratchCwd === true && isCcserverScratchPath(resolve(cwd))) && !isContained(cwd, browseRoots)) {
     throw new Error('Cannot build a sandbox: working directory is outside the allowed browseRoots.');
   }
   const docker = cfgDocker && dockerSandboxAvailableFn();

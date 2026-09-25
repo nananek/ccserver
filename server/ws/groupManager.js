@@ -271,7 +271,7 @@ export function validateGroupCwd(cwd, { requireDirectory = true } = {}) {
   if (browseRootsInvalid) {
     return { ok: false, code: 'browse-roots-invalid', message: 'sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed working directories cannot be determined. Fix the config and reload.' };
   }
-  if (browseRoots.length > 0 && !isContained(resolve(cwd), browseRoots)) {
+  if (browseRoots.length > 0 && !isContained(cwd, browseRoots)) {
     return { ok: false, code: 'outside-browse-roots', message: `cwd is outside the allowed browseRoots (sandbox.config.json's "browseRoots"). Choose a directory under one of: ${browseRoots.join(', ')}` };
   }
   return { ok: true };

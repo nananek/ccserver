@@ -714,7 +714,9 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       error: 'Cannot launch: sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed working directories cannot be determined. Fix the config and reload.',
     };
   }
-  if (cfg.browseRoots.length > 0 && !scratchExempt && !isContained(absCwd, cfg.browseRoots)) {
+  // The raw cwd, not absCwd: it is what the pty and bwrap's --bind are handed, and the
+  // kernel applies ".." to where a symlink points -- absCwd has already folded it away.
+  if (cfg.browseRoots.length > 0 && !scratchExempt && !isContained(cwd, cfg.browseRoots)) {
     return {
       sessionId: id,
       session: null,

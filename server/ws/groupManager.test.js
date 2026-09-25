@@ -225,7 +225,7 @@ function savedEntry(cwd, extra = {}) {
 }
 
 // browseRoots for the duration of fn: an allowed root, a sibling outside it,
-// and a symlink INSIDE the allowed root that points at the outside one.
+// and symlinks INSIDE the allowed root that point at the outside one and at "/".
 async function withBrowseRoots(fn) {
   const base = mkdtempSync(join(tmpdir(), 'ccs-restore-roots-'));
   const allowed = join(base, 'allowed');
@@ -233,6 +233,7 @@ async function withBrowseRoots(fn) {
   mkdirSync(allowed);
   mkdirSync(outside);
   symlinkSync(outside, join(allowed, 'link-out'));
+  symlinkSync('/', join(allowed, 'link-fs-root'));
   const cfg = join(base, 'sandbox.config.json');
   writeFileSync(cfg, JSON.stringify({ browseRoots: [allowed] }));
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
@@ -306,6 +307,10 @@ test('restoreGroups refuses a group whose cwd creation would have refused (not a
       '.. out of browseRoots': `${allowed}/../outside`,
       'symlink out of browseRoots': join(allowed, 'link-out'),
       'symlink out, then a child': join(allowed, 'link-out', 'child'),
+      // ".." after a symlink goes to where the link POINTS (the kernel's rule; see pathPolicy.test.js)
+      'symlink to "/", then ..': `${allowed}/link-fs-root/..`,
+      'symlink to "/", then ../etc': `${allowed}/link-fs-root/../etc`,
+      'symlink out, then ..': `${allowed}/link-out/..`,
     };
     for (const [what, cwd] of Object.entries(bad)) {
       const { info, warnings } = restoreFrom([savedEntry(cwd)]);
@@ -313,6 +318,31 @@ test('restoreGroups refuses a group whose cwd creation would have refused (not a
       assert.match(warnings.join('\n'), /not restoring saved group/, `${what}: says why`);
     }
     assert.equal(existsSync(outside), true);
+  });
+});
+
+// POST /groups (launchGroupFromSpec) and restoreGroups both ask validateGroupCwd, and a
+// group's cwd is later handed to the kernel exactly as saved (git -C, bwrap's --bind,
+// a spawn's cwd). So "<root>/<symlink>/.." has to be judged where the symlink points --
+// with a link to "/", the group's project directory is "/" itself.
+test('validateGroupCwd: "<root>/<symlink>/.." is refused when the symlink points outside browseRoots (with or without the existence check)', async () => {
+  await withBrowseRoots(async ({ allowed }) => {
+    const inside = join(allowed, 'proj');
+    mkdirSync(inside);
+    // control: ".." through real directories is still fine, and the trap is armed --
+    // the kernel takes each of these for a directory, so only the containment check
+    // can tell they are not inside
+    assert.equal(groupManager.validateGroupCwd(`${inside}/..`).ok, true, 'control: a real ".." inside the root passes');
+    for (const cwd of [`${allowed}/link-fs-root/..`, `${allowed}/link-out/..`]) {
+      assert.equal(statSync(cwd).isDirectory(), true, `control: the kernel accepts ${cwd} as a directory`);
+    }
+    for (const cwd of [`${allowed}/link-fs-root/..`, `${allowed}/link-fs-root/../etc`, `${allowed}/link-out/..`]) {
+      for (const opts of [undefined, { requireDirectory: false }]) {
+        const res = groupManager.validateGroupCwd(cwd, opts);
+        assert.equal(res.ok, false, `${cwd} ${JSON.stringify(opts ?? {})}: refused`);
+        assert.equal(res.code, 'outside-browse-roots');
+      }
+    }
   });
 });
 

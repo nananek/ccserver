@@ -6,7 +6,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { dirsRoute } from './dirs.js';
@@ -118,6 +118,35 @@ test('POST /dirs keeps the directory but reports failure when git init cannot ru
 // render the rtk / code-review-graph toggles disabled-with-a-note instead of
 // offering a checkbox the server silently drops (macOS seatbelt has no
 // provisioner -- see issue #22). Both true on this non-macOS test host.
+// The HTTP layer is NOT open to "<root>/<symlink>/..": resolveWithinRoots collapses ".."
+// (path.resolve, the documented contract) BEFORE the containment check, and the route then
+// reads that same collapsed path, so what is checked and what is read cannot differ. This
+// pins that, next to the launch paths (pathPolicy.test.js) where the raw path is what the
+// kernel gets and the ".." has to be judged the kernel's way.
+test('GET /dirs: "<root>/<symlink-to-/>/.." lists the root itself and never "/" (checked and read as the same collapsed path)', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'ccserver-dirs-dotdot-'));
+  const allowed = join(base, 'allowed');
+  mkdirSync(join(allowed, 'proj'), { recursive: true });
+  symlinkSync('/', join(allowed, 'link-fs-root'));
+  const get = (path) => app.inject({ method: 'GET', url: `/api/dirs?path=${encodeURIComponent(path)}` });
+  try {
+    await withConfig({ browseRoots: [allowed] }, async () => {
+      // control: the link itself is physically "/" and is refused
+      assert.equal((await get(join(allowed, 'link-fs-root'))).statusCode, 403);
+
+      const via = await get(`${allowed}/link-fs-root/..`);
+      assert.equal(via.statusCode, 200);
+      assert.equal(via.json().current, allowed, 'the collapsed path is what is listed');
+      assert.deepEqual(via.json().dirs.map((d) => d.name), ['proj'], 'the root\'s own contents -- none of "/"');
+
+      // "<root>/link/../etc" is "<root>/etc", which does not exist; it is never "/etc"
+      assert.equal((await get(`${allowed}/link-fs-root/../etc`)).statusCode, 404);
+    });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('GET /dirs/home exposes toolsAvailable for the opt-in tool toggles', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
   const { toolsAvailable } = res.json();

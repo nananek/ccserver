@@ -525,6 +525,31 @@ test('GET /files: a path outside browseRoots is refused with 403, inside is serv
   });
 });
 
+// Same as GET /dirs (dirs.test.js): the path is collapsed by resolve() before the
+// containment check and read as that collapsed path, so "<root>/<symlink>/.." cannot
+// name a file the check did not see.
+test('GET /files and /files/content: "<root>/<symlink-to-outside>/../x" is "<root>/x" -- a file beyond the link is neither checked as, nor served as, the one inside', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+  const outside = mkdtempSync(join(dir, 'outside-'));
+  mkdirSync(join(outside, 'deep'));
+  writeFileSync(join(outside, 'secret.txt'), 'outside secret\n');            // what the kernel finds at <allowed>/link/../secret.txt
+  writeFileSync(join(allowed, 'secret.txt'), 'inside copy\n');               // what a collapsed path finds there
+  symlinkSync(join(outside, 'deep'), join(allowed, 'link'));
+  const viaLink = `${allowed}/link/../secret.txt`;
+  await withConfig({ browseRoots: [allowed] }, async () => {
+    // control: the kernel really would read the outside file through this spelling
+    assert.equal(readFileSync(viaLink, 'utf8'), 'outside secret\n');
+
+    const download = await app.inject({ method: 'GET', url: `/api/files?path=${encodeURIComponent(viaLink)}` });
+    assert.equal(download.statusCode, 200);
+    assert.equal(download.body, 'inside copy\n', 'served from the collapsed path, which is what was checked');
+    const preview = await app.inject({ method: 'GET', url: contentUrl(viaLink) });
+    assert.equal(preview.statusCode, 200);
+    assert.equal(preview.json().content, 'inside copy\n');
+    assert.doesNotMatch(download.body + preview.body, /outside secret/);
+  });
+});
+
 test('GET /files/content: a path outside browseRoots is refused with 403, inside is served', async () => {
   const allowed = mkdtempSync(join(dir, 'allowed-'));
   const outside = mkdtempSync(join(dir, 'outside-'));

@@ -4,7 +4,7 @@
 // dependency-free (node builtins only) to avoid a circular import between
 // those two layers.
 
-import { resolve, sep, dirname, basename, join } from 'node:path';
+import { resolve, sep, dirname, basename, join, isAbsolute } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { scratchRoots } from './paths.js';
@@ -40,9 +40,15 @@ function withinRoots(absPath, roots) {
   return roots.some((root) => absPath === root || absPath.startsWith(root + sep));
 }
 
+// fs.realpathSync.native, not fs.realpathSync: the JS one applies path.resolve()
+// first, which collapses ".." LEXICALLY, so "<dir>/link/.." reads as "<dir>" whatever
+// "link" points at. The kernel does the opposite -- symlinks first, ".." after, on the
+// directory the link leads to -- and that is what happens to a path the server hands
+// on (open, chdir, bwrap's --bind source, git -C). .native is realpath(3): the same
+// rule, applied to the string exactly as it is given.
 function realOrSelf(p) {
   try {
-    return realpathSync(p);
+    return realpathSync.native(p);
   } catch {
     return p;
   }
@@ -62,7 +68,7 @@ function realOrSelf(p) {
 // worktreeRoot()/HOME -- see its resolveMemberWorktree.
 export function realOrNearest(absPath) {
   try {
-    return realpathSync(absPath);
+    return realpathSync.native(absPath);
   } catch {
     const parent = dirname(absPath);
     if (parent === absPath) return absPath; // reached the top; nothing left to resolve
@@ -77,10 +83,18 @@ export function realOrNearest(absPath) {
 // are compared by their "real" spelling (realOrNearest), not their lexical
 // one -- comparing a realpath'd absPath against lexical roots would
 // otherwise misjudge a root that itself sits behind a symlink as "outside".
-export function isContained(absPath, roots) {
+//
+// `path` is judged AS GIVEN: pass the string that will be handed to the kernel,
+// not one that path.resolve() has already collapsed -- ".." after a symlink goes
+// to the parent of the link's target, and once resolve() has folded it away the
+// "<root>/link/.." that reaches outside the root is indistinguishable from "<root>".
+// (A caller that later USES the collapsed path, like resolveWithinRoots' HTTP
+// callers, checks and uses the same string and is unaffected.) A relative path
+// keeps the anchoring at "/" that the launch paths' resolve('/', cwd) gave it.
+export function isContained(path, roots) {
   if (roots.length === 0) return true;
   const realRoots = roots.map(realOrSelf);
-  return withinRoots(realOrNearest(absPath), realRoots);
+  return withinRoots(realOrNearest(isAbsolute(path) ? path : resolve('/', path)), realRoots);
 }
 
 // Resolves a user-supplied path the same way the pre-existing

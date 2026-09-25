@@ -867,7 +867,9 @@ export async function runReview(args = {}) {
     // OUTSIDE browseRoots and then read it through the resulting worktree.
     // Must run before any host-side git command below (resolveDefaultBaseRef,
     // worktree creation) touches the repo. realpath first so a symlinked
-    // path cannot smuggle an outside repo past the containment check.
+    // path cannot smuggle an outside repo past the containment check --
+    // realpath(3) (.native), because the JS realpathSync collapses ".." before
+    // it looks at any symlink, and the git commands below get `cwd` as written.
     const { browseRoots, browseRootsInvalid } = loadSandboxConfig();
     if (browseRootsInvalid) {
       return { ok: false, error: 'sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed review targets cannot be determined' };
@@ -875,7 +877,7 @@ export async function runReview(args = {}) {
     if (browseRoots.length > 0) {
       let realCwd;
       try {
-        realCwd = realpathSync(cwd);
+        realCwd = realpathSync.native(cwd);
       } catch {
         return { ok: false, error: 'cwd must be an existing directory' };
       }

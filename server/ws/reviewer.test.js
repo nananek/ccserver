@@ -9,7 +9,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, symlinkSync, realpathSync } from 'node:fs';
 import os, { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -276,6 +276,41 @@ test('runReview refuses a repo outside browseRoots before any git/session work',
     else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(allowed, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// The cwd is realpath'd before the containment check, but with fs.realpathSync,
+// which collapses ".." lexically first: "<root>/link/.." became "<root>" and passed,
+// while every git command below runs in the directory the kernel finds (the link
+// target's parent). That parent IS a repository here -- validateRunReviewArgs asks git
+// about the cwd as written -- so the only thing between this request and a review of it
+// is the containment check. A headRef that does not exist keeps the test hermetic if the
+// check lets it through: the worktree cannot be made, so no worktree and no session exist.
+test('runReview refuses "<root>/<symlink>/.." when the symlink points outside browseRoots', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'ccserver-reviewer-dotdot-'));
+  const allowed = join(base, 'allowed');
+  const outsideRepo = join(base, 'outside');
+  mkdirSync(allowed);
+  mkdirSync(join(outsideRepo, 'deep'), { recursive: true });
+  git(outsideRepo, ['init', '-q']);
+  git(outsideRepo, ['-c', 'user.name=t', '-c', 'user.email=t@t.com', 'commit', '-q', '--allow-empty', '-m', 'init']);
+  symlinkSync(join(outsideRepo, 'deep'), join(allowed, 'link'));
+  const cfgPath = join(base, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const cwd = `${allowed}/link/..`;
+    // control: git, like the kernel, takes this cwd for the repository outside browseRoots
+    assert.equal(git(cwd, ['rev-parse', '--show-toplevel']).trim(), realpathSync.native(outsideRepo));
+    const res = await reviewer.runReview({ cwd, headRef: 'no-such-ref-zz' });
+    assert.equal(res.ok, false);
+    assert.match(res.error, /outside the allowed browseRoots/);
+    assert.equal(reviewer.listReviews({ cwd }).reviews.length, 0, 'nothing was recorded for a job that never started');
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(base, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 

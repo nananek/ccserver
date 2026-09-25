@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSandboxSpawn } from './sandbox.js';
@@ -52,5 +52,31 @@ test('buildSandboxSpawn refuses a cwd outside browseRoots when browseRoots is co
     rmSync(allowed, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
     rmSync(cfgDir, { recursive: true, force: true });
+  }
+});
+
+// The same defense in depth for "<root>/<symlink>/..": the bind source is the cwd as
+// written, and the kernel applies ".." to where the link points, so the cwd has to be
+// judged that way (not after resolve() collapses ".." lexically).
+test('buildSandboxSpawn refuses "<root>/<symlink>/.." when the symlink points outside browseRoots', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'ccserver-sbroot-dotdot-'));
+  const allowed = join(base, 'allowed');
+  const target = join(base, 'outside', 'deep');
+  mkdirSync(allowed);
+  mkdirSync(target, { recursive: true });
+  symlinkSync(target, join(allowed, 'link'));
+  const cfgPath = join(base, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ browseRoots: [allowed] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    await assert.rejects(
+      () => buildSandboxSpawn({ cwd: `${allowed}/link/..`, targetCommand: ['claude'], app: 'claude', sandboxOpts: null }),
+      /Cannot build a sandbox: working directory is outside the allowed browseRoots/,
+    );
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    rmSync(base, { recursive: true, force: true });
   }
 });
