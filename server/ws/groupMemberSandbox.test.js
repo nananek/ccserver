@@ -303,19 +303,25 @@ async function fireScheduleOf(t, gid, role, entryExtra = {}) {
 }
 
 test('a scheduled prompt resumes a member sandboxed with its registered options, whatever the entry recorded', async (t) => {
-  const gid = await makeGroup({ roles: ['workerA'], memberPrefs: { workerA: { sandboxOpts: NARROW } } });
+  // Registered: gpg OFF. The entry (what a member that ran on the host with a client-chosen
+  // gpg:true recorded) says the opposite; gpg is one of the options whose effective value
+  // session.sandboxOpts reports as asked, so the two cannot be told apart by anything but the launch.
+  const OFF = { gpg: false, sshAgent: false, gpgVault: false };
+  const gid = await makeGroup({ roles: ['workerA'], memberPrefs: { workerA: { sandboxOpts: OFF } } });
   let session = null;
   try {
     simulateRestart(gid);
-    ({ session } = await fireScheduleOf(t, gid, 'workerA', { sandbox: false, sandboxOpts: BROAD }));
-    // Where no sandbox can be built here the prompt is dropped (nothing runs on the host); anywhere
-    // else the member is back, in a sandbox, with what was registered for it.
-    if (session) {
+    let dropped;
+    ({ session, dropped } = await fireScheduleOf(t, gid, 'workerA', { sandbox: false, sandboxOpts: BROAD }));
+    if (sandboxModule.sandboxAvailable()) {
+      assert.ok(session, `the member is resumed (it was dropped: ${dropped})`);
       assert.equal(session.sandbox, true, 'a member whose entry said sandbox:false is resumed sandboxed');
-      assert.deepEqual(session.sandboxOpts, NARROW, 'and does not get the options the entry recorded');
+      assert.equal(session.sandboxOpts?.gpg, false, 'and does not get the gpg the entry recorded');
       assert.equal(session.groupRole, 'workerA');
     } else {
-      assert.equal(groupManager.listGroupMembers(gid).find((m) => m.role === 'workerA').sessionId, 'gone-workerA');
+      // No sandbox can be built here: the prompt is dropped for that reason, and nothing runs on the host.
+      assert.equal(session, null);
+      assert.match(dropped, /Failed to build sandbox/);
     }
   } finally {
     if (session) sessionManager.destroySession(session.id);
