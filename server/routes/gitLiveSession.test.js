@@ -107,6 +107,23 @@ test('a directory beside a session is not blocked; the guard lifts when the sess
   assert.ok(existsSync(join(cwd, 'r', '.git')));
 });
 
+test('a session whose process has exited does not block, though it stays in the registry until it is destroyed', async () => {
+  const cwd = uniq('project');
+  mkdirSync(cwd);
+  const { sessionId, session } = await newShell(cwd);
+  assert.equal((await clone(cwd)).statusCode, 409, 'positive control: while it runs, it blocks');
+
+  session.ptyProcess.kill();
+  for (let i = 0; i < 250 && !session.exited; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(session.exited, true, 'the shell exited');
+  assert.equal(sessionManager.getSession(sessionId), session, 'and its (dead) session is still registered');
+  assert.ok(!sessionManager.liveSessionCwds().includes(cwd));
+
+  const res = await clone(cwd);
+  assert.equal(res.statusCode, 200, res.body);
+  assert.ok(existsSync(join(cwd, 'r', '.git')));
+});
+
 test('a combo-group member counts like any session: its worktree cwd, and what is under it', async () => {
   // Group members are created through the same createSession with a groupId /
   // groupRole and a server-synthesized cwd (scratchCwd), and live in the same

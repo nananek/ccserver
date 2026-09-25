@@ -53,6 +53,22 @@ git -C "$4" remote add origin "$3"
 git -C "$4" config remote.origin.gh-resolved base
 `;
 
+// A `git` for gitBin: clones like OK_GH, and is the real git for anything else. After a gh clone
+// the server reads the new repository's config through the same binary; a fake that "cloned"
+// for that call too would build a directory named after its arguments in the temp dir.
+const OK_GIT = (rec) => `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = clone ]; then
+    touch '${rec}'
+    mkdir -p "$4"
+    git init -q -b main "$4"
+    git -C "$4" remote add origin "$3"
+    exit 0
+  fi
+done
+exec git "$@"
+`;
+
 async function buildApp(cloneDeps) {
   const fastify = Fastify();
   await fastify.register(gitRoute, { prefix: '/api', clone: cloneDeps });
@@ -224,7 +240,7 @@ const postClone = (a, payload) => a.inject({ method: 'POST', url: '/api/git/clon
 test('by default only github.com is allowed: a Gitea URL is 400 and starts nothing', async () => {
   const ghRec = join(base, `called-${counter++}`);
   const gitRec = join(base, `called-${counter++}`);
-  const local = await buildApp({ ghBin: fakeGh(OK_GH(ghRec)), gitBin: fakeGh(OK_GH(gitRec)), slots: { active: 0 } });
+  const local = await buildApp({ ghBin: fakeGh(OK_GH(ghRec)), gitBin: fakeGh(OK_GIT(gitRec)), slots: { active: 0 } });
   try {
     const parent = uniq('parent');
     mkdirSync(parent);
@@ -242,7 +258,7 @@ test('a configured Gitea host is cloned with git, github.com still with gh, each
   await withConfig(GITEA_CONFIG, async () => {
     const ghRec = join(base, `called-${counter++}`);
     const gitRec = join(base, `called-${counter++}`);
-    const local = await buildApp({ ghBin: fakeGh(OK_GH(ghRec)), gitBin: fakeGh(OK_GH(gitRec)), slots: { active: 0 } });
+    const local = await buildApp({ ghBin: fakeGh(OK_GH(ghRec)), gitBin: fakeGh(OK_GIT(gitRec)), slots: { active: 0 } });
     try {
       const parent = uniq('parent');
       mkdirSync(parent);
@@ -270,9 +286,10 @@ test('the host list is read once, when the routes are registered: editing the fi
   const parent = uniq('parent');
   mkdirSync(parent);
   const started = () => fakeGh(OK_GH(join(base, `called-${counter++}`)));
+  const startedGit = () => fakeGh(OK_GIT(join(base, `called-${counter++}`)));
 
   // registered WITH gitea; the file then loses it
-  let local = await withConfig(GITEA_CONFIG, () => buildApp({ ghBin: started(), gitBin: started(), slots: { active: 0 } }));
+  let local = await withConfig(GITEA_CONFIG, () => buildApp({ ghBin: started(), gitBin: startedGit(), slots: { active: 0 } }));
   try {
     await withConfig({}, async () => {
       assert.equal((await postClone(local, { parent, url: 'https://gitea.example.org/o/r' })).statusCode, 200);
@@ -282,7 +299,7 @@ test('the host list is read once, when the routes are registered: editing the fi
   }
 
   // registered WITHOUT it; the file then gains it
-  local = await withConfig({}, () => buildApp({ ghBin: started(), gitBin: started(), slots: { active: 0 } }));
+  local = await withConfig({}, () => buildApp({ ghBin: started(), gitBin: startedGit(), slots: { active: 0 } }));
   try {
     await withConfig(GITEA_CONFIG, async () => {
       assert.equal((await postClone(local, { parent, url: 'https://gitea.example.org/o/r2' })).statusCode, 400);
