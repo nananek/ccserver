@@ -54,11 +54,12 @@ test('isInfrastructureError: infra failures surface as 500, request rejections s
   assert.equal(isInfrastructureError('Failed to build sandbox: bwrap not found'), true);
   assert.equal(isInfrastructureError('Failed to spawn "claude": spawn ENOENT'), true);
   assert.equal(isInfrastructureError('Cannot launch: sandbox.config.json sets "forceSandbox": true, but bwrap is not available on this host. Install bwrap (bubblewrap) or disable forceSandbox.'), true);
-  // browseRoots (issue #189): a sandbox mandated by browseRoots (shell, or
-  // agent without allowUnsandboxedAgents) that cannot be built is the same
-  // class of infra fault as forceSandbox above -- one representative shape
-  // is enough (both mustSandboxShell/mustSandboxAgent share this prefix).
-  assert.equal(isInfrastructureError('Cannot launch: sandbox.config.json sets "browseRoots" is set (shell sessions must run sandboxed), but bwrap is not available on this host. Install bwrap (bubblewrap), set "allowUnsandboxedAgents": true to allow unsandboxed agent launches (cwd stays restricted to browseRoots), or unset browseRoots.'), true);
+  // browseRoots (issue #189): a sandbox mandated by browseRoots that cannot
+  // be built is the same class of infra fault as forceSandbox above. Agents
+  // and shells share this one message now -- the agent/shell split went away
+  // with allowUnsandboxedAgents (an agent runs shell commands, so it escapes
+  // browseRoots the same way a shell does).
+  assert.equal(isInfrastructureError('Cannot launch: sandbox.config.json sets "browseRoots", so every session must run sandboxed, but bwrap is not available on this host. Install bwrap (bubblewrap) or unset browseRoots.'), true);
   // Request-as-given rejections must keep mapping to 400.
   assert.equal(isInfrastructureError('Cannot launch: copilot is hidden on this server (sandbox.config.json\'s "hiddenApps"). Remove it from hiddenApps to allow launches.'), false);
   assert.equal(isInfrastructureError('Cannot launch: codex is not installed on this server (searched /usr/bin).'), false);

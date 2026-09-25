@@ -609,6 +609,19 @@ export default function App() {
     ));
   }, []);
 
+  // The sandbox flag the session actually launched with, reported by the
+  // server once the session exists (issue #251). openTerminalTab seeds the
+  // tab with what this client REQUESTED, which is only a guess: the server
+  // forces a sandbox whenever forceSandbox or browseRoots mandates one. Until
+  // this landed, the tab and the terminal header kept showing the guess while
+  // the session list showed the server's value -- the same session displayed
+  // two different answers.
+  const handleTabSandboxResolved = useCallback((tabId, sandbox) => {
+    setTabs((prev) => prev.map((t) =>
+      t.id === tabId && t.sandbox !== sandbox ? { ...t, sandbox } : t
+    ));
+  }, []);
+
   // Lift a group's current turn into its top-level tab entry (GroupTabView
   // polls it while visible; the last-known value persists on the tab object
   // so the tab bar shows who's up even while the group tab is closed).
@@ -1240,6 +1253,7 @@ export default function App() {
                   onToggleNotify={toggleNotify}
                   visible={activeTabId === tab.id}
                   onSessionId={(sid) => handleTabSessionId(tab.id, sid)}
+                  onSandboxResolved={(sb) => handleTabSandboxResolved(tab.id, sb)}
                   onExited={(exited) => handleTabExited(tab.id, exited)}
                   attachSessionId={tab.attachSessionId}
                   xtermTheme={getTheme(themeId).xterm}

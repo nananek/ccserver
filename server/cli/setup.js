@@ -260,7 +260,7 @@ function writeMarker() {
 // host's gpg-agent and ~/.gnupg into every sandbox, as a side effect of
 // running a migration wizard. That is a security boundary moving without
 // anyone asking. (docker is `!== false` so it stays on either way;
-// gpgVault/forceSandbox/allowUnsandboxedAgents are false in the example too.
+// gpgVault/forceSandbox are false in the example too.
 // gpg is the only one that actually flips -- and one is enough.)
 //
 // --seed-example is there for anyone who does want the whole annotated file.
@@ -410,7 +410,7 @@ function printSettingsGuidance() {
   console.log('設定の使い分け:');
   console.log('  - Web UI (設定タブ) から変更でき即時反映されるもの ... SQLite の settings テーブル');
   console.log('  - sandbox.config.json を編集し再起動が必要なもの   ... docker / persistentHome / gpg /');
-  console.log('    sshAgent / gpgVault / browseRoots / hiddenApps / allowUnsandboxedAgents / reviewerMcp /');
+  console.log('    sshAgent / gpgVault / browseRoots / hiddenApps / reviewerMcp /');
   console.log('    usageMcp');
   console.log('    (実行中セッションの安全性がその値に依存するため、動的変更は行いません)');
   console.log('');

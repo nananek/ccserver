@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
-import { loadSandboxConfig, installedApps, selectableAppIds, APP_IDS, _resetVikunjaWarningForTests } from './sandbox.js';
+import { loadSandboxConfig, installedApps, selectableAppIds, APP_IDS, _resetVikunjaWarningForTests, _resetAllowUnsandboxedAgentsWarningForTests } from './sandbox.js';
 
 // console.warn capture for the compatibility-warning tests below. Kept local
 // rather than global so an unrelated failing test still prints its own output.
@@ -517,17 +517,65 @@ test('an unparseable sandbox.config.json sets configError and flags browseRootsI
   }
 });
 
-// allowUnsandboxedAgents: only meaningful alongside browseRoots (createSession
-// gates on it there), but the parse itself is independent -- same
-// strict-boolean pattern as forceSandbox.
-test('allowUnsandboxedAgents defaults to false and is true only for an explicit true value', () => {
+// forceSandbox is EFFECTIVE, not the operator's literal value: browseRoots
+// implies it. That collapse is the fix for issue #251 -- the Web UI used to
+// read the literal value and so missed the browseRoots case, offering an
+// unsandboxed launch the server then overrode.
+test('forceSandbox is effective: browseRoots implies it, and forceSandboxReason says which cause', () => {
   withConfig({}, () => {
-    assert.equal(loadSandboxConfig().allowUnsandboxedAgents, false);
+    assert.equal(loadSandboxConfig().forceSandbox, false);
+    assert.equal(loadSandboxConfig().forceSandboxReason, null);
   });
-  withConfig({ allowUnsandboxedAgents: 'true' }, () => {
-    assert.equal(loadSandboxConfig().allowUnsandboxedAgents, false);
+  withConfig({ forceSandbox: true }, () => {
+    assert.equal(loadSandboxConfig().forceSandbox, true);
+    assert.equal(loadSandboxConfig().forceSandboxReason, 'config');
   });
-  withConfig({ allowUnsandboxedAgents: true }, () => {
-    assert.equal(loadSandboxConfig().allowUnsandboxedAgents, true);
+  // The case the UI used to miss entirely.
+  withConfig({ browseRoots: [homedir()] }, () => {
+    assert.equal(loadSandboxConfig().forceSandbox, true, 'browseRoots implies a forced sandbox');
+    assert.equal(loadSandboxConfig().forceSandboxReason, 'browseRoots');
   });
+  // An explicit [] is the documented "unrestricted" spelling -- it must not
+  // imply anything.
+  withConfig({ browseRoots: [] }, () => {
+    assert.equal(loadSandboxConfig().forceSandbox, false);
+  });
+  // A browseRoots the operator MEANT but spelled wrong normalizes to [].
+  // That must read as "restricted but broken", not as "unrestricted" --
+  // otherwise the usage capture would direct-launch on exactly the config
+  // that was supposed to lock the host down.
+  withConfig({ browseRoots: '/srv/projects' }, () => {
+    const cfg = loadSandboxConfig();
+    assert.equal(cfg.browseRootsInvalid, true, 'a string browseRoots is invalid, not empty');
+    assert.equal(cfg.forceSandbox, true, 'an invalid browseRoots must fail closed');
+  });
+  // Still strict-boolean on the explicit key.
+  withConfig({ forceSandbox: 'true' }, () => {
+    assert.equal(loadSandboxConfig().forceSandbox, false);
+  });
+});
+
+// allowUnsandboxedAgents is retired (it let an agent run unsandboxed while
+// browseRoots was set -- a containment it could not actually provide, since
+// an agent runs shell commands and walks straight out of the roots). It is
+// ignored, and warned about ONCE rather than dropped silently: a host that
+// still sets it has an operator who believes agents run unsandboxed there.
+test('allowUnsandboxedAgents is retired: ignored, and warned about once', () => {
+  _resetAllowUnsandboxedAgentsWarningForTests();
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (m) => warnings.push(String(m));
+  try {
+    withConfig({ browseRoots: [homedir()], allowUnsandboxedAgents: true }, () => {
+      const cfg = loadSandboxConfig();
+      assert.equal(cfg.allowUnsandboxedAgents, undefined, 'the key is gone from the config object');
+      assert.equal(cfg.forceSandbox, true, 'and it cannot buy its way out of the browseRoots mandate');
+      loadSandboxConfig(); // a second read must not warn again
+    });
+  } finally {
+    console.warn = realWarn;
+  }
+  const hits = warnings.filter((w) => w.includes('allowUnsandboxedAgents'));
+  assert.equal(hits.length, 1, `expected exactly one warning, got ${hits.length}`);
+  assert.match(hits[0], /retired and is ignored/);
 });

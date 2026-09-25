@@ -679,10 +679,9 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
 
   // browseRoots (issue #189): when set, every session's cwd must fall
   // inside one of these directories -- agent or shell, sandboxed or not.
-  // Checked unconditionally (not just when sandboxRequested below): an
-  // allowUnsandboxedAgents:true agent launch still runs directly on the
-  // host filesystem, so this cwd check is the only restriction such a
-  // launch gets.
+  // Checked unconditionally, not just when sandboxRequested below: a launch
+  // that is refused for lacking a sandbox backend must still be refused for
+  // a cwd outside the roots, and the two failures want different messages.
   //
   // The scratch-tree exemption is gated on the TRUSTED `scratchCwd` flag
   // (an explicit parameter, never read from a client body -- same pattern as
@@ -890,17 +889,19 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // the MCP bridge config below: a requested sandbox either builds (mode
   // 'sandbox') or errors out (the config is then never used), so 'host' is
   // only ever reached when the session genuinely runs unsandboxed.
+  // One flag, decided in loadSandboxConfig (see its forceSandbox), covering
+  // both causes: the operator wrote "forceSandbox": true, or browseRoots is
+  // set -- which implies it, because browseRoots confines only where the Web
+  // UI may browse and launch, never what a started process can reach. There
+  // is deliberately no shell/agent split any more: an agent runs shell
+  // commands, so an unsandboxed one walks out of the roots exactly like a
+  // shell does (the retired allowUnsandboxedAgents assumed otherwise).
+  //
+  // Nothing here re-derives that judgement. The Web UI reads the same field
+  // off /api/dirs/home, so the menu and the enforcement cannot disagree --
+  // they did, and that was issue #251.
   const forceSandbox = cfg.forceSandbox;
-  // browseRoots (issue #189): shells get no opt-out (a bare unsandboxed
-  // shell at an arbitrary browseRoots-confined cwd is still full host access
-  // via `cd`) -- this is the exact gap the issue reported. Agents can opt
-  // out via allowUnsandboxedAgents, since cwd containment (checked above)
-  // already bounds where an agent CLI itself reads/writes by convention,
-  // unlike an interactive shell.
-  const browseRootsRestricted = cfg.browseRoots.length > 0;
-  const mustSandboxShell = shell && browseRootsRestricted;
-  const mustSandboxAgent = !shell && browseRootsRestricted && !cfg.allowUnsandboxedAgents;
-  const sandboxMandatory = forceSandbox || mustSandboxShell || mustSandboxAgent;
+  const sandboxMandatory = forceSandbox;
   const sandboxRequested = (sandboxMandatory || sandbox) && process.platform !== 'win32' && sandboxAvailable();
 
   // Non-sandboxed host spawns exec on the host, not in the sandbox: a bare
@@ -1116,30 +1117,25 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       sandboxHomeLaunchReservations.release(reservedSandboxHomePath);
     }
   } else if (sandboxMandatory) {
-    // groups.test.js pins the exact forceSandbox message byte-for-byte
-    // (isInfrastructureError / orchestratorRestartFailureStatus), so the
-    // forceSandbox branch keeps its original wording (reason + hint)
-    // unchanged; the browseRoots-caused branches build their own message
-    // from `reason` alone (hint's bwrap/disable-forceSandbox phrasing
-    // doesn't fit them) and register their own INFRA_ERROR_PREFIXES entry
-    // below.
+    // Two causes, two messages -- wording only (cfg.forceSandbox already
+    // decided the outcome above). groups.test.js pins the "forceSandbox"
+    // one byte-for-byte via isInfrastructureError /
+    // orchestratorRestartFailureStatus, so it keeps its original reason+hint
+    // shape; the browseRoots one has its own INFRA_ERROR_PREFIXES entry
+    // because the bwrap/disable-forceSandbox hint does not fit it.
     const { reason, hint } = forceSandboxUnavailableReason();
-    if (forceSandbox) {
+    if (cfg.forceSandboxReason === 'config') {
       return {
         sessionId: id,
         session: null,
         error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. ${hint}`,
       };
     }
-    const causedBy = mustSandboxShell
-      ? '"browseRoots" is set (shell sessions must run sandboxed)'
-      : '"browseRoots" is set and "allowUnsandboxedAgents" is not true';
     return {
       sessionId: id,
       session: null,
-      error: `Cannot launch: sandbox.config.json sets ${causedBy}, but ${reason}. `
-        + `Install bwrap (bubblewrap), set "allowUnsandboxedAgents": true to allow unsandboxed `
-        + `agent launches (cwd stays restricted to browseRoots), or unset browseRoots.`,
+      error: `Cannot launch: sandbox.config.json sets "browseRoots", so every session must run `
+        + `sandboxed, but ${reason}. Install bwrap (bubblewrap) or unset browseRoots.`,
     };
   }
 

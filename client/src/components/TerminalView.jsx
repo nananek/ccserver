@@ -237,7 +237,7 @@ function osc52Response(text) {
   return `\x1b]52;c;${btoa(bin)}\x07`;
 }
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, customLabel = null, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, customLabel = null, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onSandboxResolved, onExited, attachSessionId, xtermTheme, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -392,6 +392,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   useEffect(() => { onSessionIdRef.current = onSessionId; }, [onSessionId]);
   const onExitedRef = useRef(onExited);
   useEffect(() => { onExitedRef.current = onExited; }, [onExited]);
+  const onSandboxResolvedRef = useRef(onSandboxResolved);
+  useEffect(() => { onSandboxResolvedRef.current = onSandboxResolved; }, [onSandboxResolved]);
 
   const xtermThemeRef = useRef(xtermTheme);
   useEffect(() => { xtermThemeRef.current = xtermTheme; }, [xtermTheme]);
@@ -647,16 +649,36 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         relX: x - anchorRect.x, relY: y - anchorRect.y,
       };
     };
+    // Two handle positions are the same when every coordinate matches.
+    // Identity is useless here: cellPixel() builds a fresh object each call,
+    // so an unchanged selection still produced a new object every time.
+    const samePoint = (a, b) => a.x === b.x && a.y === b.y && a.anchorY === b.anchorY
+      && a.relX === b.relX && a.relY === b.relY;
+    const sameHandles = (a, b) => {
+      if (a === b) return true;            // both null
+      if (!a || !b) return false;          // one appeared or disappeared
+      return samePoint(a.start, b.start) && samePoint(a.end, b.end);
+    };
+    // Only enqueue a React update when the value actually CHANGES (#253).
+    //
+    // term.onScroll fires once per rendered line and xterm scrolls on every
+    // new line of pty output, so with no selection -- the normal case while
+    // an agent streams -- this used to call setHandles(null) once per line.
+    // React does not bail out early here, so each call enqueued an Update
+    // object that sat in the pending queue until some OTHER state change
+    // forced a re-render: measured at roughly one object per line and about
+    // 0.5x the output's byte count retained, not freed by GC, and an agent
+    // controls both the content and the volume of that output. Comparing
+    // first makes the no-selection case a pure no-op.
     const updateHandles = () => {
-      if (!term.hasSelection()) {
-        handlesRef.current = null;
-        setHandles(null);
-        return;
+      let next = null;
+      if (term.hasSelection()) {
+        const pos = term.getSelectionPosition();
+        const start = pos ? cellPixel(pos.start.y, pos.start.x) : null;
+        const end = pos ? cellPixel(pos.end.y, pos.end.x) : null;
+        next = start && end ? { start, end } : null;
       }
-      const pos = term.getSelectionPosition();
-      const start = pos ? cellPixel(pos.start.y, pos.start.x) : null;
-      const end = pos ? cellPixel(pos.end.y, pos.end.x) : null;
-      const next = start && end ? { start, end } : null;
+      if (sameHandles(handlesRef.current, next)) return;
       handlesRef.current = next;
       setHandles(next);
     };
@@ -879,6 +901,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             }
             if (typeof msg.viewers === 'number') viewerCountRef.current = msg.viewers;
             if (typeof msg.gpgVaultActive === 'boolean') setGpgVaultActive(msg.gpgVaultActive);
+            // The sandbox flag the session ACTUALLY launched with. The tab was
+            // opened with the value this client requested, and the server
+            // overrides it whenever forceSandbox/browseRoots mandate a sandbox
+            // -- so lift the real one up and let the tab correct itself
+            // (issue #251). Older servers omit the field; the optimistic value
+            // is then all there is, exactly as before.
+            if (typeof msg.sandbox === 'boolean' && onSandboxResolvedRef.current) {
+              onSandboxResolvedRef.current(msg.sandbox);
+            }
             // 再接続などで同一タブに新しいセッションが始まるケースがあるため、
             // セッション確立のたびにexitedフラグを戻す。
             if (onExitedRef.current) onExitedRef.current(false);

@@ -114,7 +114,7 @@ ccserver splits its settings in two, and which half a setting belongs to is deci
 - **Dynamic** -- changeable from the Web UI, effective immediately: stored in the SQLite
   `settings` table.
 - **Static** -- read once at startup, requires a restart, notably the security boundaries
-  (`browseRoots`, `forceSandbox`, `allowUnsandboxedAgents`, `hiddenApps`): stored in
+  (`browseRoots`, `forceSandbox`, `hiddenApps`): stored in
   `~/.config/ccserver/sandbox.config.json`.
 
 `npm run setup` creates that file for you:

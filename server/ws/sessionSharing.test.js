@@ -446,3 +446,46 @@ test('pruning a dead viewer restores the pty size for the client still attached'
     sessionManager.destroySession(sessionId, { reason: 'test' });
   }
 });
+
+// The `session` message reports the EFFECTIVE sandbox flag (issue #251).
+//
+// The client opens a tab optimistically with the value it REQUESTED, and
+// createSession overrides that whenever forceSandbox or browseRoots mandates
+// a sandbox. Until this field existed, nothing told the client about the
+// override: the tab and the terminal header kept showing the request while
+// the session list (which reads the server's record) showed the truth, so one
+// session displayed two different answers.
+//
+// Asserted on both `init` and `attach`, because a tab restored on a second
+// device must not inherit the first one's guess either. `gpgVaultActive` is
+// the sibling field this one is modelled on.
+test('the session message reports the effective sandbox flag, on init and on attach', async () => {
+  const opener = fakeSocket();
+  const joiner = fakeSocket();
+  const openerHandler = terminal.attachTerminalHandler(opener);
+  const joinerHandler = terminal.attachTerminalHandler(joiner);
+  let sessionId = null;
+  try {
+    // A plain unsandboxed shell: nothing mandates a sandbox here, so the
+    // effective value is false -- and it must be REPORTED, not left absent.
+    await openerHandler.handleMessage({
+      type: 'init', cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false,
+    });
+    const opened = opener.messages('session').at(-1);
+    assert.ok(opened?.sessionId, 'init opened a session');
+    sessionId = opened.sessionId;
+    assert.equal(typeof opened.sandbox, 'boolean',
+      'the session message must carry the effective sandbox flag, like gpgVaultActive');
+    assert.equal(opened.sandbox, sessionManager.getSession(sessionId).sandbox,
+      'and it must match what the session actually launched with');
+    assert.equal(opened.sandbox, false);
+
+    await joinerHandler.handleMessage({ type: 'attach', sessionId, cols: 80, rows: 24 });
+    const attached = joiner.messages('session').at(-1);
+    assert.equal(attached.isReconnect, true, 'attach reports a reconnect');
+    assert.equal(attached.sandbox, sessionManager.getSession(sessionId).sandbox,
+      're-attach must report the effective flag too, not the joiner\'s guess');
+  } finally {
+    if (sessionId) sessionManager.destroySession(sessionId, { keepSchedule: false });
+  }
+});

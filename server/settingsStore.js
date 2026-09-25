@@ -6,7 +6,7 @@
 //   Settings that can be changed from the Web UI and take effect without a
 //   restart live in SQLite's `settings` table. Settings that are read once
 //   at process start and require a restart to change -- above all the
-//   security boundaries (browseRoots / forceSandbox / allowUnsandboxedAgents
+//   security boundaries (browseRoots / forceSandbox
 //   / hiddenApps) -- live in sandbox.config.json.
 //
 //   THE TEST: does the safety of an ALREADY RUNNING session depend on this

@@ -445,7 +445,7 @@ test('createSession refuses a cwd outside browseRoots, for both shells and agent
       sessionManager.destroySession(shellInside.sessionId, { keepSchedule: false });
     } else {
       assert.equal(shellInside.session, null);
-      assert.match(shellInside.error, /shell sessions must run sandboxed/);
+      assert.match(shellInside.error, /every session must run sandboxed/);
     }
   } finally {
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
@@ -505,7 +505,7 @@ test('createSession accepts a scratch-tree cwd only via the trusted scratchCwd f
     } else {
       // No backend: refused by the sandbox mandate, never by the cwd check.
       assert.equal(res.session, null);
-      assert.match(res.error, /shell sessions must run sandboxed/);
+      assert.match(res.error, /every session must run sandboxed/);
     }
   } finally {
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
@@ -601,7 +601,7 @@ test('createSession refuses an unsandboxed shell when browseRoots is set and no 
     const res = await sessionManager.createSession({ cwd: allowed, cols: 80, rows: 24, shell: true, sandbox: false });
     assert.equal(res.session, null, 'a shell must never fall back to unsandboxed when browseRoots mandates sandboxing');
     assert.match(res.error, /^Cannot launch: sandbox\.config\.json sets "browseRoots"/);
-    assert.match(res.error, /shell sessions must run sandboxed/);
+    assert.match(res.error, /every session must run sandboxed/);
   } finally {
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
@@ -610,34 +610,86 @@ test('createSession refuses an unsandboxed shell when browseRoots is set and no 
   }
 });
 
-// allowUnsandboxedAgents:true is the one opt-out from browseRoots' sandbox
-// mandate, and only for agents (never shells, see the test above). Exercised
-// against a hidden (but nominally "installed" via CCSERVER_CLAUDE_BIN) app
-// the same way the hiddenApps tests above fake an install, so the launch
-// reaches the sandbox-mandate branch without needing bwrap or a real CLI.
-test('createSession refuses an unsandboxed agent when browseRoots is set and allowUnsandboxedAgents is not true, but allows it when true', { skip: sandboxAvailable() || loadSandboxConfig().forceSandbox }, async () => {
+// browseRoots implies a mandatory sandbox, for agents exactly as for shells.
+//
+// The gap this closes: the only agent-side test of the mandate was
+// `skip: sandboxAvailable()`, so it ran ONLY on a host with no sandbox
+// backend -- where the mandate shows up as a refusal. On a host that HAS a
+// backend, which is every real deployment and the only configuration where a
+// session actually starts, the mandate has to show up as the opposite
+// outcome: the session is built AND RUNS SANDBOXED even though the client
+// asked for `sandbox: false`. Nothing pinned that.
+//
+// Written branching on the backend rather than skipping on it, so it is never
+// a no-op: with a backend it pins the forced-sandbox outcome, without one it
+// pins the refusal. (The shell side already had the first half -- see
+// "refuses a cwd outside browseRoots" -- this is the agent equivalent.)
+//
+// Shells and agents are checked side by side because the distinction between
+// them is exactly what was retired with allowUnsandboxedAgents: an agent runs
+// shell commands, so an unsandboxed agent walks out of browseRoots the same
+// way a shell does. They must come out identical.
+test('createSession: browseRoots forces a sandbox:false session sandboxed -- agents exactly like shells', async () => {
   const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
   const cfgPath = join(cfgDir, 'sandbox.config.json');
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
   const prevBin = process.env.CCSERVER_CLAUDE_BIN;
   const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  // Fake an install without a real CLI, as the hiddenApps tests above do.
   process.env.CCSERVER_CLAUDE_BIN = process.execPath;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed], allowUnsandboxedAgents: false }));
-    process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
-    const blocked = await sessionManager.createSession({ cwd: allowed, cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
-    assert.equal(blocked.session, null, 'an agent must be refused, not silently unsandboxed, when allowUnsandboxedAgents is not true');
-    assert.match(blocked.error, /^Cannot launch: sandbox\.config\.json sets "browseRoots"/);
-    assert.match(blocked.error, /allowUnsandboxedAgents/);
+    // browseRoots set, forceSandbox NOT set: the mandate comes from
+    // browseRoots alone. This is the configuration the Web UI used to read as
+    // "unsandboxed launches are fine" (issue #251).
+    writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed] }));
 
-    writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, browseRoots: [allowed], allowUnsandboxedAgents: true }));
-    const bad = await sessionManager.createSession({ cwd: allowed, cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
-    // No sandbox backend here (test is skipped otherwise), so this either
-    // spawns unsandboxed (allowed) or fails on host PATH resolution -- either
-    // way it must NOT be refused for the browseRoots/allowUnsandboxedAgents
-    // reason any more.
-    if (!bad.session) assert.doesNotMatch(bad.error, /allowUnsandboxedAgents/);
-    else sessionManager.destroySession(bad.sessionId, { keepSchedule: false });
+    for (const shell of [false, true]) {
+      const what = shell ? 'shell' : 'agent';
+      const res = await sessionManager.createSession({
+        cwd: allowed, cols: 80, rows: 24, shell, app: 'claude', sandbox: false,
+      });
+      if (sandboxAvailable()) {
+        assert.ok(res.session, `a ${what} inside browseRoots must spawn when a backend exists, got ${JSON.stringify(res.error)}`);
+        // THE POINT: the client asked for sandbox:false and must not get it.
+        assert.equal(res.session.sandbox, true,
+          `browseRoots must force even a sandbox:false ${what} sandboxed, not spawn it on the host`);
+        sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+      } else {
+        // No backend: the mandate becomes a refusal, never a silent
+        // unsandboxed spawn.
+        assert.equal(res.session, null, `without a backend the ${what} mandate must refuse, not fall back to unsandboxed`);
+        assert.match(res.error, /^Cannot launch: sandbox\.config\.json sets "browseRoots"/);
+      }
+    }
+
+    // The retired opt-out must NOT resurrect itself: a host that still has
+    // allowUnsandboxedAgents:true in its config gets the same forced sandbox.
+    writeFileSync(cfgPath, JSON.stringify({
+      docker: false, gitBroker: false, browseRoots: [allowed], allowUnsandboxedAgents: true,
+    }));
+    const legacy = await sessionManager.createSession({
+      cwd: allowed, cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false,
+    });
+    if (sandboxAvailable()) {
+      assert.ok(legacy.session, `a legacy-config agent must still spawn, got ${JSON.stringify(legacy.error)}`);
+      assert.equal(legacy.session.sandbox, true,
+        'a leftover allowUnsandboxedAgents:true must be ignored, not honoured');
+      sessionManager.destroySession(legacy.sessionId, { keepSchedule: false });
+    } else {
+      assert.equal(legacy.session, null);
+      assert.match(legacy.error, /^Cannot launch: sandbox\.config\.json sets "browseRoots"/);
+    }
+
+    // And with browseRoots unset nothing is mandated -- the flag is not
+    // unconditional.
+    writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false }));
+    const free = await sessionManager.createSession({
+      cwd: allowed, cols: 80, rows: 24, shell: true, sandbox: false,
+    });
+    assert.ok(free.session, `an unrestricted host must still allow an unsandboxed shell, got ${JSON.stringify(free.error)}`);
+    assert.equal(free.session.sandbox, false, 'without browseRoots a sandbox:false shell stays unsandboxed');
+    sessionManager.destroySession(free.sessionId, { keepSchedule: false });
   } finally {
     if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
     else process.env.CCSERVER_CLAUDE_BIN = prevBin;
