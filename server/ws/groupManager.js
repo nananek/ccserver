@@ -255,7 +255,8 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     // isn't a git repo (worktree resolution falls back to sharing cwd, see
     // plan section 2.8) or that has never been spawned yet.
     memberWorktrees: new Map(),
-    // key(string) -> { content, publishedBy(role), publishedAt(epoch ms) } --
+    // key(string) -> { content, publishedBy(role), publishedAt(epoch ms, last
+    // publish), createdAt(epoch ms, first publish) } --
     // the group-scoped "message board" (publish_doc/fetch_doc/list_docs, see
     // plan section 7), letting workers hand off content to each other
     // directly without going through the orchestrator or a shared ./tmp/
@@ -699,10 +700,14 @@ export function restoreGroups() {
         if (!group || !docsObj || typeof docsObj !== 'object') continue;
         for (const [key, doc] of Object.entries(docsObj)) {
           if (doc && typeof doc === 'object' && typeof doc.content === 'string') {
+            const publishedAt = typeof doc.publishedAt === 'number' ? doc.publishedAt : Date.now();
             group.docs.set(key, {
               content: doc.content,
               publishedBy: typeof doc.publishedBy === 'string' ? doc.publishedBy : null,
-              publishedAt: typeof doc.publishedAt === 'number' ? doc.publishedAt : Date.now(),
+              publishedAt,
+              // Docs persisted before createdAt existed: the last publish is
+              // the best lower bound we have for the first one.
+              createdAt: typeof doc.createdAt === 'number' ? doc.createdAt : publishedAt,
             });
           }
         }
@@ -1457,6 +1462,8 @@ const MAX_ORCHESTRATOR_DOCS = 20;
 // can be (WORKER_ROLE_RE). Anything else -- including a missing role and a
 // doc persisted with no publisher -- counts as the worker side, so an absent
 // identity can never be treated as the orchestrator.
+// publishedAt follows the overwrite (it is the last-publish time);
+// createdAt is kept from the first publish of the key.
 export function publishGroupDoc(groupId, role, key, content) {
   const group = groups.get(groupId);
   if (!group) return { error: 'group-not-found', message: 'group not found' };
@@ -1486,10 +1493,11 @@ export function publishGroupDoc(groupId, role, key, content) {
       message: `the orchestrator already holds the maximum of ${MAX_ORCHESTRATOR_DOCS} published documents; re-publish under one of your existing keys (list_docs shows them) to overwrite it instead of adding a new one`,
     };
   }
-  const doc = { content: text, publishedBy: role, publishedAt: Date.now() };
+  const now = Date.now();
+  const doc = { content: text, publishedBy: role, publishedAt: now, createdAt: existing?.createdAt ?? now };
   group.docs.set(key, doc);
   persistGroupDocs();
-  return { ok: true, key, publishedBy: doc.publishedBy, publishedAt: doc.publishedAt };
+  return { ok: true, key, publishedBy: doc.publishedBy, publishedAt: doc.publishedAt, createdAt: doc.createdAt };
 }
 
 export function fetchGroupDoc(groupId, key) {
@@ -1497,7 +1505,7 @@ export function fetchGroupDoc(groupId, key) {
   if (!group) return { error: 'group-not-found', message: 'group not found' };
   const doc = group.docs.get(key);
   if (!doc) return { error: 'not-found', message: `no document published under key "${key}"` };
-  return { key, content: doc.content, publishedBy: doc.publishedBy, publishedAt: doc.publishedAt };
+  return { key, content: doc.content, publishedBy: doc.publishedBy, publishedAt: doc.publishedAt, createdAt: doc.createdAt };
 }
 
 // Never includes `content` -- same "list is cheap, fetch is deliberate"
@@ -1510,6 +1518,7 @@ export function listGroupDocs(groupId) {
     key,
     publishedBy: doc.publishedBy,
     publishedAt: doc.publishedAt,
+    createdAt: doc.createdAt,
     size: Buffer.byteLength(doc.content, 'utf-8'),
   }));
 }
