@@ -22,7 +22,7 @@ export function setAgentPublishHookForTests(fn) {
 }
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, setMemberCwdResolver, peekSavedSessions, dockerAvailability, activitySnapshot } from './sessionManager.js';
+import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, setMemberCwdResolver, setMemberLaunchResolver, peekSavedSessions, dockerAvailability, activitySnapshot } from './sessionManager.js';
 import { NO_ACTIVITY } from './activity.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
@@ -2157,3 +2157,4 @@ setSessionCreateListener(onSessionCreate);
 setMcpSocketResolver(resolveGroupMcpSocket);
 setOrchestratorClaudeMdResolver(generateOrchestratorClaudeMdSrc);
 setMemberCwdResolver(resolveMemberLaunchCwd);
+setMemberLaunchResolver(resolveMemberInitLaunch);

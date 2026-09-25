@@ -268,6 +268,34 @@ export async function resolveMemberCwdForSession(groupId, groupRole) {
   return null;
 }
 
+// Resolvers of what a REGISTERED group member may be launched with (always the
+// sandbox, and the sandboxOpts registered for it). groupManager registers
+// resolveMemberInitLaunch -- the very decision the browser's re-init goes
+// through -- with the same resolver-registration pattern as above and for the
+// same reason: the scheduled-prompt auto-resume path cannot import
+// groupManager.js.
+const memberLaunchResolvers = new Set();
+
+export function setMemberLaunchResolver(fn) {
+  memberLaunchResolvers.add(fn);
+}
+
+// -> { member: true, sandbox: true, sandboxOpts } for a role the registry
+// knows as a member of the group, or null when no resolver does (group gone, a
+// role it never had): the caller must then refuse the spawn, not fall back to
+// the values it holds.
+export function resolveMemberLaunchForSession(groupId, groupRole, requested) {
+  for (const fn of memberLaunchResolvers) {
+    try {
+      const result = fn(groupId, groupRole, requested);
+      if (result && result.member) return result;
+    } catch {
+      // try the next resolver
+    }
+  }
+  return null;
+}
+
 function resolveCommand(cmd) {
   if (process.platform !== 'win32') return cmd;
   try {
@@ -1731,6 +1759,24 @@ async function fireSchedule(scheduleId) {
   // opencode, copilot, codex and commandcode expose no session id in their
   // TUI output, so resume the last session of the project instead of a
   // specific one.
+  //
+  // A group member is launched sandboxed with what the registry has for it,
+  // never with what this entry says (same decision as the browser's re-init,
+  // groupManager.resolveMemberInitLaunch). The entry only records how the
+  // member ran when the prompt was scheduled, and a member from before that
+  // decision existed may have been running on the host, with options its
+  // client chose. Nothing is created for a role the registry does not know:
+  // that drop comes first, before a channel is minted for it below.
+  let sandbox = entry.sandbox;
+  let sandboxOpts = entry.sandboxOpts;
+  if (entry.groupId && entry.groupRole) {
+    const launch = resolveMemberLaunchForSession(entry.groupId, entry.groupRole, { sandbox, sandboxOpts });
+    if (!launch) {
+      console.warn(`[scheduler] dropping prompt for group member ${entry.groupRole} of ${entry.groupId}: not a registered member of that group`);
+      return;
+    }
+    ({ sandbox, sandboxOpts } = launch);
+  }
   // A group member gets its role's MCP socket re-created (handoff channel or
   // control broker) so the resumed session can actually reach the group --
   // otherwise the orchestrator's wait_for_handoff would wait on a worker that
@@ -1803,8 +1849,8 @@ async function fireSchedule(scheduleId) {
     rows: 24,
     claudeSessionId: entry.claudeSessionId,
     shell: entry.shell,
-    sandbox: entry.sandbox,
-    sandboxOpts: entry.sandboxOpts,
+    sandbox,
+    sandboxOpts,
     app: entry.app,
     model: entry.model,
     permissionMode: entry.permissionMode,

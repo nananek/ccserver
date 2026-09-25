@@ -42,6 +42,7 @@ before(async () => {
   process.env.CCSERVER_GROUP_FILES_PATH = join(runtimeDir, 'saved-group-files.json');
   process.env.CCSERVER_GROUP_FILES_ROOT = join(runtimeDir, 'group-files');
   process.env.CCSERVER_SAVED_SESSIONS_PATH = join(runtimeDir, 'saved-sessions.json');
+  process.env.CCSERVER_SCHEDULES_PATH = join(runtimeDir, 'scheduled-prompts.json');
   process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT = join(runtimeDir, 'orchestrator-generated');
   process.env.CCSERVER_WORKTREE_ROOT = join(runtimeDir, 'worktrees');
   process.env.CCSERVER_ORCHESTRATOR_TEMPLATE_PATH = join(runtimeDir, 'orchestrator-template.md');
@@ -275,6 +276,61 @@ test('init: claiming a role the group never had is refused before anything is la
     assert.equal(sent.find((m) => m.type === 'error')?.code, 'SPAWN_FAILED');
     const gone = await initAndRecord({ cwd: projectDir, groupId: randomUUID(), groupRole: 'orchestrator', sandbox: false });
     assert.equal(gone.calls.length, 0, 'nor for a group that is not in the registry');
+  } finally { groupManager.destroyGroup(gid); }
+});
+
+// ------------------------------------ a scheduled prompt resuming a member
+
+// The other way a member is launched without a browser: a persisted schedule fires
+// while no session is alive (server/ws/sessionManager.js's fireSchedule) and creates
+// the session from the entry. An entry written while a member ran on the host -- the
+// hole above -- says sandbox:false and whatever sandboxOpts its client chose; the
+// entry survives an upgrade, so it must not decide the launch.
+async function fireScheduleOf(t, gid, role, entryExtra = {}) {
+  const warn = t.mock.method(console, 'warn', () => {});
+  writeFileSync(process.env.CCSERVER_SCHEDULES_PATH, JSON.stringify([{
+    at: Date.now() + 200, text: 'noop', cwd: projectDir, shell: true, app: 'claude', permissionMode: 'standard',
+    groupId: gid, groupRole: role, source: 'manual', ...entryExtra,
+  }]));
+  assert.equal(sessionManager.restoreSchedules().restored, 1);
+  const launched = () => {
+    const member = groupManager.listGroupMembers(gid).find((m) => m.role === role);
+    return member && member.sessionId ? sessionManager.getSession(member.sessionId) : null;
+  };
+  const dropped = () => warn.mock.calls.map((c) => c.arguments.join(' ')).find((l) => l.includes('[scheduler] dropping prompt'));
+  await until(() => launched() || dropped(), 'the schedule to fire');
+  return { session: launched(), dropped: dropped() };
+}
+
+test('a scheduled prompt resumes a member sandboxed with its registered options, whatever the entry recorded', async (t) => {
+  const gid = await makeGroup({ roles: ['workerA'], memberPrefs: { workerA: { sandboxOpts: NARROW } } });
+  let session = null;
+  try {
+    simulateRestart(gid);
+    ({ session } = await fireScheduleOf(t, gid, 'workerA', { sandbox: false, sandboxOpts: BROAD }));
+    // Where no sandbox can be built here the prompt is dropped (nothing runs on the host); anywhere
+    // else the member is back, in a sandbox, with what was registered for it.
+    if (session) {
+      assert.equal(session.sandbox, true, 'a member whose entry said sandbox:false is resumed sandboxed');
+      assert.deepEqual(session.sandboxOpts, NARROW, 'and does not get the options the entry recorded');
+      assert.equal(session.groupRole, 'workerA');
+    } else {
+      assert.equal(groupManager.listGroupMembers(gid).find((m) => m.role === 'workerA').sessionId, 'gone-workerA');
+    }
+  } finally {
+    if (session) sessionManager.destroySession(session.id);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('a scheduled prompt of a role the group never had is dropped, and no channel is made for it', async (t) => {
+  const gid = await makeGroup({ roles: ['workerA'] });
+  try {
+    const { session, dropped } = await fireScheduleOf(t, gid, 'workerZ', { sandbox: false });
+    assert.equal(session, null);
+    assert.match(dropped, /workerZ of .*not a registered member/);
+    assert.equal(groupManager.getGroup(gid).handoffChannels.has('workerZ'), false, 'nothing was minted for the unknown role');
+    assert.equal(groupManager.getGroup(gid).members.has('workerZ'), false);
   } finally { groupManager.destroyGroup(gid); }
 });
 
