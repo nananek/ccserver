@@ -186,7 +186,10 @@ test('a configured host is accepted, case-folded, and its entry decides the tool
 
 test('OWNER/REPO is always github.com: it needs github.com in the list, and takes that entry\'s tool', () => {
   assert.equal(parseCloneUrl('o/r', HOSTS).url, 'https://github.com/o/r.git');
-  assert.equal(parseCloneUrl('o/r', [{ host: 'gitea.example.org', tool: 'git' }, { host: 'github.com', tool: 'git' }]).tool, 'git');
+  assert.equal(parseCloneUrl('o/r', [{ host: 'github.com', tool: 'git' }]).tool, 'git');
+  // github.com listed second, another host first: the shorthand still means github.com, with ITS tool
+  assert.deepEqual(parseCloneUrl('o/r', [{ host: 'gitea.example.org', tool: 'git' }, { host: 'github.com', tool: 'gh' }]),
+    { ok: true, url: 'https://github.com/o/r.git', owner: 'o', repo: 'r', host: 'github.com', tool: 'gh' });
   const only = [{ host: 'gitea.example.org', tool: 'git' }];
   const res = parseCloneUrl('o/r', only);
   assert.equal(res.ok, false);
