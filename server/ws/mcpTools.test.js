@@ -1583,6 +1583,30 @@ test('delete: there is no worker-side function, and the manager refuses a worker
   assert.equal(tools.listDocs(controlDeps(g)).count, 2);
 });
 
+// #280: the tool layer adds nothing and drops nothing -- `persisted: false`
+// (a failed write to disk) reaches the caller of publish_doc / delete_doc as is.
+test('publishDoc / deleteDocAsOrchestrator: persisted:false from a failed write reaches the tool result', async () => {
+  const g = await makeGroupAsync();
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-docs-as-dir-'));
+  tmpRepos.push(dir);
+  const good = process.env.CCSERVER_GROUP_DOCS_PATH;
+  process.env.CCSERVER_GROUP_DOCS_PATH = dir;   // a directory: the write fails
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const pub = tools.publishDoc(handoffDeps(g, 'workerA', 'sess-a1'), { key: 'k', content: 'x' });
+    assert.equal(pub.ok, true);
+    assert.equal(pub.persisted, false);
+    assert.deepEqual(tools.deleteDocAsOrchestrator(controlDeps(g), { key: 'k' }), { ok: true, persisted: false });
+  } finally {
+    console.warn = realWarn;
+    if (good === undefined) delete process.env.CCSERVER_GROUP_DOCS_PATH; else process.env.CCSERVER_GROUP_DOCS_PATH = good;
+  }
+  // control: with a writable file the result is the plain shape again
+  assert.equal('persisted' in tools.publishDoc(handoffDeps(g, 'workerA', 'sess-a1'), { key: 'k2', content: 'x' }), false);
+  assert.deepEqual(tools.deleteDocAsOrchestrator(controlDeps(g), { key: 'k2' }), { ok: true });
+});
+
 test('fetchDoc: an unpublished key is a clean not-found', async () => {
   const g = await makeGroupAsync();
   const res = tools.fetchDoc(controlDeps(g), { key: 'nope' });

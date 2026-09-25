@@ -1601,8 +1601,8 @@ export function publishGroupDoc(groupId, role, key, content) {
   const now = Date.now();
   const doc = { content: text, publishedBy: role, publishedAt: now, createdAt: existing?.createdAt ?? now };
   group.docs.set(key, doc);
-  persistGroupDocs();
-  return { ok: true, key, publishedBy: doc.publishedBy, publishedAt: doc.publishedAt, createdAt: doc.createdAt };
+  const persisted = persistGroupDocs();
+  return { ok: true, key, publishedBy: doc.publishedBy, publishedAt: doc.publishedAt, createdAt: doc.createdAt, ...(persisted ? {} : { persisted: false }) };
 }
 
 export function fetchGroupDoc(groupId, key) {
@@ -1651,8 +1651,7 @@ export function deleteGroupDoc(groupId, role, key) {
   if (!group) return { error: 'group-not-found', message: 'group not found' };
   if (!group.docs.has(key)) return { error: 'not-found', message: `no document published under key "${key}"` };
   group.docs.delete(key);
-  persistGroupDocs();
-  return { ok: true };
+  return persistGroupDocs() ? { ok: true } : { ok: true, persisted: false };
 }
 
 // Best effort, same pattern as persistGroups(): re-serializes every group's
@@ -1660,6 +1659,14 @@ export function deleteGroupDoc(groupId, role, key) {
 // (not from the frequent member/pref-mutation paths that call persistGroups()),
 // so the write rate stays tied to how often documents actually change (plan
 // section 7.3).
+//
+// Returns whether the file now reflects the docs. A failure never throws (a
+// publish/delete must not crash on a full disk), but it is no longer silent:
+// it is logged, and publishGroupDoc/deleteGroupDoc pass `persisted: false` on
+// to their caller (#280) -- delete_doc promises the deletion survives a
+// restart, and a swallowed failure meant the document simply came back at the
+// next one with nobody told. A file that is already absent is not a failure
+// (there is nothing to remove).
 function persistGroupDocs() {
   try {
     const out = {};
@@ -1670,10 +1677,13 @@ function persistGroupDocs() {
     if (Object.keys(out).length > 0) {
       writeFileSync(groupDocsPath(), JSON.stringify(out));
     } else {
-      try { unlinkSync(groupDocsPath()); } catch { /* nothing to remove */ }
+      try { unlinkSync(groupDocsPath()); } catch (err) { if (err.code !== 'ENOENT') throw err; }
     }
-  } catch {
-    // best effort -- persistence must never crash a publish/delete call
+    return true;
+  } catch (err) {
+    console.warn(`[groupManager] could not persist the group docs to ${groupDocsPath()} (${err.message}); `
+      + 'the change is in memory only, and a deleted document may come back after a restart');
+    return false;
   }
 }
 

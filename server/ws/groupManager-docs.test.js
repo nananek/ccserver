@@ -7,7 +7,7 @@
 
 import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, cpSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, cpSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -390,6 +390,93 @@ test('a deleted doc stays deleted after a restart, and its key is free to publis
     const current = groupManager.getGroup(gid);
     if (current && current.controlBroker && current.controlBroker !== originalBroker) stopBroker(current.controlBroker);
     if (originalBroker) stopBroker(originalBroker);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+// --- a failed write to disk is reported, not swallowed (#280) ---------------
+// delete_doc's description promises the deletion survives a restart. When the
+// write behind that promise fails, the caller has to be told: otherwise the
+// document is back after the next restart and nobody ever learned it might be.
+// The success shape is unchanged ({ ok: true }); `persisted: false` is only
+// ADDED when the file could not be written.
+
+// Runs fn with the docs file pointed at a DIRECTORY (writeFileSync and
+// unlinkSync on it both fail, whoever the user is), collecting console.warn.
+async function withUnwritableDocsFile(fn) {
+  const dir = join(runtimeDir, `docs-file-is-a-dir-${randomUUID()}`);
+  mkdirSync(dir);
+  const good = process.env.CCSERVER_GROUP_DOCS_PATH;
+  const warnings = [];
+  const realWarn = console.warn;
+  process.env.CCSERVER_GROUP_DOCS_PATH = dir;
+  console.warn = (...a) => warnings.push(a.join(' '));
+  try {
+    return await fn(warnings);
+  } finally {
+    console.warn = realWarn;
+    process.env.CCSERVER_GROUP_DOCS_PATH = good;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('publish_doc: a failed write to disk is logged and reported as persisted:false; the success shape is unchanged', async () => {
+  const gid = await makeGroup();
+  try {
+    const good = groupManager.publishGroupDoc(gid, 'workerA', 'ok', 'x');
+    assert.equal(good.ok, true);
+    assert.equal('persisted' in good, false, 'control: a successful write adds nothing to the result');
+
+    await withUnwritableDocsFile((warnings) => {
+      const res = groupManager.publishGroupDoc(gid, 'workerA', 'not-on-disk', 'y');
+      assert.equal(res.ok, true, 'the document is published (in memory)');
+      assert.equal(res.persisted, false);
+      assert.equal(res.key, 'not-on-disk');
+      assert.equal(groupManager.fetchGroupDoc(gid, 'not-on-disk').content, 'y');
+      assert.match(warnings.join('\n'), /could not persist the group docs/);
+    });
+  } finally {
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('delete_doc: a failed write is reported, and the deleted document does come back after a restart -- which is what the flag warns about', async () => {
+  const gid = await makeGroup('/srv/proj-persist-fail');
+  const originalBroker = groupManager.getGroup(gid).controlBroker;
+  try {
+    groupManager.publishGroupDoc(gid, 'workerA', 'plan', 'on disk');
+    assert.deepEqual(groupManager.publishGroupDoc(gid, 'workerA', 'other', 'x').persisted, undefined, 'control: writes work');
+    assert.ok(JSON.parse(readFileSync(process.env.CCSERVER_GROUP_DOCS_PATH, 'utf-8'))[gid].plan, 'control: it is on disk');
+
+    await withUnwritableDocsFile((warnings) => {
+      assert.deepEqual(groupManager.deleteGroupDoc(gid, 'orchestrator', 'plan'), { ok: true, persisted: false });
+      assert.equal(groupManager.fetchGroupDoc(gid, 'plan').error, 'not-found', 'deleted in memory');
+      assert.match(warnings.join('\n'), /could not persist the group docs/);
+    });
+
+    // the file still has it: a restart brings the "deleted" document back
+    groupManager.restoreGroups();
+    assert.equal(groupManager.fetchGroupDoc(gid, 'plan').content, 'on disk');
+  } finally {
+    const current = groupManager.getGroup(gid);
+    if (current && current.controlBroker && current.controlBroker !== originalBroker) stopBroker(current.controlBroker);
+    if (originalBroker) stopBroker(originalBroker);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('delete_doc of the last document: a stale file that cannot be removed is reported too; a file that is simply absent is not a failure', async () => {
+  const gid = await makeGroup();
+  try {
+    groupManager.publishGroupDoc(gid, 'workerA', 'only', 'x');
+    await withUnwritableDocsFile(() => {
+      assert.deepEqual(groupManager.deleteGroupDoc(gid, 'orchestrator', 'only'), { ok: true, persisted: false }, 'nothing left to write, but the old file cannot be removed');
+    });
+
+    groupManager.publishGroupDoc(gid, 'workerA', 'again', 'x');
+    rmSync(process.env.CCSERVER_GROUP_DOCS_PATH, { force: true });
+    assert.deepEqual(groupManager.deleteGroupDoc(gid, 'orchestrator', 'again'), { ok: true }, 'no file to remove is the normal case');
+  } finally {
     groupManager.destroyGroup(gid);
   }
 });

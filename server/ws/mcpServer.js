@@ -158,14 +158,14 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'publish_doc',
-    'Publish a document under a key, visible to every member of this group via fetch_doc/list_docs -- use it to hand a worker a long instruction (send only the key through send_input, not the text). It is recorded as published by "orchestrator", which the server sets and no worker can claim. You cannot overwrite a key a worker published, and a worker cannot overwrite a key you published (error key-owned-by-other-side); re-publishing your own key overwrites it. The group holds at most 50 documents in total (workers\' included); list_docs shows count / limit, and a new key past the limit is refused with too-many-docs until you free a slot with delete_doc.',
+    'Publish a document under a key, visible to every member of this group via fetch_doc/list_docs -- use it to hand a worker a long instruction (send only the key through send_input, not the text). It is recorded as published by "orchestrator", which the server sets and no worker can claim. You cannot overwrite a key a worker published, and a worker cannot overwrite a key you published (error key-owned-by-other-side); re-publishing your own key overwrites it. The group holds at most 50 documents in total (workers\' included); list_docs shows count / limit, and a new key past the limit is refused with too-many-docs until you free a slot with delete_doc. If the result carries persisted:false, writing it to disk failed: it is published now, but may be gone after a server restart.',
     { key: z.string(), content: z.string() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishDocAsOrchestrator(deps, args)) }] }),
   );
 
   server.tool(
     'delete_doc',
-    'Delete the document published under a key, whoever published it (yours or a worker\'s); only you can -- workers have no delete. The key is free again straight away, for either side, and the deletion survives a server restart. An unknown key is an explicit not-found error. This is how you keep the board under its 50-document limit (list_docs shows count / limit): remove documents that have served their purpose, and only once nobody still needs them -- a worker that has not fetched a document yet gets not-found, and a findings document the pre-PR check will read must stay until its PR has merged.',
+    'Delete the document published under a key, whoever published it (yours or a worker\'s); only you can -- workers have no delete. The key is free again straight away, for either side, and the deletion survives a server restart -- unless writing it to disk failed, in which case the result carries persisted:false and the document may come back after one. An unknown key is an explicit not-found error. This is how you keep the board under its 50-document limit (list_docs shows count / limit): remove documents that have served their purpose, and only once nobody still needs them -- a worker that has not fetched a document yet gets not-found, and a findings document the pre-PR check will read must stay until its PR has merged.',
     { key: z.string() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.deleteDocAsOrchestrator(deps, args)) }] }),
   );
@@ -248,7 +248,7 @@ export function buildHandoffMcpServer(deps) {
 
   server.tool(
     'publish_doc',
-    'Publish a document under a key, visible to every member of this group (including the orchestrator and other workers) via fetch_doc/list_docs -- the direct way to hand off content (e.g. a plan) to another worker WITHOUT going through the orchestrator. Your own ./tmp/ is local to your own git worktree and is NOT visible to other workers; publish only what you want to hand off, not your whole working directory. Re-publishing the same key overwrites it, except a key the orchestrator published, which is refused (error key-owned-by-other-side).',
+    'Publish a document under a key, visible to every member of this group (including the orchestrator and other workers) via fetch_doc/list_docs -- the direct way to hand off content (e.g. a plan) to another worker WITHOUT going through the orchestrator. Your own ./tmp/ is local to your own git worktree and is NOT visible to other workers; publish only what you want to hand off, not your whole working directory. Re-publishing the same key overwrites it, except a key the orchestrator published, which is refused (error key-owned-by-other-side). If the result carries persisted:false, writing it to disk failed: it is published now, but may be gone after a server restart.',
     { key: z.string(), content: z.string() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishDoc(deps, args)) }] }),
   );
