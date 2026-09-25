@@ -331,11 +331,16 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [clipboardArmedSeq, setClipboardArmedSeq] = useState(null);
   const clipboardSeq = clipboardPrompt ? clipboardPrompt.seq : null;
   const clipboardAllowArmed = clipboardSeq !== null && clipboardArmedSeq === clipboardSeq;
+  // The delay is only spent while this terminal is on screen. A hidden tab
+  // (an ancestor is display:none, and group members / background tabs stay
+  // mounted that way) still receives writes, but its dialog is not rendered:
+  // counting from the write would let 許可 go live unseen, so the first thing
+  // a click made just as the tab is switched to lands on is a live button.
   useEffect(() => {
-    if (clipboardSeq === null) return undefined;
+    if (clipboardSeq === null || !visible) return undefined;
     const timer = setTimeout(() => setClipboardArmedSeq(clipboardSeq), CLIPBOARD_ALLOW_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [clipboardSeq]);
+  }, [clipboardSeq, visible]);
   const notePress = () => {
     clipboardPressedRef.current = { prompt: clipboardPrompt, armed: clipboardAllowArmed };
   };

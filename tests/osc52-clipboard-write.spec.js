@@ -373,6 +373,52 @@ test('swaps that keep coming keep 許可 inert for as long as they do', async ({
   await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe('burst-6');
 });
 
+// An inactive tab stays mounted under display:none and still receives writes, so
+// its dialog can come up where nobody can see it. The delay must be spent on
+// screen: if it ran out unseen, 許可 would already be live in the very frame the
+// viewer switches to that tab, and a click that was on its way there (a double
+// click on the tab, a click made just as the tab is shown) would decide.
+test('the delay is spent on screen: a dialog that came up while its tab was hidden is inert when the tab is shown', async ({ page }) => {
+  await openShell(page);
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+
+  // Terminals are not in the tab bar; the open one is reached from the sidebar.
+  const terminalItem = page.locator('.left-sidebar [data-section="opened"] .session-menu-item').first();
+  // The write is 1s away, so it lands after the terminal has been left.
+  await typeInShell(page, `sleep 1; ${osc(PAYLOAD)}`);
+  await page.locator('.tab-list').getByTitle('Files').click();
+  await expect(page.locator('.terminal-container')).toBeHidden();
+
+  // The dialog exists but is not on screen...
+  await expect(prompt(page)).toBeAttached();
+  await expect(prompt(page)).toBeHidden();
+  // ...and stays that way for longer than the delay (the time that must not count).
+  await page.waitForTimeout(CLIPBOARD_ALLOW_DELAY_MS + 500);
+
+  // Click 許可 in the very task that puts the dialog on screen.
+  await page.evaluate(() => {
+    const allow = document.querySelector('[data-testid="osc52-write-allow"]');
+    const shown = (window.__osc52Shown = { disabled: null });
+    new MutationObserver((_, observer) => {
+      if (allow.getClientRects().length === 0) return; // still hidden
+      shown.disabled = allow.getAttribute('aria-disabled');
+      allow.click();
+      observer.disconnect();
+    }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+  });
+  await terminalItem.click();
+  await expect(prompt(page)).toBeVisible();
+
+  expect(await page.evaluate(() => window.__osc52Shown.disabled)).toBe('true');
+  expect(await readClipboard(page)).toBe(SENTINEL);
+  await expect(prompt(page)).toBeVisible();
+
+  // The delay runs from when it is shown, so it does become live, and works.
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+  await allowButton(page).click();
+  await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(PAYLOAD);
+});
+
 test('拒否 is never inert: refusing during the delay closes the dialog and stays refused', async ({ page }) => {
   await openShell(page);
   await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
@@ -380,6 +426,10 @@ test('拒否 is never inert: refusing during the delay closes the dialog and sta
 
   await typeInShell(page, `${osc(PAYLOAD)}; echo OSC52-EMITTED-13`);
   await shellDone(page, 'OSC52-EMITTED-13');
+  // shellDone can pass on the echoed command line, before the sequence has run:
+  // wait for the dialog to have come up (and been refused in that same task),
+  // or the check below could succeed only because it was never shown.
+  await expect.poll(async () => (await probeLog(page)).length).toBe(1);
   await expect(prompt(page)).toBeHidden();
   // The refusal was made while 許可 was still inert.
   expect((await probeLog(page)).map((e) => [e.kind, e.disabled])).toEqual([['content', 'true']]);
