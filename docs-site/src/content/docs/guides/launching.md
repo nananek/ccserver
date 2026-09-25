@@ -23,6 +23,33 @@ description: セッションの起動方法、アプリ選択、Worker プリセ
 
 **サーバーにインストールされていない CLI は選択できません**: ccserver は起動モーダル表示時にサーバー側の実行ファイル解決 (PATH・サーバーの node バイナリディレクトリ・`~/.local/bin`・アプリ別ディレクトリ) を確認し、見つからないアプリはグレーアウトされます (ツールチップ「サーバーに未インストール」)。既定アプリが未インストールの場合も、利用可能なアプリへ自動で切り替えます。何らかの経路で未インストールのアプリが指定された場合 (例: 予約プロンプトの自動再開)、サーバーは `Cannot launch: <app> is not installed on this server (searched ...)` という明示エラーを返します。インストール/アンインストールした場合はブラウザを再読込すれば反映されます。
 
+## Files 画面の git 連携 (clone とリポジトリ表示)
+
+Files タブ (見出し "Select a Directory") の toolbar にある **Clone** ボタンと、ディレクトリ一覧の上に出る **git インジケーター**です (#278)。
+
+**インジケーター (読み取り専用)**: 表示中のディレクトリが git リポジトリなら、リポジトリのルート、ブランチ (detached のときは `detached @ <commit>`)、linked worktree の印、remote の一覧 (名前と URL) を出します。git が既定として使う remote には「既定」の印が付きます。既定の判定は、現在のブランチの `branch.<名前>.remote`、無ければ `remote.pushDefault`、無ければ `origin` の順です。
+
+- URL の userinfo (`https://user:token@...` の `user:token@`) はサーバー側で落とし、ブラウザへ送りません。
+- 変更 (既定の切り替え・remote の削除) はできません。dirty (未コミットの変更) も出しません (`git status` はリポジトリの config にある `core.fsmonitor` を実行するため。サンドボックス内のエージェントは `.git/config` を書けるので、ホスト側からは `symbolic-ref` / `rev-parse` / `config` だけを使います)。
+- リポジトリ全体 (`.git` を含む) が [browseRoots](/ccserver/sandbox/configuration/) の中にあるときだけ表示します。`.git` ファイルが browseRoots の外のリポジトリを指している場合などは何も出しません。
+- サンドボックスの許可リスト (起動時に 1 回だけ、cwd の `remote.*.url` から導出) とは独立した表示です。表示中の remote を変えても、実行中のセッションの許可リストは変わりません。
+
+**Clone**: URL を入力して **Clone** を押すと、サーバー (ホスト) で clone が実行され、表示中のディレクトリの**直下**に新しいフォルダができます (成功するとそのフォルダへ移動します)。使う道具はホストごとに決まります (許可するホストと道具は [`clone` 設定](/ccserver/sandbox/configuration/#clone-の許可ホスト)、既定は github.com だけ)。
+
+| 道具 | 実行されるコマンド | 対象 |
+|---|---|---|
+| `gh` (github.com の既定) | `gh repo clone <正規化した https URL> <一時ディレクトリ> --no-upstream` | GitHub / GitHub Enterprise Server 専用 (gh は他のホストに使えません)。`--no-upstream` なので、fork を clone しても `upstream` remote は追加されず、`origin` が gh の default になります。 |
+| `git` | `git clone -- <正規化した https URL> <一時ディレクトリ>` | Gitea など、それ以外のホスト。素の `git clone` は `upstream` も gh の `gh-resolved` も作らないので、`origin` が default になります。 |
+
+- **資格情報はサーバーを動かしているユーザーの gh / git の設定**です。clone はサンドボックスの外で走るため、サンドボックスの git broker・許可リストは関係しません。private リポジトリを clone できるかは、そのユーザーの `gh auth` (gh のホスト) や git の `credential.helper` など (git のホスト) 次第です。**自前の Gitea の private リポジトリが clone できるかは、まだ実機で確かめていません。**
+- **稼働中のセッションの作業ディレクトリの中には clone できません**: 保存先が、稼働中のセッション (コンボのメンバーの worktree を含む。サンドボックスの有無・shell / エージェントを問わない) の作業ディレクトリ、またはその配下のとき、gh / git を起動する前に 409 で断ります。そのセッションのエージェントは、clone 中の一時ディレクトリを書き換えられるためです。理由だけを返し、どのセッションかは伝えません。セッションを終了するか、別の場所に clone してください。clone の最中に、その場所へ**新しく**セッションを起動した場合と、`binds` の rw 指定など作業ディレクトリ以外の書き込み可能な場所は、この確認の対象外です。
+- **暫定の受け付け範囲 (オーナー確認待ち)**: 次の範囲は暫定の既定で、確定した仕様ではありません。
+  - 保存先は表示中のディレクトリの直下に新しいディレクトリ 1 つ (browseRoots の内側)。名前は URL の最後の要素、または入力欄で指定 (1 要素のみ。`/` `\` `.` `..`、制御文字、先頭 `-` は不可)。同じ名前のものが既にある (空のディレクトリ・ファイル・シンボリックリンクを含む) 場合は拒否します。
+  - URL は `OWNER/REPO` (常に github.com の意味。設定の許可ホストに github.com が無ければ使えません) か、`https://HOST/OWNER/REPO[.git]` (HOST は設定の許可ホストと**完全一致**、大文字小文字は区別しません)。ポート・末尾のドット・Unicode のホスト名 (国際化ドメインは設定に punycode で書きます)・userinfo (`github.com@evil.com` 型を含む)・`-` で始まるもの・他のスキーム・ローカルパス・ssh は拒否します。サーバーが URL を検証・正規化し、道具には正規化した https URL を渡します (gh の `git_protocol` 設定で ssh には変わりません)。
+- 実行は `child_process.spawn` (shell なし) で、引数は上の表のとおり固定です (ユーザーの入力は、検証済みのホスト・OWNER・REPO からサーバーが組み立てた URL としてだけ入ります)。環境変数は必要なものだけを渡し (`PATH`、`HOME`、gh / プロキシ / 証明書の設定など。gh・git 共通。ただし `GH_TOKEN` / `GITHUB_TOKEN` は、`gh` の clone と github.com の clone にだけ)、`GIT_ALLOW_PROTOCOL=https` と、`core.hooksPath=/dev/null`・`protocol.ext.allow=never`・`protocol.file.allow=never`・`core.fsmonitor=`・LFS の smudge 無効化を環境変数の git config で固定します。**LFS を使うリポジトリは、LFS のファイルがポインタのまま clone されます** (必要なら clone 後に自分で `git lfs pull`)。サブモジュールは取得しません。
+- clone は保存先の親ディレクトリを fd で固定し、その中の一時ディレクトリ (`.ccserver-clone-*`) に clone してから最終名へ rename します。失敗・タイムアウト時に中途半端なディレクトリは残りません (サーバーが clone の途中で終了した場合だけ、隠しディレクトリ `.ccserver-clone-*` が残るので、手で消してください)。タイムアウト (10 分)、同時実行数 (2)、取り込む出力量 (64 KiB) には上限があります。
+- `gh` で clone した後は、origin だけが gh の default になっているかを読み取り専用の git config で確認し、そうでなければ警告を返します (clone 自体は成功扱い)。`git` で clone した場合は確認しません。
+
 ## opencode を選んだ場合の挙動の違い
 
 - **クリップボード同期 (OSC 52)**: opencode がターミナルに書き込む OSC 52 シーケンスをブラウザが解釈し、システムクリップボードへ反映します (xterm.js は OSC 52 を無視するため、ccserver 側で処理)。
