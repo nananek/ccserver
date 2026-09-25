@@ -1135,7 +1135,8 @@ function cleanupMemberWorktree(group, role) {
 // The same 32KB ceiling mcpTools puts on a summary at push time, applied
 // wherever an event can enter the queue by another route. Kept here rather
 // than imported from mcpTools to avoid a cycle (mcpTools imports this module's
-// facade), and asserted equal to it in the tests.
+// facade), and asserted equal to it in mcpTools.test.js -- a push of an
+// oversized summary must come out at exactly this length.
 export const MAX_HANDOFF_SUMMARY_CHARS = 32 * 1024;
 
 function capHandoffSummary(ev) {
