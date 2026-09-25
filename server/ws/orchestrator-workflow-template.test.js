@@ -234,6 +234,18 @@ test('template: the review gate is pinned to the reviewed SHA, not the branch', 
   // workerA's last check before opening the PR.
   assert.match(template, /Before `gh pr create`, workerA re-runs `git rev-parse "origin\/<branch>"`,/);
   assert.match(template, /refuses to open the PR unless the tip equals the SHA that document was\s*\npublished for/);
+  // ... and it also refuses a findings document that did not come from the
+  // reviewer: the orchestrator can publish now, and could take a findings key
+  // first (a worker cannot overwrite it), so the tip/SHA match alone is not
+  // enough. The sentence must sit in the gate, after the check it adds to.
+  const publisherCheck = 'workerA also refuses a finding document whose `publishedBy` is not the role of the reviewer that ran that pass';
+  assert.ok(flat.includes(publisherCheck), 'workerA refuses a findings document not published by the reviewer');
+  assert.match(flat, /a document published as `orchestrator` or by the implementing worker is not that reviewer's finding, whatever its key and content say\), so give workerA the reviewer's role name with the request/);
+  assert.ok(
+    flat.indexOf('refuses to open the PR unless the tip equals the SHA') < flat.indexOf(publisherCheck)
+      && flat.indexOf(publisherCheck) < flat.indexOf('## Handoff discipline'),
+    'the publishedBy check follows the tip/SHA check inside the review gate',
+  );
 
   // The anchor is honest about its own strength: the orchestrator cannot
   // run git, so only workerA's comparison is independent of the reviewed

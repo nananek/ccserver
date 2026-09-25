@@ -379,6 +379,10 @@ Before `gh pr create`, workerA re-runs `git rev-parse "origin/<branch>"`,
 checks the last finding document itself with `list_docs` / `fetch_doc`, and
 refuses to open the PR unless the tip equals the SHA that document was
 published for. A tip that moved after the last pass means step 7 is not done.
+workerA also refuses a finding document whose `publishedBy` is not the role of
+the reviewer that ran that pass (a document published as `orchestrator` or by
+the implementing worker is not that reviewer's finding, whatever its key and
+content say), so give workerA the reviewer's role name with the request.
 
 Be clear-eyed about what that chain proves. You cannot run git, so every SHA
 here is a value an agent reported to you; the check in step 6 compares one
