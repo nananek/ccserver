@@ -121,16 +121,20 @@ const MAX_SCREEN_ROWS = 40;
 // Cut `text` to at most `maxChars` chars at a boundary that does not split
 // an escape sequence, keeping the tail. stripAnsi() only removes *complete*
 // sequences, so a plain `.slice(-maxChars)` can land mid-sequence and leak
-// the rest of it into the text view as literal characters. Walk the stream
-// from the front, sequence by sequence: when the cap splits one, start right
-// after it (the tail then starts clean and stays at or under the cap).
+// the rest of it into the text view as literal characters.
 //
-// The stream itself may also end mid-sequence (a pty chunk boundary split it),
-// cap or no cap; that dangling sequence is dropped from the end. Only the last
-// one can dangle -- an incomplete sequence runs to the end of the input.
+// The stream itself may end mid-sequence (a pty chunk boundary split it, or a
+// program is holding one open): that dangling sequence is dropped from the END
+// first, and the cap is counted back from there. Counting it from the end of
+// the input instead let a dangling sequence longer than the cap take the whole
+// window: the cut then moved past it, ahead of where the text ends, and the
+// text came out empty (#265 attack review, G1). Only the last sequence can
+// dangle -- an incomplete sequence runs to the end of the input.
+//
+// Then walk from the front, sequence by sequence: when the cap splits one,
+// start right after it (the tail then starts clean and stays at or under the
+// cap).
 function cleanTextCut(text, maxChars) {
-  const limit = text.length - maxChars;
-  let start = Math.max(limit, 0);
   let end = text.length;
   for (let i = 0; i < text.length;) {
     if (!isIntroducer(text.charCodeAt(i))) {
@@ -142,7 +146,20 @@ function cleanTextCut(text, maxChars) {
       end = i;
       break;
     }
-    if (i < limit && seqEnd > limit) start = seqEnd; // the cap splits this one
+    i = seqEnd;
+  }
+
+  const limit = end - maxChars;
+  if (limit <= 0) return text.slice(0, end);
+  let start = limit;
+  for (let i = 0; i < limit;) {
+    if (!isIntroducer(text.charCodeAt(i))) {
+      i++;
+      continue;
+    }
+    const seqEnd = escapeSequenceEnd(text, i);
+    if (seqEnd > limit) start = seqEnd; // the cap splits this one
+    if (seqEnd === -1 || seqEnd > limit) break;
     i = seqEnd;
   }
   return text.slice(start, end);
@@ -244,8 +261,11 @@ export function readOutput(deps, { sessionId, tail }) {
 // `tail` is read_output's optional "only the last N chunks" (clamped to
 // 1..MAX_OUTPUT_TAIL_CHUNKS; anything that is not a finite number means "not
 // given"). Without it the whole buffer is the input and the character cap
-// alone decides what is kept, so `truncated` is true exactly when the cap left
-// older output out. The copy modal passes no `tail`.
+// alone decides what is kept. `truncated` is about the chunks that were read
+// -- all of them, or the last N -- and is true when they are longer than the
+// cap: the chunks a `tail` itself leaves out are not counted, but a tail whose
+// own chunks are over the cap is reported like any other read. The copy modal
+// passes no `tail`.
 export function sessionOutputText(session, tail) {
   const chunks = Number.isFinite(tail)
     ? session.outputBuffer.slice(-Math.min(Math.max(tail, 1), MAX_OUTPUT_TAIL_CHUNKS))

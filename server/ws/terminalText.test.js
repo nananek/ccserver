@@ -156,7 +156,9 @@ test('sessionOutputText: the text view holds only what was visible, whatever the
       at += len;
     }
     const partial = SEQUENCES[Math.floor(rand() * SEQUENCES.length)];
-    const dangling = rand() < 0.5 ? partial.slice(0, 1 + Math.floor(rand() * (partial.length - 1))) : '';
+    let dangling = rand() < 0.5 ? partial.slice(0, 1 + Math.floor(rand() * (partial.length - 1))) : '';
+    // ...or a sequence left open for longer than the whole cap.
+    if (!dangling && rand() < 0.3) dangling = `${ESC}]0;` + 'x'.repeat(1 + Math.floor(rand() * 30000));
     if (dangling) chunks.push(dangling);
 
     const out = sessionOutputText({ outputBuffer: chunks });
@@ -164,6 +166,7 @@ test('sessionOutputText: the text view holds only what was visible, whatever the
     assert.match(out.text, /^[ab\n]*$/, `run ${n}: residue of an escape sequence in the text`);
     assert.ok(out.text.length <= 16 * 1024, `run ${n}: capped`);
     assert.ok(visible.endsWith(out.text), `run ${n}: the text is the newest part of what was visible, unaltered`);
+    assert.ok(out.text.length > 0, `run ${n}: an open sequence at the end did not blank the text`);
     assert.equal(out.truncated, true, `run ${n}: a 40 KiB stream is over the cap`);
   }
 });
@@ -267,4 +270,66 @@ test('readOutput: an explicit tail is still the caller\'s own count of chunks', 
   assert.equal(readOutputOf(session, { tail: 1e9 }).text.length, 3000);
   assert.equal(readOutputOf(session, { tail: 0 }).text, session.outputBuffer.at(-1));
   assert.equal(readOutputOf(session, { tail: Number.NaN }).text.length, 3000, 'not a number: treated as absent');
+});
+
+// --- G1: a sequence left open past the cap must not blank the text ---------------
+//
+// The cap is counted back from where the stream's own text ends. An escape
+// sequence still open at the end of the input (a program can hold one open for
+// as long as it likes) is dropped from the end, and the cap must not be spent on
+// it: when it was, the window fell inside the dangling sequence, the cut moved
+// past it, and the text view came out empty (#265 attack review, G1).
+test('sessionOutputText: an unterminated sequence longer than the cap does not take the text before it along', () => {
+  // Each with a body that cannot end it: a string runs to its terminator, and a
+  // CSI / ESC-intermediate run ends at a final byte, which `x` would be.
+  const open = [
+    ['OSC', `${ESC}]0;`, 'x'.repeat(20000)],
+    ['DCS', `${ESC}P1;2|`, 'x'.repeat(20000)],
+    ['APC', `${ESC}_G`, 'x'.repeat(20000)],
+    ['CSI parameters', `${ESC}[`, '1;'.repeat(10000)],
+    ['ESC ( intermediates', `${ESC}(`, '!'.repeat(20000)],
+    ['8-bit C1 OSC', '\x9d0;', 'x'.repeat(20000)],
+  ];
+  for (const [name, head, filler] of open) {
+    const out = sessionOutputText({ outputBuffer: ['IMPORTANT-OUTPUT\n', head + filler] });
+    assert.equal(out.text, 'IMPORTANT-OUTPUT\n', `${name}: what was printed before the open sequence is the text`);
+    assert.equal(out.truncated, true, `${name}: the raw stream is over the cap`);
+    // ...whichever chunk the sequence opens in, and however the tail of the stream is chunked.
+    const half = filler.length / 2;
+    const split = sessionOutputText({ outputBuffer: ['IMPORTANT-OUTPUT\n' + head, filler.slice(0, half), filler.slice(half)] });
+    assert.equal(split.text, 'IMPORTANT-OUTPUT\n', `${name}: split across chunks`);
+  }
+});
+
+test('sessionOutputText: the cap is counted back from an open sequence, and still never splits a whole one', () => {
+  // Newest 16 KiB of what precedes the open sequence, exactly.
+  const plain = sessionOutputText({ outputBuffer: ['a'.repeat(17000) + ESC + ']0;' + 'x'.repeat(100)] });
+  assert.equal(plain.text, 'a'.repeat(CAP));
+  // The window's edge falls inside a complete sequence before the open one: it starts after it.
+  const edge = `${'a'.repeat(9000)}${ESC}[38:2::255:0:0m${'b'.repeat(CAP - 4)}`;
+  const cut = sessionOutputText({ outputBuffer: [edge + ESC + ']0;' + 'x'.repeat(30000)] });
+  assert.equal(cut.text, 'b'.repeat(CAP - 4), 'no residue of the sequence the cap cut through');
+  assert.ok(cut.text.length <= CAP);
+});
+
+test('sessionOutputText: a long sequence that IS terminated still costs the text before it (unchanged)', () => {
+  // Not part of G1: a 20000-char OSC that ends properly is 20000 chars of the
+  // stream, so the newest 16 KiB lies inside it and holds no visible text. It
+  // has always been so; pinned so a change to it is a decision, not an accident.
+  const out = sessionOutputText({ outputBuffer: ['IMPORTANT-OUTPUT\n', `${ESC}]0;` + 'x'.repeat(20000) + BEL] });
+  assert.equal(out.text, '');
+  assert.equal(out.truncated, true);
+});
+
+// --- G2: what `truncated` reports next to an explicit tail ------------------------
+test('readOutput: truncated is about the chunks that were read -- a tail narrows them, and is not itself reported', () => {
+  const chunks = Array.from({ length: 2000 }, () => 'x'.repeat(20)); // 40000 chars in 2000 chunks
+  const session = { cwd: '/x', app: 'claude', exited: false, outputBuffer: chunks };
+  // The last 5 chunks are 100 chars: nothing of THEM is left out.
+  assert.equal(readOutputOf(session, { tail: 5 }).truncated, false);
+  // Everything (tail beyond the buffer): 40000 chars, the cap leaves older ones out.
+  assert.equal(readOutputOf(session, { tail: 1e9 }).truncated, true);
+  // A tail whose chunks are themselves over the cap: reported, like any read.
+  assert.equal(readOutputOf(session, { tail: 1000 }).truncated, true);
+  assert.equal(readOutputOf(session, { tail: 1000 }).text.length, CAP);
 });
