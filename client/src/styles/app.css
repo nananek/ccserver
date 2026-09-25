@@ -2936,6 +2936,142 @@ body {
   color: var(--text-muted);
 }
 
+/* Clone bar (#278): the New Folder bar's shape with a URL and a name field. */
+.clone-bar .clone-url-input {
+  flex: 2 1 260px;
+  min-width: 0;
+}
+
+.clone-bar .clone-name-input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.clone-hint,
+.clone-error {
+  flex: 1 1 100%;
+  font-size: 12px;
+}
+
+.clone-hint {
+  color: var(--text-muted);
+}
+
+.clone-error {
+  color: var(--error);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Git indicator (#278): repository / branch / remotes of the shown directory.
+   Every value is untrusted repository content, so long unbroken strings must
+   wrap instead of widening the page. */
+.git-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.git-info-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.git-info-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.git-info-root,
+.git-info-remote-name,
+.git-info-remote-url,
+.git-info-remote-push,
+.git-info-branch {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.git-info-root {
+  color: var(--text-secondary);
+}
+
+.git-info-branch {
+  color: var(--accent);
+  background: var(--bg-surface);
+  padding: 1px 8px;
+  border-radius: 10px;
+}
+
+.git-info-branch.is-detached {
+  color: var(--warning, #f9e2af);
+}
+
+.git-info-badge,
+.git-info-default {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.git-info-badge {
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+.git-info-default {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.git-info-remotes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.git-info-remote {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.git-info-remote-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.git-info-remote-url {
+  color: var(--text-secondary);
+}
+
+.git-info-remote-push {
+  color: var(--text-muted);
+}
+
+.git-info-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 /* Scroll Controls */
 .terminal-scroll-controls {
   display: flex;
@@ -3856,6 +3992,11 @@ body {
 @media (max-width: 600px) {
   .directory-browser {
     padding: 12px;
+  }
+
+  .clone-bar .clone-url-input,
+  .clone-bar .clone-name-input {
+    flex-basis: 100%;
   }
 
   .browser-header h1 {

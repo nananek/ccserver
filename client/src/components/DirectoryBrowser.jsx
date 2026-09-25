@@ -6,6 +6,7 @@ import { isPreviewable } from '../previewExts.js';
 import { isAppSelectable } from '../appAvailability.js';
 import { PERMISSION_MODES, PERMISSION_MODE_LABELS } from '../permissionMode.js';
 import { loadSandboxDefaults, defaultSandboxOpts } from '../sandboxDefaults.js';
+import GitInfoBar from './GitInfoBar.jsx';
 
 // marked + DOMPurify only matter once someone opens a preview, so keep them
 // out of the initial bundle (same split as TerminalView in App.jsx).
@@ -144,6 +145,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // git init opt-in for folder creation (off by default, like the other
   // launch flags): avoids surprising nested repositories under existing ones.
   const [initGit, setInitGit] = useState(false);
+  // Clone (#278): an inline bar next to the New Folder one. The server runs
+  // `gh repo clone --no-upstream` into a NEW folder directly under
+  // currentPath. Which URLs / names it accepts is provisional and enforced
+  // server-side (server/ghClone.js); this only shows what it says.
+  const [cloneOpen, setCloneOpen] = useState(false);
+  const [cloneUrl, setCloneUrl] = useState('');
+  const [cloneName, setCloneName] = useState('');
+  const [cloning, setCloning] = useState(false);
+  const [cloneError, setCloneError] = useState(null);
+  const [cloneNotice, setCloneNotice] = useState('');
+  // Bumped to make the git indicator re-read (Refresh button).
+  const [gitReload, setGitReload] = useState(0);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
@@ -655,6 +668,50 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
     }
   }, [currentPath, newFolderName, initGit, closeFolderForm]);
 
+  const closeCloneBar = useCallback(() => {
+    setCloneOpen(false);
+    setCloneUrl('');
+    setCloneName('');
+    setCloneError(null);
+  }, []);
+
+  // What the directory view is showing when a clone is submitted, to tell
+  // "still here" from "navigated away while it ran" when it finishes.
+  const currentPathRef = useRef(currentPath);
+  currentPathRef.current = currentPath;
+  const cloneNoticeTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(cloneNoticeTimerRef.current), []);
+
+  const handleClone = useCallback(async () => {
+    const url = cloneUrl.trim();
+    if (!url || cloning) return;
+    const parent = currentPath;
+    const name = cloneName.trim();
+    setCloning(true);
+    setCloneError(null);
+    try {
+      const res = await authFetch('/api/git/clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent, url, ...(name ? { name } : {}) }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      closeCloneBar();
+      const warnings = Array.isArray(body.warnings) && body.warnings.length > 0 ? ` (${body.warnings.join(' / ')})` : '';
+      setCloneNotice(`Cloned ${body.name} into ${displayPath(body.path, homeDir)}${warnings}`);
+      clearTimeout(cloneNoticeTimerRef.current);
+      cloneNoticeTimerRef.current = setTimeout(() => setCloneNotice(''), 8000);
+      // Like New Folder: move into what was just made -- unless the user
+      // has already gone somewhere else while the clone ran.
+      if (currentPathRef.current === parent) setCurrentPath(body.path);
+    } catch (err) {
+      setCloneError(err.message);
+    } finally {
+      setCloning(false);
+    }
+  }, [cloneUrl, cloneName, cloning, currentPath, homeDir, closeCloneBar]);
+
   const closePreview = useCallback(() => setPreviewFile(null), []);
 
   const handleDownload = useCallback((file) => {
@@ -897,6 +954,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
         })}
       </nav>
 
+      <GitInfoBar path={currentPath} homeDir={homeDir} reloadToken={gitReload} />
+
       <div className="browser-toolbar">
         <div className="toolbar-nav">
           <button className="btn btn-secondary" onClick={navigateUp} disabled={!parentPath}>
@@ -912,12 +971,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           >
             Home
           </button>
-          <button className="btn btn-secondary" onClick={() => { fetchDirs(currentPath); }} disabled={loading}>
+          <button className="btn btn-secondary" onClick={() => { fetchDirs(currentPath); setGitReload((n) => n + 1); }} disabled={loading}>
             Refresh
           </button>
           <button
             className="btn btn-secondary"
             onClick={() => {
+              closeCloneBar();
               setCreatingFolder(true);
               setNewFolderName('');
               setInitGit(false);
@@ -925,6 +985,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
             title="Make a directory (optionally as a git repository)"
           >
             New Folder
+          </button>
+          <button
+            className="btn btn-secondary"
+            data-testid="clone-open"
+            onClick={() => {
+              closeFolderForm();
+              setCloneOpen(true);
+              setCloneError(null);
+            }}
+            title="Clone a GitHub repository into a new folder here (gh repo clone --no-upstream)"
+          >
+            Clone
           </button>
           <button
             className="btn btn-secondary"
@@ -1609,6 +1681,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
         <div className="upload-progress">{uploadProgress}</div>
       )}
 
+      {cloneNotice && (
+        <div className="upload-progress" role="status" data-testid="clone-notice">{cloneNotice}</div>
+      )}
+
       {creatingFolder && (
         <div className="new-folder-bar">
           <input
@@ -1633,6 +1709,63 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           <button className="btn btn-secondary" onClick={closeFolderForm}>
             Cancel
           </button>
+        </div>
+      )}
+
+      {cloneOpen && (
+        <div className="new-folder-bar clone-bar" data-testid="clone-bar">
+          <input
+            type="text"
+            className="new-folder-input clone-url-input"
+            data-testid="clone-url"
+            placeholder="OWNER/REPO or https://github.com/OWNER/REPO"
+            aria-label="Repository to clone"
+            value={cloneUrl}
+            onChange={(e) => setCloneUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleClone();
+              if (e.key === 'Escape' && !cloning) closeCloneBar();
+            }}
+            disabled={cloning}
+            autoFocus
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+          />
+          <input
+            type="text"
+            className="new-folder-input clone-name-input"
+            data-testid="clone-name"
+            placeholder="Folder name (optional)"
+            aria-label="Folder name (optional)"
+            value={cloneName}
+            onChange={(e) => setCloneName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleClone();
+              if (e.key === 'Escape' && !cloning) closeCloneBar();
+            }}
+            disabled={cloning}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+          />
+          <button
+            className="btn btn-primary"
+            data-testid="clone-submit"
+            onClick={handleClone}
+            disabled={cloning || !cloneUrl.trim()}
+          >
+            {cloning ? 'Cloning…' : 'Clone'}
+          </button>
+          <button className="btn btn-secondary" onClick={closeCloneBar} disabled={cloning}>
+            Cancel
+          </button>
+          <div className="clone-hint">
+            github.com のリポジトリを、この場所の直下に新しいフォルダとして clone します (gh repo clone --no-upstream)。
+          </div>
+          {cloneError && (
+            <div className="clone-error" role="alert" data-testid="clone-error">{cloneError}</div>
+          )}
         </div>
       )}
 
