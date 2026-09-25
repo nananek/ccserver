@@ -426,6 +426,22 @@ test('gh failing: its message is surfaced (cleaned), the staging directory is go
   assert.deepEqual(readdirSync(a.parent), [], 'no staging directory, no half-cloned directory');
 });
 
+test('a URL in gh\'s error output loses its userinfo before it reaches the client', async () => {
+  const a = arena();
+  const ghBin = fakeGh(a.rec, ghBody(a.rec, {
+    middle: `printf "fatal: unable to access 'https://ghp_secret123:x-oauth-basic@github.com/o/r.git/': The requested URL returned error: 403\\nproxy https://pu:p@ss@proxy.internal:3128/ down\\n" >&2`,
+    build: false,
+    exitCode: 128,
+  }));
+  const res = await clone(a, { parent: a.parent, url: 'o/r' }, { ghBin });
+  assert.equal(res.code, 'clone-failed');
+  assert.match(res.message, /unable to access 'https:\/\/github\.com\/o\/r\.git\/'/, 'the rest of the message is kept');
+  assert.match(res.message, /proxy https:\/\/proxy\.internal:3128\//);
+  for (const secret of ['ghp_secret123', 'x-oauth-basic', 'pu:p', 'ss@']) {
+    assert.ok(!res.message.includes(secret), `${secret} leaked: ${res.message}`);
+  }
+});
+
 test('gh exit code 4 (authentication) gets a hint', async () => {
   const a = arena();
   const ghBin = fakeGh(a.rec, ghBody(a.rec, { build: false, exitCode: 4 }));

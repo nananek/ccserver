@@ -245,8 +245,17 @@ async function pinParent(parent, roots, platform) {
 
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
+// scheme://userinfo@host: the URL gh / git echo in an error can carry a token
+// when the operator's own config rewrites github.com to one that has it. The
+// last '@' of the authority ends the userinfo (a password may contain '@').
+const USERINFO_IN_TEXT_RE = /([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/?#]*@/g;
+
 function tailText(text, max = 1000) {
-  const cleaned = text.replace(ANSI_RE, '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '').trim();
+  const cleaned = text
+    .replace(ANSI_RE, '')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
+    .replace(USERINFO_IN_TEXT_RE, '$1')
+    .trim();
   return cleaned.length > max ? `...${cleaned.slice(-max)}` : cleaned;
 }
 
