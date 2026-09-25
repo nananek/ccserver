@@ -282,6 +282,76 @@ test('restoreGroups treats a non-finite size as missing (0, like an absent one) 
   }
 });
 
+// A saved group's id is joined onto the group-files root and made a directory
+// (ensureGroupFilesDir), and the same directory is bind-mounted into the group's
+// sandboxes. POST /groups makes the id with randomUUID(); the restore admits only
+// that form, so an id like "../x" neither restores the group nor makes anything.
+function restoreWarnings() {
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => warnings.push(a.join(' '));
+  return { warnings, done: () => { console.warn = realWarn; } };
+}
+
+test('restoreGroups: a saved id that is not a UUID makes no directory outside the group-files root (and a UUID id still makes its own)', async () => {
+  const filesRoot = join(runtimeDir, 'group-files');
+  const escapeName = `ESCAPED-${randomUUID()}`;
+  const escapeDir = join(runtimeDir, escapeName);                 // a sibling of the root: what "../<name>" resolves to
+  const cwd = `/srv/proj-id-escape-${randomUUID()}`;
+  const entry = (id) => ({ id, createdAt: 1, cwd, allowedCwds: [cwd], orchestratorApp: 'claude', members: {} });
+  const manifest = (id) => ({ [id]: { f1: { id: 'f1', name: 'a.txt', storedName: 'a.txt', size: 1 } } });
+  const good = randomUUID();
+  const w = restoreWarnings();
+  try {
+    // control: the fixture is armed. A group with an ordinary id and a manifest entry gets its directory made by the restore.
+    writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([entry(good)]));
+    writeFileSync(process.env.CCSERVER_GROUP_FILES_PATH, JSON.stringify(manifest(good)));
+    assert.equal(groupManager.restoreGroups().restored, 1);
+    assert.equal(existsSync(join(filesRoot, good)), true, 'control: the restore makes the group\'s directory under the root');
+    groupManager.destroyGroup(good);
+
+    for (const id of [`../${escapeName}`, `${good}/../../${escapeName}`]) {
+      w.warnings.length = 0;
+      writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([entry(id)]));
+      writeFileSync(process.env.CCSERVER_GROUP_FILES_PATH, JSON.stringify(manifest(id)));
+      const { restored } = groupManager.restoreGroups();
+      assert.equal(existsSync(escapeDir), false, `${id}: nothing was made outside the root`);
+      assert.equal(restored, 0, `${id}: not restored`);
+      assert.match(w.warnings.join('\n'), /not restoring a saved group: its id .* is not a group id/);
+    }
+  } finally {
+    w.done();
+    groupManager.destroyGroup(good);
+    rmSync(escapeDir, { recursive: true, force: true });
+  }
+});
+
+test('restoreGroups: docs and files manifest entries keyed by something that is not a group id are ignored, with a warning', async () => {
+  const cwd = `/srv/proj-id-keys-${randomUUID()}`;
+  const good = randomUUID();
+  const escapeName = `ESCAPED-${randomUUID()}`;
+  const w = restoreWarnings();
+  try {
+    writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([{ id: good, createdAt: 1, cwd, allowedCwds: [cwd], orchestratorApp: 'claude', members: {} }]));
+    const file = (name) => ({ f1: { id: 'f1', name, storedName: name, size: 1 } });
+    writeFileSync(process.env.CCSERVER_GROUP_FILES_PATH, JSON.stringify({ [good]: file('ok.txt'), [`../${escapeName}`]: file('a.txt'), '..': file('b.txt'), [good.toUpperCase()]: file('c.txt') }));
+    writeFileSync(process.env.CCSERVER_GROUP_DOCS_PATH, JSON.stringify({ [good]: { k: { content: 'x', publishedBy: 'workerA', publishedAt: 1, createdAt: 1 } }, [`../${escapeName}`]: { k: { content: 'y' } } }));
+    assert.equal(groupManager.restoreGroups().restored, 1);
+    const text = w.warnings.join('\n');
+    for (const key of [`../${escapeName}`, '..', good.toUpperCase()]) {
+      assert.ok(text.includes(JSON.stringify(key)), `the key ${JSON.stringify(key)} is reported (quoted)`);
+    }
+    assert.match(text, /group files manifest .* is not a group id/);
+    assert.match(text, /group docs .* is not a group id/);
+    assert.equal(groupManager.fetchGroupDoc(good, 'k').content, 'x', 'control: the entry keyed by the real id is still restored');
+    assert.equal(existsSync(join(runtimeDir, escapeName)), false);
+  } finally {
+    w.done();
+    groupManager.destroyGroup(good);
+    rmSync(join(runtimeDir, escapeName), { recursive: true, force: true });
+  }
+});
+
 test('destroyGroup removes blob root and does not touch sibling', async () => {
   const g1 = await makeGroup();
   const g2 = await makeGroup();

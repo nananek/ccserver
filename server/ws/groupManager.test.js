@@ -245,6 +245,50 @@ async function withBrowseRoots(fn) {
   }
 }
 
+// A saved group's id becomes part of paths (its group-files directory, its MCP socket
+// names). POST /groups makes it with randomUUID() -- a lowercase 8-4-4-4-12 -- and has
+// done since combo launch existed, so that is the only form a saved file is admitted in.
+test('restoreGroups admits only an id in the form POST /groups creates (a lowercase UUID), and says why for any other', async () => {
+  const cwd = `/srv/proj-ids-${randomUUID()}`;
+  const control = restoreFrom([savedEntry(cwd)]);
+  assert.equal(control.info.restored, 1, `control: an ordinary randomUUID() id is restored (${control.warnings.join(' | ')})`);
+  assert.deepEqual(control.warnings, []);
+
+  const good = randomUUID();
+  const bad = {
+    'a path out of the files root': '../ESCAPED-DIR',
+    'a slash': '/',
+    'a nested path': 'a/b',
+    'NUL': '\0',
+    'a UUID with a NUL after it': `${good}\0`,
+    'a UUID followed by a newline': `${good}\n`,
+    'a UUID with a trailing space': `${good} `,
+    'dot-dot': '..',
+    'dot': '.',
+    'empty': '',
+    'a very long string': 'a'.repeat(200000),
+    'the same UUID in uppercase': good.toUpperCase(),
+    'mixed case': `${good.slice(0, 8).toUpperCase()}${good.slice(8)}`,
+    'a UUID without dashes': good.replaceAll('-', ''),
+    'a UUID in braces': `{${good}}`,
+    'a urn': `urn:uuid:${good}`,
+    'a non-hex UUID-shaped string': 'gggggggg-gggg-gggg-gggg-gggggggggggg',
+    '__proto__': '__proto__',
+    'a UUID with a path after it': `${good}/../x`,
+  };
+  for (const [what, id] of Object.entries(bad)) {
+    const { info, warnings } = restoreFrom([savedEntry(`/srv/proj-ids-${randomUUID()}`, { id })]);
+    assert.equal(info.restored, 0, `${what}: not restored`);
+    assert.equal(groupManager.listGroups().some((g) => g.groupId === id), false, `${what}: no such group exists`);
+    const text = warnings.join('\n');
+    assert.match(text, /not restoring a saved group: its id .* is not a group id/, `${what}: says why`);
+    assert.doesNotMatch(text, /[\x00-\x09\x0b-\x1f]/, `${what}: the id is quoted (JSON.stringify), never written raw into the log`);
+  }
+  // a saved file with a bad entry does not stop the good one after it
+  const mixed = restoreFrom([savedEntry(`/srv/proj-ids-${randomUUID()}`, { id: '../ESCAPED-DIR' }), savedEntry(`/srv/proj-ids-${randomUUID()}`)]);
+  assert.equal(mixed.info.restored, 1);
+});
+
 test('restoreGroups refuses a group whose cwd creation would have refused (not absolute, "/", outside browseRoots, a ".." or a symlink out of them)', async () => {
   await withBrowseRoots(async ({ allowed, outside }) => {
     const inside = join(allowed, 'proj');

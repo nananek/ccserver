@@ -96,6 +96,16 @@ const groups = new Map(); // groupId -> group (see createGroup)
 // so a preset role is always a role addMember() will accept.
 export const WORKER_ROLE_RE = /^worker[A-Za-z0-9_-]+$/;
 
+// A group's id in the form POST /groups makes it: randomUUID(), lowercase
+// 8-4-4-4-12 (it has been since combo launch existed). The id is joined into
+// paths -- the group's files directory, which is bind-mounted into its sandboxes,
+// and its MCP socket names -- so what a saved file offers as an id is admitted in
+// this form only. Version and variant digits are not checked: they change no path.
+const GROUP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export function isGroupId(id) {
+  return typeof id === 'string' && GROUP_ID_RE.test(id);
+}
+
 // FIFO handoff queue cap: workers pushing while the orchestrator is gone must
 // not grow the queue without bound.
 const MAX_HANDOFF_QUEUE = 100;
@@ -662,6 +672,11 @@ export function restoreGroups() {
   let restored = 0;
   for (const e of arr) {
     if (!e || typeof e.id !== 'string') continue;
+    // The id first: it is what the group's directories and sockets are named by.
+    if (!isGroupId(e.id)) {
+      console.warn(`[groupManager] not restoring a saved group: its id ${JSON.stringify(e.id)} is not a group id (a lowercase UUID, as POST /groups creates)`);
+      continue;
+    }
     // A saved group is admitted by the rules a NEW group had to meet, because
     // since #279 a restart is an ordinary way for a group to come back and this
     // file is trusted input to everything below (cwd names a directory whose
@@ -802,6 +817,10 @@ export function restoreGroups() {
     const rawDocs = readJsonFileIfRegular(groupDocsPath());
     if (rawDocs && typeof rawDocs === 'object') {
       for (const [gid, docsObj] of Object.entries(rawDocs)) {
+        if (!isGroupId(gid)) {
+          console.warn(`[groupManager] ignoring the group docs entry ${JSON.stringify(gid)}: it is not a group id`);
+          continue;
+        }
         const group = groups.get(gid);
         if (!group || !docsObj || typeof docsObj !== 'object') continue;
         for (const [key, doc] of Object.entries(docsObj)) {
@@ -831,6 +850,10 @@ export function restoreGroups() {
     const rawFiles = readJsonFileIfRegular(getGroupFilesManifestPath());
     if (rawFiles && typeof rawFiles === 'object') {
       for (const [gid, filesObj] of Object.entries(rawFiles)) {
+        if (!isGroupId(gid)) {
+          console.warn(`[groupManager] ignoring the group files manifest entry ${JSON.stringify(gid)}: it is not a group id`);
+          continue;
+        }
         const group = groups.get(gid);
         if (!group || !filesObj || typeof filesObj !== 'object') continue;
         // Ensure the group's blob directory exists so later binds succeed.
