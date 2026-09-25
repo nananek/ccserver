@@ -168,6 +168,13 @@ const sandboxHomeLaunchReservations = new SandboxHomeLaunchReservations();
 const sessionExitListeners = new Set();
 const sessionCreateListeners = new Set();
 
+// Set when gracefulShutdown() starts and never cleared: the process is on its
+// way out. Every pty exit after that is the shutdown's own doing, not the
+// session ending on its own, and listeners are told so (second argument) --
+// groupManager must not read "the last member exited" as "the group is over",
+// or a routine stop wipes every group it is supposed to restore.
+let shuttingDown = false;
+
 export function setSessionExitListener(fn) {
   sessionExitListeners.add(fn);
 }
@@ -597,7 +604,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
 
     for (const fn of sessionExitListeners) {
       try {
-        fn(session);
+        fn(session, { shuttingDown });
       } catch {
         // a listener must never break the pty exit path
       }
@@ -2336,6 +2343,7 @@ export function savedSessionPublic(session, claudeId) {
 // Kills every live pty, waits up to 3s for them to exit, writes resumable
 // sessions to .saved-sessions.json, then tears down all local bookkeeping.
 export function gracefulShutdown() {
+  shuttingDown = true;
   // The relay isn't tied to any session's ptys, just this process's own
   // listeners.
   gpgVaultRelay.stop();
