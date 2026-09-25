@@ -1954,7 +1954,7 @@ export function getGroupFilesDirForGroup(groupId) {
 
 // Exporting for tests: groupManager.test.js drives the assembly-race path
 // directly (no real pty available to trigger the listener organically).
-export function onSessionExit(session) {
+export function onSessionExit(session, { shuttingDown = false } = {}) {
   if (!session?.groupId) return;
   const group = groups.get(session.groupId);
   if (!group) return;
@@ -1973,11 +1973,19 @@ export function onSessionExit(session) {
   // brokers are already stopped, so this just drops the Map entry. Groups
   // still being assembled are exempt: their members are registered one by
   // one, so "no live members" is expected mid-flight (see `assembling`).
+  //
+  // Not while the server itself is stopping (`shuttingDown`, from
+  // sessionManager.gracefulShutdown): that kills every pty, so the last member
+  // "exits" as a matter of course, and destroying the group here would delete
+  // exactly what persistence and restoreGroups() exist to bring back -- the
+  // registry entry, docs, handoff queue, files and worktrees -- and drop its
+  // members from the .saved-sessions.json written right after. The group is
+  // restored by the next start, where its members resume.
   const liveCount = [...group.members.values()].some((sid) => {
     const s = sessionApi.getSession(sid);
     return s && !s.exited;
   });
-  if (!group.assembling && !liveCount) destroyGroup(session.groupId);
+  if (!group.assembling && !liveCount && !shuttingDown) destroyGroup(session.groupId);
 }
 
 // A session was created with a groupId/groupRole (e.g. a scheduled prompt
