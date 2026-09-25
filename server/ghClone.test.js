@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync,
-  renameSync, rmSync, symlinkSync, writeFileSync,
+  renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -171,8 +171,17 @@ test('a successful clone: fixed argv, pinned cwd, allowlisted env, final directo
   const argv = readLines(join(a.rec, 'argv'));
   assert.equal(argv.length, 5);
   assert.deepEqual([argv[0], argv[1], argv[2], argv[4]], ['repo', 'clone', 'https://github.com/OWNER/REPO.git', '--no-upstream']);
-  assert.match(argv[3], /^\.ccserver-clone-[A-Za-z0-9]{6}$/, 'gh clones into a relative staging name');
+  assert.match(argv[3], /^\.ccserver-clone-[0-9a-f]{12}$/, 'gh clones into a relative staging name');
   assert.equal(readLines(join(a.rec, 'cwd'))[0], realpathSync(a.parent), 'gh runs in the (pinned) parent directory');
+});
+
+test('the finished directory has the mode a plain mkdir / git clone would give (not the 0700 of a temp dir)', async () => {
+  const a = arena();
+  const ghBin = fakeGh(a.rec, ghBody(a.rec));
+  assert.equal((await clone(a, { parent: a.parent, url: 'o/r' }, { ghBin })).ok, true);
+  const control = join(a.parent, 'control');
+  mkdirSync(control);
+  assert.equal(statSync(join(a.parent, 'r')).mode & 0o777, statSync(control).mode & 0o777);
 });
 
 test('the child environment is an allowlist plus the fixed pins', async () => {
@@ -592,6 +601,21 @@ test('a host-level LFS smudge filter does not run, and the clone still succeeds 
   const res = await realClone(hardened, `file://${h.src}`, uniq('dst'));
   assert.equal(res.ok, true, res.stderr);
   assert.equal(h.ran('LFS'), false, 'the smudge driver ran');
+});
+
+test('real git clones into an existing EMPTY directory (the staging-directory shape) under the hardened env', async () => {
+  const h = hostileHost();
+  const noFilePin = gitConfigEnv(CLONE_GIT_CONFIG.filter(([k]) => k !== 'protocol.file.allow'));
+  const env = { ...withoutKeys(buildCloneEnv(hostEnv(h.home)), (k) => isConfigKey(k) || k === 'GIT_ALLOW_PROTOCOL'), ...noFilePin };
+  const dst = uniq('staging');
+  mkdirSync(dst);
+  const res = await realClone(env, `file://${h.src}`, dst);
+  assert.equal(res.ok, true, res.stderr);
+  assert.ok(existsSync(join(dst, '.git')));
+  const nonEmpty = uniq('nonempty');
+  mkdirSync(nonEmpty);
+  writeFileSync(join(nonEmpty, 'x'), '1');
+  assert.equal((await realClone(env, `file://${h.src}`, nonEmpty)).ok, false, 'control: git itself refuses a non-empty directory');
 });
 
 test('the empty core.* pins do not break a clone', async () => {

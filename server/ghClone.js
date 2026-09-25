@@ -32,7 +32,7 @@
 //     on the pinned directory, and the child runs with that directory as its
 //     working directory through /proc/self/fd/3 (Linux), so swapping the path
 //     for a symlink afterwards changes nothing. The clone itself runs in a
-//     mkdtemp'd staging directory inside the pinned parent and is renamed to
+//     freshly mkdir'd staging directory inside the pinned parent and is renamed to
 //     its final name only after it succeeded. That was chosen over "let git
 //     create the final directory" because (1) no half-cloned directory ever
 //     appears under the final name, whatever kills the clone; (2) git never
@@ -53,10 +53,11 @@
 //     update).
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, mkdtemp, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { isContained, resolveWithinRoots } from './pathPolicy.js';
 import { buildChildEnv, gitConfigEnv, runGit } from './hostGit.js';
 
@@ -294,6 +295,23 @@ function runChild(bin, args, { pin, env, timeoutMs, maxOutputBytes }) {
   });
 }
 
+// A new, unpredictably named directory in the pinned parent. mkdir (not
+// mkdtemp) on purpose: mkdtemp creates it 0700, git keeps an existing
+// directory's mode, and the finished clone would come out 0700 where a plain
+// `git clone` gives the umask-derived mode (measured: 700 vs 755).
+async function makeStagingDir(fsPath) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const name = `${STAGING_PREFIX}${randomBytes(6).toString('hex')}`;
+    try {
+      await mkdir(join(fsPath, name));
+      return name;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+  }
+  throw new Error('could not create a staging directory');
+}
+
 // ---------------------------------------------------------------------------
 // After the clone
 
@@ -421,7 +439,7 @@ async function cloneInto({ parent, dirName, url }, roots, opts) {
       replacesEmptyDir = true;
     }
 
-    stageName = basename(await mkdtemp(join(pin.fsPath, STAGING_PREFIX)));
+    stageName = await makeStagingDir(pin.fsPath);
 
     const result = await runChild(
       opts.ghBin,
