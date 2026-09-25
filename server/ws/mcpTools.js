@@ -16,6 +16,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
 
 const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Z0-9]|[>=<]|#[0-9])/g;
 
@@ -406,13 +407,39 @@ export function getTabStatus(deps, { sessionId }) {
 // read_output.
 //
 // deps.connectionIsAlive (a per-connection function, when provided) is
-// forwarded to takeHandoff: an event is never dequeued for a connection
-// whose socket is dead, so a handoff is never lost to a disconnected wait --
-// it stays queued and the next wait_for_handoff receives it.
-export function waitForHandoff(deps, { timeoutMs = 900000 }) {
+// forwarded to takeHandoff: an event is never dequeued for a connection whose
+// socket is dead, so a handoff is not lost to a disconnected wait -- it stays
+// queued and the next wait_for_handoff receives it. "Not lost", not "never
+// lost": liveness is re-read while waiting and again at the commit check, but
+// NOT after it, so a socket dying in the slice below takes its event with it
+// (the queue has already been persisted without it). Same residual as a late
+// abort, and it closes the same way -- with an ack.
+//
+// `extra` is the MCP SDK's per-request context. Only `extra.signal` is used,
+// and it is the other half of the same guarantee (#245): connection liveness
+// says nothing about a client that cancelled or abandoned THIS request while
+// keeping the socket open. Without it the cancelled wait still consumes the
+// next handoff, and the SDK then drops the response it was consumed for.
+//
+// The final re-check below covers the one slice takeHandoff cannot see: the
+// abort landing after its commit check but before this returns. Re-queueing
+// there costs a duplicate delivery at worst (the next wait gets it again),
+// which is the right way round -- a handoff arriving twice is recoverable,
+// one that never arrives is not.
+export function waitForHandoff(deps, { timeoutMs = 900000 }, extra = undefined) {
   const opts = {};
   if (typeof deps.connectionIsAlive === 'function') opts.isAlive = deps.connectionIsAlive;
-  return deps.groupManager.takeHandoff(deps.groupId, Math.max(Number(timeoutMs) || 0, 0), opts);
+  const signal = extra && extra.signal;
+  if (signal) opts.signal = signal;
+  const wait = deps.groupManager.takeHandoff(deps.groupId, Math.max(Number(timeoutMs) || 0, 0), opts);
+  if (!signal) return wait;
+  return wait.then((result) => {
+    if (signal.aborted && result && !result.timedOut && !result.error) {
+      deps.groupManager.requeueHandoff(deps.groupId, result);
+      return { timedOut: true };
+    }
+    return result;
+  });
 }
 
 // Handoff (worker-only): notify the orchestrator that the worker's task is
@@ -427,6 +454,14 @@ export function handoffToOrchestrator(deps, { summary, status = 'done', nextRole
     return { error: 'bad-request', message: `status must be one of: ${statuses.join(', ')}` };
   }
   const ok = deps.groupManager.pushHandoff(deps.groupId, {
+    // #245: the delivery guarantee is at-least-once on purpose -- a handoff
+    // that arrives twice is recoverable, one that never arrives is not (see
+    // waitForHandoff's re-queue). That trade only works if the RECEIVER can
+    // tell a repeat from a second real handoff, and nothing else in the event
+    // distinguishes them: two workers can legitimately send the same summary
+    // with the same status. So every handoff carries an id, and the
+    // orchestrator's rule is simply "same id = already handled".
+    id: randomUUID(),
     fromSessionId: sessionId,
     fromRole: deps.role || null,
     summary: String(summary || '').slice(0, MAX_HANDOFF_SUMMARY_CHARS),

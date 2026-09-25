@@ -422,10 +422,32 @@ orchestrator should catch this itself.
   need of input.
 - `wait_for_handoff` returning `{timedOut:true}` is NOT an error: it
   simply means no handoff arrived within the timeout. Call it again. A
-  handoff is never lost to a timeout or a disconnect -- an event that
-  arrives while nobody is waiting stays queued, and even if your
-  connection dies mid-wait, the next `wait_for_handoff` (after the
-  reconnect) receives it.
+  handoff is essentially never lost to a timeout, a disconnect, or an
+  interrupted turn -- an event that arrives while nobody is waiting stays
+  queued (it survives a server restart too), and a wait that is cut short
+  gives its event back instead of consuming it: both a connection that dies
+  mid-wait and a request you cancel or abandon are detected, so the next
+  `wait_for_handoff` receives the event. "Essentially" is doing real work
+  there, in exactly one place: cancellation is re-checked at the moment the
+  event is handed over, but an abort landing after that -- while the SDK is
+  still writing the response -- cannot be observed from the server, so an
+  event CAN be lost in that one-macrotask window. Nothing you do while
+  waiting avoids it; closing it needs an explicit ack from the orchestrator,
+  which is a protocol change and is not implemented. What puts an event in
+  that window is the response failing to reach you AFTER the server already
+  counted it as delivered -- a cancellation landing at that instant, but
+  equally the connection dropping or the server dying at that instant.
+  Cancelling is only the one of the three you cause yourself: a disconnect is
+  re-checked while you wait and again when the event is handed over, but not
+  after that. Treat the whole thing as a rare-but-real possibility rather
+  than a reason to poll: if a worker you are sure handed off never appears,
+  re-check with a single `get_tab_status`/`read_output` rather than assuming
+  the queue is empty.
+  Two other limits are real: only the newest 100 undelivered handoffs are
+  kept, and a summary over 32KB is truncated. Delivery is
+  at-least-once: recovering a handoff from a wait you interrupted can hand
+  you the SAME one twice, so key on the event's `id` -- an id you have
+  already acted on is a repeat, not a second handoff.
 - After sending a step, default to pure waiting: re-calling
   `wait_for_handoff` after `{timedOut:true}` is normal and safe (the
   worker may simply still be working), so an isolated timeout is nothing

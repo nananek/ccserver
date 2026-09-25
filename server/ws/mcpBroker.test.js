@@ -91,11 +91,22 @@ function mcpClient(target) {
       sock.on('error', reject);
     }),
     call(method, params = {}) {
-      return new Promise((resolve, reject) => {
-        const reqId = ++id;
+      return this.callTracked(method, params).promise;
+    },
+    // Same as call(), but hands back the JSON-RPC id so a test can cancel
+    // this exact request (notifications/cancelled takes a requestId).
+    callTracked(method, params = {}) {
+      const reqId = ++id;
+      const promise = new Promise((resolve, reject) => {
         pending.set(reqId, { resolve, reject });
         sock.write(`${JSON.stringify({ jsonrpc: '2.0', id: reqId, method, params })}\n`);
       });
+      return { id: reqId, promise };
+    },
+    // A JSON-RPC notification (no id, no response) -- how a real client tells
+    // the server it has given up on an in-flight request.
+    notify(method, params = {}) {
+      sock.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`);
     },
     close() { sock.end(); },
   };
@@ -983,4 +994,56 @@ test('a handoff is not lost when the waiting connection dies mid-wait', async ()
   assert.equal(groupManager.getGroup(groupId).pendingTakes.size, 0, 'no zombie waiter remains');
   // (The dead client never receives a response -- deadWait stays pending
   // client-side by design; the server-side waiter was settled.)
+});
+
+// #245 Case B. The sibling of the test above, and the one that was actually
+// losing handoffs all day: the client CANCELS the wait instead of dropping the
+// connection. The socket stays up, so connectionIsAlive keeps answering true,
+// the zombie waiter claims the next handoff -- and the SDK then refuses to
+// send a response for a cancelled request, so the event reaches nobody and is
+// gone from the queue.
+//
+// The distinction from Case A (which already worked) is ONLY the order: if the
+// orchestrator calls wait again BEFORE the worker pushes, supersede reclaims
+// the event. This test pushes first, which is exactly the window a model's
+// interrupted turn leaves open.
+test('#245: a cancelled wait_for_handoff does not swallow the next handoff', async () => {
+  const orch = mcpClient(control);
+  await orch.connected;
+  const cancelled = orch.callTracked('tools/call', {
+    name: 'wait_for_handoff', arguments: { timeoutMs: 60000 },
+  });
+  // Never answered by design (the request is cancelled below).
+  cancelled.promise.catch(() => {});
+  // Let the server register the waiter before cancelling it.
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(groupManager.getGroup(groupId).pendingTakes.size, 1, 'the waiter is registered');
+
+  orch.notify('notifications/cancelled', { requestId: cancelled.id, reason: 'user interrupt' });
+  // The abort must retire the waiter on its own -- without this, nothing
+  // between here and the push would.
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(groupManager.getGroup(groupId).pendingTakes.size, 0,
+    'the cancelled wait must stop being a consumer, not linger for its full timeoutMs');
+
+  // Now the worker hands off, with NO new wait outstanding. This is the order
+  // Case A never exercised.
+  const worker = mcpClient(handoff);
+  await worker.connected;
+  const sent = await callTool(worker, 'handoff_to_orchestrator', {
+    summary: 'CASE-B must survive a cancelled wait',
+    status: 'done',
+  });
+  assert.deepEqual(sent, { ok: true }, 'the worker is told it was sent');
+  worker.close();
+  await new Promise((r) => setTimeout(r, 200));
+
+  // ...and {ok:true} has to mean something. The event is still there for the
+  // next wait -- on the SAME connection, which is the realistic case (the
+  // client cancelled a request, it did not reconnect).
+  const got = await callTool(orch, 'wait_for_handoff', { timeoutMs: 3000 });
+  assert.equal(got.timedOut, undefined, 'the handoff must not have been swallowed by the cancelled wait');
+  assert.equal(got.summary, 'CASE-B must survive a cancelled wait');
+  assert.equal(got.fromRole, 'workerA');
+  orch.close();
 });

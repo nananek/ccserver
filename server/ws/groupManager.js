@@ -28,7 +28,7 @@ import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker
 import { isValidApp } from './appLaunch.js';
 import { loadSandboxConfig } from './sandbox.js';
 import { resolveMemberWorktree, removeMemberWorktree, listWorktreeDirs } from './worktree.js';
-import { readJsonFileIfRegular } from './regularFile.js';
+import { readJsonFileIfRegular, readRegularFileText } from './regularFile.js';
 import { sendNotification } from './notify.js';
 import {
   getGroupFilesRoot,
@@ -517,10 +517,39 @@ function persistGroups() {
         memberPrefs: g.memberPrefs || {},
         members: Object.fromEntries([...g.members]),
         memberWorktrees: Object.fromEntries([...g.memberWorktrees]),
+        // #245: undelivered handoffs outlive the process. Both the tool
+        // description and the docs promised this already; nothing was saving
+        // it, so a restart silently emptied the queue and the orchestrator
+        // waited forever for work a worker had been told was sent.
+        handoffQueue: g.handoffQueue || [],
       });
     }
     if (arr.length > 0) {
-      writeFileSync(groupsPath(), JSON.stringify(arr));
+      // Written to a fresh temp name and renamed into place, for three
+      // reasons that all matter more now that #245 put this on the handoff
+      // hot path (every push, every delivery, every re-queue):
+      //
+      //   - writeFileSync straight onto the final path BLOCKS if that path is
+      //     a FIFO, and being synchronous it takes the event loop and the
+      //     SIGTERM handler with it (the #212 shape, on the write side). A
+      //     name we just made cannot be something that was lying in wait.
+      //   - rename(2) is atomic, so a crash mid-write can no longer leave a
+      //     half-written file. restoreGroups' parse failure is total loss of
+      //     every group AND every undelivered handoff, which is exactly what
+      //     this branch promises survives a restart.
+      //   - 0600 on creation: the queue holds summaries the agents wrote, and
+      //     under the legacy layout this file sits in the checkout, where the
+      //     default 0644 is readable by any other local user. The DB already
+      //     does this; the state files never did.
+      const finalPath = groupsPath();
+      const tmpPath = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
+      try {
+        writeFileSync(tmpPath, JSON.stringify(arr), { mode: 0o600 });
+        renameSync(tmpPath, finalPath);
+      } catch (err) {
+        try { unlinkSync(tmpPath); } catch { /* nothing to clean up */ }
+        throw err;
+      }
     } else {
       try { unlinkSync(groupsPath()); } catch { /* nothing to remove */ }
     }
@@ -539,13 +568,38 @@ function persistGroups() {
 // generateOrchestratorClaudeMdSrc) so a scheduled auto-resume or an
 // orchestrator restart can use it as cwd again.
 export function restoreGroups() {
+  // Read and parse as two steps, deliberately. readJsonFileIfRegular() would
+  // do both in one call, but it is JSON.parse(readRegularFileText(...)), so a
+  // missing file and a corrupt one arrive at the same catch and cannot be told
+  // apart -- and telling them apart is the whole point of the warning below
+  // (#245). readRegularFileText() is the same reader minus the parse, so #212's
+  // protections (O_NONBLOCK so a FIFO cannot block the event loop, O_NOFOLLOW
+  // so a symlink is refused, and the size cap) are unchanged.
+  let raw;
+  try {
+    raw = readRegularFileText(groupsPath());
+  } catch {
+    // No file (a fresh install), or something we refuse to read: a FIFO, a
+    // symlink, or a file over STATE_FILE_MAX_BYTES. Start empty either way.
+    return { restored: 0, ids: [] };
+  }
   let arr;
   try {
-    arr = readJsonFileIfRegular(groupsPath());
-  } catch {
-    return { restored: 0, ids: [] }; // no file / unreadable
+    arr = JSON.parse(raw);
+  } catch (err) {
+    // Distinguished from "no file" on purpose: a file that EXISTS but does not
+    // parse means every group and every undelivered handoff in it is gone, and
+    // index.js only logs when something was restored -- so the old silent
+    // {restored:0} made a total loss indistinguishable from a fresh install
+    // (#245 review). Say so; it is the only chance anyone has to notice.
+    console.warn(`[groupManager] ${groupsPath()} exists but does not parse (${err.message}); `
+      + 'every saved group and every undelivered handoff in it is being dropped');
+    return { restored: 0, ids: [] };
   }
-  if (!Array.isArray(arr)) return { restored: 0, ids: [] };
+  if (!Array.isArray(arr)) {
+    console.warn(`[groupManager] ${groupsPath()} is not a JSON array; ignoring it`);
+    return { restored: 0, ids: [] };
+  }
 
   const savedSessions = peekSavedSessions() || [];
   const ids = [];
@@ -572,7 +626,17 @@ export function restoreGroups() {
       files: new Map(),
       controlBroker: null,
       handoffChannels: new Map(),
-      handoffQueue: [],
+      // #245: restore what was still undelivered. Capped on the way back in
+      // as well -- a hand-edited or corrupted file must not let the queue
+      // start out over the limit it is otherwise held to.
+      // Both caps, not just the count one. The tool description and the docs
+      // promise "the newest 100" and "32KB", and a restore that enforced only
+      // the first would let a hand-edited or corrupted file reintroduce an
+      // event the normal path could never produce -- the documented limit
+      // would then be true of pushes and false of the queue (#245 review).
+      handoffQueue: Array.isArray(e.handoffQueue)
+        ? e.handoffQueue.filter((ev) => ev && typeof ev === 'object').slice(-MAX_HANDOFF_QUEUE).map(capHandoffSummary)
+        : [],
       handoffEmitter: new EventEmitter(),
       pendingTakes: new Set(),
       memberSaved: new Map(),
@@ -1068,6 +1132,18 @@ function cleanupMemberWorktree(group, role) {
   group.memberWorktrees.delete(role);
 }
 
+// The same 32KB ceiling mcpTools puts on a summary at push time, applied
+// wherever an event can enter the queue by another route. Kept here rather
+// than imported from mcpTools to avoid a cycle (mcpTools imports this module's
+// facade), and asserted equal to it in mcpTools.test.js -- a push of an
+// oversized summary must come out at exactly this length.
+export const MAX_HANDOFF_SUMMARY_CHARS = 32 * 1024;
+
+function capHandoffSummary(ev) {
+  if (!ev || typeof ev.summary !== 'string' || ev.summary.length <= MAX_HANDOFF_SUMMARY_CHARS) return ev;
+  return { ...ev, summary: ev.summary.slice(0, MAX_HANDOFF_SUMMARY_CHARS) };
+}
+
 // FIFO handoff queue + EventEmitter: workers push, orchestrator takes. The
 // queue is capped so workers pushing while the orchestrator is away (crashed,
 // not waiting) can't grow memory without bound -- oldest hands off first.
@@ -1075,7 +1151,15 @@ export function pushHandoff(groupId, event) {
   const group = groups.get(groupId);
   if (!group) return false;
   if (group.handoffQueue.length >= MAX_HANDOFF_QUEUE) {
-    group.handoffQueue.shift();
+    // #245: the sender of the dropped event was told ok:true and will never
+    // learn it went nowhere. Dropping is still the right call (an absent
+    // orchestrator must not grow memory without bound), but doing it in
+    // silence is not -- this line is the only place anyone can find out.
+    // Changing the contract so the SENDER learns is a separate decision.
+    const dropped = group.handoffQueue.shift();
+    console.warn(`[groupManager] handoff queue full for ${groupId} (${MAX_HANDOFF_QUEUE}): `
+      + `dropping the oldest undelivered handoff from ${dropped?.fromRole || 'unknown'} -- `
+      + 'the orchestrator is not consuming handoffs and that one is now lost');
   }
   group.handoffQueue.push(event);
   // A worker handed off: the turn moves to the orchestrator -- or, when the
@@ -1083,6 +1167,10 @@ export function pushHandoff(groupId, event) {
   group.currentTurn = event.nextRole || 'orchestrator';
   group.lastHandoffAt = Date.now();
   group.handoffEmitter.emit('handoff');
+  // Persist the queue itself, not just the fact that a group exists (#245):
+  // nothing else on this path rewrites the file, so without this the queue
+  // would only ever reach disk if some unrelated mutation happened to follow.
+  persistGroups();
   return true;
 }
 
@@ -1109,13 +1197,30 @@ export function pushHandoff(groupId, event) {
 // the next waiter whose connection is actually alive. The waiter itself is
 // left pending (it cannot consume anything) until superseded or timed out.
 //
+// opts.signal (an AbortSignal, optional): the MCP request's own cancellation
+// signal (#245). `isAlive` answers per CONNECTION, which is the wrong grain:
+// a client that cancels or abandons THIS request keeps the connection open,
+// so isAlive stays true, the zombie waiter happily claims the next event --
+// and the SDK then declines to send a response for a cancelled request, so
+// the event reaches no one and is gone from the queue. Aborting settles the
+// waiter immediately (reclaiming anything it had claimed), which both returns
+// the event to the queue and stops the zombie competing for the next one.
+//
 // Dequeue is not the same as delivery: the waiter claims an event, then
-// commits the delivery on the next macrotask. A supersede arriving in the
-// same turn can still reclaim the claimed event (its connection may have died
-// or its request been cancelled between the claim and the send), so the
-// event is re-queued instead of being lost with the stale waiter. The same
-// reclaim runs when the orchestrator exits (onOrchestratorExit) or a timeout
-// fires while an event is claimed.
+// commits the delivery on the next macrotask. Deliverability is re-checked at
+// BOTH points -- claim and commit -- because a connection can die, or a
+// request be cancelled, in between. A supersede arriving in the same turn can
+// likewise reclaim the claimed event, so the event is re-queued instead of
+// being lost with the stale waiter. The same reclaim runs when the
+// orchestrator exits (onOrchestratorExit) or a timeout fires while an event
+// is claimed.
+//
+// What this does NOT close: the slice between the commit-time check and the
+// SDK actually writing the response. mcpTools.waitForHandoff re-checks the
+// signal once more after this resolves and re-queues if it lost the race, but
+// an abort landing inside the SDK's own serialize-and-write is not observable
+// from here. Closing that needs an explicit ack from the orchestrator (a
+// protocol change, see #245).
 export function takeHandoff(groupId, timeoutMs, opts = {}) {
   const group = groups.get(groupId);
   if (!group) return Promise.resolve({ error: 'group-not-found' });
@@ -1126,10 +1231,23 @@ export function takeHandoff(groupId, timeoutMs, opts = {}) {
   return new Promise((resolve) => {
     const waiter = { consumed: null, finish: null, onHandoff: null };
     let settled = false;
+    // Can this waiter be expected to actually deliver right now? Both halves
+    // must hold, and both are re-read on every check: the connection is up,
+    // and this particular request has not been cancelled.
+    const deliverable = () => (!opts.isAlive || opts.isAlive())
+      && !(opts.signal && opts.signal.aborted);
+    const onAbort = () => {
+      // The client gave up on THIS request. Anything claimed goes back to the
+      // queue, and the waiter stops listening so it cannot eat the next event
+      // and strand it in a response the SDK will refuse to send.
+      reclaimConsumed(group, waiter);
+      finish({ timedOut: true });
+    };
     const finish = (val) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
       group.pendingTakes.delete(waiter);
       group.handoffEmitter.off('handoff', waiter.onHandoff);
       resolve(val);
@@ -1137,13 +1255,25 @@ export function takeHandoff(groupId, timeoutMs, opts = {}) {
     waiter.finish = finish;
     waiter.onHandoff = () => {
       if (group.handoffQueue.length === 0 || waiter.consumed) return;
-      if (opts.isAlive && !opts.isAlive()) return;
+      if (!deliverable()) return;
       waiter.consumed = group.handoffQueue.shift();
       // Commit the delivery on the next macrotask, not inline: a supersede
       // (a newer takeHandoff in the same turn) must be able to reclaim the
       // event from this waiter, so it is never delivered to a connection
       // whose request may already be gone.
-      setTimeout(() => finish(waiter.consumed), 0);
+      setTimeout(() => {
+        // Re-check: the connection may have died, or the request been
+        // cancelled, since the claim. Either way this waiter can no longer
+        // deliver, so the event goes back rather than out with it.
+        if (!deliverable()) {
+          reclaimConsumed(group, waiter);
+          finish({ timedOut: true });
+          return;
+        }
+        finish(waiter.consumed);
+        // Delivered: it must not come back after a restart (#245).
+        persistGroups();
+      }, 0);
     };
     const timer = timeoutMs > 0
       ? setTimeout(() => {
@@ -1153,8 +1283,32 @@ export function takeHandoff(groupId, timeoutMs, opts = {}) {
       : null;
     group.pendingTakes.add(waiter);
     group.handoffEmitter.on('handoff', waiter.onHandoff);
+    if (opts.signal) {
+      if (opts.signal.aborted) { finish({ timedOut: true }); return; }
+      opts.signal.addEventListener('abort', onAbort, { once: true });
+    }
     waiter.onHandoff();
   });
+}
+
+// Put an event back at the FRONT of the queue. Used by mcpTools.waitForHandoff
+// when it finds the request was cancelled after takeHandoff already handed the
+// event over -- the last point at which we can still tell (#245).
+export function requeueHandoff(groupId, event) {
+  const group = groups.get(groupId);
+  if (!group || !event) return false;
+  if (!group.handoffQueue.includes(event)) {
+    // Put it back at the FRONT, then honour the cap from the BACK: the
+    // recovered event is the oldest undelivered one, so it is the next thing
+    // owed to the orchestrator, and dropping the newest to make room would
+    // undo the recovery. Without this the queue sits at 101 and the documented
+    // "newest 100" is false by one (#245 review).
+    group.handoffQueue.unshift(event);
+    while (group.handoffQueue.length > MAX_HANDOFF_QUEUE) group.handoffQueue.pop();
+  }
+  group.handoffEmitter.emit('handoff');
+  persistGroups();
+  return true;
 }
 
 // Give back an event a (still-pending) waiter claimed but has not committed:
@@ -1841,6 +1995,9 @@ const groupManagerApi = {
   setCurrentTurn,
   pushHandoff,
   takeHandoff,
+  // waitForHandoff's last-chance re-queue when it finds the request was
+  // cancelled after takeHandoff already handed the event over (#245).
+  requeueHandoff,
   addMember,
   removeMember,
   getOrchestratorSandboxOpts,

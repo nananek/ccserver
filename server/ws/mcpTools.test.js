@@ -237,6 +237,31 @@ test('handoff: identity fields in the arguments are ignored (closure wins)', asy
   assert.equal(ev.groupId, undefined);
 });
 
+// groupManager.MAX_HANDOFF_SUMMARY_CHARS carries a comment saying it is
+// "asserted equal" to the cap mcpTools applies at push time. The two are
+// separate literals on purpose (importing across would be a cycle) -- and
+// until this test existed, nothing held them together: changing mcpTools'
+// 32*1024 to 64*1024 left every suite green while the 32KB the tool
+// description and the docs promise quietly became true of restores only
+// (#245 gate, L1).
+test('#245: the push-time summary cap is the SAME value restores are capped to', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const cap = groupManager.MAX_HANDOFF_SUMMARY_CHARS;
+
+  const res = tools.handoffToOrchestrator(handoffDeps(g, 'workerA', 'sess-a1'), {
+    summary: 'x'.repeat(cap + 5000),
+    status: 'done',
+  });
+  assert.equal(res.ok, true);
+
+  const ev = await tools.waitForHandoff(controlDeps(g), { timeoutMs: 500 });
+  assert.equal(ev.summary.length, cap,
+    'mcpTools must truncate to exactly the constant groupManager re-applies on restore');
+  assert.equal(cap, 32 * 1024,
+    'and that constant must stay the 32KB the tool description and the docs promise');
+});
+
 // Every control tool must be callable without any identity input -- the
 // schemas forbid it at the wire layer (mcpBroker.test.js walks the schemas);
 // this is the implementation half: no tool may even READ a wire-supplied
@@ -482,6 +507,59 @@ test('listGroupSessions: autoYes reflects each live session state', async () => 
     assert.equal(byRole.workerB.autoYes, false);
   } finally {
     groupManager.setSessionApiForTests(null);
+  }
+});
+
+// #245, the last slice takeHandoff cannot see: the request is aborted AFTER
+// takeHandoff has already handed the event over, before waitForHandoff
+// returns. Nothing downstream will deliver it, so it has to go back.
+// Stubbed rather than driven through the broker on purpose -- this is exactly
+// the window that cannot be hit reliably from the wire.
+test('#245: an abort landing after takeHandoff resolves re-queues the event', async () => {
+  const ac = new AbortController();
+  const event = { fromRole: 'workerA', summary: 'must not vanish in the last slice' };
+  const requeued = [];
+  const deps = {
+    groupId: 'g-last-slice',
+    groupManager: {
+      // Resolves with the event, but the client gives up in the same turn.
+      takeHandoff: async () => { ac.abort(); return event; },
+      requeueHandoff: (groupId, ev) => { requeued.push({ groupId, ev }); return true; },
+    },
+  };
+
+  const res = await tools.waitForHandoff(deps, { timeoutMs: 500 }, { signal: ac.signal });
+  assert.deepEqual(res, { timedOut: true }, 'the caller is told nothing arrived, not handed a doomed event');
+  assert.deepEqual(requeued, [{ groupId: 'g-last-slice', ev: event }],
+    'and the event is back in the queue for the next wait');
+});
+
+// The same guard must not fire when the request is healthy, or every handoff
+// would be delivered twice.
+test('#245: a live (unaborted) wait is not re-queued', async () => {
+  const ac = new AbortController();
+  const event = { fromRole: 'workerA', summary: 'ordinary delivery' };
+  const requeued = [];
+  const deps = {
+    groupId: 'g-ok',
+    groupManager: {
+      takeHandoff: async () => event,
+      requeueHandoff: (groupId, ev) => { requeued.push({ groupId, ev }); return true; },
+    },
+  };
+
+  assert.deepEqual(await tools.waitForHandoff(deps, { timeoutMs: 500 }, { signal: ac.signal }), event);
+  assert.deepEqual(requeued, [], 'nothing is re-queued on a normal delivery');
+});
+
+// The stubs above prove the LOGIC; this proves the wiring. mcpTools only ever
+// sees groupManager through the narrow facade, so a method it calls that the
+// facade does not re-export is a TypeError in production that no stubbed test
+// can see -- which is exactly how requeueHandoff shipped missing (#245).
+test('#245: the groupManager facade exposes every method mcpTools calls on it', () => {
+  const api = groupManager.getGroupManagerApi();
+  for (const name of ['pushHandoff', 'takeHandoff', 'requeueHandoff']) {
+    assert.equal(typeof api[name], 'function', `groupManagerApi.${name} must exist for mcpTools`);
   }
 });
 

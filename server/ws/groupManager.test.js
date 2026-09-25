@@ -20,9 +20,9 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, cpSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { classifyActivity } from './activity.js';
 
@@ -257,6 +257,205 @@ test('a dead (isAlive:false) waiter never consumes; the next live waiter receive
   const [resDead, resLive] = await Promise.all([deadWait, liveWait]);
   assert.deepEqual(resDead, { timedOut: true });
   assert.deepEqual(resLive, { type: 'done', from: 'workerA', summary: 'survives death' });
+});
+
+// #245: liveness is re-read at COMMIT, not only at claim. A waiter claims the
+// event, then commits one macrotask later; a connection that dies inside that
+// gap would otherwise carry the event out with it into a socket nobody reads.
+// The issue lists this as the sibling of the cancellation path and never
+// reproduced it at the wire; here it is, deterministically.
+test('#245: a connection that dies between claim and commit gives the event back', async () => {
+  const gid = await makeGroup();
+
+  let alive = true;
+  const dying = groupManager.takeHandoff(gid, 0, { isAlive: () => alive });
+  // The claim happens synchronously inside pushHandoff's emit...
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'claimed then orphaned' });
+  // ...and the commit is a macrotask later. Kill the connection in between.
+  alive = false;
+
+  // Settle the dying waiter on its OWN before taking the next one: a second
+  // takeHandoff here would supersede it and reclaim the event that way, which
+  // would pass whether or not the commit re-check exists.
+  assert.deepEqual(await dying, { timedOut: true }, 'the dying waiter delivers nothing');
+  assert.deepEqual(await groupManager.takeHandoff(gid, 200),
+    { type: 'done', from: 'workerA', summary: 'claimed then orphaned' },
+    'and the event it had already claimed is back for the next waiter');
+});
+
+// #245: the same guarantee for a cancelled REQUEST rather than a dead
+// connection. takeHandoff takes the request's AbortSignal, so an abort both
+// returns anything claimed and retires the waiter -- otherwise it lingers for
+// the full timeoutMs as the group's sole consumer.
+test('#245: aborting a wait returns its claimed event and retires the waiter', async () => {
+  const gid = await makeGroup();
+
+  const ac = new AbortController();
+  const aborted = groupManager.takeHandoff(gid, 60000, { signal: ac.signal });
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'reclaimed on abort' });
+  ac.abort();
+
+  assert.deepEqual(await aborted, { timedOut: true });
+  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 0,
+    'an aborted waiter must not linger as a consumer');
+  const next = await groupManager.takeHandoff(gid, 200);
+  assert.deepEqual(next, { type: 'done', from: 'workerA', summary: 'reclaimed on abort' });
+});
+
+// An already-aborted signal must never register a consumer at all. Note the
+// timeoutMs of 0 (= never times out on its own): it has to be the aborted
+// check that settles this, not a timer. Adding an 'abort' listener to a signal
+// that has ALREADY fired does nothing (the event is long gone), so without the
+// up-front check this waiter would hang forever as the group's sole consumer.
+test('#245: a wait whose signal is already aborted consumes nothing', async () => {
+  const gid = await makeGroup();
+
+  const ac = new AbortController();
+  ac.abort();
+  assert.deepEqual(await groupManager.takeHandoff(gid, 0, { signal: ac.signal }), { timedOut: true });
+  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 0);
+
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'still here' });
+  assert.deepEqual(await groupManager.takeHandoff(gid, 200), { type: 'done', from: 'workerA', summary: 'still here' });
+});
+
+// #245: the tool description and the docs both promised undelivered handoffs
+// survive a restart. Nothing was saving them: persistGroups() left the queue
+// out entirely and restoreGroups() rebuilt it empty, so a restart threw away
+// work every sender had been told {ok:true} for.
+test('#245: an undelivered handoff survives a restart', async () => {
+  const gid = await makeGroup();
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'must outlive the process' });
+
+  // Simulate the restart the way restoreGroups() actually sees it: the file on
+  // disk is the only thing that crosses the process boundary.
+  const onDisk = JSON.parse(readFileSync(process.env.CCSERVER_GROUPS_PATH, 'utf-8'));
+  const saved = onDisk.find((g) => g.id === gid);
+  assert.ok(saved, 'the group reached disk');
+  assert.deepEqual(saved.handoffQueue, [{ type: 'done', from: 'workerA', summary: 'must outlive the process' }],
+    'the queue is part of what is persisted');
+
+  // Restart simulation. Two things matter: destroyGroup also rewrites the
+  // file, so the on-disk state has to be put back; and the file accumulates
+  // every group this suite made, so restoreGroups() is pointed at THIS group
+  // alone -- resurrecting the rest would leave their brokers and timers behind
+  // and the test process would never exit.
+  groupManager.destroyGroup(gid);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([saved]));
+  groupManager.restoreGroups();
+  assert.deepEqual(await groupManager.takeHandoff(gid, 200),
+    { type: 'done', from: 'workerA', summary: 'must outlive the process' },
+    'and the restored group still has it to hand out');
+  groupManager.destroyGroup(gid);
+});
+
+// The other half: a handoff that WAS delivered must not come back.
+test('#245: a delivered handoff does not reappear after a restart', async () => {
+  const gid = await makeGroup();
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'delivered once' });
+  assert.equal((await groupManager.takeHandoff(gid, 200)).summary, 'delivered once');
+
+  const saved = JSON.parse(readFileSync(process.env.CCSERVER_GROUPS_PATH, 'utf-8')).find((g) => g.id === gid);
+  assert.deepEqual(saved.handoffQueue, [], 'the delivery was written through');
+  groupManager.destroyGroup(gid);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([saved]));
+  groupManager.restoreGroups();
+  assert.deepEqual(await groupManager.takeHandoff(gid, 200), { timedOut: true },
+    'a restart must not resurrect an already-delivered handoff');
+  groupManager.destroyGroup(gid);
+});
+
+// --- #245 review findings ----------------------------------------------------
+
+// Delivery is at-least-once by design, so the receiver needs a way to tell a
+// repeat from a second real handoff. Nothing else in the event does it: two
+// workers can legitimately send the same summary with the same status.
+test('#245: every handoff carries a unique id', async () => {
+  const gid = await makeGroup();
+  const api = groupManager.getGroupManagerApi();
+  const tools = await import('./mcpTools.js');
+  const deps = { groupId: gid, role: 'workerA', sessionId: 's1', groupManager: api };
+
+  tools.handoffToOrchestrator(deps, { summary: 'same text', status: 'done' });
+  tools.handoffToOrchestrator(deps, { summary: 'same text', status: 'done' });
+  const a = await groupManager.takeHandoff(gid, 200);
+  const b = await groupManager.takeHandoff(gid, 200);
+
+  assert.equal(typeof a.id, 'string');
+  assert.notEqual(a.id, b.id, 'two identical-looking handoffs are still distinguishable');
+
+  // ...and a re-queue hands back the SAME id, which is what makes "same id =
+  // already handled" work for the duplicate this branch deliberately allows.
+  api.requeueHandoff(gid, a);
+  assert.equal((await groupManager.takeHandoff(gid, 200)).id, a.id);
+  groupManager.destroyGroup(gid);
+});
+
+// The documented ceiling is "the newest 100 and 32KB". restoreGroups enforced
+// only the count, so a hand-edited or corrupted file could reintroduce an
+// event the normal path could never produce.
+test('#245: restore applies the 32KB summary cap, not just the count cap', async () => {
+  const gid = await makeGroup();
+  groupManager.pushHandoff(gid, { fromRole: 'workerA', summary: 'x', status: 'done' });
+  const saved = JSON.parse(readFileSync(process.env.CCSERVER_GROUPS_PATH, 'utf-8')).find((g) => g.id === gid);
+  saved.handoffQueue = [{ fromRole: 'workerA', summary: 'y'.repeat(200000), status: 'done' }];
+
+  groupManager.destroyGroup(gid);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([saved]));
+  groupManager.restoreGroups();
+
+  const ev = await groupManager.takeHandoff(gid, 200);
+  assert.equal(ev.summary.length, 32 * 1024, 'an oversized summary in the file is cut to the documented cap');
+  groupManager.destroyGroup(gid);
+});
+
+// A re-queue put the queue at 101 and left it there.
+test('#245: re-queueing a recovered event still honours the 100 cap', async () => {
+  const gid = await makeGroup();
+  const api = groupManager.getGroupManagerApi();
+  for (let i = 0; i < 100; i += 1) groupManager.pushHandoff(gid, { fromRole: 'workerA', summary: `e${i}` });
+  assert.equal(groupManager.getGroup(gid).handoffQueue.length, 100);
+
+  api.requeueHandoff(gid, { fromRole: 'workerA', summary: 'recovered' });
+  assert.equal(groupManager.getGroup(gid).handoffQueue.length, 100, 'the cap holds');
+  assert.equal(groupManager.getGroup(gid).handoffQueue[0].summary, 'recovered',
+    'and the recovered event is the next one out, not the one dropped');
+  groupManager.destroyGroup(gid);
+});
+
+// #245 put persistGroups on the handoff hot path, so its write has to be safe
+// to run there: not blockable, atomic, and not world-readable.
+test('#245: the state file is written atomically, 0600, and never onto a planted path', async () => {
+  const gid = await makeGroup();
+  groupManager.pushHandoff(gid, { fromRole: 'workerA', summary: 'persisted' });
+
+  const mode = statSync(process.env.CCSERVER_GROUPS_PATH).mode & 0o777;
+  assert.equal(mode, 0o600, `the queue holds agent-written summaries; got ${mode.toString(8)}`);
+
+  // No temp file is left behind on the happy path.
+  const dir = dirname(process.env.CCSERVER_GROUPS_PATH);
+  assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith('.tmp')), [],
+    'the temp file is renamed into place, not left lying around');
+  groupManager.destroyGroup(gid);
+});
+
+// A file that exists but does not parse is total loss of every group AND every
+// undelivered handoff -- the thing this branch promises survives a restart.
+// index.js only logs when something WAS restored, so silence here made a total
+// loss look exactly like a fresh install.
+test('#245: an unparseable state file is reported, not silently dropped', () => {
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, '{ this is not json');
+  const realWarn = console.warn;
+  const warnings = [];
+  console.warn = (...a) => { warnings.push(a.join(' ')); };
+  try {
+    assert.deepEqual(groupManager.restoreGroups(), { restored: 0, ids: [] });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(warnings.length, 1, 'losing every group must not be silent');
+  assert.match(warnings[0], /does not parse/);
+  assert.match(warnings[0], /undelivered handoff/, 'and it must say what was lost');
 });
 
 test('onOrchestratorExit settles pending waiters as timedOut (no 15-min zombie)', async () => {
