@@ -365,7 +365,11 @@ test('restoreGroups keeps allowedCwds and memberWorktrees to what creation can p
   assert.deepEqual(control.warnings, []);
 
   const { info, warnings } = restoreFrom([savedEntry(cwd, {
-    allowedCwds: [cwd, good, '/etc', '/', worktreePathForTest(`${cwd}-other`, 'workerA'), `${good}/../../elsewhere`, 7, null],
+    // '..' and a trailing '/..' matter for more than being wrong: their basename
+    // is '..', which worktreePathFor refuses by THROWING, so an entry like that
+    // must be turned away by the role check before it ever gets there -- or one
+    // saved group would abort the whole restore, and with it every group after it.
+    allowedCwds: [cwd, good, '/etc', '/', worktreePathForTest(`${cwd}-other`, 'workerA'), `${good}/../../elsewhere`, '..', `${cwd}/..`, `${good}/..`, 7, null],
     memberWorktrees: {
       workerA: { path: good, gitCommonDir: null, branch: null },
       workerB: { path: '/etc', gitCommonDir: null, branch: null },
