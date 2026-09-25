@@ -313,7 +313,7 @@ test('an existing EMPTY directory is replaced by the finished clone', async () =
 test('the final name filling up while gh runs is a conflict and the staging directory is removed', async () => {
   const a = arena();
   const go = join(a.rec, 'go');
-  const ghBin = fakeGh(a.rec, ghBody(a.rec, { middle: `touch '${a.rec}/started'\nwhile [ ! -f '${go}' ]; do sleep 0.05; done` }));
+  const ghBin = fakeGh(a.rec, ghBody(a.rec, { middle: `touch '${a.rec}/started'\nn=0; while [ ! -f '${go}' ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done` }));
   mkdirSync(join(a.parent, 'r'));
   const pending = clone(a, { parent: a.parent, url: 'o/r' }, { ghBin });
   await waitFor(() => existsSync(join(a.rec, 'started')));
@@ -333,7 +333,7 @@ test('swapping the parent path for a symlink while gh runs does not redirect the
   mkdirSync(outsideRoots);
   const go = join(a.rec, 'go');
   const ghBin = fakeGh(a.rec, ghBody(a.rec, {
-    middle: `touch '${a.rec}/started'\nwhile [ ! -f '${go}' ]; do sleep 0.05; done\npwd -P > '${a.rec}/cwd-after'`,
+    middle: `touch '${a.rec}/started'\nn=0; while [ ! -f '${go}' ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done\npwd -P > '${a.rec}/cwd-after'`,
   }));
   const pending = clone(a, { parent: a.parent, url: 'o/r' }, { ghBin });
   await waitFor(() => existsSync(join(a.rec, 'started')));
@@ -451,7 +451,7 @@ test('the concurrency cap answers busy and frees the slot afterwards', async () 
   const a = arena();
   const go = join(a.rec, 'go');
   const slots = fastSlots();
-  const slow = fakeGh(a.rec, ghBody(a.rec, { middle: `touch '${a.rec}/started'\nwhile [ ! -f '${go}' ]; do sleep 0.05; done` }));
+  const slow = fakeGh(a.rec, ghBody(a.rec, { middle: `touch '${a.rec}/started'\nn=0; while [ ! -f '${go}' ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done` }));
   const quick = fakeGh(a.rec, ghBody(a.rec));
   const first = clone(a, { parent: a.parent, url: 'o/one' }, { ghBin: slow, slots, maxConcurrent: 1 });
   await waitFor(() => existsSync(join(a.rec, 'started')));
