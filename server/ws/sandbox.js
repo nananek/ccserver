@@ -1912,7 +1912,18 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     // uid is 0, /run/user/0 does not exist, and the GNUPGHOME bind is the one
     // GnuPG uses -- left exactly as it was.
     if (!usesRootlesskit) {
-      args.push('--bind-try', relaySockets.agent, gpgVaultRelay.gnupgRunUserAgentSocket(targetDir, process.getuid()));
+      const runUserAlias = gpgVaultRelay.gnupgRunUserAgentSocket(targetDir, process.getuid());
+      if (runUserAlias) {
+        args.push('--bind-try', relaySockets.agent, runUserAlias);
+      } else {
+        // Only a relative XDG_RUNTIME_DIR gets here (hostRuntimeDir() returns it
+        // unvalidated): gnupg would hash the path against ITS working directory,
+        // which this side cannot know. Without the alias gpg in the sandbox
+        // starts an agent of its own and signing fails -- no secret key is
+        // exposed by that -- so say why instead of leaving it a mystery.
+        console.warn(`[sandbox] gpgVault: GNUPGHOME ${JSON.stringify(targetDir)} is not an absolute path (XDG_RUNTIME_DIR must be absolute), `
+          + 'so the relay socket is not bound where gnupg looks under /run/user/<uid>; gpg inside this sandbox will not reach the relay');
+      }
     }
     args.push('--setenv', 'GNUPGHOME', targetDir);
     // Unlike authSock above (bind source==dest, a live host path), the

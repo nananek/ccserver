@@ -207,6 +207,16 @@ test('gnupgRunUserAgentSocket: reproduces the socket path GnuPG picks for a non-
   assert.equal(gnupgRunUserAgentSocket('/home/u/.gnupg-vault', 0), '/run/user/0/gnupg/d.yeh1bu1d5hu38tts5g44fur1/S.gpg-agent');
 });
 
+// A relative homedir has no answer here: gnupg would hash it against its own
+// working directory (measured: "y" hashes like "<cwd>/y"). null, so that a caller
+// binds nothing rather than an alias gpg never looks at.
+test('gnupgRunUserAgentSocket: a relative (or non-string) homedir has no answer', () => {
+  for (const home of ['gnupg-vault', './gnupg-vault', 'rel/run/gnupg-vault', '', undefined, null, 42]) {
+    assert.equal(gnupgRunUserAgentSocket(home, 1001), null, JSON.stringify(home));
+  }
+  assert.notEqual(gnupgRunUserAgentSocket('/abs/gnupg-vault', 1001), null, 'control: an absolute one still gets its path');
+});
+
 // The vectors above pin two GnuPG versions; this one follows whatever GnuPG the
 // host actually has, so a change in its hashing turns this red instead of
 // silently sending gpg back to an empty agent of its own.
@@ -255,6 +265,43 @@ test('gpgVault under rootlesskit (uid 0): the relay socket stays bound at GNUPGH
     assert.ok(!spawn.args.some((a) => typeof a === 'string' && a.includes('/gnupg/d.')), 'no /run/user/<uid>/gnupg/d.<hash> alias');
   } finally {
     cleanupSpawn(spawn);
+  }
+});
+
+// hostRuntimeDir() hands XDG_RUNTIME_DIR back as it is, so a relative one makes
+// the sandbox's GNUPGHOME relative, and gnupg would hash that against ITS working
+// directory. sandbox.js used to bind an alias at the hash of the relative string
+// (a path gpg never looks at) without a word; now it binds none and says why.
+// sandbox.js reads XDG_RUNTIME_DIR when the module is evaluated, so a second
+// instance of it is imported under the relative value (the query string makes it
+// a separate module); the process moves into a scratch directory for the
+// duration so nothing the relative path creates lands in the checkout.
+test('gpgVault without rootlesskit and a relative XDG_RUNTIME_DIR: no /run/user alias is bound, and a warning says why', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
+  setUpUnlockedVault();
+  const scratch = mkdtempSync(join(tmpdir(), 'cgvrel-'));
+  const cwd0 = process.cwd();
+  const prevXdg = process.env.XDG_RUNTIME_DIR;
+  const warnings = [];
+  const realWarn = console.warn;
+  let spawn;
+  try {
+    process.chdir(scratch);
+    process.env.XDG_RUNTIME_DIR = 'rel-run';
+    console.warn = (...a) => warnings.push(a.join(' '));
+    const { buildSandboxSpawn: buildRelative } = await import('./sandbox.js?relative-xdg-runtime-dir');
+    writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+    spawn = await buildRelative({ cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: { gpgVault: true } });
+    const gnupgHome = findSetenv(spawn.args, 'GNUPGHOME');
+    assert.equal(gnupgHome, join('rel-run', 'gnupg-vault'), 'control: GNUPGHOME really is the relative path');
+    assert.ok(hasBindTry(spawn.args, getRelaySocketPaths().agent, join(gnupgHome, 'S.gpg-agent')), 'control: the GNUPGHOME bind is still there');
+    assert.ok(!spawn.args.some((a) => typeof a === 'string' && a.includes('/gnupg/d.')), 'no alias under /run/user/<uid>/gnupg/d.<hash>');
+    assert.match(warnings.join('\n'), /GNUPGHOME "rel-run\/gnupg-vault" is not an absolute path/);
+  } finally {
+    console.warn = realWarn;
+    process.chdir(cwd0);
+    if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = prevXdg;
+    cleanupSpawn(spawn);
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
 

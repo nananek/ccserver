@@ -48,7 +48,7 @@
 import { createServer, createConnection } from 'node:net';
 import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 import * as gpgVaultAgent from './gpgVaultAgent.js';
 import { createAssuanFilter, createSshAgentFilter } from './gpgVaultRelayFilter.js';
@@ -123,9 +123,16 @@ export function getRelaySocketPaths() {
 // those two spellings the hashes differ (measured, GnuPG 2.4.9: "/x/y/" and
 // "y" hash like "/x/y" in gpgconf, not here). "//", "./" and ".." are hashed as
 // written by both, so they agree.
+//
+// A relative homedir cannot be answered at all: gnupg absolutizes it against ITS
+// working directory, which is not known here. Returns null for it (and for a
+// non-string), so a caller binds nothing instead of binding an alias at a
+// hash gpg will never look at; sandbox.js warns. That is what a relative
+// XDG_RUNTIME_DIR would produce (hostRuntimeDir() returns it as it is).
 const ZBASE32 = 'ybndrfg8ejkmcpqxot1uwisza345h769';
 
 export function gnupgRunUserAgentSocket(homedir, uid) {
+  if (typeof homedir !== 'string' || !isAbsolute(homedir)) return null;
   let bits = 0;
   let acc = 0;
   let hash = '';
