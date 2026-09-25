@@ -145,10 +145,11 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // git init opt-in for folder creation (off by default, like the other
   // launch flags): avoids surprising nested repositories under existing ones.
   const [initGit, setInitGit] = useState(false);
-  // Clone (#278): an inline bar next to the New Folder one. The server runs
-  // `gh repo clone --no-upstream` into a NEW folder directly under
-  // currentPath. Which URLs / names it accepts is provisional and enforced
-  // server-side (server/ghClone.js); this only shows what it says.
+  // Clone (#278): an inline bar next to the New Folder one. The server clones
+  // (gh or git, per the host) into a NEW folder directly under currentPath.
+  // Which hosts, URLs and names it accepts is the server config's and
+  // provisional, and enforced server-side (server/ghClone.js); this only shows
+  // what it says.
   const [cloneOpen, setCloneOpen] = useState(false);
   const [cloneUrl, setCloneUrl] = useState('');
   const [cloneName, setCloneName] = useState('');
@@ -994,7 +995,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
               setCloneOpen(true);
               setCloneError(null);
             }}
-            title="Clone a GitHub repository into a new folder here (gh repo clone --no-upstream)"
+            title="Clone a repository into a new folder here (hosts allowed by the server config; github.com by default)"
           >
             Clone
           </button>
@@ -1718,7 +1719,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
             type="text"
             className="new-folder-input clone-url-input"
             data-testid="clone-url"
-            placeholder="OWNER/REPO or https://github.com/OWNER/REPO"
+            placeholder="OWNER/REPO (github.com) or https://HOST/OWNER/REPO"
             aria-label="Repository to clone"
             value={cloneUrl}
             onChange={(e) => setCloneUrl(e.target.value)}
@@ -1761,7 +1762,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
             Cancel
           </button>
           <div className="clone-hint">
-            github.com のリポジトリを、この場所の直下に新しいフォルダとして clone します (gh repo clone --no-upstream)。
+            サーバーの設定で許可されたホスト (既定は github.com) のリポジトリを、この場所の直下に新しいフォルダとして clone します。稼働中のセッションの作業ディレクトリの中には clone できません。
           </div>
           {cloneError && (
             <div className="clone-error" role="alert" data-testid="clone-error">{cloneError}</div>

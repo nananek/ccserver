@@ -21,7 +21,7 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | GET | `/api/dirs/home` | `{ home, browseRoots, initialBrowsePath, defaultApp, availableApps }` — サーバーのホームディレクトリ、許可ルート一覧 ([browseRoots](/ccserver/sandbox/configuration/) 参照、`[]` は無制限)、ブラウジング開始パス、既定起動アプリ、検出済みCLI (`claude`/`opencode`/`copilot`/`codex`) |
 | POST | `/api/dirs` | `{ parent, name }` でフォルダ作成 |
 | GET | `/api/git/info?path=<path>` | 指定ディレクトリの git リポジトリの読み取り専用の情報 (`isRepo`、`root`、`worktree`、`head` (`branch` / `detached`)、`remotes[{ name, url, pushUrl, isDefault }]`、`defaultRemote`)。URL の userinfo は落として返す。[browseRoots](/ccserver/sandbox/configuration/) の外は 403。詳細は [Files 画面の git 連携](/ccserver/guides/launching/#files-画面の-git-連携-clone-とリポジトリ表示) |
-| POST | `/api/git/clone` | `{ parent, url, name? }`。サーバー (ホスト) で `gh repo clone <URL> <dir> --no-upstream` を実行し、`parent` の直下に新しいディレクトリを作る。`{ path, name, url, warnings }` を返す。受け付ける URL・保存先は**暫定** (同上のガイド参照) |
+| POST | `/api/git/clone` | `{ parent, url, name? }`。サーバー (ホスト) で、ホストごとの道具 (`gh repo clone <URL> <dir> --no-upstream` か `git clone -- <URL> <dir>`) を実行し、`parent` の直下に新しいディレクトリを作る。許可ホストは [`clone` 設定](/ccserver/sandbox/configuration/#clone-の許可ホスト) (既定は github.com のみ、不正な設定だと 503)。`parent` が稼働中のセッションの作業ディレクトリ (またはその配下) なら 409。`{ path, name, url, warnings }` を返す。受け付ける URL・保存先は**暫定** (同上のガイド参照) |
 | GET | `/api/sessions` | 実行中セッションの一覧 |
 | DELETE | `/api/sessions/:id` | セッションを終了する (予約プロンプトも解除) |
 | GET | `/api/files?path=<path>` | ファイルをダウンロード |

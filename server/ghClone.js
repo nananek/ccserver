@@ -1,8 +1,18 @@
-// POST /api/git/clone (routes/git.js): clone a GitHub repository into a new
-// directory under the directory the Files screen is showing, by running
-// `gh repo clone <url> <dir> --no-upstream` ON THE HOST as the user ccserver
-// runs as (#278, owner decision (b)). The credentials are that user's gh /
-// git setup; nothing here reads or forwards a token.
+// POST /api/git/clone (routes/git.js): clone a repository into a new
+// directory under the directory the Files screen is showing, ON THE HOST as the
+// user ccserver runs as (#278, owner decision (b)). The credentials are that
+// user's gh / git setup; nothing here reads or forwards a token.
+//
+//   tool "gh"   `gh repo clone <url> <dir> --no-upstream`. GitHub / GHES only:
+//               gh cannot talk to anything else. --no-upstream is what keeps a
+//               fork's origin the default (gh would otherwise add `upstream`).
+//   tool "git"  `git clone -- <url> <dir>`, for Gitea and any other host. A
+//               plain clone creates neither `upstream` nor gh's `gh-resolved`,
+//               so origin is the default without any extra flag.
+//
+// Which hosts, and which tool for each, comes from sandbox.config.json's
+// "clone" block (cloneConfig.js; default: github.com with gh). The URL you
+// give is only ever matched against that list, exactly.
 //
 // PROVISIONAL DEFAULTS -- pending owner confirmation (Q2 / Q3). They are
 // deliberately conservative and are not a decision:
@@ -10,16 +20,22 @@
 //      inside browseRoots; the name comes from the URL's last element or an
 //      explicit override (one path element; no `/` `\` `.` `..`, control
 //      characters, or leading `-`); anything already at that name is refused.
-//   Q3 URL: `OWNER/REPO` or `https://github.com/OWNER/REPO[.git]` only, host
-//      github.com only; userinfo, a leading `-`, other schemes, local paths and
-//      ssh are refused. The server normalizes the URL and hands gh THAT https
-//      URL, so gh's git_protocol setting cannot turn it into an ssh clone.
+//      (Owner decision: also refused when a running session's working
+//      directory is the shown directory or one of its parents.)
+//   Q3 URL: `OWNER/REPO` (always github.com) or `https://HOST/OWNER/REPO[.git]`
+//      with HOST a configured host, exactly (case-folded; no port, no trailing
+//      dot, no Unicode); userinfo, a leading `-`, other schemes, local paths
+//      and ssh are refused. The server normalizes the URL and hands the tool
+//      THAT https URL, so a git_protocol setting cannot turn it into ssh.
 //
 // Why each piece is the way it is:
 //
-//   - argv is fixed: ['repo', 'clone', <normalized url>, <staging dir>,
-//     '--no-upstream']. No user text becomes a gh or git flag, and nothing is
-//     passed after `--` to git.
+//   - argv is fixed per tool: gh ['repo', 'clone', <normalized url>, <staging
+//     dir>, '--no-upstream'], git ['clone', '--', <normalized url>, <staging
+//     dir>]. No user text becomes a gh or git flag: the URL is rebuilt from a
+//     matched host and two validated path elements, the directory is our own
+//     random name. Both tools get the same environment, pins, pinned parent,
+//     staging directory, limits and cleanup.
 //   - The child's environment is an allowlist (hostGit.js), plus prompt /
 //     protocol / config pins: GIT_TERMINAL_PROMPT=0, GH_PROMPT_DISABLED=1,
 //     GIT_ALLOW_PROTOCOL=https, GIT_LFS_SKIP_SMUDGE=1 and GIT_CONFIG_COUNT
@@ -40,15 +56,20 @@
 //     (3) failure cleanup only touches a directory this call created.
 //     Residual: an agent that can write INSIDE the staging directory while the
 //     clone runs (a live sandbox session whose tree contains the destination)
-//     can still interfere -- no path-based scheme closes that. Not addressed
-//     here; noted for the owner.
+//     can interfere -- no path-based scheme closes that. So a destination that
+//     is, or lies under, the working directory of a running session is refused
+//     up front (owner decision), before anything is created or run. Not closed:
+//     a session LAUNCHED into such a directory while the clone runs, and rw
+//     binds other than the cwd (sandbox.config.json "binds", a worktree's
+//     shared git dir).
 //   - Limits: a timeout (the child's whole process group is killed), a cap on
 //     concurrent clones, and a cap on captured output.
-//   - After a successful clone the new repository's config is read (read-only,
-//     `git config --file`) to confirm origin, and only origin, is what gh will
-//     treat as the default (no `upstream` remote, no gh-resolved elsewhere).
-//     That is what `--no-upstream` is documented to give; a mismatch is
-//     reported as a warning, not an error -- the clone itself succeeded.
+//   - After a successful `gh` clone the new repository's config is read
+//     (read-only, `git config --file`) to confirm origin, and only origin, is
+//     what gh will treat as the default (no `upstream` remote, no gh-resolved
+//     elsewhere). That is what `--no-upstream` is documented to give; a
+//     mismatch is reported as a warning, not an error -- the clone itself
+//     succeeded. A plain `git clone` cannot produce either, so nothing is read.
 //   - Nothing is run inside the new repository (no `git status`, no submodule
 //     update).
 
@@ -57,8 +78,9 @@ import { randomBytes } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { lstat, mkdir, open, realpath, rename, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { isContained, resolveWithinRoots } from './pathPolicy.js';
+import { DEFAULT_CLONE_HOSTS } from './cloneConfig.js';
 import { buildChildEnv, gitConfigEnv, runGit } from './hostGit.js';
 
 // Provisional values (owner: "timeout / concurrency / output caps" were asked
@@ -124,19 +146,31 @@ export function fsFailure(err) {
 // Validation
 
 // GitHub owner names: alphanumerics and hyphens, 1-39 chars, no hyphen at
-// either end. Repository names: alphanumerics, `.`, `_`, `-`, up to 100.
-const OWNER = '[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?';
-const REPO = '[A-Za-z0-9._-]{1,100}';
-const SHORTHAND_RE = new RegExp(`^(${OWNER})/(${REPO})$`);
-const HTTPS_RE = new RegExp(`^https://github\\.com/(${OWNER})/(${REPO})$`, 'i');
+// either end. Elsewhere (Gitea and friends) a user or organization may also
+// contain `.` and `_`, so the shape is wider there -- but it still starts and
+// ends with an alphanumeric, which is what rules out `.` / `..` as an owner.
+// Repository names: alphanumerics, `.`, `_`, `-`, up to 100.
+const GITHUB_HOST = 'github.com';
+const GITHUB_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const OTHER_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
+const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+// The host is captured as plain ASCII, then matched EXACTLY (lower-cased)
+// against the configured list. Anything else in that position -- a port, an
+// `@`, a Unicode look-alike, a `%`-escape -- does not match and is refused.
+const HTTPS_URL_RE = /^https:\/\/([A-Za-z0-9.-]+)\/([^/]+)\/([^/]+)$/i;
 const CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/;
 const WHITESPACE_RE = /\s/;
 const USERINFO_RE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/]*@/;
 
-const URL_HELP = 'Use OWNER/REPO or https://github.com/OWNER/REPO';
+function urlHelp(hosts) {
+  const names = hosts.map((h) => h.host);
+  const shorthand = names.includes(GITHUB_HOST) ? 'OWNER/REPO (github.com) or ' : '';
+  return `Use ${shorthand}https://HOST/OWNER/REPO with HOST one of: ${names.join(', ') || '(none)'}`;
+}
 
-// -> { ok: true, url, owner, repo } | { ok: false, message }
-export function parseCloneUrl(input) {
+// hosts: the configured [{ host, tool }] (cloneConfig.js).
+// -> { ok: true, url, owner, repo, host, tool } | { ok: false, message }
+export function parseCloneUrl(input, hosts = DEFAULT_CLONE_HOSTS) {
   if (typeof input !== 'string') return { ok: false, message: 'url is required' };
   const raw = input.trim();
   if (!raw) return { ok: false, message: 'url is required' };
@@ -148,14 +182,34 @@ export function parseCloneUrl(input) {
   if (USERINFO_RE.test(raw)) {
     return { ok: false, message: 'url must not contain credentials (user:password@)' };
   }
-  const match = raw.match(SHORTHAND_RE) || raw.match(HTTPS_RE);
-  if (!match) return { ok: false, message: `Unsupported url. ${URL_HELP}` };
-  const owner = match[1];
-  const repo = match[2].replace(/\.git$/i, '');
-  if (!repo || repo === '.' || repo === '..') {
-    return { ok: false, message: `Unsupported url. ${URL_HELP}` };
+  const unsupported = { ok: false, message: `Unsupported url. ${urlHelp(hosts)}` };
+  const allowed = new Map(hosts.map((h) => [h.host, h]));
+
+  let entry;
+  let owner;
+  let repo;
+  const shorthand = raw.match(/^([^/]+)\/([^/]+)$/);
+  if (shorthand) {
+    // OWNER/REPO has always meant GitHub; it does not follow the list order.
+    if (!GITHUB_OWNER_RE.test(shorthand[1]) || !REPO_RE.test(shorthand[2])) return unsupported;
+    entry = allowed.get(GITHUB_HOST);
+    if (!entry) {
+      return { ok: false, message: `OWNER/REPO means github.com, which is not an allowed host here. ${urlHelp(hosts)}` };
+    }
+    [, owner, repo] = shorthand;
+  } else {
+    const match = raw.match(HTTPS_URL_RE);
+    if (!match) return unsupported;
+    const host = match[1].toLowerCase();
+    entry = allowed.get(host);
+    if (!entry) return { ok: false, message: `Host "${host}" is not allowed. ${urlHelp(hosts)}` };
+    const ownerRe = host === GITHUB_HOST ? GITHUB_OWNER_RE : OTHER_OWNER_RE;
+    if (!ownerRe.test(match[2]) || !REPO_RE.test(match[3])) return unsupported;
+    [, , owner, repo] = match;
   }
-  return { ok: true, url: `https://github.com/${owner}/${repo}.git`, owner, repo };
+  repo = repo.replace(/\.git$/i, '');
+  if (!repo || repo === '.' || repo === '..') return unsupported;
+  return { ok: true, url: `https://${entry.host}/${owner}/${repo}.git`, owner, repo, host: entry.host, tool: entry.tool };
 }
 
 // -> { ok: true, name } | { ok: false, message }
@@ -375,9 +429,15 @@ const defaultSlots = { active: 0 };
 // cloneRepository({ parent, url, name? }, roots, deps?) ->
 //   { ok: true, data: { path, name, url, warnings } }
 //   { ok: false, code, message }   code: validation | forbidden | not-found |
-//     conflict | busy | gh-unavailable | timeout | clone-failed | internal
-// `deps` exists for tests: ghBin, gitBin, sourceEnv, timeoutMs,
-// maxConcurrent, maxOutputBytes, platform, slots.
+//     conflict | busy | tool-unavailable | timeout | clone-failed | internal
+// deps:
+//   hosts            the configured [{ host, tool }] (default: github.com / gh)
+//   liveSessionCwds  REQUIRED: () => the working directories of the running
+//                    sessions. There is no default on purpose: a caller that
+//                    forgot it would silently lose the running-session guard,
+//                    so without it every clone is refused.
+//   ghBin, gitBin, sourceEnv, timeoutMs, maxConcurrent, maxOutputBytes,
+//   platform, slots  test seams.
 export async function cloneRepository(request, roots, deps = {}) {
   const opts = {
     ghBin: 'gh',
@@ -390,8 +450,11 @@ export async function cloneRepository(request, roots, deps = {}) {
   };
   const { parent, url, name } = request || {};
 
+  if (typeof opts.liveSessionCwds !== 'function') {
+    return fail('internal', 'Clone is not wired to the running-session check, so it is refused');
+  }
   if (typeof parent !== 'string' || !parent) return fail('validation', 'parent is required');
-  const parsed = parseCloneUrl(url);
+  const parsed = parseCloneUrl(url, opts.hosts);
   if (!parsed.ok) return fail('validation', parsed.message);
   if (name !== undefined && name !== null && typeof name !== 'string') {
     return fail('validation', 'name must be a string');
@@ -408,13 +471,39 @@ export async function cloneRepository(request, roots, deps = {}) {
   }
   opts.slots.active += 1;
   try {
-    return await cloneInto({ parent, dirName, url: parsed.url }, roots, opts);
+    return await cloneInto({ parent, dirName, url: parsed.url, tool: parsed.tool }, roots, opts);
   } finally {
     opts.slots.active -= 1;
   }
 }
 
-async function cloneInto({ parent, dirName, url }, roots, opts) {
+// True when `realDir` is one of `cwds` or lies beneath one of them (owner
+// decision: a running session can write anywhere under its working directory,
+// the staging directory included). Both spellings of each cwd are tried: the
+// real one is where a symlinked cwd actually is, and the lexical one still
+// counts when the real one cannot be resolved (a cwd removed since), so that
+// failing to resolve never lets a destination through.
+async function insideLiveSessionCwd(realDir, cwds) {
+  for (const cwd of cwds) {
+    if (typeof cwd !== 'string' || !cwd) continue;
+    const spellings = [resolve(cwd)];
+    try { spellings.push(await realpath(cwd)); } catch { /* the lexical spelling stands */ }
+    for (const base of spellings) {
+      const rel = relative(base, realDir);
+      if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) return true;
+    }
+  }
+  return false;
+}
+
+// What each tool is run as. The URL and the staging name are the only
+// variable parts, and neither is user text.
+function commandFor(tool, url, stageName, opts) {
+  if (tool === 'git') return { name: 'git', label: 'git clone', bin: opts.gitBin, args: ['clone', '--', url, stageName] };
+  return { name: 'gh', label: 'gh repo clone', bin: opts.ghBin, args: ['repo', 'clone', url, stageName, '--no-upstream'] };
+}
+
+async function cloneInto({ parent, dirName, url, tool }, roots, opts) {
   const pinned = await pinParent(parent, roots, opts.platform).catch(fsFailure);
   if (!pinned.ok) return pinned;
   const pin = pinned.data;
@@ -444,6 +533,13 @@ async function cloneInto({ parent, dirName, url }, roots, opts) {
   };
 
   try {
+    // Owner decision: a destination inside the working directory of a running
+    // session is refused before anything is created or run. The message says
+    // why, and nothing about which session or where.
+    if (await insideLiveSessionCwd(pin.realPath, await opts.liveSessionCwds())) {
+      return fail('conflict', 'Cannot clone here: a running session uses this directory (or one above it) as its working directory. Close that session, or clone somewhere else.');
+    }
+
     // Refuse early when the final name is taken by anything at all: the
     // destination is a NEW directory. (rename below would replace an empty
     // directory that appears in the meantime; that is all the race can cost.)
@@ -458,15 +554,16 @@ async function cloneInto({ parent, dirName, url }, roots, opts) {
 
     stageName = await makeStagingDir(pin.fsPath);
 
+    const command = commandFor(tool, url, stageName, opts);
     const result = await runChild(
-      opts.ghBin,
-      ['repo', 'clone', url, stageName, '--no-upstream'],
+      command.bin,
+      command.args,
       { pin, env, timeoutMs: opts.timeoutMs, maxOutputBytes: opts.maxOutputBytes },
     );
     if (result.spawnError) {
       await cleanup();
-      if (result.spawnError.code === 'ENOENT') return fail('gh-unavailable', 'gh is not installed on this server');
-      return fail('internal', `Could not run gh: ${result.spawnError.message}`);
+      if (result.spawnError.code === 'ENOENT') return fail('tool-unavailable', `${command.name} is not installed on this server`);
+      return fail('internal', `Could not run ${command.name}: ${result.spawnError.message}`);
     }
     if (result.timedOut) {
       await cleanup();
@@ -474,18 +571,18 @@ async function cloneInto({ parent, dirName, url }, roots, opts) {
     }
     if (result.code !== 0) {
       const detail = tailText(result.stderr) || tailText(result.stdout);
-      const hint = result.code === 4 ? ' (gh is not authenticated for the server user)' : '';
+      const hint = command.name === 'gh' && result.code === 4 ? ' (gh is not authenticated for the server user)' : '';
       await cleanup();
-      return fail('clone-failed', `gh repo clone failed (exit ${result.code})${hint}${detail ? `: ${detail}` : ''}`);
+      return fail('clone-failed', `${command.label} failed (exit ${result.code})${hint}${detail ? `: ${detail}` : ''}`);
     }
 
-    // gh said it worked: make sure there is a repository before publishing it.
+    // The tool said it worked: make sure there is a repository before publishing it.
     const gitEntry = await lstat(join(pin.fsPath, stageName, '.git')).catch(() => null);
     if (!gitEntry) {
       await cleanup();
-      return fail('clone-failed', 'gh reported success but no repository was created');
+      return fail('clone-failed', `${command.name} reported success but no repository was created`);
     }
-    const warnings = await checkGhDefault(join(pin.realPath, stageName), opts);
+    const warnings = command.name === 'gh' ? await checkGhDefault(join(pin.realPath, stageName), opts) : [];
 
     try {
       await rename(join(pin.fsPath, stageName), finalFs);

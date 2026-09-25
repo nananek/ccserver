@@ -51,6 +51,11 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
   "hiddenApps": [],
   "usageMcp": false,
   "browseRoots": [],
+  "clone": {
+    "hosts": [
+      { "host": "github.com", "tool": "gh" }
+    ]
+  },
   "reviewerMcp": false,
   "notify": {
     "discordWebhook": "",
@@ -84,6 +89,7 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 | `hiddenApps` | `[]` | 起動ピッカーから完全に除外するエージェント CLI (`"claude"`・`"opencode"`・`"copilot"`・`"codex"` の配列)。契約していない (=使わせたくない) CLI をサーバーにインストールされているかどうかに関わらず隠すための設定です。単発起動モーダル・コンボ起動のロール別選択・Worker プリセット管理・Usage ボタンのアプリタブ、4画面すべてに適用されます。**未インストールのため grey out されて表示され続けるものとは別の挙動**で、`hiddenApps` に入れたアプリは常に完全に除去されます (grey out のまま残すモードはありません)。不明な値は無視されます。この設定によってこのホストに実際にインストール済みのアプリが1つも選択できなくなる場合、サーバーは起動を拒否します (何も起動できない UI をサイレントに立ち上げないため)。ピッカーからの除外は UI 上の利便性に過ぎず、実際の防御は `createSession()` 側にもあります: WS/REST を直接叩く、あるいは Worker/Launch プリセット経由であっても、隠されたアプリでの新規セッション作成 (予約プロンプトの自動再開を含む) はサーバー側で拒否されます。 |
 | `usageMcp` | `false` | Claude セッションへ `ccserver-usage` MCP (`get_usage` ツール) を注入するか。安全のため既定はオフで、`true` の明示時だけ有効です。`showUsage` とは独立しています。 |
 | `browseRoots` | `[]` | `/api/files`・`/api/dirs`・`/ws/terminal` のアクセス範囲をこれらのディレクトリ (とそのサブツリー) 配下に制限する許可ルートの配列。`[]` (既定) は従来どおりホスト全域アクセス可能。設定すると: ファイルのダウンロード/プレビュー/アップロード先とディレクトリ閲覧/作成がこの配下に制限され、**シェル・エージェントを問わず、すべてのセッションが常時サンドボックス強制 (オプトアウト不可) になります。** `browseRoots` が絞るのは Web UI が閲覧・起動できる範囲だけで、起動したプロセス自体は制限できません。エージェントはシェルコマンドを実行できるため、サンドボックス外で動けば `cd` でルート外に出られます。したがって **`browseRoots` の設定は `forceSandbox` を含意します**。起動時に、ccserver 自身の設定・データ・状態ディレクトリ (`~/.config/ccserver` / `~/.local/share/ccserver` / `~/.local/state/ccserver` — SQLite DB、この設定ファイル、federation の秘密鍵、`saved-*.json`) がこの配下に入っていないか検証し、入っている場合は起動を拒否します。3 つとも browseRoots の外に置いてください。`~` はホームディレクトリに展開されます。**コンボ起動 (グループ) について**: ワーカー/オーケストレーターの実際のセッション cwd は常に `~/.local/share/ccserver-sandbox/{worktrees,orchestrator}/...` というサーバー内部の固定スクラッチ領域になり (プロジェクトディレクトリ自体ではありません)、この領域は browseRoots のチェック対象外です。ただしコンボ起動作成時 (`POST /api/groups`) のプロジェクト cwd 自体は browseRoots 配下でなければ拒否されるため、browseRoots 外のプロジェクトに対してコンボグループを作成すること自体はできません。 |
+| `clone` | `{ hosts: [ { host: "github.com", tool: "gh" } ] }` | Files 画面の **Clone** が clone してよいホストと、ホストごとの道具 (`"gh"` か `"git"`)。**既定は github.com だけ** (このキーが無ければ今までどおり)。`hosts` は許可リストの全体で、既定に足されるのではありません。自前の Gitea などを使う設定例・ホスト名の規則・不正な設定のときの挙動は [下記](#clone-の許可ホスト)。サーバー起動時に 1 回だけ読むので、変更には再起動が必要で、クライアントからは変えられません。 |
 | `reviewerMcp` | `false` | コードレビュー用 MCP (`ccserver-reviewer`、`run_review`/`list_reviews`/`get_review`/`finish_review` ツール) を有効化するか。`true` の明示時、shell と copilot を除く全セッション (コンボのワーカーも含む、グループの有無は不問) へ注入されます。ローカルの任意 ref/ブランチ/PR/未コミット差分に対して使い捨ての git worktree 上でヘッドレスセッションを起動し `/code-review` を実行するため、既定はオフです。レビュージョブ自身のセッションには、このフラグの値に関わらず (ライブ編集で無効化された場合の完了検知破綻を防ぐため) `finish_review` を呼ぶための MCP が強制的に注入されます ([コードレビュー](/ccserver/guides/reviewer/) 参照)。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
@@ -91,6 +97,46 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 | `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 ([通知](/ccserver/guides/notify/) 参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。`bridge` はエージェント通知ブリッジの設定 ([通知](/ccserver/guides/notify/) 参照、既定 `enabled: false`)。`vikunja` キーは廃止済み (残っていても無視され、起動時に警告が出るだけ)。 |
 | `federation` | `{}` | 拠点間ペアリング ([federation](/ccserver/guides/federation/) 参照) の設定。`requireTokenForPairing: true` でペアリング開始リクエストに `CCSERVER_TOKEN` の提示を必須化 (既定 `false`)。機能自体の有効/無効は `CCSERVER_FEDERATION_PORT` 環境変数で制御し、ここでは切り替えられません。 |
 | `network` | `{ isolate: false, initialState: "enforce", mode: "enforce", allowedHosts: [], deniedHosts: [] }` | ネットワーク隔離 ([下記](#ネットワーク隔離)参照)。`isolate` は機能全体の on/off (`true` で隔離が有効になる)。`initialState` は隔離を有効にして起動したセッションの開始state (`"enforce"`/`"open"`)、`mode` は `"enforce"`/`"audit"`、`allowedHosts`/`deniedHosts` は完全一致か先頭ドット (`.example.com`) のみの許可/拒否リスト (各最大200件)。設定 UI (設定 → ネットワーク隔離) からも編集可能で、`allowedHosts`/`deniedHosts` の保存は稼働中セッションへ自動反映されます。 |
+
+## clone の許可ホスト
+
+Files 画面の **Clone** ([起動ガイド](/ccserver/guides/launching/#files-画面の-git-連携-clone-とリポジトリ表示)) は、`sandbox.config.json` の `clone.hosts` に書かれたホストの https URL だけを clone します。**既定 (このキーが無いとき) は github.com だけ、道具は `gh`** で、これまでと同じ挙動です。
+
+```json
+{
+  "clone": {
+    "hosts": [
+      { "host": "github.com", "tool": "gh" },
+      { "host": "gitea.example.org", "tool": "git" }
+    ]
+  }
+}
+```
+
+| `tool` | 実行されるコマンド | 使いどころ |
+|---|---|---|
+| `"gh"` | `gh repo clone <URL> <dir> --no-upstream` | GitHub と GitHub Enterprise Server。**gh は GitHub の道具で、Gitea など他のホストには使えません。** |
+| `"git"` | `git clone -- <URL> <dir>` | Gitea など、それ以外の全部。素の `git clone` は `upstream` も gh の `gh-resolved` も作らないので、`origin` が default になります。 |
+
+どちらも、[起動ガイド](/ccserver/guides/launching/#files-画面の-git-連携-clone-とリポジトリ表示)のとおり、同じ堅牢化 (環境変数の許可リスト、`GIT_ALLOW_PROTOCOL=https`、`core.hooksPath=/dev/null`、LFS の smudge 無効、fd で固定した親ディレクトリ、一時ディレクトリ + rename、タイムアウト、プロセスグループの kill) で実行されます。
+
+**ホスト名の規則** (`host` と、URL のホストの両方):
+
+- **完全一致**です (大文字小文字は区別しません)。`gitea.example.org` を書いても `sub.gitea.example.org`・`gitea.example.org.evil.example`・`example.org` は通りません。ワイルドカードはありません。
+- **ポートは書けません**。ポート付きの URL (`https://gitea.example.org:3000/...`) は拒否されるので、標準ポート以外で待ち受けるサーバーは今は使えません。
+- **末尾のドット・スキーム・パス・userinfo・IPv6 リテラルは書けません**。`https://github.com@evil.example/...` や `https://user:pw@...` のような、ホストと取り違えやすい URL は、許可ホスト名が何であっても拒否されます。
+- **Unicode は受け付けません**。国際化ドメインは punycode (`xn--...`) で書きます。URL のホストも ASCII しか読まないので、見た目が似た別のホスト (ドットなしの `ı`、キリル文字の `е`、全角文字など) は一致しません。
+- 同じホストを 2 回書くことはできません。
+
+**URL**: https のみで、ssh は受け付けません。`OWNER/REPO` の略記は**常に github.com** の意味です (許可リストの順序には依存しません)。`hosts` に github.com が無い場合、略記は使えず、他のホストは完全な `https://HOST/OWNER/REPO` で指定します。
+
+**不正な設定は、既定に戻さず、Clone を無効にします (fail closed)**。形が違う・未知のキー・ホスト名が上の規則に反する・`tool` が `gh` / `git` 以外・重複・空の `hosts` のどれかがあると、一部の要素を捨てたり既定 (github.com) を補ったりはせず、Clone は 503 と理由を返し、起動時にも警告をログに出します。既定に戻さないのは、github.com を外すつもりで書いた設定が、typo で github.com を許可する側に広がるのを避けるためです。ほかの機能には影響しません。
+
+:::caution
+- **このホストの資格情報が使われます**。clone は ccserver を動かしているユーザーとして、サンドボックスの外で走ります。`gh` のホストは `gh auth` の資格情報、`git` のホストはそのユーザーの `credential.helper` などの設定 (と、サーバーの環境変数 `GH_TOKEN` / `GITHUB_TOKEN`。gh と git で同じ環境を渡します) で認証されます。`hosts` に書いたホストは「オペレーターの資格情報を提示してよい相手」です。信頼できるホストだけを書いてください。
+- **自前の Gitea の private リポジトリの clone は、まだ実機で確かめていません** (git の資格情報の受け渡しはサーバーユーザーの設定に依存します)。
+- サーバー起動時に 1 回だけ読みます (稼働中のサーバーが接続する相手を決める値なので、ファイルで、起動時に決める設計です。[設定モデル](/ccserver/reference/configuration-model/) の判定基準)。変更したら ccserver を再起動してください。
+:::
 
 ## gh 利用記録（任意・ローカルのみ）
 

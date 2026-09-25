@@ -2,7 +2,7 @@
 // status mapping, browseRoots, and that a bad request never reaches gh.
 // gh is a shell script injected through the plugin's `clone` option.
 
-import { test, before, after } from 'node:test';
+import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -212,4 +212,110 @@ test('POST /git/clone: gh failing is 502, gh missing is 500, a timeout is 504, t
   await busy.close();
 
   assert.deepEqual(readdirSync(parent).filter((n) => n.startsWith('.ccserver-clone-')), []);
+});
+
+// --- which hosts Clone may use (sandbox.config.json "clone") ---------------------------
+
+const GITEA_CONFIG = {
+  clone: { hosts: [{ host: 'github.com', tool: 'gh' }, { host: 'gitea.example.org', tool: 'git' }] },
+};
+const postClone = (a, payload) => a.inject({ method: 'POST', url: '/api/git/clone', payload });
+
+test('by default only github.com is allowed: a Gitea URL is 400 and starts nothing', async () => {
+  const ghRec = join(base, `called-${counter++}`);
+  const gitRec = join(base, `called-${counter++}`);
+  const local = await buildApp({ ghBin: fakeGh(OK_GH(ghRec)), gitBin: fakeGh(OK_GH(gitRec)), slots: { active: 0 } });
+  try {
+    const parent = uniq('parent');
+    mkdirSync(parent);
+    const res = await postClone(local, { parent, url: 'https://gitea.example.org/o/r' });
+    assert.equal(res.statusCode, 400, res.body);
+    assert.match(res.json().error, /not allowed/);
+    assert.ok(!existsSync(ghRec) && !existsSync(gitRec), 'neither tool was started');
+    assert.deepEqual(readdirSync(parent), []);
+  } finally {
+    await local.close();
+  }
+});
+
+test('a configured Gitea host is cloned with git, github.com still with gh, each without the other', async () => {
+  await withConfig(GITEA_CONFIG, async () => {
+    const ghRec = join(base, `called-${counter++}`);
+    const gitRec = join(base, `called-${counter++}`);
+    const local = await buildApp({ ghBin: fakeGh(OK_GH(ghRec)), gitBin: fakeGh(OK_GH(gitRec)), slots: { active: 0 } });
+    try {
+      const parent = uniq('parent');
+      mkdirSync(parent);
+      const viaGit = await postClone(local, { parent, url: 'https://gitea.example.org/o/r' });
+      assert.equal(viaGit.statusCode, 200, viaGit.body);
+      assert.equal(viaGit.json().url, 'https://gitea.example.org/o/r.git');
+      assert.ok(existsSync(gitRec) && !existsSync(ghRec), 'a git host starts git, not gh');
+      assert.ok(existsSync(join(parent, 'r', '.git')));
+
+      const viaGh = await postClone(local, { parent, url: 'https://github.com/o/r2' });
+      assert.equal(viaGh.statusCode, 200, viaGh.body);
+      assert.ok(existsSync(ghRec), 'github.com starts gh');
+      // a host that is not on the list is still refused, and the shorthand is still github.com
+      assert.equal((await postClone(local, { parent, url: 'https://evil.example/o/r' })).statusCode, 400);
+      assert.equal((await postClone(local, { parent, url: 'https://gitea.example.org.evil.example/o/r' })).statusCode, 400);
+      assert.equal((await postClone(local, { parent, url: 'https://gitea.example.org:3000/o/r' })).statusCode, 400);
+      assert.equal((await postClone(local, { parent, url: 'o/r3' })).statusCode, 200);
+    } finally {
+      await local.close();
+    }
+  });
+});
+
+test('the host list is read once, when the routes are registered: editing the file needs a restart', async () => {
+  const parent = uniq('parent');
+  mkdirSync(parent);
+  const started = () => fakeGh(OK_GH(join(base, `called-${counter++}`)));
+
+  // registered WITH gitea; the file then loses it
+  let local = await withConfig(GITEA_CONFIG, () => buildApp({ ghBin: started(), gitBin: started(), slots: { active: 0 } }));
+  try {
+    await withConfig({}, async () => {
+      assert.equal((await postClone(local, { parent, url: 'https://gitea.example.org/o/r' })).statusCode, 200);
+    });
+  } finally {
+    await local.close();
+  }
+
+  // registered WITHOUT it; the file then gains it
+  local = await withConfig({}, () => buildApp({ ghBin: started(), gitBin: started(), slots: { active: 0 } }));
+  try {
+    await withConfig(GITEA_CONFIG, async () => {
+      assert.equal((await postClone(local, { parent, url: 'https://gitea.example.org/o/r2' })).statusCode, 400);
+    });
+  } finally {
+    await local.close();
+  }
+});
+
+test('a clone block that cannot be used disables Clone (503 with the reason); it is not repaired into the default', async () => {
+  const warn = mock.method(console, 'warn', () => {});
+  try {
+    await withConfig({ clone: { hosts: [{ host: 'gitea.example.org:3000', tool: 'git' }] } }, async () => {
+      const ghRec = join(base, `called-${counter++}`);
+      const local = await buildApp({ ghBin: fakeGh(OK_GH(ghRec)), slots: { active: 0 } });
+      try {
+        assert.ok(warn.mock.calls.some((c) => /"clone" "hosts"\[0\]\.host/.test(String(c.arguments[0])) && /disabled/.test(String(c.arguments[0]))),
+          'the operator is told at startup');
+        const parent = uniq('parent');
+        mkdirSync(parent);
+        // github.com is the DEFAULT, and the default must not come back for a broken block
+        const res = await postClone(local, { parent, url: 'https://github.com/o/r' });
+        assert.equal(res.statusCode, 503, res.body);
+        assert.match(res.json().error, /"clone" "hosts"\[0\]\.host/);
+        assert.ok(!existsSync(ghRec) && readdirSync(parent).length === 0);
+        // nothing else is affected
+        const info = await local.inject({ method: 'GET', url: `/api/git/info?path=${encodeURIComponent(parent)}` });
+        assert.equal(info.statusCode, 200);
+      } finally {
+        await local.close();
+      }
+    });
+  } finally {
+    warn.mock.restore();
+  }
 });

@@ -21,7 +21,7 @@ ccserver の設定は 2 種類あります。どちらに属するかは好み�
 | 置き場所 | SQLite の `settings` テーブル | `~/.config/ccserver/sandbox.config.json` |
 | 変更方法 | Web UI の設定タブ | テキストエディタ |
 | 反映 | 即時 | **ccserver の再起動が必要** |
-| 例 | ワーカープリセット、起動プリセット、ペアリング済みインスタンス、パスキー、GPG Vault | `docker` / `persistentHome` / `gpg` / `sshAgent` / `gpgVault` / `browseRoots` / `hiddenApps` / `reviewerMcp` / `usageMcp` |
+| 例 | ワーカープリセット、起動プリセット、ペアリング済みインスタンス、パスキー、GPG Vault | `docker` / `persistentHome` / `gpg` / `sshAgent` / `gpgVault` / `browseRoots` / `clone` / `hiddenApps` / `reviewerMcp` / `usageMcp` |
 
 ### 現時点での既知の例外
 

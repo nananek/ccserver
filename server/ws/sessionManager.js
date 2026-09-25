@@ -1255,6 +1255,19 @@ export function getSession(id) {
   return sessions.get(id);
 }
 
+// The working directory of every session that has not exited: shells, agents,
+// and combo-group members (whose cwd is their own worktree) alike. Only the
+// directories, not the sessions: routes/git.js's Clone uses it to refuse a
+// destination a running session could write into, and needs nothing about who
+// that session is.
+export function liveSessionCwds() {
+  const cwds = [];
+  for (const session of sessions.values()) {
+    if (!session.exited && typeof session.cwd === 'string' && session.cwd) cwds.push(session.cwd);
+  }
+  return cwds;
+}
+
 // Operator-assigned display names for sessions (right-click rename in the
 // client). Null/undefined/empty-after-trim means "no custom name". Overlong
 // input is rejected (not truncated) so the caller can surface the limit.

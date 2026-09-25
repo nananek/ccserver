@@ -34,15 +34,21 @@ Files タブ (見出し "Select a Directory") の toolbar にある **Clone** �
 - リポジトリ全体 (`.git` を含む) が [browseRoots](/ccserver/sandbox/configuration/) の中にあるときだけ表示します。`.git` ファイルが browseRoots の外のリポジトリを指している場合などは何も出しません。
 - サンドボックスの許可リスト (起動時に 1 回だけ、cwd の `remote.*.url` から導出) とは独立した表示です。表示中の remote を変えても、実行中のセッションの許可リストは変わりません。
 
-**Clone**: URL を入力して **Clone** を押すと、サーバー (ホスト) で `gh repo clone <正規化した https URL> <保存先> --no-upstream` が実行され、表示中のディレクトリの**直下**に新しいフォルダができます (成功するとそのフォルダへ移動します)。`--no-upstream` なので、fork を clone しても `upstream` remote は追加されず、`origin` が gh の default になります。
+**Clone**: URL を入力して **Clone** を押すと、サーバー (ホスト) で clone が実行され、表示中のディレクトリの**直下**に新しいフォルダができます (成功するとそのフォルダへ移動します)。使う道具はホストごとに決まります (許可するホストと道具は [`clone` 設定](/ccserver/sandbox/configuration/#clone-の許可ホスト)、既定は github.com だけ)。
 
-- **資格情報はサーバーを動かしているユーザーの gh / git の設定**です。clone はサンドボックスの外で走るため、サンドボックスの git broker・許可リストは関係しません。private リポジトリを clone できるかは、そのユーザーの `gh auth` 次第です。
+| 道具 | 実行されるコマンド | 対象 |
+|---|---|---|
+| `gh` (github.com の既定) | `gh repo clone <正規化した https URL> <一時ディレクトリ> --no-upstream` | GitHub / GitHub Enterprise Server 専用 (gh は他のホストに使えません)。`--no-upstream` なので、fork を clone しても `upstream` remote は追加されず、`origin` が gh の default になります。 |
+| `git` | `git clone -- <正規化した https URL> <一時ディレクトリ>` | Gitea など、それ以外のホスト。素の `git clone` は `upstream` も gh の `gh-resolved` も作らないので、`origin` が default になります。 |
+
+- **資格情報はサーバーを動かしているユーザーの gh / git の設定**です。clone はサンドボックスの外で走るため、サンドボックスの git broker・許可リストは関係しません。private リポジトリを clone できるかは、そのユーザーの `gh auth` (gh のホスト) や git の `credential.helper` など (git のホスト) 次第です。**自前の Gitea の private リポジトリが clone できるかは、まだ実機で確かめていません。**
+- **稼働中のセッションの作業ディレクトリの中には clone できません**: 保存先が、稼働中のセッション (コンボのメンバーの worktree を含む。サンドボックスの有無・shell / エージェントを問わない) の作業ディレクトリ、またはその配下のとき、gh / git を起動する前に 409 で断ります。そのセッションのエージェントは、clone 中の一時ディレクトリを書き換えられるためです。理由だけを返し、どのセッションかは伝えません。セッションを終了するか、別の場所に clone してください。clone の最中に、その場所へ**新しく**セッションを起動した場合と、`binds` の rw 指定など作業ディレクトリ以外の書き込み可能な場所は、この確認の対象外です。
 - **暫定の受け付け範囲 (オーナー確認待ち)**: 次の範囲は暫定の既定で、確定した仕様ではありません。
   - 保存先は表示中のディレクトリの直下に新しいディレクトリ 1 つ (browseRoots の内側)。名前は URL の最後の要素、または入力欄で指定 (1 要素のみ。`/` `\` `.` `..`、制御文字、先頭 `-` は不可)。同じ名前のものが既にある (空のディレクトリ・ファイル・シンボリックリンクを含む) 場合は拒否します。
-  - URL は `OWNER/REPO` または `https://github.com/OWNER/REPO[.git]` だけ。ホストは github.com のみで、userinfo・`-` で始まるもの・他のスキーム・ローカルパス・ssh は拒否します。サーバーが URL を検証・正規化し、gh には正規化した https URL を渡します (gh の `git_protocol` 設定で ssh には変わりません)。
-- 実行は `child_process.spawn` (shell なし) で、引数は `repo clone <URL> <ディレクトリ> --no-upstream` に固定されます。環境変数は必要なものだけを渡し (`PATH`、`HOME`、gh / プロキシ / 証明書の設定など)、`GIT_ALLOW_PROTOCOL=https` と、`core.hooksPath=/dev/null`・`protocol.ext.allow=never`・`protocol.file.allow=never`・`core.fsmonitor=`・LFS の smudge 無効化を環境変数の git config で固定します。**LFS を使うリポジトリは、LFS のファイルがポインタのまま clone されます** (必要なら clone 後に自分で `git lfs pull`)。サブモジュールは取得しません。
+  - URL は `OWNER/REPO` (常に github.com の意味。設定の許可ホストに github.com が無ければ使えません) か、`https://HOST/OWNER/REPO[.git]` (HOST は設定の許可ホストと**完全一致**、大文字小文字は区別しません)。ポート・末尾のドット・Unicode のホスト名 (国際化ドメインは設定に punycode で書きます)・userinfo (`github.com@evil.com` 型を含む)・`-` で始まるもの・他のスキーム・ローカルパス・ssh は拒否します。サーバーが URL を検証・正規化し、道具には正規化した https URL を渡します (gh の `git_protocol` 設定で ssh には変わりません)。
+- 実行は `child_process.spawn` (shell なし) で、引数は上の表のとおり固定です (ユーザーの入力は、検証済みのホスト・OWNER・REPO からサーバーが組み立てた URL としてだけ入ります)。環境変数は必要なものだけを渡し (`PATH`、`HOME`、gh / プロキシ / 証明書の設定など。gh・git 共通)、`GIT_ALLOW_PROTOCOL=https` と、`core.hooksPath=/dev/null`・`protocol.ext.allow=never`・`protocol.file.allow=never`・`core.fsmonitor=`・LFS の smudge 無効化を環境変数の git config で固定します。**LFS を使うリポジトリは、LFS のファイルがポインタのまま clone されます** (必要なら clone 後に自分で `git lfs pull`)。サブモジュールは取得しません。
 - clone は保存先の親ディレクトリを fd で固定し、その中の一時ディレクトリ (`.ccserver-clone-*`) に clone してから最終名へ rename します。失敗・タイムアウト時に中途半端なディレクトリは残りません (サーバーが clone の途中で終了した場合だけ、隠しディレクトリ `.ccserver-clone-*` が残るので、手で消してください)。タイムアウト (10 分)、同時実行数 (2)、取り込む出力量 (64 KiB) には上限があります。
-- clone の後、origin だけが gh の default になっているかを読み取り専用の git config で確認し、そうでなければ警告を返します (clone 自体は成功扱い)。
+- `gh` で clone した後は、origin だけが gh の default になっているかを読み取り専用の git config で確認し、そうでなければ警告を返します (clone 自体は成功扱い)。`git` で clone した場合は確認しません。
 
 ## opencode を選んだ場合の挙動の違い
 
