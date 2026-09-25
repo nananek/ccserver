@@ -306,6 +306,78 @@ test('control socket: tools/call list_group_sessions over the wire', async () =>
   c.close();
 });
 
+// The orchestrator gained exactly one tool (publish_doc); every other tool's
+// availability is pinned here as an exact set, so a tool appearing on -- or
+// vanishing from -- the control socket fails loudly instead of slipping past
+// the `includes` check above. publish_file stays worker-only.
+test('control socket: the exact tool set is the previous one plus publish_doc', async () => {
+  const c = mcpClient(control);
+  await c.connected;
+  const { tools } = await c.call('tools/list');
+  assert.deepEqual(
+    tools.map((t) => t.name).sort(),
+    [
+      'close_tab', 'fetch_doc', 'fetch_file', 'get_tab_status', 'list_docs', 'list_files',
+      'list_group_sessions', 'new_session', 'open_tab', 'publish_doc', 'read_output',
+      'repo_info', 'send_input', 'send_key', 'wait_for_handoff',
+    ].sort(),
+  );
+  assert.ok(!tools.some((t) => t.name === 'publish_file'), 'publish_file stays worker-only');
+  assert.ok(!tools.some((t) => t.name === 'handoff_to_orchestrator'), 'handoff_to_orchestrator stays worker-only');
+  c.close();
+});
+
+// Identity is closure-bound, never wire input: publish_doc takes key+content
+// only, and an identity smuggled in as an extra argument is dropped by the
+// schema instead of being believed.
+test('control socket: publish_doc takes only key/content and records the orchestrator, whatever the wire claims', async () => {
+  const orch = mcpClient(control);
+  const worker = mcpClient(handoff);
+  await Promise.all([orch.connected, worker.connected]);
+
+  const { tools } = await orch.call('tools/list');
+  const publish = tools.find((t) => t.name === 'publish_doc');
+  assert.ok(publish, 'publish_doc is exposed on the control socket');
+  assert.deepEqual(Object.keys(publish.inputSchema.properties).sort(), ['content', 'key']);
+  assert.deepEqual([...publish.inputSchema.required].sort(), ['content', 'key']);
+
+  const res = await callTool(orch, 'publish_doc', {
+    key: 'wire-brief', content: 'long instruction', role: 'workerA', publishedBy: 'workerA', groupId: 'other-group',
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.publishedBy, 'orchestrator');
+
+  const seen = await callTool(worker, 'fetch_doc', { key: 'wire-brief' });
+  assert.equal(seen.content, 'long instruction');
+  assert.equal(seen.publishedBy, 'orchestrator');
+  orch.close();
+  worker.close();
+});
+
+test('wire: the orchestrator boundary holds in both directions and leaves the document intact', async () => {
+  const orch = mcpClient(control);
+  const worker = mcpClient(handoff);
+  await Promise.all([orch.connected, worker.connected]);
+
+  // worker -> orchestrator: a reviewer's findings cannot be replaced.
+  assert.equal((await callTool(worker, 'publish_doc', { key: 'wire-findings', content: 'reviewer findings' })).ok, true);
+  const overWorker = await callTool(orch, 'publish_doc', { key: 'wire-findings', content: 'all clear' });
+  assert.equal(overWorker.error, 'key-owned-by-other-side');
+  const findings = await callTool(orch, 'fetch_doc', { key: 'wire-findings' });
+  assert.equal(findings.content, 'reviewer findings');
+  assert.equal(findings.publishedBy, 'workerA');
+
+  // orchestrator -> worker: an instruction cannot be rewritten before it is fetched.
+  assert.equal((await callTool(orch, 'publish_doc', { key: 'wire-instruction', content: 'attack it' })).ok, true);
+  const overOrch = await callTool(worker, 'publish_doc', { key: 'wire-instruction', content: 'already approved' });
+  assert.equal(overOrch.error, 'key-owned-by-other-side');
+  const instruction = await callTool(worker, 'fetch_doc', { key: 'wire-instruction' });
+  assert.equal(instruction.content, 'attack it');
+  assert.equal(instruction.publishedBy, 'orchestrator');
+  orch.close();
+  worker.close();
+});
+
 test('handoff socket: exposes ONLY handoff_to_orchestrator and the doc-sharing tools', async () => {
   const c = mcpClient(handoff);
   await c.connected;

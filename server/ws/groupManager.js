@@ -1434,15 +1434,41 @@ export function destroyGroup(groupId) {
 // the group's memory footprint must stay bounded regardless of how it's used.
 const MAX_DOC_BYTES = 256 * 1024;
 const MAX_DOCS_PER_GROUP = 50;
+// The orchestrator's share of that cap. It has no delete_doc, so without its
+// own ceiling a document per request would fill all the slots and leave the
+// workers unable to publish (a plan, a findings document): the workers always
+// keep MAX_DOCS_PER_GROUP - MAX_ORCHESTRATOR_DOCS of them.
+const MAX_ORCHESTRATOR_DOCS = 20;
 
 // Re-publishing the same key overwrites it (whoever published most recently
-// wins) -- kept deliberately simple for a "message board", no per-key
-// ownership or versioning. See plan section 7.6 for what's left open here.
+// wins) -- kept deliberately simple for a "message board", no versioning. See
+// plan section 7.6 for what's left open here. The ONE ownership rule is the
+// orchestrator boundary: the orchestrator and the workers do not overwrite
+// each other's keys. Worker<->worker stays last-writer-wins.
+//   - orchestrator over a worker's key would let the party that RELAYS a
+//     document rewrite the evidence it relays (a reviewer's findings, above
+//     all) while fetch_doc still reads as an ordinary document.
+//   - a worker over the orchestrator's key would let the party under review
+//     rewrite an instruction between the orchestrator publishing it and the
+//     reviewer fetching it -- the same instruction that used to travel by
+//     send_input, a channel no worker can write to.
+// `role` is the closure-bound identity from the MCP server (never the wire);
+// the orchestrator is exactly the string 'orchestrator', which no worker role
+// can be (WORKER_ROLE_RE). Anything else -- including a missing role and a
+// doc persisted with no publisher -- counts as the worker side, so an absent
+// identity can never be treated as the orchestrator.
 export function publishGroupDoc(groupId, role, key, content) {
   const group = groups.get(groupId);
   if (!group) return { error: 'group-not-found', message: 'group not found' };
   if (typeof key !== 'string' || !key) {
     return { error: 'bad-request', message: 'key must be a non-empty string' };
+  }
+  const existing = group.docs.get(key);
+  if (existing && (existing.publishedBy === 'orchestrator') !== (role === 'orchestrator')) {
+    return {
+      error: 'key-owned-by-other-side',
+      message: `key "${key}" was published by ${existing.publishedBy || 'another member'}; the orchestrator and the workers cannot overwrite each other's documents -- publish under a different key`,
+    };
   }
   const text = typeof content === 'string' ? content : '';
   const byteLength = Buffer.byteLength(text, 'utf-8');
@@ -1451,6 +1477,14 @@ export function publishGroupDoc(groupId, role, key, content) {
   }
   if (!group.docs.has(key) && group.docs.size >= MAX_DOCS_PER_GROUP) {
     return { error: 'too-many-docs', message: `group already has the maximum of ${MAX_DOCS_PER_GROUP} published documents` };
+  }
+  // Overwriting one of its own keys adds no document, so it is exempt.
+  if (role === 'orchestrator' && !group.docs.has(key)
+    && [...group.docs.values()].filter((d) => d.publishedBy === 'orchestrator').length >= MAX_ORCHESTRATOR_DOCS) {
+    return {
+      error: 'too-many-orchestrator-docs',
+      message: `the orchestrator already holds the maximum of ${MAX_ORCHESTRATOR_DOCS} published documents; re-publish under one of your existing keys (list_docs shows them) to overwrite it instead of adding a new one`,
+    };
   }
   const doc = { content: text, publishedBy: role, publishedAt: Date.now() };
   group.docs.set(key, doc);
