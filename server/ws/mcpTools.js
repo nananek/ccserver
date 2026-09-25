@@ -477,15 +477,26 @@ export function handoffToOrchestrator(deps, { summary, status = 'done', nextRole
 // content directly to any other member (worker<->worker, or a worker
 // publishing something the orchestrator wants to see) without relaying it
 // through send_input/handoff_to_orchestrator text. deps.role (handoff
-// server only -- see mcpServer.js) is the publisher's identity, exactly the
-// same "never taken from the wire" pattern as handoffToOrchestrator's
+// server only -- see mcpServer.js) is a worker publisher's identity, exactly
+// the same "never taken from the wire" pattern as handoffToOrchestrator's
 // sessionId/role above. The control server's fetch_doc/list_docs pass
-// deps.role as undefined (the orchestrator has no role string of its own);
-// publishGroupDoc is only ever wired on the handoff server, so it always
-// gets a real role.
+// deps.role as undefined (the orchestrator has no role string of its own,
+// and reading needs no identity); its publish_doc is publishDocAsOrchestrator
+// below, which names the orchestrator explicitly.
+//
+// The orchestrator publishes through its own function rather than through
+// publishDoc with a fallback role: publishDoc must never turn "no role on
+// these deps" into an identity, least of all the orchestrator's. The control
+// server calls publishDocAsOrchestrator, the handoff server calls publishDoc,
+// and neither identity is ever taken from the wire. What the two may
+// overwrite of each other's keys is decided in groupManager.publishGroupDoc.
 
 export function publishDoc(deps, { key, content }) {
   return deps.groupManager.publishGroupDoc(deps.groupId, deps.role || null, key, content);
+}
+
+export function publishDocAsOrchestrator(deps, { key, content }) {
+  return deps.groupManager.publishGroupDoc(deps.groupId, 'orchestrator', key, content);
 }
 
 export function fetchDoc(deps, { key }) {

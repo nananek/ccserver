@@ -5,9 +5,11 @@
 //
 // Two distinct servers per group:
 //   control (buildControlMcpServer)  -- reachable only by the orchestrator
-//     socket. Tools can inspect/type into any member and wait for handoffs.
+//     socket. Tools can inspect/type into any member and wait for handoffs,
+//     and publish_doc as the orchestrator.
 //   handoff (buildHandoffMcpServer)  -- one per worker socket, exposing only
-//     handoffToOrchestrator. The worker cannot read other sessions.
+//     handoffToOrchestrator and the doc/file exchange tools. The worker cannot
+//     read other sessions.
 //
 // groupId / sessionId / role are bound in the per-connection closure; they are
 // never taken from tool arguments (see mcpTools.js -- the authorization
@@ -154,6 +156,13 @@ export function buildControlMcpServer(deps) {
   );
 
   server.tool(
+    'publish_doc',
+    'Publish a document under a key, visible to every member of this group via fetch_doc/list_docs -- use it to hand a worker a long instruction (send only the key through send_input, not the text). It is recorded as published by "orchestrator", which the server sets and no worker can claim. Use a key unique to the request. You cannot overwrite a key a worker published, and a worker cannot overwrite a key you published (error key-owned-by-other-side); re-publishing your own key overwrites it.',
+    { key: z.string(), content: z.string() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishDocAsOrchestrator(deps, args)) }] }),
+  );
+
+  server.tool(
     'fetch_doc',
     'Fetch a document previously published (by any member) under a key via publish_doc.',
     { key: z.string() },
@@ -231,7 +240,7 @@ export function buildHandoffMcpServer(deps) {
 
   server.tool(
     'publish_doc',
-    'Publish a document under a key, visible to every member of this group (including the orchestrator and other workers) via fetch_doc/list_docs -- the direct way to hand off content (e.g. a plan) to another worker WITHOUT going through the orchestrator. Your own ./tmp/ is local to your own git worktree and is NOT visible to other workers; publish only what you want to hand off, not your whole working directory. Re-publishing the same key overwrites it.',
+    'Publish a document under a key, visible to every member of this group (including the orchestrator and other workers) via fetch_doc/list_docs -- the direct way to hand off content (e.g. a plan) to another worker WITHOUT going through the orchestrator. Your own ./tmp/ is local to your own git worktree and is NOT visible to other workers; publish only what you want to hand off, not your whole working directory. Re-publishing the same key overwrites it, except a key the orchestrator published, which is refused (error key-owned-by-other-side).',
     { key: z.string(), content: z.string() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishDoc(deps, args)) }] }),
   );

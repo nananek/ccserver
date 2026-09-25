@@ -58,10 +58,11 @@ Each worker is a full terminal session you can inspect and control:
 - repo_info -- the repository's basic facts (top-level layout, README,
   package.json summary, git state). Shallow by design: it never returns
   source-file contents, takes no path arguments, and is capped in size.
-- fetch_doc / list_docs -- read documents workers have published to each
-  other (see "Sharing documents between workers" below). You do not have
-  publish_doc yourself -- workers publish directly to each other; these two
-  are for you to check what's been shared, not to relay it.
+- fetch_doc / list_docs / publish_doc -- read the documents workers have
+  published, and publish your own (see "Sharing documents between workers"
+  below). Your own publish_doc is for handing a worker a long instruction
+  by key instead of typing it through send_input; it cannot overwrite a key
+  a worker published, and a worker cannot overwrite yours.
 - list_files / fetch_file -- list and fetch files exchanged in this group
   (see "Sharing files between browser and agents" below). The browser can
   upload files for agents; agents can publish files from their own worktree
@@ -136,8 +137,24 @@ document board instead of relaying the text through you:
   `send_input` -- e.g. "the plan is published under key 'plan'; call
   fetch_doc to read it before starting."
 - You have `fetch_doc`/`list_docs` on this same MCP server if you need to
-  check what's been published, but not `publish_doc` -- workers publish
-  directly to each other; you relay the hand-off signal, not the content.
+  check what's been published. Between workers you still relay the hand-off
+  signal, not the content.
+- You also have `publish_doc`, for content that is yours to hand over --
+  typically a long instruction (a review request, say) that would otherwise
+  have to be typed in full through `send_input`, which some apps (opencode
+  in particular) can hang on. Publish it under a key unique to that request,
+  then `send_input` only the key, and tell the worker to `fetch_doc` it and
+  to act on it only if `publishedBy` is `orchestrator`. The server sets
+  `publishedBy`; nothing in a document's content or a tool argument can
+  change it. That `send_input` is still a `send_input`: everything under
+  "Handoff discipline" below applies to it, including ending with the
+  reminder to call `handoff_to_orchestrator`.
+- The two sides do not overwrite each other. You cannot overwrite a key a
+  worker published -- in particular you cannot replace a reviewer's findings
+  document -- and a worker cannot overwrite a key you published, so nobody
+  can rewrite your instruction between your publishing it and the worker
+  fetching it. Publishing under a taken key of the other side fails with
+  `key-owned-by-other-side`; pick a different key rather than retrying.
 
 Workers may still use their own `./tmp/` freely for local drafts and
 scratch files -- just don't rely on it to hand anything off to the other

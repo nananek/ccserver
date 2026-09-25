@@ -1489,13 +1489,72 @@ test('fetchDoc/listDocs: a document published by one worker is visible to anothe
   assert.equal(fromWorkerB.content, 'the plan body');
   assert.equal(fromWorkerB.publishedBy, 'workerA');
 
-  // The control socket (orchestrator) has fetch_doc/list_docs too, but no
-  // publish_doc -- see mcpServer.js's buildControlMcpServer.
+  // The control socket (orchestrator) reads with fetch_doc/list_docs too (and
+  // publishes with publishDocAsOrchestrator, below) -- see mcpServer.js's
+  // buildControlMcpServer.
   const fromControl = tools.fetchDoc(controlDeps(g), { key: 'plan' });
   assert.equal(fromControl.content, 'the plan body');
   const listed = tools.listDocs(controlDeps(g));
   assert.deepEqual(listed.docs.map((d) => d.key), ['plan']);
   assert.equal(listed.docs[0].content, undefined);
+});
+
+test('publishDocAsOrchestrator: publishes as "orchestrator", visible to workers with that publishedBy', async () => {
+  const g = await makeGroupAsync();
+  const res = tools.publishDocAsOrchestrator(controlDeps(g), { key: 'review-request', content: 'long instruction' });
+  assert.equal(res.ok, true);
+  assert.equal(res.publishedBy, 'orchestrator');
+
+  const fromWorker = tools.fetchDoc(handoffDeps(g, 'workerSec', 'sess-s1'), { key: 'review-request' });
+  assert.equal(fromWorker.content, 'long instruction');
+  assert.equal(fromWorker.publishedBy, 'orchestrator');
+  assert.equal(tools.listDocs(controlDeps(g)).docs[0].publishedBy, 'orchestrator');
+});
+
+test('publishDocAsOrchestrator: the identity is fixed, not taken from deps.role', async () => {
+  const g = await makeGroupAsync();
+  // Even deps that carry a worker role (never the case on the control server)
+  // must not change who the orchestrator's publish is recorded as.
+  const res = tools.publishDocAsOrchestrator({ ...controlDeps(g), role: 'workerA' }, { key: 'k', content: 'c' });
+  assert.equal(res.publishedBy, 'orchestrator');
+});
+
+test('publish over the orchestrator boundary is refused both ways and the document is untouched', async () => {
+  const g = await makeGroupAsync();
+  tools.publishDoc(handoffDeps(g, 'workerSec', 'sess-s1'), { key: 'attack-review-abc1234', content: 'reviewer findings' });
+  const overWorker = tools.publishDocAsOrchestrator(controlDeps(g), { key: 'attack-review-abc1234', content: 'all clear' });
+  assert.equal(overWorker.error, 'key-owned-by-other-side');
+
+  tools.publishDocAsOrchestrator(controlDeps(g), { key: 'brief', content: 'orchestrator brief' });
+  const overOrchestrator = tools.publishDoc(handoffDeps(g, 'workerB', 'sess-b1'), { key: 'brief', content: 'rewritten' });
+  assert.equal(overOrchestrator.error, 'key-owned-by-other-side');
+
+  const findings = tools.fetchDoc(controlDeps(g), { key: 'attack-review-abc1234' });
+  assert.equal(findings.content, 'reviewer findings');
+  assert.equal(findings.publishedBy, 'workerSec');
+  const brief = tools.fetchDoc(controlDeps(g), { key: 'brief' });
+  assert.equal(brief.content, 'orchestrator brief');
+  assert.equal(brief.publishedBy, 'orchestrator');
+});
+
+test('publishDoc: worker behavior is unchanged -- worker keys are still overwritten by the last worker to publish', async () => {
+  const g = await makeGroupAsync();
+  tools.publishDoc(handoffDeps(g, 'workerA', 'sess-a1'), { key: 'plan', content: 'v1' });
+  const res = tools.publishDoc(handoffDeps(g, 'workerB', 'sess-b1'), { key: 'plan', content: 'v2' });
+  assert.equal(res.ok, true);
+  assert.equal(res.publishedBy, 'workerB');
+  assert.equal(tools.fetchDoc(controlDeps(g), { key: 'plan' }).content, 'v2');
+});
+
+test('publishDoc: deps with no role never becomes the orchestrator (no fallback identity)', async () => {
+  const g = await makeGroupAsync();
+  tools.publishDocAsOrchestrator(controlDeps(g), { key: 'brief', content: 'orchestrator brief' });
+  // controlDeps has no role: routing it through the WORKER function must not
+  // let it claim, or take over, the orchestrator's key.
+  const res = tools.publishDoc(controlDeps(g), { key: 'brief', content: 'x' });
+  assert.equal(res.error, 'key-owned-by-other-side');
+  const fresh = tools.publishDoc(controlDeps(g), { key: 'new-key', content: 'x' });
+  assert.notEqual(fresh.publishedBy, 'orchestrator');
 });
 
 test('fetchDoc: an unpublished key is a clean not-found', async () => {

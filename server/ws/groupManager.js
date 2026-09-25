@@ -1436,13 +1436,34 @@ const MAX_DOC_BYTES = 256 * 1024;
 const MAX_DOCS_PER_GROUP = 50;
 
 // Re-publishing the same key overwrites it (whoever published most recently
-// wins) -- kept deliberately simple for a "message board", no per-key
-// ownership or versioning. See plan section 7.6 for what's left open here.
+// wins) -- kept deliberately simple for a "message board", no versioning. See
+// plan section 7.6 for what's left open here. The ONE ownership rule is the
+// orchestrator boundary: the orchestrator and the workers do not overwrite
+// each other's keys. Worker<->worker stays last-writer-wins.
+//   - orchestrator over a worker's key would let the party that RELAYS a
+//     document rewrite the evidence it relays (a reviewer's findings, above
+//     all) while fetch_doc still reads as an ordinary document.
+//   - a worker over the orchestrator's key would let the party under review
+//     rewrite an instruction between the orchestrator publishing it and the
+//     reviewer fetching it -- the same instruction that used to travel by
+//     send_input, a channel no worker can write to.
+// `role` is the closure-bound identity from the MCP server (never the wire);
+// the orchestrator is exactly the string 'orchestrator', which no worker role
+// can be (WORKER_ROLE_RE). Anything else -- including a missing role and a
+// doc persisted with no publisher -- counts as the worker side, so an absent
+// identity can never be treated as the orchestrator.
 export function publishGroupDoc(groupId, role, key, content) {
   const group = groups.get(groupId);
   if (!group) return { error: 'group-not-found', message: 'group not found' };
   if (typeof key !== 'string' || !key) {
     return { error: 'bad-request', message: 'key must be a non-empty string' };
+  }
+  const existing = group.docs.get(key);
+  if (existing && (existing.publishedBy === 'orchestrator') !== (role === 'orchestrator')) {
+    return {
+      error: 'key-owned-by-other-side',
+      message: `key "${key}" was published by ${existing.publishedBy || 'another member'}; the orchestrator and the workers cannot overwrite each other's documents -- publish under a different key`,
+    };
   }
   const text = typeof content === 'string' ? content : '';
   const byteLength = Buffer.byteLength(text, 'utf-8');
