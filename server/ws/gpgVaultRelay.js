@@ -46,6 +46,7 @@
 // second process to spawn/track/kill per server run.
 
 import { createServer, createConnection } from 'node:net';
+import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
@@ -101,6 +102,35 @@ export function getRelayDir() {
 export function getRelaySocketPaths() {
   const dir = relayDir();
   return Object.fromEntries(Object.entries(RELAYS).map(([kind, r]) => [kind, join(dir, r.basename)]));
+}
+
+// Where GnuPG (>= 2.1.13) looks for the agent socket of a NON-default homedir
+// when /run/user/<uid> exists: /run/user/<uid>/gnupg/d.<hash>/S.gpg-agent,
+// hash = the first 15 bytes of sha1(homedir) in zbase32 (24 characters). Only
+// when /run/user/<uid> does NOT exist does it fall back to <homedir>/S.gpg-agent.
+// A bwrap sandbox without rootlesskit keeps the host uid and always has
+// /run/user/<uid> (buildBwrapArgs makes XDG_RUNTIME_DIR), so binding the relay
+// socket at <homedir>/S.gpg-agent alone is not enough there: gpg finds nothing
+// at the hashed path and quietly starts its own empty agent in the sandbox.
+// Verified equal to `gpgconf --homedir H --list-dirs agent-socket` on GnuPG
+// 2.4.4 and 2.4.9 (sandbox-gpgvault.test.js pins both, and compares against the
+// host's own gpgconf on every run).
+const ZBASE32 = 'ybndrfg8ejkmcpqxot1uwisza345h769';
+
+export function gnupgRunUserAgentSocket(homedir, uid) {
+  let bits = 0;
+  let acc = 0;
+  let hash = '';
+  for (const byte of createHash('sha1').update(homedir).digest().subarray(0, 15)) {
+    acc = (acc << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      hash += ZBASE32[(acc >> (bits - 5)) & 31];
+      bits -= 5;
+    }
+    acc &= (1 << bits) - 1;
+  }
+  return `/run/user/${uid}/gnupg/d.${hash}/S.gpg-agent`;
 }
 
 // Deny-list form for launches WITHOUT gpgVault (audit F3): every socket path

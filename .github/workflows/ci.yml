@@ -61,6 +61,86 @@ jobs:
         if: always()
         run: node server/tools/path-canary.js verify
 
+  # The unit-tests matrix above runs WITHOUT a sandbox backend, and that is
+  # load-bearing rather than incidental: ubuntu runners ship no bwrap, so those
+  # legs are what exercise every "no backend available" path. It is not a gap
+  # to be closed. PR #259 shipped three assertions that only execute when bwrap
+  # is absent, they were stale, and the no-bwrap legs are the only thing that
+  # caught them -- the author's host and the review host both had bwrap and
+  # both went green.
+  #
+  # What was missing is the OTHER condition. Tests that branch on
+  # sandboxAvailable() have a second half -- "the session really is built and
+  # really runs sandboxed" -- which is the half every real deployment takes,
+  # and nothing ran it. So this job ADDS a condition instead of replacing one:
+  # the same suite, once with a backend and once without. Deleting either side
+  # loses real coverage.
+  #
+  # Deliberately not matrixed over Node. This job varies the sandbox backend,
+  # not the Node version; the matrix above already answers the Node question,
+  # and tripling this would buy three bwrap installs to re-answer it. Pinned to
+  # 22, the oldest version the project claims, matching the e2e job.
+  unit-tests-sandbox:
+    name: Unit tests (server, bwrap backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install bubblewrap
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          # Ubuntu 24.04 gates unprivileged user namespaces behind AppArmor
+          # (kernel.apparmor_restrict_unprivileged_userns), which bwrap needs.
+          # Relaxed only when the plain invocation actually fails, so the log
+          # records which of the two configurations this runner required
+          # instead of hiding it behind an unconditional sysctl.
+          if bwrap --ro-bind / / --dev /dev --proc /proc true; then
+            echo "bwrap usable as installed"
+          else
+            echo "relaxing kernel.apparmor_restrict_unprivileged_userns for bwrap"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      # Presence is not usability, and this job is worthless if it silently
+      # degrades into a second copy of the no-backend matrix above. Both facts
+      # are asserted: sandboxAvailable() (which only stats /usr/bin/bwrap, and
+      # is what selects the success branch in the tests) and a real bwrap
+      # execution. A runner where either regresses fails here, loudly, rather
+      # than reporting green over coverage it did not actually provide.
+      - name: Assert the sandbox backend is really available
+        run: |
+          set -eux
+          bwrap --ro-bind / / --dev /dev --proc /proc true
+          node --input-type=module -e "
+            import { sandboxAvailable, sandboxBackend } from './server/ws/sandbox.js';
+            console.log('sandboxBackend():', sandboxBackend());
+            if (!sandboxAvailable()) {
+              console.error('FATAL: sandboxAvailable() is false -- this job would duplicate the no-backend matrix');
+              process.exit(1);
+            }
+          "
+
+      - name: Seed host-path canaries
+        run: node server/tools/path-canary.js place
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Verify the canaries survived
+        if: always()
+        run: node server/tools/path-canary.js verify
+
   # Matrixed too: the build toolchain (vite/rollup/esbuild) is where a new Node
   # breaks first, and at ~20s a leg the whole matrix costs less than a minute.
   client-build:
