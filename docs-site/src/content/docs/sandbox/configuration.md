@@ -135,6 +135,7 @@ Files 画面の **Clone** ([起動ガイド](/ccserver/guides/launching/#files-�
 
 :::caution
 - **このホストの資格情報が使われます**。clone は ccserver を動かしているユーザーとして、サンドボックスの外で走ります。`gh` のホストは `gh auth` の資格情報、`git` のホストはそのユーザーの `credential.helper` などの設定で認証されます。サーバーの環境変数 `GH_TOKEN` / `GITHUB_TOKEN` は、`gh` の clone と、github.com の clone にだけ渡します (github.com 以外を `git` で clone する子プロセスには渡しません。git 自身はこれらを読まず、その `credential.helper` が受け取るだけなので、GitHub のトークンを別のホストに渡さないためです)。`hosts` に書いたホストは「オペレーターの資格情報を提示してよい相手」です。信頼できるホストだけを書いてください。
+- **許可リストが縛るのは、URL に書けるホストです。実際の接続先ではありません**。許可したホストが別のホストへ https で redirect すると、git は最初の要求でそれを追います (git 2.55.0 で測定: 許可リストに無いホスト・ポートにも要求が届きました)。github.com の改名・移管の redirect を壊さないため、git の `http.followRedirects` は固定していません。信頼できないホストは書かないでください。
 - **自前の Gitea の private リポジトリの clone は、まだ実機で確かめていません** (git の資格情報の受け渡しはサーバーユーザーの設定に依存します)。
 - サーバー起動時に 1 回だけ読みます (稼働中のサーバーが接続する相手を決める値なので、ファイルで、起動時に決める設計です。[設定モデル](/ccserver/reference/configuration-model/) の判定基準)。変更したら ccserver を再起動してください。
 :::

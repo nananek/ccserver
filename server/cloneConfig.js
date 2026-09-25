@@ -10,8 +10,10 @@
 //
 // Why it lives in the file and is read once (#230, docs-site
 // reference/configuration-model): the list decides which servers this process
-// will open a connection to, as the operator, with the operator's
-// credentials. That is a value the safety of a running server depends on, so
+// will address, as the operator, with the operator's credentials. (It bounds
+// the host in the URL, not where git ends up: git follows a redirect on its
+// first request, measured with 2.55.0, so a listed host is a trusted one.)
+// That is a value the safety of a running server depends on, so
 // it comes from the operator's file, never from the client, and a change needs
 // a restart (routes/git.js reads it once when the route is registered).
 //
