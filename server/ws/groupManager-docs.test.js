@@ -4,9 +4,9 @@
 // (.saved-group-docs.json, independent of .saved-groups.json), and cleanup
 // on destroyGroup.
 
-import { test, before, after } from 'node:test';
+import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, cpSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, cpSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -277,5 +277,110 @@ test('destroyGroup removes the group entry from .saved-group-docs.json', async (
   if (existsSync(process.env.CCSERVER_GROUP_DOCS_PATH)) {
     const after = JSON.parse(readFileSync(process.env.CCSERVER_GROUP_DOCS_PATH, 'utf-8'));
     assert.ok(!after[gid], 'destroyed group no longer has a docs entry');
+  }
+});
+
+test('re-publishing keeps createdAt (first publish) while publishedAt follows the overwrite; list and fetch both report it', async () => {
+  const gid = await makeGroup();
+  const now = mock.method(Date, 'now', () => 1_000);
+  try {
+    const first = groupManager.publishGroupDoc(gid, 'workerA', 'plan', 'v1');
+    assert.equal(first.createdAt, 1_000);
+    assert.equal(first.publishedAt, 1_000);
+
+    now.mock.mockImplementation(() => 5_000);
+    const second = groupManager.publishGroupDoc(gid, 'workerB', 'plan', 'v2');
+    assert.equal(second.createdAt, 1_000, 'overwrite must not move createdAt');
+    assert.equal(second.publishedAt, 5_000, 'publishedAt keeps meaning "last publish"');
+
+    const fetched = groupManager.fetchGroupDoc(gid, 'plan');
+    assert.equal(fetched.createdAt, 1_000);
+    assert.equal(fetched.publishedAt, 5_000);
+    const [listed] = groupManager.listGroupDocs(gid);
+    assert.equal(listed.createdAt, 1_000);
+    assert.equal(listed.publishedAt, 5_000);
+
+    // A different key published later gets its own createdAt.
+    now.mock.mockImplementation(() => 9_000);
+    assert.equal(groupManager.publishGroupDoc(gid, 'workerA', 'other', 'x').createdAt, 9_000);
+  } finally {
+    now.mock.restore();
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('createdAt is persisted and restored; a doc saved before createdAt existed falls back to its publishedAt', async () => {
+  const gid = await makeGroup('/srv/proj-created-at');
+  const originalBroker = groupManager.getGroup(gid).controlBroker;
+  const now = mock.method(Date, 'now', () => 1_000);
+  try {
+    groupManager.publishGroupDoc(gid, 'workerA', 'kept', 'v1');
+    now.mock.mockImplementation(() => 5_000);
+    groupManager.publishGroupDoc(gid, 'workerA', 'kept', 'v2');
+    now.mock.mockImplementation(() => 2_000);
+    groupManager.publishGroupDoc(gid, 'workerA', 'legacy', 'old');
+    now.mock.restore();
+
+    const raw = JSON.parse(readFileSync(process.env.CCSERVER_GROUP_DOCS_PATH, 'utf-8'));
+    assert.equal(raw[gid].kept.createdAt, 1_000, 'createdAt is written to the docs file');
+    // Rewrite the file the way a pre-createdAt server left it.
+    delete raw[gid].legacy.createdAt;
+    writeFileSync(process.env.CCSERVER_GROUP_DOCS_PATH, JSON.stringify(raw));
+
+    groupManager.restoreGroups();
+    const kept = groupManager.fetchGroupDoc(gid, 'kept');
+    assert.equal(kept.createdAt, 1_000);
+    assert.equal(kept.publishedAt, 5_000);
+    const legacy = groupManager.fetchGroupDoc(gid, 'legacy');
+    assert.equal(legacy.publishedAt, 2_000);
+    assert.equal(legacy.createdAt, 2_000, 'no recorded createdAt -> publishedAt');
+  } finally {
+    now.mock.restore();
+    if (originalBroker) stopBroker(originalBroker);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('restoreGroups treats a non-finite createdAt/publishedAt as missing (JSON.parse turns 1e999 into Infinity)', async () => {
+  const gid = await makeGroup('/srv/proj-non-finite');
+  const originalBroker = groupManager.getGroup(gid).controlBroker;
+  try {
+    // JSON.stringify writes Infinity as null, so plant the literals by hand.
+    const doc = (publishedAt, createdAt) => ({ content: 'x', publishedBy: 'workerA', publishedAt, createdAt });
+    const text = JSON.stringify({
+      [gid]: {
+        bothPosInf: doc('+INF', '+INF'),
+        publishedNegInf: doc('-INF', 5_000),
+        createdPosInf: doc(4_000, '+INF'),
+        createdNegInf: doc(4_000, '-INF'),
+      },
+    }).replaceAll('"+INF"', '1e999').replaceAll('"-INF"', '-1e999');
+    writeFileSync(process.env.CCSERVER_GROUP_DOCS_PATH, text);
+    const planted = JSON.parse(text)[gid];
+    assert.equal(planted.bothPosInf.createdAt, Infinity, 'the fixture really carries Infinity');
+    assert.equal(planted.publishedNegInf.publishedAt, -Infinity);
+
+    const t0 = Date.now();
+    groupManager.restoreGroups();
+    const t1 = Date.now();
+
+    const get = (key) => groupManager.fetchGroupDoc(gid, key);
+    for (const key of ['bothPosInf', 'publishedNegInf', 'createdPosInf', 'createdNegInf']) {
+      assert.ok(get(key).content === 'x', `${key} was restored from the file`);
+      assert.ok(Number.isFinite(get(key).publishedAt), `${key}.publishedAt is finite`);
+      assert.ok(Number.isFinite(get(key).createdAt), `${key}.createdAt is finite`);
+    }
+    // publishedAt: same as a missing one -- the restore time.
+    for (const key of ['bothPosInf', 'publishedNegInf']) {
+      assert.ok(get(key).publishedAt >= t0 && get(key).publishedAt <= t1, `${key}.publishedAt falls back to now`);
+    }
+    // createdAt: same as a missing one -- the doc's publishedAt; a finite one is kept.
+    assert.equal(get('bothPosInf').createdAt, get('bothPosInf').publishedAt);
+    assert.equal(get('publishedNegInf').createdAt, 5_000);
+    assert.equal(get('createdPosInf').createdAt, 4_000);
+    assert.equal(get('createdNegInf').createdAt, 4_000);
+  } finally {
+    if (originalBroker) stopBroker(originalBroker);
+    groupManager.destroyGroup(gid);
   }
 });

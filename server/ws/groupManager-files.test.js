@@ -205,6 +205,43 @@ test('manifest persistence across restoreGroups and stale/corrupt handling', asy
   }
 });
 
+test('restoreGroups treats a non-finite publishedAt as missing and keeps a finite one (JSON.parse turns 1e999 into Infinity)', async () => {
+  const gid = await makeGroup('/srv/proj-files-non-finite');
+  const originalBroker = groupManager.getGroup(gid)?.controlBroker || null;
+  try {
+    const names = ['pos-inf.txt', 'neg-inf.txt', 'finite.txt'];
+    groupManager.publishGroupFilesFromUpload(gid, names.map((name) => ({ name, mimeType: 'text/plain', data: Buffer.from(name) })));
+    const idOf = (name) => groupManager.listGroupFiles(gid).files.find((f) => f.name === name).id;
+    const ids = Object.fromEntries(names.map((name) => [name, idOf(name)]));
+
+    // JSON.stringify writes Infinity as null, so plant the literals by hand.
+    const raw = JSON.parse(readFileSync(process.env.CCSERVER_GROUP_FILES_PATH, 'utf-8'));
+    raw[gid][ids['pos-inf.txt']].publishedAt = '+INF';
+    raw[gid][ids['neg-inf.txt']].publishedAt = '-INF';
+    raw[gid][ids['finite.txt']].publishedAt = 5_000;
+    const text = JSON.stringify(raw).replaceAll('"+INF"', '1e999').replaceAll('"-INF"', '-1e999');
+    writeFileSync(process.env.CCSERVER_GROUP_FILES_PATH, text);
+    const planted = JSON.parse(text)[gid];
+    assert.equal(planted[ids['pos-inf.txt']].publishedAt, Infinity, 'the fixture really carries Infinity');
+    assert.equal(planted[ids['neg-inf.txt']].publishedAt, -Infinity);
+
+    const t0 = Date.now();
+    groupManager.restoreGroups();
+    const t1 = Date.now();
+
+    const restored = new Map(groupManager.listGroupFiles(gid).files.map((f) => [f.name, f]));
+    assert.deepEqual([...restored.keys()].sort(), [...names].sort(), 'all three files were restored');
+    for (const name of ['pos-inf.txt', 'neg-inf.txt']) {
+      const at = restored.get(name).publishedAt;
+      assert.ok(Number.isFinite(at) && at >= t0 && at <= t1, `${name}.publishedAt falls back to the restore time (got ${at})`);
+    }
+    assert.equal(restored.get('finite.txt').publishedAt, 5_000);
+  } finally {
+    if (originalBroker) stopBroker(originalBroker);
+    groupManager.destroyGroup(gid);
+  }
+});
+
 test('destroyGroup removes blob root and does not touch sibling', async () => {
   const g1 = await makeGroup();
   const g2 = await makeGroup();

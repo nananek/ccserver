@@ -1,19 +1,13 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 import { authFetch, getToken } from '../auth.js';
 import { displayPath } from '../displayPath.js';
 import TabIcon from './TabIcon.jsx';
 import { formatSize } from '../formatSize.js';
+import { docCreatedAt, formatTime, sortDocsNewestFirst, sortFilesNewestFirst } from '../groupBoardOrder.js';
 import { activityInfo } from '../activityLevel.js';
 
 const TerminalView = lazy(() => import('./TerminalView.jsx'));
 const DocPreview = lazy(() => import('./DocPreview.jsx'));
-
-function formatTime(ts) {
-  if (!ts) return '';
-  try {
-    return new Date(ts).toLocaleString();
-  } catch { return ''; }
-}
 
 // A combo group's tab body: a second-level sub-tab bar (one entry per member:
 // workerA / workerB / orchestrator) above always-mounted TerminalViews, one
@@ -93,6 +87,8 @@ export default function GroupTabView({
   // group-scoped document sharing). No upload/delete UI -- publishing stays
   // an agent-only action.
   const [docs, setDocs] = useState([]);
+  const sortedDocs = useMemo(() => sortDocsNewestFirst(docs), [docs]);
+  const sortedFiles = useMemo(() => sortFilesNewestFirst(files), [files]);
   const [docsError, setDocsError] = useState(null);
   const [isDocsOpen, setIsDocsOpen] = useState(false);
   const [previewDocKey, setPreviewDocKey] = useState(null);
@@ -571,10 +567,16 @@ export default function GroupTabView({
               <div className="group-files-empty">No files yet. Drag &amp; drop or click Upload. Max 50 MiB/file, 20 files / 200 MiB per group.</div>
             ) : (
               <div className="group-files-list">
-                {files.map((f) => (
+                {sortedFiles.map((f) => (
                   <div key={f.id} className="group-files-item">
-                    <span className="group-files-name" title={f.name}>{f.name}</span>
-                    <span className="group-files-meta">{formatSize(f.size)} · {f.mimeType} · {f.direction === 'agent' ? `agent:${f.publishedBy || ''}` : 'browser'} · {formatTime(f.publishedAt)}</span>
+                    <div className="group-files-body">
+                      <span className="group-files-name" title={f.name}>{f.name}</span>
+                      <span className="group-files-meta">{formatSize(f.size)} · {f.mimeType} · {f.direction === 'agent' ? `agent:${f.publishedBy || ''}` : 'browser'}</span>
+                      {/* Files are never overwritten, so one time is both creation and update. */}
+                      <span className="group-files-times">
+                        <span className="group-files-time">{f.direction === 'agent' ? '公開' : 'アップロード'} {formatTime(f.publishedAt)}</span>
+                      </span>
+                    </div>
                     <button className="btn btn-secondary group-files-download-btn" onClick={() => handleDownload(f)} title="Download">↓</button>
                     <button className="btn btn-secondary group-files-delete-btn" onClick={() => handleDelete(f)} title="Delete">✕</button>
                   </div>
@@ -609,10 +611,16 @@ export default function GroupTabView({
               <div className="group-docs-empty">No documents published yet.</div>
             ) : (
               <div className="group-docs-list">
-                {docs.map((d) => (
+                {sortedDocs.map((d) => (
                   <div key={d.key} className="group-docs-item">
-                    <span className="group-docs-name" title={d.key}>{d.key}</span>
-                    <span className="group-docs-meta">{formatSize(d.size)} · {d.publishedBy} · {formatTime(d.publishedAt)}</span>
+                    <div className="group-docs-body">
+                      <span className="group-docs-name" title={d.key}>{d.key}</span>
+                      <span className="group-docs-meta">{formatSize(d.size)} · {d.publishedBy}</span>
+                      <span className="group-docs-times">
+                        <span className="group-docs-time group-docs-created">作成 {formatTime(docCreatedAt(d))}</span>
+                        <span className="group-docs-time group-docs-updated">更新 {formatTime(d.publishedAt)}</span>
+                      </span>
+                    </div>
                     <button className="btn btn-secondary group-docs-view-btn" onClick={() => setPreviewDocKey(d.key)} title="View">View</button>
                   </div>
                 ))}

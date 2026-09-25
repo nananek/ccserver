@@ -59,6 +59,7 @@ test('list/content round-trip reflects publish_doc without leaking content in th
   assert.ok(entry, 'published doc should appear in the list');
   assert.equal(entry.publishedBy, 'workerA');
   assert.equal(typeof entry.publishedAt, 'number');
+  assert.equal(typeof entry.createdAt, 'number');
   assert.equal(typeof entry.size, 'number');
   assert.equal(entry.content, undefined, 'list must not include content');
 
@@ -69,6 +70,7 @@ test('list/content round-trip reflects publish_doc without leaking content in th
   assert.equal(body.content, '# Plan\n\nsome content');
   assert.equal(body.publishedBy, 'workerA');
   assert.equal(typeof body.publishedAt, 'number');
+  assert.equal(body.createdAt, entry.createdAt, 'content reports the same createdAt as the list');
 });
 
 test('content 404s for unknown key and unknown group, 400 without key', async () => {

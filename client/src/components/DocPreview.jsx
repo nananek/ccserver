@@ -1,13 +1,7 @@
 import { useState, useEffect } from 'react';
 import { authFetch } from '../auth.js';
 import PreviewDialog from './PreviewDialog.jsx';
-
-function formatTime(ts) {
-  if (!ts) return '';
-  try {
-    return new Date(ts).toLocaleString();
-  } catch { return ''; }
-}
+import { docCreatedAt, formatTime } from '../groupBoardOrder.js';
 
 /**
  * Read-only modal viewer for a group document board entry (publish_doc /
@@ -49,7 +43,7 @@ export default function DocPreview({ groupId, docKey, onClose }) {
       title={docKey}
       titleHint={docKey}
       meta={data && (
-        <span className="file-preview-meta">{data.publishedBy} · {formatTime(data.publishedAt)}</span>
+        <span className="file-preview-meta">{data.publishedBy} · 作成 {formatTime(docCreatedAt(data))} · 更新 {formatTime(data.publishedAt)}</span>
       )}
       status={state.status}
       error={state.error}

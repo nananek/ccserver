@@ -30,6 +30,6 @@ export async function groupDocsRoute(fastify, opts) {
     if (res.error) {
       return reply.code(404).send({ error: res.error, message: res.message });
     }
-    return { key: res.key, content: res.content, publishedBy: res.publishedBy, publishedAt: res.publishedAt };
+    return { key: res.key, content: res.content, publishedBy: res.publishedBy, publishedAt: res.publishedAt, createdAt: res.createdAt };
   });
 }
