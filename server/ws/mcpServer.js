@@ -214,7 +214,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'repo_info',
-    'Return shallow facts about the group\'s repository: top-level layout (directory and file names only, capped at 100 entries), the README preview (first ~8KB), a package.json summary (name/version/description and the keys of scripts/dependencies/devDependencies -- never values, capped at 50 keys each) and git state (current branch, short HEAD, last 5 commit subjects, count of changed files). It takes no path arguments (the project directory is fixed), returns no source-file contents, and is capped in size so it cannot balloon your context. Deeper inspection and any changes belong to the workers: send the work to a worker via send_input instead of trying to read the repo yourself.',
+    'Return shallow facts about the group\'s repository: top-level layout (directory and file names only, capped at 100 entries), the README preview (first ~8KB), a package.json summary (name/version/description and the keys of scripts/dependencies/devDependencies -- never values, capped at 50 keys each) and git state (current branch, short HEAD, last 5 commit subjects). It takes no path arguments (the project directory is fixed), returns no source-file contents, and is capped in size so it cannot balloon your context. Deeper inspection and any changes belong to the workers: send the work to a worker via send_input instead of trying to read the repo yourself.',
     {},
     async () => ({ content: [{ type: 'text', text: JSON.stringify(await tools.repoInfo(deps)) }] }),
   );
