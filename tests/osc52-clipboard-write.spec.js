@@ -500,24 +500,63 @@ async function expectDelayStartedOver(page, payload) {
   await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(payload);
 }
 
-// Real window focus, not a stand-in. Playwright keeps Chromium's focus
+// Two ways of taking focus away from the page. The scenarios below are written
+// once and run with each; a driver is { install, blur, refocus } and `install`
+// runs before the page loads.
+//
+// Stubbed (always runs): document.hasFocus is replaced, before the app loads, by
+// a function that reports a flag the test controls, and the window's own `blur`
+// and `focus` events are dispatched by hand. This is what has to hold in every
+// Chromium build, because the page is only told about focus by those two events
+// (and, once, by hasFocus() when the dialog appears). It pins how the page
+// reacts, not that the browser reports focus changes.
+function stubbedWindowFocus(page) {
+  const set = (on) => page.evaluate((v) => {
+    window.__osc52Focus = v;
+    window.dispatchEvent(new Event(v ? 'focus' : 'blur'));
+  }, on);
+  return {
+    install: () => page.addInitScript(() => {
+      window.__osc52Focus = true;
+      document.hasFocus = () => window.__osc52Focus;
+    }),
+    async blur() {
+      await set(false);
+      // The input arrived: as far as the page can tell, the window is unfocused.
+      expect(await page.evaluate(() => document.hasFocus())).toBe(false);
+    },
+    refocus: () => set(true),
+  };
+}
+
+// Real (skipped where it cannot be set up): Playwright keeps Chromium's focus
 // emulation on, so a page always believes it has focus; with it off, the real
 // focus (which the page holds once it has had mouse input) has to be taken by
 // another page before the window blurs for real -- `blur` on the window,
-// document.hasFocus() false. Measured on the system Chromium: switching the
-// emulation off alone leaves hasFocus() true.
-async function blurWindow(page) {
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false });
-  await page.context().newPage();
-  // The input arrived: the window really is unfocused.
-  expect(await page.evaluate(() => document.hasFocus())).toBe(false);
-  return cdp;
+// document.hasFocus() false. On the system Chromium (/usr/bin/chromium) that
+// works, and switching the emulation off alone leaves hasFocus() true. On the
+// Chromium Playwright downloads (what CI uses) hasFocus() stayed true through
+// all of it, so there is nothing to measure and the test says so.
+function realWindowFocus(page) {
+  let cdp;
+  return {
+    install: async () => {},
+    async blur() {
+      cdp = await page.context().newCDPSession(page);
+      await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false });
+      await page.context().newPage();
+      test.skip(
+        await page.evaluate(() => document.hasFocus()),
+        'this Chromium keeps document.hasFocus() true with focus emulation off and another page focused, so the window cannot be blurred for real',
+      );
+    },
+    // Focus comes back to the page: a `focus` event on the window.
+    refocus: () => cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }),
+  };
 }
-// Focus comes back to the page: a `focus` event on the window.
-const refocusWindow = (cdp) => cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
 
-test('the delay is only counted while the window has focus: losing focus ends a served count, and it starts over on return', async ({ page }) => {
+async function servedCountEndsWithFocus(page, focus) {
+  await focus.install();
   await openShell(page);
   await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
 
@@ -525,33 +564,42 @@ test('the delay is only counted while the window has focus: losing focus ends a 
   await expect(prompt(page)).toBeVisible();
   await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
 
-  const cdp = await blurWindow(page);
+  await focus.blur();
   await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'true');
   // Unfocused for longer than the delay: none of it counts.
   await page.waitForTimeout(CLIPBOARD_ALLOW_DELAY_MS + 500);
   await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'true');
 
   await clickAllowOnReturn(page, 'focus');
-  await refocusWindow(cdp);
+  await focus.refocus();
   await expectDelayStartedOver(page, PAYLOAD);
-});
+}
 
-test('a dialog that comes up while the window has no focus does not count the delay until it has', async ({ page }) => {
+async function dialogWithoutFocusDoesNotCount(page, focus) {
+  await focus.install();
   await openShell(page);
   await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
 
   // The write is 1s away: it lands after the window has lost focus.
   await typeInShell(page, `sleep 1; ${osc(PAYLOAD)}`);
-  const cdp = await blurWindow(page);
+  await focus.blur();
 
   await expect(prompt(page)).toBeVisible();
   await page.waitForTimeout(CLIPBOARD_ALLOW_DELAY_MS + 500);
   await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'true');
 
   await clickAllowOnReturn(page, 'focus');
-  await refocusWindow(cdp);
+  await focus.refocus();
   await expectDelayStartedOver(page, PAYLOAD);
-});
+}
+
+const SERVED_COUNT_TITLE = 'the delay is only counted while the window has focus: losing focus ends a served count, and it starts over on return';
+const NO_FOCUS_TITLE = 'a dialog that comes up while the window has no focus does not count the delay until it has';
+
+test(SERVED_COUNT_TITLE, ({ page }) => servedCountEndsWithFocus(page, stubbedWindowFocus(page)));
+test(NO_FOCUS_TITLE, ({ page }) => dialogWithoutFocusDoesNotCount(page, stubbedWindowFocus(page)));
+test(`${SERVED_COUNT_TITLE} (real window focus)`, ({ page }) => servedCountEndsWithFocus(page, realWindowFocus(page)));
+test(`${NO_FOCUS_TITLE} (real window focus)`, ({ page }) => dialogWithoutFocusDoesNotCount(page, realWindowFocus(page)));
 
 // Playwright pins document.visibilityState to 'visible' whatever it does to the
 // tabs (checked: headless and headed, a second page brought to front, a tab
