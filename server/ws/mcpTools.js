@@ -407,9 +407,13 @@ export function getTabStatus(deps, { sessionId }) {
 // read_output.
 //
 // deps.connectionIsAlive (a per-connection function, when provided) is
-// forwarded to takeHandoff: an event is never dequeued for a connection
-// whose socket is dead, so a handoff is never lost to a disconnected wait --
-// it stays queued and the next wait_for_handoff receives it.
+// forwarded to takeHandoff: an event is never dequeued for a connection whose
+// socket is dead, so a handoff is not lost to a disconnected wait -- it stays
+// queued and the next wait_for_handoff receives it. "Not lost", not "never
+// lost": liveness is re-read while waiting and again at the commit check, but
+// NOT after it, so a socket dying in the slice below takes its event with it
+// (the queue has already been persisted without it). Same residual as a late
+// abort, and it closes the same way -- with an ack.
 //
 // `extra` is the MCP SDK's per-request context. Only `extra.signal` is used,
 // and it is the other half of the same guarantee (#245): connection liveness

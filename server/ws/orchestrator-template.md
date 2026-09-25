@@ -433,11 +433,16 @@ orchestrator should catch this itself.
   still writing the response -- cannot be observed from the server, so an
   event CAN be lost in that one-macrotask window. Nothing you do while
   waiting avoids it; closing it needs an explicit ack from the orchestrator,
-  which is a protocol change and is not implemented. You reach it only by
-  cancelling a wait at the instant a handoff is being delivered, so treat it
-  as a rare-but-real possibility rather than a reason to poll: if a worker
-  you are sure handed off never appears, re-check with a single
-  `get_tab_status`/`read_output` rather than assuming the queue is empty.
+  which is a protocol change and is not implemented. What puts an event in
+  that window is the response failing to reach you AFTER the server already
+  counted it as delivered -- a cancellation landing at that instant, but
+  equally the connection dropping or the server dying at that instant.
+  Cancelling is only the one of the three you cause yourself: a disconnect is
+  re-checked while you wait and again when the event is handed over, but not
+  after that. Treat the whole thing as a rare-but-real possibility rather
+  than a reason to poll: if a worker you are sure handed off never appears,
+  re-check with a single `get_tab_status`/`read_output` rather than assuming
+  the queue is empty.
   Two other limits are real: only the newest 100 undelivered handoffs are
   kept, and a summary over 32KB is truncated. Delivery is
   at-least-once: recovering a handoff from a wait you interrupted can hand
