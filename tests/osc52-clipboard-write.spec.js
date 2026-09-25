@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { CLIPBOARD_ALLOW_DELAY_MS } from '../client/src/osc52.js';
 
 // Issue #241: a session's own pty output could replace the viewer's clipboard
 // with no confirmation and no trace (the OSC 52 sequence is stripped before
@@ -157,6 +158,9 @@ test('a click acts only on the payload on screen when it began: a swap mid-click
   const preview = page.getByTestId('osc52-write-preview');
   const allow = page.getByRole('button', { name: '許可', exact: true });
   await expect(preview).toHaveText(A);
+  // 許可 is inert for a moment after the dialog appears (see the delay tests
+  // below); a press has to begin once it is live for this to be about the swap.
+  await expect(allow).toHaveAttribute('aria-disabled', 'false');
 
   // Press on 許可 while A is what the dialog shows...
   const box = await allow.boundingBox();
@@ -164,7 +168,11 @@ test('a click acts only on the payload on screen when it began: a swap mid-click
   await page.mouse.down();
   // ...the session replaces it with B while the button is still held...
   await expect(preview).toHaveText(B, { timeout: 10_000 });
-  // ...and the release lands on a dialog that now shows something else.
+  // ...and, after 許可 has gone live again on B, the release lands on a dialog
+  // that now shows something else. (Released any sooner, the swap's own delay
+  // would refuse the click; this holds long enough that only the "what was on
+  // screen when the press began" check can.)
+  await expect(allow).toHaveAttribute('aria-disabled', 'false');
   await page.mouse.up();
   await page.waitForTimeout(500);
 
@@ -216,4 +224,214 @@ test('a payload with nothing visible in it says so instead of showing a blank bo
   expect(shown).toContain('見える文字がありません');
   // It states how much is nevertheless about to be written.
   expect(shown).toContain(String(Array.from(blank).length));
+});
+
+
+// 許可 is inert for CLIPBOARD_ALLOW_DELAY_MS after the dialog appears and after
+// its content is swapped (the agent picks the moment: a click aimed at whatever
+// was under the pointer, or a press that began before a swap, must not land on a
+// decision nobody had time to read). 拒否 is never inert.
+//
+// "Immediately" is measured from INSIDE the page. A MutationObserver reacts in
+// the same task as the render that changed the dialog and acts on it right then,
+// so none of this depends on how quickly Playwright's own round trips get there
+// (its polling can lag the dialog by more than the delay). Every observation --
+// the preview text, aria-disabled, the computed opacity, a timestamp -- is
+// logged for the assertions.
+async function watchDialog(page, onContent) {
+  await page.evaluate((initial) => {
+    const probe = { log: [], onContent: initial };
+    window.__osc52Probe = probe;
+    let lastText = null;
+    let lastDisabled = null;
+    new MutationObserver(() => {
+      const dialog = document.querySelector('[data-testid="osc52-write-prompt"]');
+      const allow = dialog?.querySelector('[data-testid="osc52-write-allow"]') ?? null;
+      const deny = dialog?.querySelector('.btn-secondary') ?? null;
+      const text = dialog?.querySelector('[data-testid="osc52-write-preview"]')?.textContent ?? null;
+      const disabled = allow ? allow.getAttribute('aria-disabled') : null;
+      if (text === lastText && disabled === lastDisabled) return;
+      const contentChanged = text !== lastText;
+      lastText = text;
+      lastDisabled = disabled;
+      if (text === null) return;
+      probe.log.push({
+        kind: contentChanged ? 'content' : 'state',
+        text,
+        disabled,
+        opacity: getComputedStyle(allow).opacity,
+        at: performance.now(),
+      });
+      if (!contentChanged) return;
+      const action = probe.onContent;
+      if (action === 'click-allow') allow.click();
+      if (action === 'click-deny') deny.click();
+      if (action === 'press-allow') {
+        allow.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0 }));
+      }
+      if (action === 'key-allow') {
+        allow.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' }));
+      }
+    }).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['aria-disabled'] });
+  }, onContent);
+}
+const setOnContent = (page, action) => page.evaluate((a) => { window.__osc52Probe.onContent = a; }, action);
+const probeLog = (page) => page.evaluate(() => window.__osc52Probe.log);
+const allowButton = (page) => page.getByTestId('osc52-write-allow');
+
+// Types into the shell WITHOUT clicking the terminal: while the dialog is up its
+// backdrop covers it, and a click there would dismiss the dialog.
+async function typeInShell(page, command) {
+  await page.locator('.terminal-container textarea').first().focus();
+  await page.keyboard.type(command);
+  await page.keyboard.press('Enter');
+}
+const osc = (payload) => `printf '\\033]52;c;%s\\007' ${b64(payload)}`;
+const shellDone = (page, marker) => expect(page.locator('.terminal-container .xterm-rows')).toContainText(marker, { timeout: 15_000 });
+
+test('許可 is inert when the dialog appears, looks and reports it, and works once the delay is over', async ({ page }) => {
+  await openShell(page);
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+  // A click made in the very task that renders the dialog.
+  await watchDialog(page, 'click-allow');
+
+  await typeInShell(page, `${osc(PAYLOAD)}; echo OSC52-EMITTED-10`);
+  await expect(prompt(page)).toBeVisible();
+  await shellDone(page, 'OSC52-EMITTED-10');
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+
+  // It came up inert, and looked it; then it went live, and looked it.
+  const log = await probeLog(page);
+  expect(log.map((e) => [e.kind, e.disabled, e.opacity])).toEqual([
+    ['content', 'true', '0.5'],
+    ['state', 'false', '1'],
+  ]);
+  // The delay is the constant, not "a moment": it went live no sooner.
+  expect(log[1].at - log[0].at).toBeGreaterThanOrEqual(CLIPBOARD_ALLOW_DELAY_MS - 30);
+
+  // The click made while inert did nothing: nothing written, dialog still asking.
+  expect(await readClipboard(page)).toBe(SENTINEL);
+  await expect(prompt(page)).toBeVisible();
+
+  // After the delay a real click is a decision like any other.
+  await allowButton(page).click();
+  await expect(prompt(page)).toBeHidden();
+  await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(PAYLOAD);
+});
+
+test('a swap starts the delay again: a click right after B replaces A does nothing, even though 許可 was live on A', async ({ page }) => {
+  await openShell(page);
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+  await watchDialog(page, 'click-allow');
+
+  const A = 'A'.repeat(48);
+  const B = 'B'.repeat(48);
+  // B arrives 1.5s after A: long after A went live, so B's swap is what is under test.
+  await typeInShell(page, `${osc(A)}; sleep 1.5; ${osc(B)}; echo OSC52-EMITTED-11`);
+  await expect(page.getByTestId('osc52-write-preview')).toHaveText(B, { timeout: 15_000 });
+  await shellDone(page, 'OSC52-EMITTED-11');
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+
+  // A came up inert and went live; B replaced it inert, in the same render as
+  // the new text (there is no moment with B shown and 許可 still live), and went
+  // live in its turn. A click was made in the task of each content change.
+  const log = await probeLog(page);
+  expect(log.map((e) => `${e.kind}:${e.text[0]}:${e.disabled}`)).toEqual([
+    'content:A:true', 'state:A:false', 'content:B:true', 'state:B:false',
+  ]);
+
+  expect(await readClipboard(page)).toBe(SENTINEL);
+  await expect(prompt(page)).toBeVisible();
+  await allowButton(page).click();
+  await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(B);
+});
+
+test('swaps that keep coming keep 許可 inert for as long as they do', async ({ page }) => {
+  await openShell(page);
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+  await watchDialog(page, 'click-allow');
+
+  // Six writes 0.2s apart: each lands well inside the delay of the one before.
+  const burst = [1, 2, 3, 4, 5, 6].map((i) => osc(`burst-${i}`)).join('; sleep 0.2; ');
+  await typeInShell(page, `${burst}; echo OSC52-EMITTED-12`);
+  await expect(page.getByTestId('osc52-write-preview')).toHaveText('burst-6', { timeout: 15_000 });
+  await shellDone(page, 'OSC52-EMITTED-12');
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+
+  // 許可 was never live while the burst went on: it went live once, after the last one.
+  const log = await probeLog(page);
+  const contents = log.filter((e) => e.kind === 'content');
+  const live = log.filter((e) => e.disabled === 'false');
+  expect(contents.length).toBeGreaterThanOrEqual(2);
+  expect(live).toHaveLength(1);
+  expect(log.at(-1)).toMatchObject({ kind: 'state', text: 'burst-6', disabled: 'false' });
+  expect(log.slice(0, -1).every((e) => e.disabled === 'true')).toBe(true);
+
+  // A burst is still one dialog, on the newest payload, and nothing was written.
+  expect(await readClipboard(page)).toBe(SENTINEL);
+  await allowButton(page).click();
+  await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe('burst-6');
+});
+
+test('拒否 is never inert: refusing during the delay closes the dialog and stays refused', async ({ page }) => {
+  await openShell(page);
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+  await watchDialog(page, 'click-deny');
+
+  await typeInShell(page, `${osc(PAYLOAD)}; echo OSC52-EMITTED-13`);
+  await shellDone(page, 'OSC52-EMITTED-13');
+  await expect(prompt(page)).toBeHidden();
+  // The refusal was made while 許可 was still inert.
+  expect((await probeLog(page)).map((e) => [e.kind, e.disabled])).toEqual([['content', 'true']]);
+  expect(await readClipboard(page)).toBe(SENTINEL);
+
+  // And it is the sticky refusal: the next write neither asks nor writes.
+  await setOnContent(page, null);
+  await emitWrite(page, `${PAYLOAD}-SECOND`, 'OSC52-EMITTED-14');
+  await expect(prompt(page)).toBeHidden();
+  expect(await readClipboard(page)).toBe(SENTINEL);
+});
+
+test('a press that began while 許可 was inert does not count when it is released after the delay', async ({ page }) => {
+  await openShell(page);
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+
+  // Pointer: pressed in the task that renders the dialog, released (as a click) once live.
+  await watchDialog(page, 'press-allow');
+  await typeInShell(page, `${osc(PAYLOAD)}; echo OSC52-EMITTED-15`);
+  await shellDone(page, 'OSC52-EMITTED-15');
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+  await allowButton(page).dispatchEvent('click');
+  await page.waitForTimeout(300);
+  expect(await readClipboard(page)).toBe(SENTINEL);
+  await expect(prompt(page)).toBeVisible();
+
+  // Keyboard: the same, for a key that went down while inert (a newer write swaps the content in).
+  await setOnContent(page, 'key-allow');
+  await typeInShell(page, `${osc(`${PAYLOAD}-2`)}; echo OSC52-EMITTED-16`);
+  await shellDone(page, 'OSC52-EMITTED-16');
+  await expect(page.getByTestId('osc52-write-preview')).toHaveText(`${PAYLOAD}-2`);
+  await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+  await allowButton(page).dispatchEvent('click');
+  await page.waitForTimeout(300);
+  expect(await readClipboard(page)).toBe(SENTINEL);
+  await expect(prompt(page)).toBeVisible();
+
+  // A fresh, whole click is still a decision.
+  await allowButton(page).click();
+  await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(`${PAYLOAD}-2`);
+});
+
+test('once the delay is over 許可 works from the keyboard: Enter and Space', async ({ page }) => {
+  await openShell(page);
+
+  for (const [key, payload, marker] of [['Enter', `${PAYLOAD}-ENTER`, 'OSC52-EMITTED-17'], [' ', `${PAYLOAD}-SPACE`, 'OSC52-EMITTED-18']]) {
+    await typeInShell(page, `${osc(payload)}; echo ${marker}`);
+    await shellDone(page, marker);
+    await expect(allowButton(page)).toHaveAttribute('aria-disabled', 'false', { timeout: CLIPBOARD_ALLOW_DELAY_MS + 5_000 });
+    await allowButton(page).focus();
+    await page.keyboard.press(key);
+    await expect(prompt(page)).toBeHidden();
+    await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(payload);
+  }
 });

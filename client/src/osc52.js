@@ -101,6 +101,12 @@ export function createOsc52Handler({ onWrite, onQuery }) {
 // Longest payload prefix shown in the write-confirmation dialog.
 export const CLIPBOARD_PREVIEW_MAX = 120;
 
+// How long 許可 stays inert after the dialog appears and after its content is
+// swapped. The agent chooses the moment: a click aimed at whatever was under
+// the pointer a moment ago, or a press that began before a swap, must not be
+// able to land on a decision the viewer has not had time to read.
+export const CLIPBOARD_ALLOW_DELAY_MS = 500;
+
 const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/u;
 const WHITESPACE = /\s/u;
 

@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { authWsUrl, authFetch } from '../auth.js';
-import { createOsc52Handler, clipboardWritePreview } from '../osc52.js';
+import { createOsc52Handler, clipboardWritePreview, CLIPBOARD_ALLOW_DELAY_MS } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
 import { displayPath } from '../displayPath.js';
 import { isElevatedPermissionMode } from '../permissionMode.js';
@@ -313,15 +313,32 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // mirrors App.jsx's skip-close-confirm pattern.
   const [showSandboxWarning, setShowSandboxWarning] = useState(false);
   // Issue #241. Pending OSC 52 clipboard WRITE awaiting the viewer's decision:
-  // { text, preview } or null. Assigning a new one replaces any pending one,
-  // which is also the burst policy -- see the onWrite handler below.
+  // { seq, text, preview } or null. Assigning a new one replaces any pending
+  // one, which is also the burst policy -- see the onWrite handler below.
   const [clipboardPrompt, setClipboardPrompt] = useState(null);
-  // The prompt that was on screen when 許可 was PRESSED (pointer or key down).
+  // What 許可 was pressed on (pointer or key down): { prompt, armed }.
   // The click that follows is only a decision about THAT prompt: a later write
   // replaces the dialog's content in place, so without this a press on A that
   // is released after B has been swapped in would write B, which the viewer
   // never saw when they committed to the press.
   const clipboardPressedRef = useRef(null);
+  // Every write gets a fresh, never-reused seq, so "the dialog was re-armed"
+  // is exactly "a write arrived" (a spread copy of the same prompt keeps its seq).
+  const clipboardSeqRef = useRef(0);
+  // seq of the prompt whose 許可 has been live for CLIPBOARD_ALLOW_DELAY_MS.
+  // Compared, not toggled, so a new prompt is inert in the very render that
+  // shows it -- there is no frame with new content and a still-live button.
+  const [clipboardArmedSeq, setClipboardArmedSeq] = useState(null);
+  const clipboardSeq = clipboardPrompt ? clipboardPrompt.seq : null;
+  const clipboardAllowArmed = clipboardSeq !== null && clipboardArmedSeq === clipboardSeq;
+  useEffect(() => {
+    if (clipboardSeq === null) return undefined;
+    const timer = setTimeout(() => setClipboardArmedSeq(clipboardSeq), CLIPBOARD_ALLOW_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [clipboardSeq]);
+  const notePress = () => {
+    clipboardPressedRef.current = { prompt: clipboardPrompt, armed: clipboardAllowArmed };
+  };
   // Sticky refusal for this terminal session (a ref, not state: the osc52
   // handler below is built once per session inside an effect and must see the
   // live value without being rebuilt).
@@ -563,7 +580,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         // other, so only the last one could ever have survived in the
         // clipboard anyway -- and it denies an agent a way to multiply
         // dialogs by splitting one payload across many sequences.
-        setClipboardPrompt({ text, preview: clipboardWritePreview(text) });
+        setClipboardPrompt({ seq: ++clipboardSeqRef.current, text, preview: clipboardWritePreview(text) });
       },
       onQuery: () => {
         if (osc52ReadDecision === null) {
@@ -2043,22 +2060,32 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               </button>
               <button
                 className="btn btn-primary"
-                onPointerDown={() => { clipboardPressedRef.current = clipboardPrompt; }}
-                onKeyDown={() => { clipboardPressedRef.current = clipboardPrompt; }}
+                data-testid="osc52-write-allow"
+                // aria-disabled rather than disabled: the button keeps focus and
+                // stays announced while inert, and the guard in onClick is ours
+                // (it also has to judge a press that began before the button
+                // went live, which a native disabled button never reports).
+                aria-disabled={!clipboardAllowArmed}
+                onPointerDown={notePress}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') notePress(); }}
                 // Synchronous inside the click handler on purpose: that is
                 // what gives navigator.clipboard.writeText its activation.
                 onClick={() => {
-                  const pressed = clipboardPressedRef.current;
+                  const press = clipboardPressedRef.current;
                   clipboardPressedRef.current = null;
                   // The dialog content changed between the press and this
                   // click: refuse, keep the dialog open on what is shown now,
                   // and let the viewer decide again. (No recorded press means
                   // a click with no press phase at all -- e.g. assistive tech
                   // -- so there is no window in which a swap could sit.)
-                  if (pressed && pressed !== clipboardPrompt) {
+                  if (press && press.prompt !== clipboardPrompt) {
                     setClipboardPrompt((p) => p && { ...p, swapped: true });
                     return;
                   }
+                  // Still inside the delay after the dialog appeared or was
+                  // swapped, or the press itself began inside it: not a
+                  // decision. The viewer has to press again.
+                  if (!clipboardAllowArmed || (press && !press.armed)) return;
                   const { text } = clipboardPrompt;
                   setClipboardPrompt(null);
                   writeClipboardText(text);
