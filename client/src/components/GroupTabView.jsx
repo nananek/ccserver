@@ -160,9 +160,13 @@ export default function GroupTabView({
         // not touch state after this effect's cleanup ran (issue #123 #8).
         if (cancelled) return;
         if (res.status === 404) {
-          // The group is gone server-side (torn down from another client /
-          // the server restarted and the group was destroyed): nothing left
-          // to poll. Show a banner instead of silently staying stale.
+          // The group is gone server-side: destroyed from another client, or
+          // removed automatically when its last live member exited on its own.
+          // A server restart is NOT one of the ways -- a normal stop (SIGTERM /
+          // SIGINT) keeps the group and the next start restores it (#279); only
+          // saved state that cannot be read, or a group that restoreGroups
+          // refuses to admit, makes a restart end up here. Nothing left to
+          // poll. Show a banner instead of silently staying stale.
           setGroupGone(true);
           return;
         }
