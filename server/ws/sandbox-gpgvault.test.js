@@ -254,7 +254,6 @@ test('gpgVault under rootlesskit (uid 0): the relay socket stays bound at GNUPGH
     assert.ok(hasBindTry(spawn.args, getRelaySocketPaths().agent, join(homedir(), '.gnupg-vault', 'S.gpg-agent')), 'GNUPGHOME bind under docker');
     assert.ok(!spawn.args.some((a) => typeof a === 'string' && a.includes('/gnupg/d.')), 'no /run/user/<uid>/gnupg/d.<hash> alias');
   } finally {
-    if (spawn.stateDir) rmSync(spawn.stateDir, { recursive: true, force: true });
     cleanupSpawn(spawn);
   }
 });
