@@ -3,18 +3,11 @@ import { authFetch, getToken } from '../auth.js';
 import { displayPath } from '../displayPath.js';
 import TabIcon from './TabIcon.jsx';
 import { formatSize } from '../formatSize.js';
-import { docCreatedAt, sortDocsNewestFirst, sortFilesNewestFirst } from '../groupBoardOrder.js';
+import { docCreatedAt, formatTime, sortDocsNewestFirst, sortFilesNewestFirst } from '../groupBoardOrder.js';
 import { activityInfo } from '../activityLevel.js';
 
 const TerminalView = lazy(() => import('./TerminalView.jsx'));
 const DocPreview = lazy(() => import('./DocPreview.jsx'));
-
-function formatTime(ts) {
-  if (!ts) return '';
-  try {
-    return new Date(ts).toLocaleString();
-  } catch { return ''; }
-}
 
 // A combo group's tab body: a second-level sub-tab bar (one entry per member:
 // workerA / workerB / orchestrator) above always-mounted TerminalViews, one

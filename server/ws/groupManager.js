@@ -700,14 +700,16 @@ export function restoreGroups() {
         if (!group || !docsObj || typeof docsObj !== 'object') continue;
         for (const [key, doc] of Object.entries(docsObj)) {
           if (doc && typeof doc === 'object' && typeof doc.content === 'string') {
-            const publishedAt = typeof doc.publishedAt === 'number' ? doc.publishedAt : Date.now();
+            // Number.isFinite, not typeof: JSON.parse turns a hand-edited or
+            // corrupt `1e999` into Infinity, which is a number.
+            const publishedAt = Number.isFinite(doc.publishedAt) ? doc.publishedAt : Date.now();
             group.docs.set(key, {
               content: doc.content,
               publishedBy: typeof doc.publishedBy === 'string' ? doc.publishedBy : null,
               publishedAt,
               // Docs persisted before createdAt existed: the last publish is
               // the best lower bound we have for the first one.
-              createdAt: typeof doc.createdAt === 'number' ? doc.createdAt : publishedAt,
+              createdAt: Number.isFinite(doc.createdAt) ? doc.createdAt : publishedAt,
             });
           }
         }

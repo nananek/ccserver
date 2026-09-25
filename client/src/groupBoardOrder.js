@@ -7,6 +7,21 @@
 const ts = (n) => (Number.isFinite(n) ? n : 0);
 
 /**
+ * A timestamp as the viewer's local date-time, or '' when there is nothing to
+ * show: no time, or one Date cannot represent (which would otherwise render
+ * as the literal "Invalid Date").
+ * @param {number | string | undefined | null} value
+ * @returns {string}
+ */
+export function formatTime(value) {
+  if (!value) return '';
+  try {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
+  } catch { return ''; }
+}
+
+/**
  * A doc's first-publish time. `publishedAt` is the last publish (it moves on
  * every overwrite), so it is only a stand-in for a server that predates
  * `createdAt`.

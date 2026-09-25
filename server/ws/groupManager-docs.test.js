@@ -340,3 +340,47 @@ test('createdAt is persisted and restored; a doc saved before createdAt existed 
     groupManager.destroyGroup(gid);
   }
 });
+
+test('restoreGroups treats a non-finite createdAt/publishedAt as missing (JSON.parse turns 1e999 into Infinity)', async () => {
+  const gid = await makeGroup('/srv/proj-non-finite');
+  const originalBroker = groupManager.getGroup(gid).controlBroker;
+  try {
+    // JSON.stringify writes Infinity as null, so plant the literals by hand.
+    const doc = (publishedAt, createdAt) => ({ content: 'x', publishedBy: 'workerA', publishedAt, createdAt });
+    const text = JSON.stringify({
+      [gid]: {
+        bothPosInf: doc('+INF', '+INF'),
+        publishedNegInf: doc('-INF', 5_000),
+        createdPosInf: doc(4_000, '+INF'),
+        createdNegInf: doc(4_000, '-INF'),
+      },
+    }).replaceAll('"+INF"', '1e999').replaceAll('"-INF"', '-1e999');
+    writeFileSync(process.env.CCSERVER_GROUP_DOCS_PATH, text);
+    const planted = JSON.parse(text)[gid];
+    assert.equal(planted.bothPosInf.createdAt, Infinity, 'the fixture really carries Infinity');
+    assert.equal(planted.publishedNegInf.publishedAt, -Infinity);
+
+    const t0 = Date.now();
+    groupManager.restoreGroups();
+    const t1 = Date.now();
+
+    const get = (key) => groupManager.fetchGroupDoc(gid, key);
+    for (const key of ['bothPosInf', 'publishedNegInf', 'createdPosInf', 'createdNegInf']) {
+      assert.ok(get(key).content === 'x', `${key} was restored from the file`);
+      assert.ok(Number.isFinite(get(key).publishedAt), `${key}.publishedAt is finite`);
+      assert.ok(Number.isFinite(get(key).createdAt), `${key}.createdAt is finite`);
+    }
+    // publishedAt: same as a missing one -- the restore time.
+    for (const key of ['bothPosInf', 'publishedNegInf']) {
+      assert.ok(get(key).publishedAt >= t0 && get(key).publishedAt <= t1, `${key}.publishedAt falls back to now`);
+    }
+    // createdAt: same as a missing one -- the doc's publishedAt; a finite one is kept.
+    assert.equal(get('bothPosInf').createdAt, get('bothPosInf').publishedAt);
+    assert.equal(get('publishedNegInf').createdAt, 5_000);
+    assert.equal(get('createdPosInf').createdAt, 4_000);
+    assert.equal(get('createdNegInf').createdAt, 4_000);
+  } finally {
+    if (originalBroker) stopBroker(originalBroker);
+    groupManager.destroyGroup(gid);
+  }
+});

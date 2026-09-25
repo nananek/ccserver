@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { docCreatedAt, sortDocsNewestFirst, sortFilesNewestFirst } from '../client/src/groupBoardOrder.js';
+import { docCreatedAt, formatTime, sortDocsNewestFirst, sortFilesNewestFirst } from '../client/src/groupBoardOrder.js';
 
 const doc = (key, createdAt, publishedAt) => ({ key, createdAt, publishedAt });
 const keys = (docs) => docs.map((d) => d.key);
@@ -40,4 +40,15 @@ test('sortFilesNewestFirst: newest upload first, ties by id, input untouched', (
   ];
   assert.deepEqual(sortFilesNewestFirst(listed).map((f) => f.id), ['f3', 'f2a', 'f2b', 'f1']);
   assert.deepEqual(listed.map((f) => f.id), ['f1', 'f3', 'f2b', 'f2a']);
+});
+
+test('formatTime: no time, or one Date cannot represent, renders as nothing -- never "Invalid Date"', () => {
+  for (const v of [undefined, null, 0, '', 'zzz', NaN, Infinity, -Infinity, 1e300, 8.64e15 + 1, -8.64e15 - 1]) {
+    assert.equal(formatTime(v), '', `formatTime(${String(v)})`);
+  }
+  // A real time still renders, right up to Date's own limit.
+  for (const v of [1, Date.UTC(2026, 8, 25), 8.64e15]) {
+    assert.notEqual(formatTime(v), '', `formatTime(${v})`);
+    assert.equal(formatTime(v), new Date(v).toLocaleString());
+  }
 });

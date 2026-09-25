@@ -1,14 +1,7 @@
 import { useState, useEffect } from 'react';
 import { authFetch } from '../auth.js';
 import PreviewDialog from './PreviewDialog.jsx';
-import { docCreatedAt } from '../groupBoardOrder.js';
-
-function formatTime(ts) {
-  if (!ts) return '';
-  try {
-    return new Date(ts).toLocaleString();
-  } catch { return ''; }
-}
+import { docCreatedAt, formatTime } from '../groupBoardOrder.js';
 
 /**
  * Read-only modal viewer for a group document board entry (publish_doc /
