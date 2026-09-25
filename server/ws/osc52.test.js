@@ -121,3 +121,54 @@ test('preview counts by code point, so astral characters are not split', () => {
 test('an empty payload (a clipboard clear) is distinguishable from ordinary text', () => {
   assert.deepEqual(clipboardWritePreview(''), { text: '', chars: 0, truncated: false });
 });
+
+// The sanitizer used to drop a hand-written list of invisible characters, and
+// characters that do the same job but were not on it stayed in the preview
+// (issue #241 review, F2). A leading run of them spent the whole preview budget,
+// so the dialog showed only "…" while a hidden tail was written too.
+
+test('preview drops invisible characters the old list missed: bidi mark, Mongolian separator, tags, variation selectors, deprecated formats, fillers', () => {
+  const missed = [
+    0x061c, // ARABIC LETTER MARK
+    0x180e, // MONGOLIAN VOWEL SEPARATOR
+    0xe0000, 0xe0041, 0xe007f, // tag characters
+    0xfe00, 0xfe0e, 0xfe0f, // variation selectors
+    0x2065, // reserved, default-ignorable
+    0x206a, 0x206d, 0x206f, // deprecated format characters
+    0x115f, 0x1160, 0x3164, // Hangul fillers
+    0x2800, // BRAILLE PATTERN BLANK
+    0xe0100, // variation selector supplement
+  ];
+  for (const cp of missed) {
+    const ch = String.fromCodePoint(cp);
+    assert.equal(clipboardWritePreview(`a${ch}b`).text, 'ab', `U+${cp.toString(16).toUpperCase()} survived into the preview`);
+  }
+});
+
+test('an invisible run in front of the content cannot spend the truncation budget', () => {
+  // 130 > CLIPBOARD_PREVIEW_MAX: counted before removal, the run alone fills the window.
+  const r = clipboardWritePreview('᠎'.repeat(130) + 'HIDDEN-TAIL');
+  assert.equal(r.text, 'HIDDEN-TAIL');
+  assert.equal(r.truncated, false);
+  assert.equal(r.chars, 141, 'the viewer is still told the real size');
+});
+
+test('truncation is counted after removal: invisible characters spread through long text do not shorten what is shown', () => {
+  const r = clipboardWritePreview('x​ㅤ'.repeat(CLIPBOARD_PREVIEW_MAX));
+  assert.equal(r.text, 'x'.repeat(CLIPBOARD_PREVIEW_MAX));
+  assert.equal(r.truncated, false);
+});
+
+test('a run of blanks of any kind collapses to one space, so blank padding cannot push the content out either', () => {
+  assert.equal(clipboardWritePreview(' '.repeat(200) + 'TAIL').text, ' TAIL');
+  assert.equal(clipboardWritePreview('a 　  b').text, 'a b');
+  assert.equal(clipboardWritePreview(' '.repeat(200) + 'TAIL').truncated, false);
+});
+
+test('a payload with nothing visible in it previews as blank, and still reports its real length', () => {
+  const payload = '⠀'.repeat(30) + 'ㅤ'.repeat(30) + '\u{e0041}' + ' '.repeat(40);
+  const r = clipboardWritePreview(payload);
+  assert.equal(r.text.trim(), '', 'nothing the viewer could read');
+  assert.equal(r.chars, Array.from(payload).length);
+  assert.ok(r.chars > 0, 'so the dialog can tell it apart from a clipboard clear (chars === 0)');
+});

@@ -180,3 +180,40 @@ test('a click acts only on the payload on screen when it began: a swap mid-click
   await expect(prompt(page)).toBeHidden();
   await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(B);
 });
+
+// Invisible characters the sanitizer did not know about used to fill the preview
+// budget: 130 U+180E in front of a tail left the dialog showing only "…" while
+// "許可" wrote the hidden tail as well.
+test('invisible characters cannot make the preview look empty while the payload carries a hidden tail', async ({ page }) => {
+  await openShell(page);
+
+  await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
+  expect(await readClipboard(page)).toBe(SENTINEL);
+
+  const masked = '᠎'.repeat(130) + 'HIDDEN-TAIL';
+  await emitWrite(page, masked, 'OSC52-EMITTED-8');
+  await expect(prompt(page)).toBeVisible();
+  expect(await readClipboard(page)).toBe(SENTINEL);
+
+  // The invisible run is not shown and does not eat the budget: the real
+  // content is what the viewer reads.
+  expect(await page.getByTestId('osc52-write-preview').textContent()).toBe('HIDDEN-TAIL');
+
+  await page.getByRole('button', { name: '許可', exact: true }).click();
+  await expect.poll(() => readClipboard(page), { timeout: 10_000 }).toBe(masked);
+});
+
+test('a payload with nothing visible in it says so instead of showing a blank box', async ({ page }) => {
+  await openShell(page);
+
+  // Braille blank, Hangul filler, a tag character and blanks only: every one
+  // of them renders as nothing or as blank space.
+  const blank = '⠀'.repeat(30) + 'ㅤ'.repeat(30) + '\u{E0041}\u{E007F}' + ' '.repeat(40);
+  await emitWrite(page, blank, 'OSC52-EMITTED-9');
+  await expect(prompt(page)).toBeVisible();
+
+  const shown = (await page.getByTestId('osc52-write-preview').textContent()) ?? '';
+  expect(shown).toContain('見える文字がありません');
+  // It states how much is nevertheless about to be written.
+  expect(shown).toContain(String(Array.from(blank).length));
+});

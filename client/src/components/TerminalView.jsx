@@ -2014,7 +2014,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 clipboardWritePreview (see osc52.js) so it cannot forge dialog
                 lines, and rendered as a JSX child so React escapes it. */}
             <p className="osc52-write-preview" data-testid="osc52-write-preview">
-              {clipboardPrompt.preview.text || '(空 — クリップボードの内容が消去されます)'}
+              {clipboardPrompt.preview.text.trim()
+                ? clipboardPrompt.preview.text
+                : clipboardPrompt.preview.chars === 0
+                  ? '(空 — クリップボードの内容が消去されます)'
+                  // Not empty, but nothing the viewer could read either
+                  // (invisible characters and blanks only): say so, rather
+                  // than showing a box that looks like the empty case.
+                  : `(見える文字がありません — 空白または不可視の文字 ${clipboardPrompt.preview.chars} 文字が書き込まれます)`}
             </p>
             {clipboardPrompt.swapped && (
               <p className="osc52-write-meta" data-testid="osc52-write-swapped">
