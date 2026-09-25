@@ -198,7 +198,7 @@ test('invisible characters cannot make the preview look empty while the payload 
   await page.evaluate((s) => navigator.clipboard.writeText(s), SENTINEL);
   expect(await readClipboard(page)).toBe(SENTINEL);
 
-  const masked = '᠎'.repeat(130) + 'HIDDEN-TAIL';
+  const masked = '\u180e'.repeat(130) + 'HIDDEN-TAIL';
   await emitWrite(page, masked, 'OSC52-EMITTED-8');
   await expect(prompt(page)).toBeVisible();
   expect(await readClipboard(page)).toBe(SENTINEL);
@@ -216,7 +216,7 @@ test('a payload with nothing visible in it says so instead of showing a blank bo
 
   // Braille blank, Hangul filler, a tag character and blanks only: every one
   // of them renders as nothing or as blank space.
-  const blank = '⠀'.repeat(30) + 'ㅤ'.repeat(30) + '\u{E0041}\u{E007F}' + ' '.repeat(40);
+  const blank = '\u2800'.repeat(30) + '\u3164'.repeat(30) + '\u{E0041}\u{E007F}' + ' '.repeat(40);
   await emitWrite(page, blank, 'OSC52-EMITTED-9');
   await expect(prompt(page)).toBeVisible();
 

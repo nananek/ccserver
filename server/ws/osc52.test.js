@@ -147,26 +147,26 @@ test('preview drops invisible characters the old list missed: bidi mark, Mongoli
 
 test('an invisible run in front of the content cannot spend the truncation budget', () => {
   // 130 > CLIPBOARD_PREVIEW_MAX: counted before removal, the run alone fills the window.
-  const r = clipboardWritePreview('᠎'.repeat(130) + 'HIDDEN-TAIL');
+  const r = clipboardWritePreview('\u180e'.repeat(130) + 'HIDDEN-TAIL');
   assert.equal(r.text, 'HIDDEN-TAIL');
   assert.equal(r.truncated, false);
   assert.equal(r.chars, 141, 'the viewer is still told the real size');
 });
 
 test('truncation is counted after removal: invisible characters spread through long text do not shorten what is shown', () => {
-  const r = clipboardWritePreview('x​ㅤ'.repeat(CLIPBOARD_PREVIEW_MAX));
+  const r = clipboardWritePreview('x\u200b\u3164'.repeat(CLIPBOARD_PREVIEW_MAX));
   assert.equal(r.text, 'x'.repeat(CLIPBOARD_PREVIEW_MAX));
   assert.equal(r.truncated, false);
 });
 
 test('a run of blanks of any kind collapses to one space, so blank padding cannot push the content out either', () => {
   assert.equal(clipboardWritePreview(' '.repeat(200) + 'TAIL').text, ' TAIL');
-  assert.equal(clipboardWritePreview('a 　  b').text, 'a b');
+  assert.equal(clipboardWritePreview('a\u00a0\u3000 \u2003b').text, 'a b');
   assert.equal(clipboardWritePreview(' '.repeat(200) + 'TAIL').truncated, false);
 });
 
 test('a payload with nothing visible in it previews as blank, and still reports its real length', () => {
-  const payload = '⠀'.repeat(30) + 'ㅤ'.repeat(30) + '\u{e0041}' + ' '.repeat(40);
+  const payload = '\u2800'.repeat(30) + '\u3164'.repeat(30) + '\u{e0041}' + ' '.repeat(40);
   const r = clipboardWritePreview(payload);
   assert.equal(r.text.trim(), '', 'nothing the viewer could read');
   assert.equal(r.chars, Array.from(payload).length);
