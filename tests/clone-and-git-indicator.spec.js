@@ -42,7 +42,7 @@ async function stubGit(page, { info = { isRepo: false }, clone } = {}) {
   await page.route('**/api/git/info**', async (route) => {
     const path = new URL(route.request().url()).searchParams.get('path');
     seen.info.push(path);
-    const answer = typeof info === 'function' ? info(path) : info;
+    const answer = await (typeof info === 'function' ? info(path) : info);
     if (answer && answer.status) {
       await route.fulfill({ status: answer.status, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) });
       return;
@@ -106,10 +106,15 @@ for (const [label, viewport] of [['desktop', { width: 1280, height: 800 }], ['ph
       const box = await bar.boundingBox();
       expect(box.x).toBeGreaterThanOrEqual(0);
       expect(box.x + box.width).toBeLessThanOrEqual(viewport.width + 0.5);
-      for (const selector of ['.git-info-remote-url', '.git-info-remote-push', '.git-info-branch', '.git-info-remote-name']) {
-        const b = await bar.locator(selector).first().boundingBox();
-        expect(b.x + b.width, selector).toBeLessThanOrEqual(viewport.width + 0.5);
-      }
+      // A box that fits is not enough: an unbroken string that cannot wrap
+      // spills OUT of its box (and out of the clipped page). Every element in
+      // the indicator must contain its own text.
+      const overflowing = await bar.evaluate((el) => [el, ...el.querySelectorAll('*')]
+        .filter((n) => n.scrollWidth > n.clientWidth + 1)
+        .map((n) => n.className || n.tagName));
+      expect(overflowing).toEqual([]);
+      await expect(bar.locator('.git-info-remote-url')).toBeVisible(); // the long values really rendered
+      await expect(bar.locator('.git-info-remote-push')).toBeVisible();
     });
 
     test('the Clone bar: opens, needs a URL, sends the request, reports success and moves into the new folder', async ({ page }) => {
@@ -206,6 +211,23 @@ for (const [label, viewport] of [['desktop', { width: 1280, height: 800 }], ['ph
       await expect(page.getByTestId('clone-bar')).toHaveCount(0);
     });
 
+    test('a very long, unbroken error message stays inside the Clone bar', async ({ page }) => {
+      await stubGit(page, { clone: async () => ({ status: 502, body: { error: `gh repo clone failed (exit 1): ${'q'.repeat(600)}` } }) });
+      await openFiles(page);
+      await page.getByTestId('clone-open').click();
+      await page.getByTestId('clone-url').fill('o/r');
+      await page.getByTestId('clone-submit').click();
+      const alert = page.getByTestId('clone-error');
+      await expect(alert).toContainText('q'.repeat(600));
+      const bar = page.getByTestId('clone-bar');
+      const box = await bar.boundingBox();
+      expect(box.x + box.width).toBeLessThanOrEqual(viewport.width + 0.5);
+      const overflowing = await bar.evaluate((el) => [el, ...el.querySelectorAll('*')]
+        .filter((n) => n.scrollWidth > n.clientWidth + 1)
+        .map((n) => n.className || n.tagName));
+      expect(overflowing).toEqual([]);
+    });
+
     test('opening New Folder closes the Clone bar, and the other way round', async ({ page }) => {
       await stubGit(page);
       await openFiles(page);
@@ -271,13 +293,25 @@ test('repository-supplied strings are rendered as text, never as markup', async 
 });
 
 test('moving to another directory drops the previous repository at once and asks about the new path', async ({ page }) => {
-  const seen = await stubGit(page, { info: (path) => (path === root ? repo() : { isRepo: false }) });
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const seen = await stubGit(page, {
+    info: async (path) => {
+      if (path === root) return repo();
+      await gate; // the answer for the new directory is still in flight
+      return { isRepo: false };
+    },
+  });
   await openFiles(page);
   await expect(page.getByTestId('git-info')).toBeVisible();
 
   await page.locator('.dir-item', { hasText: 'child' }).click();
-  await expect(page.getByTestId('git-info')).toHaveCount(0);
   await expect.poll(() => seen.info.includes(child)).toBe(true);
+  // The request for the new path is pending: the previous repository must
+  // not be shown under the new path in the meantime.
+  await expect(page.locator('.breadcrumbs')).toContainText('child');
+  await expect(page.getByTestId('git-info')).toHaveCount(0);
+  release();
   await expect(page.getByTestId('git-info')).toHaveCount(0);
 
   const before = seen.info.length;
