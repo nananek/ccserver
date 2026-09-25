@@ -49,7 +49,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { createServer } from 'node:net';
+import { createServer, createConnection } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
@@ -473,35 +473,52 @@ function runServer({ sock, allowlist, cwd, commitGuard, app }) {
   process.on('SIGINT', shutdown);
 }
 
-// Synchronous readiness probe: spawn a short-lived helper that connects and expects a JSON line.
-// Uses execFileSync with timeout so the current thread can block without starving the event loop.
-function probeBrokerSync(sockPath, timeoutMs = 700, token = '') {
-  const probeScript = `
-    const net=require('net');
-    const sock=process.argv[1];
-    const tok=process.argv[2]||'';
-    const c=net.createConnection(sock);
-    let buf='';
-    const t=setTimeout(()=>process.exit(2), ${timeoutMs});
-    c.on('connect',()=>{ try{c.write(JSON.stringify({op:'probe',token:tok})+'\\n');}catch{} });
-    c.on('data',d=>{ buf+=d; if(buf.includes('\\n')){ clearTimeout(t); process.stdout.write(buf); c.end(); }});
-    c.on('error',()=>{ clearTimeout(t); process.exit(1); });
-    c.on('close',()=>{ if(buf) process.exit(0); });
-    c.on('end',()=>{ clearTimeout(t); process.exit(buf.includes('\\n')?0:1); });
-  `;
-  try {
-    const out = execFileSync(process.execPath, ['-e', probeScript, sockPath, token], {
-      encoding: 'utf-8',
-      timeout: timeoutMs + 500,
-      stdio: ['ignore', 'pipe', 'pipe'],
+// Readiness probe: connect to the socket and confirm the broker actually
+// speaks the protocol (and accepts our token), rather than trusting that the
+// socket file appearing means it is serving.
+//
+// This used to run the same handshake inside a FRESH NODE PROCESS via
+// execFileSync, on a fixed 500ms budget. That was the single most expensive
+// thing about starting a broker, and almost none of the 500ms was the probe:
+// under 8x CPU oversubscription `node -e 'process.exit(0)'` alone takes
+// 374-717ms to boot, so the budget could expire before the probe script had
+// even started running. Measured on this host, that is what actually failed
+// under load -- 6/20 launches on master and 4/20 on the first cut of this
+// branch died here with "readiness probe failed", NOT on the socket wait
+// this PR had already fixed (#248).
+//
+// The child process was only ever there because startGitBroker was
+// synchronous and could not await a socket. It is async now (see the wait
+// above), so the parent can just speak the protocol itself -- which is what
+// network-broker.js's probeBroker already does. Removing the child removes
+// the cost that was blowing the budget, instead of raising the budget to
+// cover it.
+function probeBrokerReady(sockPath, timeoutMs, token = '') {
+  return new Promise((resolve) => {
+    let settled = false;
+    let buf = '';
+    // A complete line means the broker answered. The probe always sends the
+    // real token, so a well-formed non-'unauthorized' reply = ready + authed.
+    const verdict = () => buf.includes('\n') && !buf.includes('"unauthorized"');
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { conn.destroy(); } catch { /* already gone */ }
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    const conn = createConnection(sockPath);
+    conn.on('connect', () => {
+      try { conn.write(`${JSON.stringify({ op: 'probe', token })}\n`); } catch { finish(false); }
     });
-    // A `\n`-terminated line means the broker is up and accepted our token
-    // (an unauthorized reply is still a valid line -- but the probe always
-    // sends the real token, so a well-formed response = ready + authed).
-    return typeof out === 'string' && out.includes('\n') && !out.includes('"unauthorized"');
-  } catch {
-    return false;
-  }
+    conn.on('data', (d) => {
+      buf += d;
+      if (buf.includes('\n')) finish(verdict());
+    });
+    conn.on('error', () => finish(false));
+    conn.on('close', () => finish(verdict()));
+  });
 }
 
 // Compute the allow-list once and launch a fresh broker instance for a
@@ -694,6 +711,7 @@ export async function startGitBroker(
   // ordering still holds, and two sessions starting at once no longer
   // serialise behind each other's broker spawn.
   const budgetMs = brokerStartupBudgetMs();
+  const startedAt = Date.now();
   const { value: ready, waitedMs } = await awaitBrokerReady({
     probe: () => existsSync(sockPath),
     isDead: () => spawnError !== null || proc.exitCode !== null || proc.signalCode !== null,
@@ -709,12 +727,27 @@ export async function startGitBroker(
     throw new Error(`git broker failed to start for ${cwd}: ${reason}`);
   }
 
-  // Readiness probe: ensure the broker actually speaks the protocol
-  const probed = probeBrokerSync(sockPath, 500, token);
+  // The probe shares ONE deadline with the socket wait above, rather than
+  // adding a second budget after it: "the broker is up and answering" is a
+  // single question, and two stacked budgets would make the real worst case
+  // twice what CCSERVER_BROKER_STARTUP_TIMEOUT_MS says. The floor is not a
+  // tuned budget -- it just means a socket that appeared in the last
+  // milliseconds of the budget still gets a real attempt instead of a 0ms one.
+  const probeBudgetMs = Math.max(budgetMs - (Date.now() - startedAt), 250);
+  const probeStartedAt = Date.now();
+  const probed = await probeBrokerReady(sockPath, probeBudgetMs, token);
   if (!probed) {
     try { proc.kill('SIGKILL'); } catch {}
     try { rmSync(dir, { recursive: true, force: true }); } catch {}
-    throw new Error(`git broker readiness probe failed for ${cwd}: no response on ${sockPath}`);
+    const alive = proc.exitCode === null && proc.signalCode === null;
+    throw new Error(
+      `git broker readiness probe failed for ${cwd}: the socket ${sockPath} exists but the broker `
+      + `did not answer within ${Date.now() - probeStartedAt}ms `
+      + (alive
+        ? '(the process was still alive, so it was too slow rather than broken -- '
+          + 'raise CCSERVER_BROKER_STARTUP_TIMEOUT_MS on a loaded host)'
+        : `(the process is gone: exitCode=${proc.exitCode} signal=${proc.signalCode})`),
+    );
   }
 
   return { proc, dir, sockPath, allowlistPath, allowlist, commitGuardPath, token };

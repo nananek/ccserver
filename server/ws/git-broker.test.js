@@ -907,3 +907,82 @@ describe('#248: a dead broker child is detected, not waited out', () => {
     assert.doesNotMatch(err.message, /exited code=/, 'nothing exited here');
   });
 });
+
+// --- #248 F1: the readiness probe is no longer a second fixed budget --------
+//
+// After the socket wait was fixed, the launch still ran a probe that spawned a
+// FRESH NODE PROCESS on its own fixed 500ms budget. Under load that budget was
+// mostly node's own boot (374-717ms at 8x oversubscription), so it expired
+// before the probe ran: the gate measured 6/20 launches on master failing here
+// -- on the path this PR had supposedly fixed. The probe now speaks the
+// protocol from the parent, and shares ONE deadline with the socket wait.
+//
+// Measured, 20 alternating launches per side under 8x oversubscription:
+//   master 2/20 failed (both on the probe); this branch 0/20, and faster
+//   (p50 1079ms vs 1715ms) because the probe no longer boots a node.
+describe('#248: the readiness probe', () => {
+  const sockOf = (args) => args[args.indexOf('--sock') + 1];
+
+  test('a socket file that is not a live broker is rejected, not taken as ready', async () => {
+    // existsSync(sockPath) is true, so the socket WAIT is satisfied -- only the
+    // probe can catch this. Without a probe the launch would hand the sandbox a
+    // bind-mounted dead file and fail later, inside the session.
+    const prev = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = '800';
+    let err = null;
+    let child = null;
+    try {
+      await startGitBroker({ cwd: repoDir }, {
+        spawnProcess: (_cmd, args, opts) => {
+          const script = `require('fs').writeFileSync(${JSON.stringify(sockOf(args))}, ''); setTimeout(() => {}, 30000);`;
+          child = spawn(process.execPath, ['-e', script], opts);
+          return child;
+        },
+      });
+    } catch (e) {
+      err = e;
+    } finally {
+      if (prev === undefined) delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+      else process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prev;
+      try { child?.kill('SIGKILL'); } catch { /* gone */ }
+    }
+    assert.ok(err, 'a dead socket must fail the launch');
+    assert.match(err.message, /readiness probe failed/);
+    assert.match(err.message, /exists but the broker did not answer/,
+      'the message must say the socket was there and the broker was not');
+  });
+
+  test('a broker that accepts but never replies is bounded by the shared deadline', async () => {
+    // The probe's own timeout path: a real listener, so connect() succeeds and
+    // only the deadline can end it. Restoring a fixed budget here would still
+    // pass -- what this pins is that the wait is BOUNDED and attributed to the
+    // probe rather than hanging the launch.
+    const prev = process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+    process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = '900';
+    const started = Date.now();
+    let err = null;
+    let child = null;
+    try {
+      await startGitBroker({ cwd: repoDir }, {
+        spawnProcess: (_cmd, args, opts) => {
+          const script = `const net=require('net');`
+            + `net.createServer(() => { /* accept and say nothing, ever */ }).listen(${JSON.stringify(sockOf(args))});`
+            + `setTimeout(() => {}, 30000);`;
+          child = spawn(process.execPath, ['-e', script], opts);
+          return child;
+        },
+      });
+    } catch (e) {
+      err = e;
+    } finally {
+      if (prev === undefined) delete process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS;
+      else process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS = prev;
+      try { child?.kill('SIGKILL'); } catch { /* gone */ }
+    }
+    const elapsed = Date.now() - started;
+    assert.ok(err, 'a broker that never answers must fail the launch');
+    assert.match(err.message, /readiness probe failed/);
+    assert.match(err.message, /still alive/, 'it was slow, not dead -- say so');
+    assert.ok(elapsed < 5000, `the probe must be bounded, took ${elapsed}ms`);
+  });
+});

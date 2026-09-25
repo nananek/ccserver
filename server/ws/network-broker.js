@@ -796,10 +796,6 @@ export async function startNetworkBroker(
   return { proc, dir, port, token, adminToken, allowedHosts, deniedHosts, mode, state };
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 // Async readiness probe: connect and confirm the port actually accepts TCP
 // connections -- a bare connect+close is enough to distinguish "listening"
 // from "nothing there yet". Was a synchronous execFileSync-spawned-subprocess
