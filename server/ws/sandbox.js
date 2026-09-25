@@ -1903,6 +1903,17 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     for (const src of Object.values(relaySockets)) {
       args.push('--bind-try', src, join(targetDir, basename(src)));
     }
+    // Without rootlesskit the sandbox keeps the host uid and has /run/user/<uid>
+    // (XDG_RUNTIME_DIR above), so GnuPG looks for the agent socket of this
+    // non-default GNUPGHOME under /run/user/<uid>/gnupg/d.<hash>/, NOT in
+    // GNUPGHOME. The bind above alone would leave gpg unable to reach the relay:
+    // it starts an empty agent of its own inside the sandbox and signing fails
+    // with "No secret key" (see gnupgRunUserAgentSocket). Under rootlesskit the
+    // uid is 0, /run/user/0 does not exist, and the GNUPGHOME bind is the one
+    // GnuPG uses -- left exactly as it was.
+    if (!usesRootlesskit) {
+      args.push('--bind-try', relaySockets.agent, gpgVaultRelay.gnupgRunUserAgentSocket(targetDir, process.getuid()));
+    }
     args.push('--setenv', 'GNUPGHOME', targetDir);
     // Unlike authSock above (bind source==dest, a live host path), the
     // vault's ssh socket lands at a different in-sandbox path, so

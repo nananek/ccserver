@@ -10,7 +10,7 @@ import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { buildSandboxSpawn } from './sandbox.js';
@@ -24,7 +24,7 @@ import {
   isUnlocked,
   getUnlockedAgentInfo,
 } from './gpgVaultAgent.js';
-import { getRelaySocketPaths, getRelayDir, ensureStarted as ensureGpgVaultRelayStarted, stop as stopGpgVaultRelay } from './gpgVaultRelay.js';
+import { getRelaySocketPaths, getRelayDir, gnupgRunUserAgentSocket, ensureStarted as ensureGpgVaultRelayStarted, stop as stopGpgVaultRelay } from './gpgVaultRelay.js';
 
 const TOOLS_AVAILABLE = gpgVaultToolsAvailable();
 const IS_LINUX_BWRAP = process.platform !== 'darwin';
@@ -189,6 +189,72 @@ test('gpgVault:true while unlocked: binds public files+sockets, sets GNUPGHOME/S
     assert.ok(!argsStr.includes('openpgp-revocs.d'), 'revocation certs must never be bound into the sandbox');
     assert.ok(!argsStr.includes('sshcontrol'), 'sshcontrol (host-only ssh-agent config) must never be bound into the sandbox');
   } finally {
+    cleanupSpawn(spawn);
+  }
+});
+
+// GnuPG keeps the agent socket of a non-default homedir at
+// /run/user/<uid>/gnupg/d.<hash>/S.gpg-agent whenever /run/user/<uid> exists,
+// and only falls back to <homedir>/S.gpg-agent when it does not. A sandbox
+// without rootlesskit keeps the host uid and always has /run/user/<uid>, so the
+// relay socket must be bound at that path too (it used to be bound only at
+// GNUPGHOME, which gpg never looked at there).
+// Vectors: `gpgconf --homedir H --list-dirs agent-socket`, GnuPG 2.4.4 (Ubuntu
+// 24.04) and 2.4.9 (Arch), captured with /run/user/<uid> present.
+test('gnupgRunUserAgentSocket: reproduces the socket path GnuPG picks for a non-default homedir', () => {
+  assert.equal(gnupgRunUserAgentSocket('/run/user/1001/gnupg-vault', 1001), '/run/user/1001/gnupg/d.bxsbgohuux7fdfjec7jkib1o/S.gpg-agent');
+  assert.equal(gnupgRunUserAgentSocket('/run/user/1000/gnupg-vault', 1001), '/run/user/1001/gnupg/d.ktazf4to9xw1fi3ts6w5ekjm/S.gpg-agent');
+  assert.equal(gnupgRunUserAgentSocket('/home/u/.gnupg-vault', 0), '/run/user/0/gnupg/d.yeh1bu1d5hu38tts5g44fur1/S.gpg-agent');
+});
+
+// The vectors above pin two GnuPG versions; this one follows whatever GnuPG the
+// host actually has, so a change in its hashing turns this red instead of
+// silently sending gpg back to an empty agent of its own.
+test('gnupgRunUserAgentSocket matches what this host\'s gpgconf returns', { skip: !TOOLS_AVAILABLE || process.platform !== 'linux' || !existsSync(`/run/user/${process.getuid()}`) }, () => {
+  const uid = process.getuid();
+  for (const home of ['/run/user/1001/gnupg-vault', '/home/u/.gnupg-vault', join(tmpRoot, 'gnupg-vault')]) {
+    const actual = execFileSync('gpgconf', ['--homedir', home, '--list-dirs', 'agent-socket'], { timeout: 5000, encoding: 'utf8' }).trim();
+    assert.equal(gnupgRunUserAgentSocket(home, uid), actual, `homedir ${home}`);
+  }
+});
+
+function hasBindTry(args, src, dest) {
+  return args.some((a, i) => a === '--bind-try' && args[i + 1] === src && args[i + 2] === dest);
+}
+
+test('gpgVault without rootlesskit: the relay socket is bound at GNUPGHOME and at the path GnuPG looks at under /run/user/<uid>', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
+  setUpUnlockedVault();
+  const spawn = await spawnFor({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } });
+  try {
+    const relaySock = getRelaySocketPaths().agent;
+    const gnupgHome = findSetenv(spawn.args, 'GNUPGHOME');
+    assert.ok(hasBindTry(spawn.args, relaySock, join(gnupgHome, 'S.gpg-agent')), 'the GNUPGHOME bind is still there');
+    assert.ok(
+      hasBindTry(spawn.args, relaySock, gnupgRunUserAgentSocket(gnupgHome, process.getuid())),
+      `relay socket also bound where gpg resolves it, got: ${spawn.args.join(' ')}`,
+    );
+    // Only the restricted agent relay is aliased; the ssh socket is reached through SSH_AUTH_SOCK, never looked up by gpg.
+    assert.ok(!spawn.args.some((a) => typeof a === 'string' && a.includes('/gnupg/d.') && a.endsWith('S.gpg-agent.ssh')));
+  } finally {
+    cleanupSpawn(spawn);
+  }
+});
+
+// rootlesskit runs the sandbox as uid 0, where /run/user/0 does not exist and
+// GnuPG uses GNUPGHOME itself: nothing may change for that path.
+test('gpgVault under rootlesskit (uid 0): the relay socket stays bound at GNUPGHOME only, no /run/user alias', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP }, async () => {
+  setUpUnlockedVault();
+  writeFileSync(cfgPath, JSON.stringify({ docker: true, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }));
+  const spawn = await buildSandboxSpawn(
+    { cwd: tmpRoot, targetCommand: ['claude'], app: 'claude', sandboxOpts: { gpgVault: true } },
+    { dockerSandboxAvailable: () => true },
+  );
+  try {
+    assert.equal(spawn.command, '/usr/bin/rootlesskit', 'docker:true takes the rootlesskit path');
+    assert.ok(hasBindTry(spawn.args, getRelaySocketPaths().agent, join(homedir(), '.gnupg-vault', 'S.gpg-agent')), 'GNUPGHOME bind under docker');
+    assert.ok(!spawn.args.some((a) => typeof a === 'string' && a.includes('/gnupg/d.')), 'no /run/user/<uid>/gnupg/d.<hash> alias');
+  } finally {
+    if (spawn.stateDir) rmSync(spawn.stateDir, { recursive: true, force: true });
     cleanupSpawn(spawn);
   }
 });
@@ -446,11 +512,21 @@ test('F1: the relayed ssh-agent lists and signs with the vault key but refuses t
 // Replays the audit's exact repro inside a REAL bwrap sandbox built by
 // buildSandboxSpawn (not just argv inspection): the sandbox's own gpg, with
 // the GNUPGHOME/SSH_AUTH_SOCK the launch sets up, tries to export the key.
+//
+// The export assertions only mean something if that gpg talks to the RELAY. When
+// it does not, gpg starts an empty agent of its own inside the sandbox: exports
+// then yield 0 bytes because there is no key at all, not because the relay
+// refused. So reachability is asserted first, on a --no-autostart connection
+// made before any gpg call could start such an agent, and again at the end that
+// no agent of its own was started.
 test('F1 (real bwrap): inside a gpgVault:true sandbox, export-secret-keys yields nothing, signing and ssh still work', { skip: !TOOLS_AVAILABLE || !IS_LINUX_BWRAP || !bwrapUsable() }, async (t) => {
   const vault = setUpUnlockedVault();
   const script = [
     'set -u',
     'export LC_ALL=C',
+    'echo "AGENT_SOCKET=$(gpgconf --list-dirs agent-socket)"',
+    'if [ -S "$(gpgconf --list-dirs agent-socket)" ]; then echo AGENT_SOCKET_IS_SOCKET=yes; else echo AGENT_SOCKET_IS_SOCKET=no; fi',
+    'echo "RESTRICTED=$(gpg-connect-agent --no-autostart "GETINFO restricted" /bye 2>&1 | grep -m1 -E "^(OK|ERR)")"',
     `n=$(gpg --batch --pinentry-mode loopback --export-secret-keys ${vault.fingerprint} 2>/dev/null | wc -c)`,
     'echo "EXPORT_BYTES=$n"',
     `m=$(gpg --batch --export-secret-subkeys ${vault.fingerprint} 2>/dev/null | wc -c)`,
@@ -458,6 +534,7 @@ test('F1 (real bwrap): inside a gpgVault:true sandbox, export-secret-keys yields
     'echo "KEYWRAP=$(gpg-connect-agent --no-autostart "KEYWRAP_KEY --export" /bye 2>&1 | grep -m1 -E "^(OK|ERR|D)")"',
     `if echo tree | gpg --batch --status-fd=1 -bsau ${vault.fingerprint} 2>/dev/null | grep -q SIG_CREATED; then echo SIGN=ok; else echo SIGN=fail; fi`,
     'if ssh-add -L >/dev/null 2>&1; then echo SSH=ok; else echo SSH=fail; fi',
+    'echo "LOCAL_AGENTS=$(grep -lx gpg-agent /proc/[0-9]*/comm 2>/dev/null | wc -l)"',
     'ls "$GNUPGHOME"',
   ].join('\n');
   const sb = await spawnFor(
@@ -471,11 +548,14 @@ test('F1 (real bwrap): inside a gpgVault:true sandbox, export-secret-keys yields
       t.skip(`bwrap could not assemble the sandbox on this host: ${res.stderr.trim().split('\n')[0]}`);
       return;
     }
+    assert.match(out, /AGENT_SOCKET_IS_SOCKET=yes/, `the agent socket gpg resolves inside the sandbox must exist:\n${out}`);
+    assert.match(out, /RESTRICTED=OK/, `gpg inside the sandbox must reach the relay's restricted agent, not an agent of its own:\n${out}`);
     assert.match(out, /EXPORT_BYTES=0\b/, `secret key export must yield 0 bytes inside the sandbox:\n${out}`);
     assert.match(out, /SUBKEY_EXPORT_BYTES=0\b/, out);
     assert.match(out, /KEYWRAP=ERR 67109115 /, out);
     assert.match(out, /SIGN=ok/, `signing must still work inside the sandbox:\n${out}`);
     assert.match(out, /SSH=ok/, out);
+    assert.match(out, /LOCAL_AGENTS=0\b/, `no gpg-agent of its own may be running inside the sandbox:\n${out}`);
     // What the sandbox can see of the vault homedir: public files and the two
     // relay sockets, nothing else.
     assert.doesNotMatch(out, /private-keys-v1\.d|sshcontrol|S\.gpg-agent\.extra|S\.keyboxd|S\.dirmngr/, out);
