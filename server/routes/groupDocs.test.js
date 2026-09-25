@@ -45,6 +45,9 @@ test('GET /api/groups/:id/docs returns metadata only (404 for unknown group)', a
   const body = res.json();
   assert.ok(Array.isArray(body.docs));
   assert.equal(body.docs.length, 0);
+  // count / limit are added next to docs (#276)
+  assert.equal(body.count, 0);
+  assert.equal(body.limit, 50);
 
   const notFound = await app.inject({ method: 'GET', url: '/api/groups/nope/docs' });
   assert.equal(notFound.statusCode, 404);
@@ -73,6 +76,27 @@ test('list/content round-trip reflects publish_doc without leaking content in th
   assert.equal(body.createdAt, entry.createdAt, 'content reports the same createdAt as the list');
 });
 
+test('GET /docs reports count and limit next to the unchanged docs list, and they follow publish and delete', async () => {
+  const before = (await app.inject({ method: 'GET', url: `/api/groups/${groupId}/docs` })).json();
+  groupManager.publishGroupDoc(groupId, 'orchestrator', 'usage-a', 'x');
+  groupManager.publishGroupDoc(groupId, 'workerA', 'usage-b', 'x');
+
+  const res = await app.inject({ method: 'GET', url: `/api/groups/${groupId}/docs` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.deepEqual(Object.keys(body).sort(), ['count', 'docs', 'limit']);
+  assert.equal(body.limit, 50);
+  assert.equal(body.count, body.docs.length);
+  assert.equal(body.count, before.count + 2);
+  for (const d of body.docs) assert.deepEqual(Object.keys(d).sort(), ['createdAt', 'key', 'publishedAt', 'publishedBy', 'size']);
+
+  groupManager.deleteGroupDoc(groupId, 'orchestrator', 'usage-a');
+  groupManager.deleteGroupDoc(groupId, 'orchestrator', 'usage-b');
+  const after = (await app.inject({ method: 'GET', url: `/api/groups/${groupId}/docs` })).json();
+  assert.equal(after.count, before.count);
+  assert.equal(after.docs.length, before.docs.length);
+});
+
 test('content 404s for unknown key and unknown group, 400 without key', async () => {
   const missingKey = await app.inject({ method: 'GET', url: `/api/groups/${groupId}/docs/content?key=nope` });
   assert.equal(missingKey.statusCode, 404);
@@ -89,4 +113,27 @@ test('docs route is read-only: no write methods registered', async () => {
   assert.equal(post.statusCode, 404);
   const del = await app.inject({ method: 'DELETE', url: `/api/groups/${groupId}/docs/content?key=plan` });
   assert.equal(del.statusCode, 404);
+});
+
+// delete_doc is the orchestrator's MCP tool (#276); the browser-facing REST
+// surface gained no way to delete. Every shape a delete could take is tried,
+// and the document must still be there afterwards.
+test('docs route cannot delete: no DELETE/PUT/PATCH on any docs path, and the document survives', async () => {
+  groupManager.publishGroupDoc(groupId, 'orchestrator', 'rest-keep', 'still here');
+  const attempts = [
+    ['DELETE', `/api/groups/${groupId}/docs?key=rest-keep`],
+    ['DELETE', `/api/groups/${groupId}/docs/rest-keep`],
+    ['DELETE', `/api/groups/${groupId}/docs/content?key=rest-keep`],
+    ['PUT', `/api/groups/${groupId}/docs?key=rest-keep`],
+    ['PATCH', `/api/groups/${groupId}/docs/content?key=rest-keep`],
+    ['POST', `/api/groups/${groupId}/docs/delete?key=rest-keep`],
+  ];
+  for (const [method, url] of attempts) {
+    const res = await app.inject({ method, url, payload: { key: 'rest-keep' } });
+    assert.equal(res.statusCode, 404, `${method} ${url}`);
+  }
+  const still = await app.inject({ method: 'GET', url: `/api/groups/${groupId}/docs/content?key=rest-keep` });
+  assert.equal(still.statusCode, 200);
+  assert.equal(still.json().content, 'still here');
+  groupManager.deleteGroupDoc(groupId, 'orchestrator', 'rest-keep');
 });

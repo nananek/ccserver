@@ -3,7 +3,8 @@ import * as groupManager from '../ws/groupManager.js';
 // Read-only REST view onto the group document board (publish_doc/fetch_doc/
 // list_docs -- see groupManager.js's "group-scoped document sharing"
 // section). No POST/PUT/DELETE here on purpose: publishing/deleting a doc
-// stays an MCP-only (agent) action, the browser can only look.
+// stays an MCP-only (agent) action -- deleting is the orchestrator's alone --
+// and the browser can only look.
 export async function groupDocsRoute(fastify, opts) {
   // List docs for a group. No content, mirroring listGroupDocs()/list_docs's
   // "list is cheap, fetch is deliberate" shape.
@@ -12,7 +13,9 @@ export async function groupDocsRoute(fastify, opts) {
     const group = groupManager.getGroup(groupId);
     if (!group) return reply.code(404).send({ error: 'Group not found' });
     const docs = groupManager.listGroupDocs(groupId);
-    return { docs };
+    // count / limit ride along with docs (same as list_docs): the usage the
+    // board is held to, so a UI or a script can show "n / limit".
+    return { docs, ...groupManager.getGroupDocUsage(groupId) };
   });
 
   // Fetch one doc's content. `key` is a query param rather than a path

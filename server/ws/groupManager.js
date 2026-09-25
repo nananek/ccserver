@@ -1442,11 +1442,6 @@ export function destroyGroup(groupId) {
 // the group's memory footprint must stay bounded regardless of how it's used.
 const MAX_DOC_BYTES = 256 * 1024;
 const MAX_DOCS_PER_GROUP = 50;
-// The orchestrator's share of that cap. It has no delete_doc, so without its
-// own ceiling a document per request would fill all the slots and leave the
-// workers unable to publish (a plan, a findings document): the workers always
-// keep MAX_DOCS_PER_GROUP - MAX_ORCHESTRATOR_DOCS of them.
-const MAX_ORCHESTRATOR_DOCS = 20;
 
 // Re-publishing the same key overwrites it (whoever published most recently
 // wins) -- kept deliberately simple for a "message board", no versioning. See
@@ -1465,6 +1460,12 @@ const MAX_ORCHESTRATOR_DOCS = 20;
 // can be (WORKER_ROLE_RE). Anything else -- including a missing role and a
 // doc persisted with no publisher -- counts as the worker side, so an absent
 // identity can never be treated as the orchestrator.
+// The boundary is about publish: the orchestrator CAN delete any document
+// (deleteGroupDoc), and the key is then free for either side. What it
+// publishes there afterwards is recorded as published by 'orchestrator', which
+// the server sets, so it never reads as a worker's document -- a reviewer's
+// findings in particular -- and the pre-PR check that looks at publishedBy
+// rejects it.
 // publishedAt follows the overwrite (it is the last-publish time);
 // createdAt is kept from the first publish of the key.
 export function publishGroupDoc(groupId, role, key, content) {
@@ -1486,14 +1487,9 @@ export function publishGroupDoc(groupId, role, key, content) {
     return { error: 'too-large', message: `content exceeds the ${MAX_DOC_BYTES} byte limit (got ${byteLength} bytes)` };
   }
   if (!group.docs.has(key) && group.docs.size >= MAX_DOCS_PER_GROUP) {
-    return { error: 'too-many-docs', message: `group already has the maximum of ${MAX_DOCS_PER_GROUP} published documents` };
-  }
-  // Overwriting one of its own keys adds no document, so it is exempt.
-  if (role === 'orchestrator' && !group.docs.has(key)
-    && [...group.docs.values()].filter((d) => d.publishedBy === 'orchestrator').length >= MAX_ORCHESTRATOR_DOCS) {
     return {
-      error: 'too-many-orchestrator-docs',
-      message: `the orchestrator already holds the maximum of ${MAX_ORCHESTRATOR_DOCS} published documents; re-publish under one of your existing keys (list_docs shows them) to overwrite it instead of adding a new one`,
+      error: 'too-many-docs',
+      message: `group already has the maximum of ${MAX_DOCS_PER_GROUP} published documents; only the orchestrator can free a slot: it checks usage with list_docs (count / limit) and removes documents that are no longer needed with delete_doc`,
     };
   }
   const now = Date.now();
@@ -1526,7 +1522,25 @@ export function listGroupDocs(groupId) {
   }));
 }
 
+// How full the board is: what list_docs (MCP) and GET /docs (REST) report next
+// to the documents, so the orchestrator -- the only role that can clear it --
+// sees the usage before a publish fails on it.
+export function getGroupDocUsage(groupId) {
+  const group = groups.get(groupId);
+  return { count: group ? group.docs.size : 0, limit: MAX_DOCS_PER_GROUP };
+}
+
+// The orchestrator deletes any document, whoever published it; nobody else
+// can. `role` is the closure-bound identity from the control MCP server (the
+// only caller: mcpTools.deleteDocAsOrchestrator), never the wire. It is
+// checked here as well, so a caller that passes anything else -- a worker's
+// role, a missing role -- is refused instead of being trusted to have been
+// filtered out upstream. The publish-side ownership boundary is not consulted:
+// deleting is how the orchestrator frees a key, on either side of it.
 export function deleteGroupDoc(groupId, role, key) {
+  if (role !== 'orchestrator') {
+    return { error: 'forbidden', message: 'only the orchestrator can delete documents' };
+  }
   const group = groups.get(groupId);
   if (!group) return { error: 'group-not-found', message: 'group not found' };
   if (!group.docs.has(key)) return { error: 'not-found', message: `no document published under key "${key}"` };
@@ -2059,6 +2073,7 @@ const groupManagerApi = {
   publishGroupDoc,
   fetchGroupDoc,
   listGroupDocs,
+  getGroupDocUsage,
   deleteGroupDoc,
   listGroupFiles,
   fetchGroupFile,

@@ -472,7 +472,7 @@ export function handoffToOrchestrator(deps, { summary, status = 'done', nextRole
   return ok ? { ok: true } : { error: 'group-not-found' };
 }
 
-// --- publish_doc / fetch_doc / list_docs ------------------------------------
+// --- publish_doc / fetch_doc / list_docs / delete_doc -----------------------
 // Group-scoped document sharing (plan section 7): lets any member hand off
 // content directly to any other member (worker<->worker, or a worker
 // publishing something the orchestrator wants to see) without relaying it
@@ -490,6 +490,12 @@ export function handoffToOrchestrator(deps, { summary, status = 'done', nextRole
 // server calls publishDocAsOrchestrator, the handoff server calls publishDoc,
 // and neither identity is ever taken from the wire. What the two may
 // overwrite of each other's keys is decided in groupManager.publishGroupDoc.
+//
+// delete_doc follows the same shape and exists ONLY on the control server:
+// deleteDocAsOrchestrator names the orchestrator explicitly, takes the key and
+// nothing else, and there is no worker-side counterpart to fall back on.
+// groupManager.deleteGroupDoc refuses any other role as well, so the facade
+// that the handoff server also receives cannot be used to delete.
 
 export function publishDoc(deps, { key, content }) {
   return deps.groupManager.publishGroupDoc(deps.groupId, deps.role || null, key, content);
@@ -499,12 +505,21 @@ export function publishDocAsOrchestrator(deps, { key, content }) {
   return deps.groupManager.publishGroupDoc(deps.groupId, 'orchestrator', key, content);
 }
 
+export function deleteDocAsOrchestrator(deps, { key }) {
+  return deps.groupManager.deleteGroupDoc(deps.groupId, 'orchestrator', key);
+}
+
 export function fetchDoc(deps, { key }) {
   return deps.groupManager.fetchGroupDoc(deps.groupId, key);
 }
 
+// `count` / `limit` sit next to `docs` (added, nothing existing changed): how
+// full the board is, for the orchestrator that has to keep it under the limit.
 export function listDocs(deps) {
-  return { docs: deps.groupManager.listGroupDocs(deps.groupId) };
+  return {
+    docs: deps.groupManager.listGroupDocs(deps.groupId),
+    ...deps.groupManager.getGroupDocUsage(deps.groupId),
+  };
 }
 
 // --- group file exchange (browser <-> agent, agent <-> browser) ------------

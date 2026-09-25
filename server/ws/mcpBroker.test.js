@@ -306,18 +306,18 @@ test('control socket: tools/call list_group_sessions over the wire', async () =>
   c.close();
 });
 
-// The orchestrator gained exactly one tool (publish_doc); every other tool's
-// availability is pinned here as an exact set, so a tool appearing on -- or
-// vanishing from -- the control socket fails loudly instead of slipping past
-// the `includes` check above. publish_file stays worker-only.
-test('control socket: the exact tool set is the previous one plus publish_doc', async () => {
+// The orchestrator gained exactly two tools (publish_doc, then delete_doc);
+// every other tool's availability is pinned here as an exact set, so a tool
+// appearing on -- or vanishing from -- the control socket fails loudly instead
+// of slipping past the `includes` check above. publish_file stays worker-only.
+test('control socket: the exact tool set is the previous one plus publish_doc and delete_doc', async () => {
   const c = mcpClient(control);
   await c.connected;
   const { tools } = await c.call('tools/list');
   assert.deepEqual(
     tools.map((t) => t.name).sort(),
     [
-      'close_tab', 'fetch_doc', 'fetch_file', 'get_tab_status', 'list_docs', 'list_files',
+      'close_tab', 'delete_doc', 'fetch_doc', 'fetch_file', 'get_tab_status', 'list_docs', 'list_files',
       'list_group_sessions', 'new_session', 'open_tab', 'publish_doc', 'read_output',
       'repo_info', 'send_input', 'send_key', 'wait_for_handoff',
     ].sort(),
@@ -374,6 +374,80 @@ test('wire: the orchestrator boundary holds in both directions and leaves the do
   const instruction = await callTool(worker, 'fetch_doc', { key: 'wire-instruction' });
   assert.equal(instruction.content, 'attack it');
   assert.equal(instruction.publishedBy, 'orchestrator');
+  orch.close();
+  worker.close();
+});
+
+// delete_doc (#276): the orchestrator's alone, key only, identity from the
+// socket. Everything the worker side could try -- a wire-supplied identity, the
+// tool itself -- is exercised over the real sockets.
+test('control socket: delete_doc takes only a key, deletes as the orchestrator whatever the wire claims, and frees the key', async () => {
+  const orch = mcpClient(control);
+  const worker = mcpClient(handoff);
+  await Promise.all([orch.connected, worker.connected]);
+
+  const { tools } = await orch.call('tools/list');
+  const del = tools.find((t) => t.name === 'delete_doc');
+  assert.ok(del, 'delete_doc is exposed on the control socket');
+  assert.deepEqual(Object.keys(del.inputSchema.properties), ['key']);
+  assert.deepEqual([...del.inputSchema.required], ['key']);
+
+  assert.equal((await callTool(worker, 'publish_doc', { key: 'wire-del-findings', content: 'reviewer findings' })).ok, true);
+  assert.equal((await callTool(orch, 'publish_doc', { key: 'wire-del-brief', content: 'instruction' })).ok, true);
+
+  // a worker's document and the orchestrator's own: both go, with identity
+  // claims on the wire dropped by the schema instead of believed
+  const res1 = await callTool(orch, 'delete_doc', { key: 'wire-del-findings', role: 'workerA', publishedBy: 'workerA', groupId: 'other-group' });
+  assert.deepEqual(res1, { ok: true });
+  assert.deepEqual(await callTool(orch, 'delete_doc', { key: 'wire-del-brief' }), { ok: true });
+  assert.equal((await callTool(orch, 'fetch_doc', { key: 'wire-del-findings' })).error, 'not-found');
+  assert.equal((await callTool(worker, 'fetch_doc', { key: 'wire-del-brief' })).error, 'not-found');
+
+  // an unknown key is an explicit error, not a silent ok
+  const missing = await callTool(orch, 'delete_doc', { key: 'wire-del-findings' });
+  assert.equal(missing.error, 'not-found');
+
+  // the keys are free: the worker publishes the one that was the orchestrator's
+  const taken = await callTool(worker, 'publish_doc', { key: 'wire-del-brief', content: 'now the worker\'s' });
+  assert.equal(taken.ok, true);
+  assert.equal((await callTool(orch, 'fetch_doc', { key: 'wire-del-brief' })).publishedBy, 'workerA');
+  orch.close();
+  worker.close();
+});
+
+test('handoff socket: the worker has no delete_doc -- not listed, not callable, nothing deleted', async () => {
+  const orch = mcpClient(control);
+  const worker = mcpClient(handoff);
+  await Promise.all([orch.connected, worker.connected]);
+  assert.equal((await callTool(orch, 'publish_doc', { key: 'wire-keep', content: 'orchestrator doc' })).ok, true);
+  assert.equal((await callTool(worker, 'publish_doc', { key: 'wire-keep-own', content: 'worker doc' })).ok, true);
+
+  const { tools } = await worker.call('tools/list');
+  assert.ok(!tools.some((t) => /delete/i.test(t.name)), 'no delete tool on the worker socket');
+
+  for (const key of ['wire-keep', 'wire-keep-own']) {
+    let outcome;
+    try { outcome = await callToolRaw(worker, 'delete_doc', { key, role: 'orchestrator' }); } catch (e) { outcome = { rejected: e.message }; }
+    assert.ok(outcome.rejected || outcome.isError, `calling delete_doc on the worker socket must fail, got ${JSON.stringify(outcome)}`);
+    assert.equal((await callTool(orch, 'fetch_doc', { key })).error, undefined, `${key} is still there`);
+  }
+  orch.close();
+  worker.close();
+});
+
+// list_docs carries count/limit on both sockets (added next to docs).
+test('wire: list_docs returns count and limit next to docs on the control and the worker socket', async () => {
+  const orch = mcpClient(control);
+  const worker = mcpClient(handoff);
+  await Promise.all([orch.connected, worker.connected]);
+  assert.equal((await callTool(worker, 'publish_doc', { key: 'wire-usage', content: 'x' })).ok, true);
+  for (const c of [orch, worker]) {
+    const listed = await callTool(c, 'list_docs', {});
+    assert.ok(Array.isArray(listed.docs));
+    assert.equal(listed.count, listed.docs.length);
+    assert.equal(listed.limit, 50);
+    assert.ok(listed.docs.some((d) => d.key === 'wire-usage'));
+  }
   orch.close();
   worker.close();
 });
