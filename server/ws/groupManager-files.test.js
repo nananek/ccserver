@@ -242,6 +242,46 @@ test('restoreGroups treats a non-finite publishedAt as missing and keeps a finit
   }
 });
 
+// Same shape as the publishedAt case above, for the other numeric field of a
+// restored manifest entry: `size` also went through typeof, so a hand-edited or
+// corrupt 1e999 (Infinity once parsed) was accepted -- and sizes are what the
+// group's quota arithmetic adds up.
+test('restoreGroups treats a non-finite size as missing (0, like an absent one) and keeps a finite one', async () => {
+  const gid = await makeGroup('/srv/proj-files-size-non-finite');
+  const originalBroker = groupManager.getGroup(gid)?.controlBroker || null;
+  try {
+    const names = ['pos-inf.txt', 'neg-inf.txt', 'absent.txt', 'finite.txt'];
+    groupManager.publishGroupFilesFromUpload(gid, names.map((name) => ({ name, mimeType: 'text/plain', data: Buffer.from(name) })));
+    const idOf = (name) => groupManager.listGroupFiles(gid).files.find((f) => f.name === name).id;
+    const ids = Object.fromEntries(names.map((name) => [name, idOf(name)]));
+
+    // JSON.stringify writes Infinity as null, so plant the literals by hand.
+    const raw = JSON.parse(readFileSync(process.env.CCSERVER_GROUP_FILES_PATH, 'utf-8'));
+    raw[gid][ids['pos-inf.txt']].size = '+INF';
+    raw[gid][ids['neg-inf.txt']].size = '-INF';
+    delete raw[gid][ids['absent.txt']].size;
+    raw[gid][ids['finite.txt']].size = 7;
+    const text = JSON.stringify(raw).replaceAll('"+INF"', '1e999').replaceAll('"-INF"', '-1e999');
+    writeFileSync(process.env.CCSERVER_GROUP_FILES_PATH, text);
+    const planted = JSON.parse(text)[gid];
+    assert.equal(planted[ids['pos-inf.txt']].size, Infinity, 'the fixture really carries Infinity');
+    assert.equal(planted[ids['neg-inf.txt']].size, -Infinity);
+    assert.equal('size' in planted[ids['absent.txt']], false);
+
+    groupManager.restoreGroups();
+
+    const restored = new Map(groupManager.listGroupFiles(gid).files.map((f) => [f.name, f]));
+    assert.deepEqual([...restored.keys()].sort(), [...names].sort(), 'all four files were restored');
+    assert.equal(restored.get('absent.txt').size, 0, 'control: an absent size is 0');
+    assert.equal(restored.get('pos-inf.txt').size, 0, 'a non-finite size is treated as absent');
+    assert.equal(restored.get('neg-inf.txt').size, 0);
+    assert.equal(restored.get('finite.txt').size, 7);
+  } finally {
+    if (originalBroker) stopBroker(originalBroker);
+    groupManager.destroyGroup(gid);
+  }
+});
+
 test('destroyGroup removes blob root and does not touch sibling', async () => {
   const g1 = await makeGroup();
   const g2 = await makeGroup();

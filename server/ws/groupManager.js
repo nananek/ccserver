@@ -854,7 +854,9 @@ export function restoreGroups() {
           group.files.set(fid, {
             id: meta.id,
             name: sanitizeDisplayName(meta.name),
-            size: typeof meta.size === 'number' ? meta.size : 0,
+            // Number.isFinite, not typeof: see the docs restore above. A size is
+            // what the group's quota arithmetic adds up.
+            size: Number.isFinite(meta.size) ? meta.size : 0,
             mimeType: typeof meta.mimeType === 'string' ? meta.mimeType : mimeForName(meta.name),
             direction: meta.direction === 'agent' ? 'agent' : 'user',
             publishedBy: typeof meta.publishedBy === 'string' ? meta.publishedBy : null,
