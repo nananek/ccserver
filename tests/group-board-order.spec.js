@@ -190,6 +190,10 @@ test('Docs: newest update first, created/updated times shown, an overwrite moves
   await expect(meta).toContainText('作成 2026/1/1 9:00:00');
   await expect(meta).toContainText('更新 2026/9/20 12:04:05');
   expect(stub.contentKeys).toEqual(['design-notes']);
+
+  // On a narrow phone the two times do not fit one row: they wrap, not clip.
+  await page.setViewportSize({ width: 320, height: 568 });
+  await expectNotClippedHorizontally(meta);
 });
 
 test('Files: newest upload first, agent/browser time labelled, names render as text, nothing clipped', async ({ page }) => {
