@@ -752,7 +752,8 @@ export function restoreGroups() {
             mimeType: typeof meta.mimeType === 'string' ? meta.mimeType : mimeForName(meta.name),
             direction: meta.direction === 'agent' ? 'agent' : 'user',
             publishedBy: typeof meta.publishedBy === 'string' ? meta.publishedBy : null,
-            publishedAt: typeof meta.publishedAt === 'number' ? meta.publishedAt : Date.now(),
+            // Number.isFinite, not typeof: see the docs restore above.
+            publishedAt: Number.isFinite(meta.publishedAt) ? meta.publishedAt : Date.now(),
             storedName: meta.storedName,
           });
         }
