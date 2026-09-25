@@ -723,7 +723,9 @@ async function gitRun(cwd, args) {
 // "the project's history". Terminal control sequences (ESC [ ... m), BEL, CR,
 // DEL and the C0/C1 control characters are removed; tab and ordinary spaces
 // stay. (git already cuts a line at a NUL, so nothing follows one.) No length
-// limit is applied here: the log had none, and none is added.
+// limit is applied here: the log had none, and none is added. The branch name is
+// text somebody chose as well and gets the same removal; git refuses ASCII
+// control characters and DEL in a ref name, so only the C1 ones can be there.
 const CONTROL_CHARS_RE = /[\x00-\x08\x0a-\x1f\x7f-\x9f]/g;
 
 async function gitState(cwd) {
@@ -732,7 +734,7 @@ async function gitState(cwd) {
   if (head == null) return null; // not a repository (or no git at all)
   const log = await gitRun(cwd, ['log', '--oneline', '-5']);
   return {
-    branch: branch || null,
+    branch: (branch ? branch.replace(CONTROL_CHARS_RE, '') : '') || null,
     head,
     log: log ? log.split('\n').map((line) => line.replace(CONTROL_CHARS_RE, '')).filter(Boolean) : [],
   };

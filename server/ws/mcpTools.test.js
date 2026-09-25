@@ -1978,6 +1978,23 @@ test('repoInfo: control characters in a commit subject do not reach the orchestr
   }
 });
 
+// The branch name reaches the orchestrator too, and it is text somebody chose. git refuses
+// ASCII control characters and DEL in a ref name, so what can be planted there is a C1
+// control (a UTF-8 C2 80 .. C2 9F, U+009B being the single-character CSI); it is stripped
+// the way a commit subject's are.
+test('repoInfo: C1 control characters in the branch name do not reach the orchestrator (an ordinary non-ASCII name is untouched)', async () => {
+  const r = makeTrapRepo('branch-ctrl');
+  r.git('checkout', '-q', '-b', 'feat/a\x9b31mred\x85end');
+  assert.ok(r.git('branch', '--show-current').includes('\x9b'), 'control: git keeps the C1 control in the name');
+  const out = await repoInfoOf(r);
+  assert.equal(out.git.branch, 'feat/a31mredend');
+  assert.doesNotMatch(out.git.branch, /[\x00-\x08\x0a-\x1f\x7f-\x9f]/);
+
+  const plain = makeTrapRepo('branch-plain');
+  plain.git('checkout', '-q', '-b', 'feat/日本語-ok_1');
+  assert.equal((await repoInfoOf(plain)).git.branch, 'feat/日本語-ok_1');
+});
+
 // #283 review: three of the pins (--no-optional-locks, core.fsmonitor=false,
 // core.hooksPath=/dev/null) are LAYERS: none of the three commands left runs
 // anything through them today (measured, git 2.55), so no trap can go red
