@@ -5,9 +5,9 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 import { GIT_INFO_ARGS, pickDefaultRemote, readGitInfo, sanitizeText, stripUserinfo } from './gitInfo.js';
 import { commit, fixtureGitEnv, git, initRepo } from './testGitFixtures.js';
 
@@ -265,6 +265,80 @@ test('a .git file that points at a repository outside browseRoots is not followe
   const res = await readGitInfo(trap, [rootDir]);
   assert.deepEqual(res.data, { path: trap, isRepo: false, reason: 'outside-roots' });
   assert.ok(!JSON.stringify(res).includes('private/thing'));
+});
+
+// readGitInfo judges three paths git reports (toplevel, git dir, common dir), and any ONE of them
+// outside browseRoots refuses the repository. The tests above escape through several at once (a
+// gitlink leaves the git dir AND the common dir; an ancestor leaves all three), so removing any single
+// clause would still be refused by another. Each test below leaves through exactly one, and first
+// asserts (against real git) that the other two are inside -- otherwise it would prove nothing.
+const inside = (path, root) => path === root || path.startsWith(root + sep);
+function layoutInside(dir, root) {
+  const [toplevel, gitDir, commonDir] = git(dir, ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'])
+    .trim().split('\n');
+  return [toplevel, gitDir, isAbsolute(commonDir) ? commonDir : resolve(dir, commonDir)].map((p) => inside(p, root));
+}
+
+test('a commondir file that points outside browseRoots is not followed (only the common dir is outside)', async () => {
+  const outside = initRepo(fresh('secret'));
+  git(outside, ['remote', 'add', 'origin', 'https://github.com/private/thing.git']);
+  const armed = armHostileConfig(outside);
+  const rootDir = join(base, `commondir-${counter++}`);
+  const dir = initRepo(join(rootDir, 'repo'));
+  writeFileSync(join(dir, '.git', 'commondir'), `${join(outside, '.git')}\n`);
+  assert.deepEqual(layoutInside(dir, rootDir), [true, true, false], 'the fixture leaves through the common dir alone');
+
+  // Sanity: with no restriction the common dir IS followed (its config is what supplies the remote),
+  // so the refusal below is the containment rule and not git failing to read the layout.
+  const open = await readGitInfo(dir, []);
+  assert.equal(open.data.isRepo, true);
+  assert.equal(open.data.remotes[0].url, 'https://github.com/private/thing.git');
+
+  const res = await readGitInfo(dir, [rootDir]);
+  assert.deepEqual(res.data, { path: dir, isRepo: false, reason: 'outside-roots' });
+  assert.ok(!JSON.stringify(res).includes('private/thing'));
+  assert.ok(!existsSync(armed), 'nothing the outside repository configures was run');
+});
+
+test('a gitdir that points outside browseRoots is not followed (only the git dir is outside)', async () => {
+  const rootDir = join(base, `gitdir-${counter++}`);
+  const main = initRepo(join(rootDir, 'main'));
+  const worktree = join(rootDir, 'wt');
+  git(main, ['worktree', 'add', '-q', worktree, '-b', 'secret-branch']);
+  // Move the worktree's admin directory out of the roots and re-point both ends of the link at it:
+  // the worktree and the shared (common) repository stay inside, the git dir does not.
+  const admin = join(base, `admin-${counter++}`);
+  renameSync(join(main, '.git', 'worktrees', 'wt'), admin);
+  writeFileSync(join(worktree, '.git'), `gitdir: ${admin}\n`);
+  writeFileSync(join(admin, 'commondir'), `${join(main, '.git')}\n`);
+  writeFileSync(join(admin, 'gitdir'), `${join(worktree, '.git')}\n`);
+  assert.deepEqual(layoutInside(worktree, rootDir), [true, false, true], 'the fixture leaves through the git dir alone');
+
+  const open = await readGitInfo(worktree, []);
+  assert.equal(open.data.isRepo, true);
+  assert.deepEqual(open.data.head, { kind: 'branch', name: 'secret-branch' });
+  assert.equal(open.data.worktree, true);
+
+  const res = await readGitInfo(worktree, [rootDir]);
+  assert.deepEqual(res.data, { path: worktree, isRepo: false, reason: 'outside-roots' });
+  assert.ok(!JSON.stringify(res).includes('secret-branch'), 'what the outside git dir says (its HEAD) is not sent');
+});
+
+test('a core.worktree that points outside browseRoots is not followed (only the top level is outside)', async () => {
+  const rootDir = join(base, `toplevel-${counter++}`);
+  const dir = initRepo(join(rootDir, 'repo'));
+  const tree = fresh('tree');
+  mkdirSync(tree);
+  git(dir, ['config', 'core.worktree', tree]);
+  assert.deepEqual(layoutInside(dir, rootDir), [false, true, true], 'the fixture leaves through the top level alone');
+
+  const open = await readGitInfo(dir, []);
+  assert.equal(open.data.isRepo, true);
+  assert.equal(open.data.root, tree);
+
+  const res = await readGitInfo(dir, [rootDir]);
+  assert.deepEqual(res.data, { path: dir, isRepo: false, reason: 'outside-roots' });
+  assert.ok(!JSON.stringify(res).includes(tree));
 });
 
 test('an ancestor repository above browseRoots is not described', async () => {
