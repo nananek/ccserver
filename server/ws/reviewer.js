@@ -148,9 +148,72 @@ export function reviewWorktreePath(projectCwd, jobId) {
 // stderr is piped (not inherited), mirroring worktree.js's git() helper: a
 // routine failure (bad ref, no origin remote) produces expected stderr
 // chatter that would otherwise look like a real server error in the logs.
-function git(cwd, args) {
-  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+// #252: every cwd this runs against is WRITABLE by the session that asked for
+// the review (its project dir, or the gitCommonDir of its worktree), so the
+// agent can replace .git/config or .git/HEAD with a FIFO. git then blocks in
+// open(2) for ever, and since this is execFileSync the whole ccserver process
+// blocks with it -- SIGTERM included, so only SIGKILL gets the host back.
+// Measured: with no timeout the call never returns; with one it stalls for the
+// timeout and then throws (code ETIMEDOUT, signal SIGTERM).
+//
+// The timeout is what removes the PERMANENT hang. It does not make the call
+// non-blocking: the event loop still stops for up to GIT_TIMEOUT_MS, and a
+// caller that keeps asking can keep paying it. That is the same bounded-stall
+// shape worktree.js (30s) and gitAllowlist.js (2s) already have.
+//
+// Every call here is local-only and finishes in milliseconds; the budget is
+// generous only for snapshotDirtyChanges' `git diff --binary` on a large dirty
+// tree. Overridable for a host where that is genuinely slower.
+const GIT_TIMEOUT_MS = Number(process.env.CCSERVER_REVIEWER_GIT_TIMEOUT_MS) || 10_000;
+
+// Did spawnSync's own timeout kill this child?
+//
+// `code` alone, and both of the conditions this test used to also carry were
+// removed on purpose (measured on Node 26; reviewer.test.js pins all four
+// shapes):
+//
+//   - `errno === -110` was Linux-only. errno is libuv's NUMERIC value, and
+//     ETIMEDOUT is 110 on Linux but 60 on macOS (xnu), so on a macOS host that
+//     conjunct was simply never true: the timeout went out UNTAGGED and the one
+//     pre-acceptance caller reported "cwd is not a git repository" about a
+//     directory that plainly is one -- exactly the wrong answer the tagging
+//     exists to prevent (#252 gate, F1). `code` is the error NAME, the same
+//     string on every platform.
+//   - `signal === 'SIGTERM'` was the DANGEROUS half rather than a harmless
+//     synonym, so it could not simply be kept once errno was dropped: a child
+//     killed by an EXTERNAL SIGTERM (an operator, a supervisor) reports signal
+//     SIGTERM too, and gets NO code and NO errno at all. Accepting it would tag
+//     someone else's kill as a git timeout. Node sets code ETIMEDOUT only when
+//     spawnSync's own timer fired, which is precisely the case meant here.
+//
+// Exported for the tests: the FIFO case below can only exercise the platform it
+// runs on, and CI runs these on Linux, so the platform-independence itself has
+// to be checkable from a synthetic error shape.
+export function isSpawnTimeout(err) {
+  return !!err && err.code === 'ETIMEDOUT';
 }
+
+function git(cwd, args) {
+  try {
+    return execFileSync('git', ['-C', cwd, ...args], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: GIT_TIMEOUT_MS,
+    });
+  } catch (err) {
+    // A timeout must not read like an ordinary git failure. Callers below
+    // swallow failures into benign defaults ("no origin remote", "not a
+    // repo"), which for a REAL repo whose git was blocked would be a wrong
+    // answer wearing a normal one's clothes. Tag it so they can tell.
+    if (isSpawnTimeout(err)) {
+      throw Object.assign(
+        new Error(`git ${args[0]} in ${cwd} exceeded ${GIT_TIMEOUT_MS}ms and was killed`),
+        { code: 'EGITTIMEOUT', cause: err },
+      );
+    }
+    throw err;
+  }
+}
+
+const isGitTimeout = (err) => !!err && err.code === 'EGITTIMEOUT';
 
 function isDirectory(path) {
   try {
@@ -160,12 +223,18 @@ function isDirectory(path) {
   }
 }
 
+// Returns 'yes' | 'no' | 'timeout'. The third case exists because this is the
+// ONE git call on the pre-acceptance path -- run_review's argument validation,
+// reachable by any session with a single MCP call, before any job is accepted
+// or any concurrency cap applies. Reporting a timed-out git as 'no' would tell
+// the caller "cwd is not a git repository" about a repository that plainly is
+// one, and would hide the only symptom an operator could act on.
 function isGitRepo(cwd) {
-  if (!isDirectory(cwd)) return false;
+  if (!isDirectory(cwd)) return 'no';
   try {
-    return git(cwd, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
-  } catch {
-    return false;
+    return git(cwd, ['rev-parse', '--is-inside-work-tree']).trim() === 'true' ? 'yes' : 'no';
+  } catch (err) {
+    return isGitTimeout(err) ? 'timeout' : 'no';
   }
 }
 
@@ -326,10 +395,20 @@ export function snapshotDirtyChanges(projectCwd) {
 
 export function applyPatchToWorktree(worktreePath, patchText) {
   if (!patchText || !patchText.trim()) return;
+  // Not routed through git() above because this one needs `input` on stdin,
+  // which that helper deliberately does not offer (it pipes stdin from
+  // /dev/null). It gets the same timeout by hand instead: the cwd here is a
+  // review worktree the host created moments ago under a unique jobId, before
+  // any session exists, so no sandbox can plant a FIFO in it TODAY -- but an
+  // untimed synchronous git is a permanent host-wide hang the moment that
+  // stops being true (if apply ever moves after session start, or the review
+  // worktree is ever bind-mounted). Cheap here, so it does not wait for that
+  // (#252 gate, F2).
   execFileSync('git', ['-C', worktreePath, 'apply', '--whitespace=nowarn', '-'], {
     input: patchText,
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: GIT_TIMEOUT_MS,
   });
 }
 
@@ -435,7 +514,11 @@ export function validateRunReviewArgs(args = {}) {
   const cwd = typeof args.cwd === 'string' && args.cwd ? args.cwd : null;
   if (!cwd) return { ok: false, error: 'cwd is required' };
   if (!isDirectory(cwd)) return { ok: false, error: 'cwd must be an existing directory' };
-  if (!isGitRepo(cwd)) return { ok: false, error: 'cwd is not a git repository' };
+  const repoState = isGitRepo(cwd);
+  if (repoState === 'timeout') {
+    return { ok: false, error: `git in ${cwd} did not respond; refusing the review (a git metadata file there may not be a regular file)` };
+  }
+  if (repoState !== 'yes') return { ok: false, error: 'cwd is not a git repository' };
 
   const number = Number.isInteger(args.number) && args.number > 0 ? args.number : null;
   const headRef = typeof args.headRef === 'string' && args.headRef ? args.headRef : null;
