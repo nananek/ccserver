@@ -1252,7 +1252,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     setCopyLoading(true);
     setCopyText('');
     try {
-      const res = await fetch(`/api/sessions/${id}/text`);
+      // authFetch, not fetch: in token mode every /api request needs the
+      // Authorization header it attaches, and without it this is a 401 that
+      // the catch below turns into an empty modal.
+      const res = await authFetch(`/api/sessions/${id}/text`);
       if (!res.ok) throw new Error(String(res.status));
       const data = await res.json();
       setCopyText(typeof data.text === 'string' ? data.text : '');

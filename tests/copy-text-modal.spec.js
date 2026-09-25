@@ -133,3 +133,42 @@ test('the copy modal holds no escape, control or bidi bytes, however the termina
   expect(value).toContain('COLON-SGR\nCURSORSTYLE\nDCS:AFTER-DCS\nC0:ABCDEF\nsafespoiled\nEND-MARK');
   expect(value).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]|\p{Bidi_Control}/u);
 });
+
+// AUTH_MODE=token gates every /api request on `Authorization: Bearer <token>`,
+// and the client attaches it in authFetch. The modal's fetch went around
+// authFetch, so in token mode it was answered 401 and the modal opened empty
+// with no hint why (#265 attack review, F2). This suite's server runs in `none`
+// mode, where the header is ignored -- so the token gate is stood in for at the
+// network layer: the route answers 401 unless the header is there, exactly as
+// the real gate does, and the test asserts what the browser sent.
+test('the copy modal authenticates its fetch: it sends the stored token and shows the 200 body', async ({ page }) => {
+  const TOKEN = 'e2e-token-265';
+  const BODY = 'token-mode-body-7741';
+  await page.addInitScript((t) => localStorage.setItem('ccserver-token', t), TOKEN);
+
+  const seen = [];
+  await page.route('**/api/sessions/*/text', async (route) => {
+    const auth = route.request().headers().authorization ?? null;
+    seen.push(auth);
+    if (auth !== `Bearer ${TOKEN}`) {
+      return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: 'Unauthorized' }) });
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ text: `${BODY}\n`, truncated: false }) });
+  });
+
+  await openShell(page);
+  // Anything on screen means the session is attached (its id is known), which is
+  // what the button needs; the modal's content here comes from the route above.
+  const attached = await page.waitForFunction(() => {
+    const rows = document.querySelectorAll('.xterm-rows > div');
+    return [...rows].some((r) => r.textContent.trim() !== '');
+  }, null, { timeout: 15_000 }).then(() => true).catch(() => false);
+  test.skip(!attached, 'shell printed nothing, so the session never attached (unrelated to the modal under test)');
+
+  await page.locator('.copy-text-btn').click();
+  const area = page.locator('.copy-text-area');
+  await expect(area).toBeVisible();
+  await expect.poll(async () => (await area.inputValue()).includes(BODY), { timeout: 10_000 }).toBe(true);
+  expect(seen.length).toBeGreaterThan(0);
+  expect(seen).toEqual(seen.map(() => `Bearer ${TOKEN}`));
+});
