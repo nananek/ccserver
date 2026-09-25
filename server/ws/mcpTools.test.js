@@ -9,7 +9,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, utimesSync, chmodSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1659,4 +1659,175 @@ test('repoInfo: group-not-found also works against the production facade shape',
   assert.equal(typeof deps.groupManager.getGroup, 'undefined', 'facade shape must not expose getGroup');
   const out = await tools.repoInfo(deps);
   assert.equal(out.error, 'group-not-found');
+});
+
+// --- repo_info must not run what the project's .git tells git to run ---------
+// repo_info runs git on the HOST, in a directory whose .git the workers'
+// sandboxes can write (see gitRun in mcpTools.js). Each trap below is one thing
+// git can be told to run while merely READING, armed with a harmless script that
+// only appends a line to a marker file. A trap is first sprung by the four
+// commands exactly as repo_info used to run them (the control): a trap that does
+// not fire there would make "it did not fire under repoInfo" prove nothing. Then
+// it must stay silent under repoInfo itself.
+
+// The fixture's own git calls get a clean env, so nothing a harness injects
+// (commit.gpgsign, core.hooksPath, ...) can leak into them or hide a trap.
+function makeTrapRepo(tag) {
+  const dir = makeTmpRepo(`trap-${tag}`);
+  const home = makeTmpRepo(`trap-${tag}-home`);
+  const env = { PATH: process.env.PATH, HOME: home, LANG: 'C', GIT_CONFIG_NOSYSTEM: '1' };
+  const git = (...args) => execFileSync('git', ['-C', dir, ...args], { env, encoding: 'utf-8' });
+  execFileSync('git', ['init', '-q', dir], { env });
+  writeFileSync(join(dir, 'a.txt'), 'one\n');
+  writeFileSync(join(dir, 'b.txt'), 'two\n');
+  git('add', '.');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'initial commit');
+  const marker = join(home, 'marker');
+  const script = join(home, 'trap.sh');
+  writeFileSync(script, `#!/bin/sh\necho "$0 $*" >> "${marker}"\nexit 0\n`);
+  chmodSync(script, 0o755);
+  return { dir, home, env, git, marker, script };
+}
+// Same size and content, another mtime: status has to look at a.txt again and
+// refresh (= write) the index, which is what some traps need. Called again
+// after the control, because the control's own status already refreshed it.
+let restatSeq = 0;
+function restat(r) {
+  const when = new Date(Date.now() - (100 + 50 * restatSeq++) * 1000);
+  utimesSync(join(r.dir, 'a.txt'), when, when);
+}
+
+function installHook(r, dir) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'post-index-change'), readFileSync(r.script));
+  chmodSync(join(dir, 'post-index-change'), 0o755);
+}
+function dropHeadTree(r) {
+  const tree = r.git('rev-parse', 'HEAD^{tree}').trim();
+  rmSync(join(r.dir, '.git', 'objects', tree.slice(0, 2), tree.slice(2)), { force: true });
+}
+
+const REPO_INFO_TRAPS = {
+  'core.fsmonitor (git status runs it as a command)': (r) => {
+    r.git('config', 'core.fsmonitor', r.script);
+  },
+  'post-index-change hook in .git/hooks (git status runs it when it refreshes the index)': (r) => {
+    installHook(r, join(r.dir, '.git', 'hooks'));
+  },
+  'core.hooksPath pointing at a directory that holds that hook': (r) => {
+    installHook(r, join(r.home, 'hooks'));
+    r.git('config', 'core.hooksPath', join(r.home, 'hooks'));
+  },
+  'log.showSignature + gpg.program on a commit that carries a signature (git log runs gpg.program)': (r) => {
+    const tree = r.git('rev-parse', 'HEAD^{tree}').trim();
+    const commit = `tree ${tree}\nauthor t <t@t> 1 +0000\ncommitter t <t@t> 1 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n xx\n -----END PGP SIGNATURE-----\n\nsigned\n`;
+    const oid = execFileSync('git', ['-C', r.dir, 'hash-object', '-t', 'commit', '-w', '--stdin'], { env: r.env, input: commit, encoding: 'utf-8' }).trim();
+    r.git('update-ref', 'HEAD', oid);
+    r.git('config', 'log.showSignature', 'true');
+    r.git('config', 'gpg.program', r.script);
+  },
+  'an object missing from a promisor remote, fetched on demand through remote.origin.uploadpack': (r) => {
+    r.git('config', 'core.repositoryformatversion', '1');
+    r.git('config', 'extensions.partialClone', 'origin');
+    r.git('config', 'remote.origin.promisor', 'true');
+    r.git('config', 'remote.origin.url', join(r.home, 'no-such-upstream'));
+    r.git('config', 'remote.origin.uploadpack', r.script);
+    dropHeadTree(r);
+  },
+  'core.fsmonitor in the repository of a submodule that git status descends into': (r) => {
+    const sub = join(r.dir, 'sub');
+    execFileSync('git', ['init', '-q', sub], { env: r.env });
+    writeFileSync(join(sub, 'f'), 's\n');
+    const sgit = (...args) => execFileSync('git', ['-C', sub, ...args], { env: r.env, encoding: 'utf-8' });
+    sgit('add', '.');
+    sgit('-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 's');
+    sgit('config', 'core.fsmonitor', r.script);
+    r.git('update-index', '--add', '--cacheinfo', `160000,${sgit('rev-parse', 'HEAD').trim()},sub`);
+    writeFileSync(join(sub, 'f'), 'dirty\n');
+  },
+};
+
+// The four commands as repo_info ran them before it pinned anything.
+function runUnpinnedGitState(r, extraEnv = {}) {
+  for (const args of [['branch', '--show-current'], ['rev-parse', '--short', 'HEAD'], ['log', '--oneline', '-5'], ['status', '--porcelain']]) {
+    try { execFileSync('git', ['-C', r.dir, ...args], { env: { ...r.env, ...extraEnv }, stdio: 'ignore' }); } catch { /* a failing command still counts if it ran a trap first */ }
+  }
+}
+
+// repo_info reads process.env, so the ambient one decides what a trap can do: a
+// harness that injects GIT_CONFIG_* (core.hooksPath, gpg.program, ...) outranks
+// the fixture's own repository config and would hide a trap here while CI, with
+// a bare env, sees it fire. Every GIT_* variable is therefore removed for the
+// call, and `extra` is what a test puts back on purpose.
+async function repoInfoOf(r, extra = {}) {
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: r.dir, orchestratorDir: join(r.home, 'orch') });
+  groupsToDestroy.push(gid);
+  const bare = Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith('GIT_')).map((k) => [k, null]));
+  return withProcessEnv({ ...bare, ...extra }, () => tools.repoInfo(controlDeps(gid)));
+}
+
+// process.env for the duration of fn (restored exactly; null = unset).
+async function withProcessEnv(vars, fn) {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(vars)) { if (v == null) delete process.env[k]; else process.env[k] = v; }
+  try { return await fn(); } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+}
+
+for (const [name, arm] of Object.entries(REPO_INFO_TRAPS)) {
+  test(`repoInfo: git does not run ${name}`, async () => {
+    const r = makeTrapRepo('exec');
+    restat(r);
+    arm(r);
+    runUnpinnedGitState(r);
+    assert.ok(existsSync(r.marker), 'control: the trap must fire for the commands as repo_info used to run them, or this test proves nothing');
+
+    rmSync(r.marker);
+    restat(r);
+    const out = await repoInfoOf(r);
+    assert.equal(existsSync(r.marker), false, `repo_info ran the trap: ${existsSync(r.marker) ? readFileSync(r.marker, 'utf-8') : ''}`);
+    assert.ok(out.git && typeof out.git.head === 'string' && out.git.head.length > 0, 'repo_info still reports the git state');
+  });
+}
+
+test('repoInfo: config injected through the environment (GIT_CONFIG_COUNT) cannot start a command either', async () => {
+  const r = makeTrapRepo('envcfg');
+  restat(r);
+  const injected = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.fsmonitor', GIT_CONFIG_VALUE_0: r.script };
+  runUnpinnedGitState(r, injected);
+  assert.ok(existsSync(r.marker), 'control: env-injected core.fsmonitor fires for the unpinned commands');
+
+  rmSync(r.marker);
+  restat(r);
+  const out = await repoInfoOf(r, injected);
+  assert.equal(existsSync(r.marker), false, 'repo_info ran a command injected through the environment');
+  assert.ok(out.git && out.git.head);
+});
+
+test('repoInfo: reading the git state does not write the project\'s index', async () => {
+  const r = makeTrapRepo('index');
+  const indexPath = join(r.dir, '.git', 'index');
+  restat(r);
+  const beforeControl = readFileSync(indexPath);
+  runUnpinnedGitState(r);
+  assert.notDeepEqual(readFileSync(indexPath), beforeControl, 'control: an ordinary git status refreshes and rewrites the index');
+
+  restat(r);
+  const before = readFileSync(indexPath);
+  await repoInfoOf(r);
+  assert.deepEqual(readFileSync(indexPath), before, 'repo_info must leave the index as it found it');
+});
+
+test('repoInfo: changes still counts modified, staged and untracked files, and not a file that only got a new mtime', async () => {
+  const r = makeTrapRepo('count');
+  restat(r);                                  // a.txt: new mtime, same content -> not a change
+  writeFileSync(join(r.dir, 'b.txt'), 'two, edited\n');     // modified
+  writeFileSync(join(r.dir, 'untracked.txt'), 'x\n');       // untracked
+  writeFileSync(join(r.dir, 'staged.txt'), 'x\n');
+  r.git('add', 'staged.txt');                               // staged
+  const out = await repoInfoOf(r);
+  assert.equal(out.git.changes, 3);
+  assert.ok(out.git.log[0].endsWith('initial commit'));
 });
