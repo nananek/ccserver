@@ -108,6 +108,18 @@ export function buildCloneEnv(source = process.env) {
 const ok = (data) => ({ ok: true, data });
 const fail = (code, message) => ({ ok: false, code, message });
 
+// What an unexpected failure becomes for the client. The message of a raw fs
+// error names the /proc/self/fd/N path the call went through (and the staging
+// name), which means nothing to the caller; the ordinary "cannot write here"
+// cases get their own answer, the rest is logged and reported by code alone.
+export function fsFailure(err) {
+  if (err?.code === 'EACCES' || err?.code === 'EPERM') return fail('forbidden', 'Permission denied');
+  if (err?.code === 'EROFS') return fail('forbidden', 'Read-only file system');
+  if (err?.code === 'ENOSPC') return fail('internal', 'No space left on device');
+  console.error(`[git-clone] unexpected failure: ${err?.stack || err}`);
+  return fail('internal', `Clone failed unexpectedly${err?.code ? ` (${err.code})` : ''}; see the server log`);
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 
@@ -394,7 +406,7 @@ export async function cloneRepository(request, roots, deps = {}) {
 }
 
 async function cloneInto({ parent, dirName, url }, roots, opts) {
-  const pinned = await pinParent(parent, roots, opts.platform);
+  const pinned = await pinParent(parent, roots, opts.platform).catch(fsFailure);
   if (!pinned.ok) return pinned;
   const pin = pinned.data;
   const env = buildCloneEnv(opts.sourceEnv);
@@ -479,7 +491,7 @@ async function cloneInto({ parent, dirName, url }, roots, opts) {
     return ok({ path: join(pin.realPath, dirName), name: dirName, url, warnings });
   } catch (err) {
     await cleanup();
-    return fail('internal', err.message);
+    return fsFailure(err);
   } finally {
     await pin.close();
   }

@@ -7,7 +7,7 @@
 // The last group exercises the environment against REAL git, to pin which of
 // the pins actually bite (they were measured, not assumed).
 
-import { test, before, after } from 'node:test';
+import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import {
@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  CLONE_GIT_CONFIG, buildCloneEnv, cloneRepository, parseCloneUrl, validateCloneName,
+  CLONE_GIT_CONFIG, buildCloneEnv, cloneRepository, fsFailure, parseCloneUrl, validateCloneName,
 } from './ghClone.js';
 import { buildChildEnv, gitConfigEnv } from './hostGit.js';
 import { fixtureGitEnv, git, initRepo } from './testGitFixtures.js';
@@ -298,6 +298,38 @@ test('a parent that cannot name a directory (NUL byte, over-long name) is a vali
     assert.equal(res.code, 'validation', JSON.stringify(res));
   }
   assert.ok(!existsSync(join(a.rec, 'called')));
+});
+
+test('an fs failure reaches the client without the /proc/self/fd path it happened at', () => {
+  const logged = mock.method(console, 'error', () => {});
+  try {
+    for (const [code, want] of [['EACCES', 'forbidden'], ['EPERM', 'forbidden'], ['EROFS', 'forbidden'], ['ENOSPC', 'internal'], ['EIO', 'internal']]) {
+      const err = Object.assign(new Error(`${code}: boom, mkdir '/proc/self/fd/9/.ccserver-clone-0123456789ab'`), { code });
+      const res = fsFailure(err);
+      assert.equal(res.ok, false);
+      assert.equal(res.code, want, code);
+      assert.ok(!/proc|ccserver-clone/.test(res.message), `${code}: ${res.message}`);
+    }
+    assert.equal(logged.mock.callCount(), 1, 'only the unexpected one (EIO) is logged');
+  } finally {
+    logged.mock.restore();
+  }
+});
+
+test('a parent nobody can write to is forbidden, not a 500 that names /proc/self/fd', { skip: process.getuid?.() === 0 }, async () => {
+  const a = arena();
+  const ro = join(a.parent, 'ro');
+  mkdirSync(ro);
+  chmodSync(ro, 0o555);
+  try {
+    const ghBin = fakeGh(a.rec, ghBody(a.rec));
+    const res = await clone(a, { parent: ro, url: 'o/r' }, { ghBin });
+    assert.equal(res.code, 'forbidden', JSON.stringify(res));
+    assert.ok(!/proc/.test(res.message));
+    assert.ok(!existsSync(join(a.rec, 'called')));
+  } finally {
+    chmodSync(ro, 0o755);
+  }
 });
 
 test('anything already at the final name -- directory (empty or not), file, symlink -- is a conflict; gh is not run', async () => {
