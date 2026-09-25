@@ -2,10 +2,7 @@ name: CI
 
 on:
   push:
-    # TEMPORARY (removed in the next commit): this branch is listed so the
-    # new job below gets a real CI run to be verified against, without
-    # opening a PR for it.
-    branches: [master, ci/sandbox-backend-job]
+    branches: [master]
   pull_request:
     branches: [master]
 
