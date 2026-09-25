@@ -179,7 +179,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'list_docs',
-    'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need. The result also carries count and limit: how many documents the group holds and the most it can hold.',
+    'List documents published in this group (key, publishedBy role, publishedAt = last publish, createdAt = first publish, size) without their content -- fetch_doc the ones you need. The result also carries count and limit: how many documents the group holds and the most it can hold.',
     {},
     async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listDocs(deps)) }] }),
   );
@@ -262,7 +262,7 @@ export function buildHandoffMcpServer(deps) {
 
   server.tool(
     'list_docs',
-    'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need. The result also carries count and limit: how many documents the group holds and the most it can hold.',
+    'List documents published in this group (key, publishedBy role, publishedAt = last publish, createdAt = first publish, size) without their content -- fetch_doc the ones you need. The result also carries count and limit: how many documents the group holds and the most it can hold.',
     {},
     async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listDocs(deps)) }] }),
   );

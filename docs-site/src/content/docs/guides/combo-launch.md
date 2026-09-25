@@ -30,11 +30,11 @@ copilot はコンボ起動 (グループ) では選択できません。copilot 
 | ツール | 引数 | 説明 | 使えるロール |
 |--------|------|------|--------------|
 | `publish_doc` | `key`, `content` | 指定した key でドキュメントを公開/上書き。グループの他メンバー全員に見える | ワーカー・オーケストレーター両方 |
-| `fetch_doc` | `key` | `publish_doc` で公開済みのドキュメントを取得。`{ content, publishedBy, publishedAt }` / `{ error: 'not-found' }` | ワーカー・オーケストレーター両方 |
-| `list_docs` | – | 公開済みドキュメントの一覧 (`key`/`publishedBy`/`publishedAt`/`size`、本文は含まない) と、使用量の `count` / `limit` | ワーカー・オーケストレーター両方 |
+| `fetch_doc` | `key` | `publish_doc` で公開済みのドキュメントを取得。`{ content, publishedBy, publishedAt, createdAt }` / `{ error: 'not-found' }` | ワーカー・オーケストレーター両方 |
+| `list_docs` | – | 公開済みドキュメントの一覧 (`key`/`publishedBy`/`publishedAt`/`createdAt`/`size`、本文は含まない) と、使用量の `count` / `limit` | ワーカー・オーケストレーター両方 |
 | `delete_doc` | `key` | 指定した key のドキュメントを削除。公開したロールは問わない。存在しない key は `{ error: 'not-found' }`。削除後、その key は空く | オーケストレーターのみ |
 
-1 文書あたり 256KB、グループあたり最大 50 件の上限があります。上限に達すると、新しい key は `too-many-docs` で拒否されます (既存の key の再公開は上限に関係なくできます)。使用量は `list_docs` の `count` / `limit` (と REST の `GET /api/groups/:id/docs` の同じ 2 フィールド) で確認できます。ディスクへの書き込みに失敗したときは、`publish_doc` / `delete_doc` の結果に `persisted: false` が付きます (公開・削除そのものは反映されますが、サーバーを再起動すると、削除した文書が戻ることがあります)。
+1 文書あたり 256KB、グループあたり最大 50 件の上限があります。上限に達すると、新しい key は `too-many-docs` で拒否されます (既存の key の再公開は上限に関係なくできます)。使用量は `list_docs` の `count` / `limit` (と REST の `GET /api/groups/:id/docs` の同じ 2 フィールド) で確認できます。`publishedAt` は最後に公開した時刻、`createdAt` は最初に公開した時刻です (同じ key の再公開では `createdAt` が引き継がれ、削除して公開し直すと新しくなります)。ディスクへの書き込みに失敗したときは、`publish_doc` / `delete_doc` の結果に `persisted: false` が付きます (公開・削除そのものは反映されますが、サーバーを再起動すると、削除した文書が戻ることがあります)。
 
 ドキュメントを消せるのはオーケストレーターだけ (`delete_doc`) で、50 件以内に収めるのはオーケストレーターの役目です。役目を終えた文書 (受け取り済みの指示、マージ済みの PR の findings など) を消してください。**PR 作成前チェックが読む findings 文書は、その PR がマージされるまで消さないでください** (消すとチェックが fail closed になり、PR を開けなくなります)。
 

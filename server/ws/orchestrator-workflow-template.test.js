@@ -194,6 +194,7 @@ test('mcpServer.js: publish_doc is registered on BOTH servers and each descripti
   // list_docs says it carries count/limit, on both servers.
   for (const [name, src] of [['control', control], ['handoff', handoff]]) {
     assert.match(src, /The result also carries count and limit/, `${name} list_docs description mentions count/limit`);
+    assert.match(src, /publishedAt = last publish, createdAt = first publish/, `${name} list_docs description names createdAt (#275)`);
   }
 });
 
