@@ -1588,7 +1588,7 @@ test('repoInfo returns shallow repo facts (root/readme/packageJson/git)', async 
   assert.ok(out.git.head.length > 0, 'short HEAD reported');
   assert.equal(out.git.log.length, 1);
   assert.ok(out.git.log[0].endsWith('initial commit'), `log line is '<hash> initial commit' (got ${out.git.log[0]})`);
-  assert.equal(out.git.changes, 0, 'clean tree');
+  assert.deepEqual(Object.keys(out.git).sort(), ['branch', 'head', 'log'], 'branch/HEAD/log only: repo_info does not run git status, so there is no changes field');
 });
 
 test('repoInfo: missing README/package.json/git fall back to null per section', async () => {
@@ -1666,9 +1666,12 @@ test('repoInfo: group-not-found also works against the production facade shape',
 // sandboxes can write (see gitRun in mcpTools.js). Each trap below is one thing
 // git can be told to run while merely READING, armed with a harmless script that
 // only appends a line to a marker file. A trap is first sprung by the four
-// commands exactly as repo_info used to run them (the control): a trap that does
-// not fire there would make "it did not fire under repoInfo" prove nothing. Then
-// it must stay silent under repoInfo itself.
+// commands exactly as repo_info ran them before it stopped running `git status`
+// (the control): a trap that does not fire there would make "it did not fire
+// under repoInfo" prove nothing. Then it must stay silent under repoInfo itself.
+// Most traps here are status's (fsmonitor, the index hook, a filter, ...): they
+// stay silent because repoInfo no longer runs status, and go red if it comes
+// back. Two are log's, and are held by a flag (showSignature, lazy fetch).
 
 // The fixture's own git calls get a clean env, so nothing a harness injects
 // (commit.gpgsign, core.hooksPath, ...) can leak into them or hide a trap.
@@ -1702,9 +1705,15 @@ function installHook(r, dir) {
   writeFileSync(join(dir, 'post-index-change'), readFileSync(r.script));
   chmodSync(join(dir, 'post-index-change'), 0o755);
 }
-function dropHeadTree(r) {
-  const tree = r.git('rev-parse', 'HEAD^{tree}').trim();
-  rmSync(join(r.dir, '.git', 'objects', tree.slice(0, 2), tree.slice(2)), { force: true });
+function dropObject(r, oid) {
+  rmSync(join(r.dir, '.git', 'objects', oid.slice(0, 2), oid.slice(2)), { force: true });
+}
+function makePromisor(r, uploadpack) {
+  r.git('config', 'core.repositoryformatversion', '1');
+  r.git('config', 'extensions.partialClone', 'origin');
+  r.git('config', 'remote.origin.promisor', 'true');
+  r.git('config', 'remote.origin.url', join(r.home, 'no-such-upstream'));
+  r.git('config', 'remote.origin.uploadpack', uploadpack);
 }
 
 const REPO_INFO_TRAPS = {
@@ -1726,13 +1735,23 @@ const REPO_INFO_TRAPS = {
     r.git('config', 'log.showSignature', 'true');
     r.git('config', 'gpg.program', r.script);
   },
-  'an object missing from a promisor remote, fetched on demand through remote.origin.uploadpack': (r) => {
-    r.git('config', 'core.repositoryformatversion', '1');
-    r.git('config', 'extensions.partialClone', 'origin');
-    r.git('config', 'remote.origin.promisor', 'true');
-    r.git('config', 'remote.origin.url', join(r.home, 'no-such-upstream'));
-    r.git('config', 'remote.origin.uploadpack', r.script);
-    dropHeadTree(r);
+  'the HEAD tree missing from a promisor remote, fetched on demand through remote.origin.uploadpack (git status needs it)': (r) => {
+    makePromisor(r, r.script);
+    dropObject(r, r.git('rev-parse', 'HEAD^{tree}').trim());
+  },
+  'the HEAD commit missing from a promisor remote, fetched on demand through remote.origin.uploadpack (git log needs it)': (r) => {
+    makePromisor(r, r.script);
+    dropObject(r, r.git('rev-parse', 'HEAD').trim());
+  },
+  'a clean filter chosen in .git/info/attributes (git status runs it on a file whose stat changed)': (r) => {
+    mkdirSync(join(r.dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(r.dir, '.git', 'info', 'attributes'), '* filter=trap\n');
+    r.git('config', 'filter.trap.clean', r.script);
+  },
+  'a filter process chosen in .git/info/attributes (git status starts it)': (r) => {
+    mkdirSync(join(r.dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(r.dir, '.git', 'info', 'attributes'), '* filter=trap\n');
+    r.git('config', 'filter.trap.process', r.script);
   },
   'core.fsmonitor in the repository of a submodule that git status descends into': (r) => {
     const sub = join(r.dir, 'sub');
@@ -1820,14 +1839,18 @@ test('repoInfo: reading the git state does not write the project\'s index', asyn
   assert.deepEqual(readFileSync(indexPath), before, 'repo_info must leave the index as it found it');
 });
 
-test('repoInfo: changes still counts modified, staged and untracked files, and not a file that only got a new mtime', async () => {
-  const r = makeTrapRepo('count');
-  restat(r);                                  // a.txt: new mtime, same content -> not a change
+test('repoInfo: the git state is branch, head and log -- no changes field, however dirty the tree is', async () => {
+  const r = makeTrapRepo('nochanges');
+  restat(r);
   writeFileSync(join(r.dir, 'b.txt'), 'two, edited\n');     // modified
   writeFileSync(join(r.dir, 'untracked.txt'), 'x\n');       // untracked
   writeFileSync(join(r.dir, 'staged.txt'), 'x\n');
   r.git('add', 'staged.txt');                               // staged
   const out = await repoInfoOf(r);
-  assert.equal(out.git.changes, 3);
+  assert.deepEqual(Object.keys(out.git).sort(), ['branch', 'head', 'log']);
+  assert.equal('changes' in out.git, false);
+  assert.ok(out.git.branch.length > 0);
+  assert.ok(out.git.head.length > 0);
+  assert.equal(out.git.log.length, 1);
   assert.ok(out.git.log[0].endsWith('initial commit'));
 });

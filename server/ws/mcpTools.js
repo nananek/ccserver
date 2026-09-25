@@ -632,34 +632,49 @@ const gitExec = promisify(execFile);
 // sandbox -- and that directory's .git is shared into every worker's sandbox
 // read-write. Its config, hooks and attributes are therefore input written by an
 // agent, and git runs some of them while merely reading. Measured (git 2.55,
-// throwaway repos, marker scripts) for the commands gitState runs:
-//   status --porcelain   core.fsmonitor (also the one of a submodule status
-//                        descends into); the post-index-change hook, from
-//                        .git/hooks or core.hooksPath, whenever status refreshes
-//                        and writes the index; and a fetch on demand of a missing
-//                        object from a promisor remote (remote.*.uploadpack,
-//                        core.sshCommand, an ext:: url, ...)
-//   log --oneline -5    gpg.program, when log.showSignature is on and a commit
-//                        carries a signature
+// throwaway repos, marker scripts):
+//   status --porcelain   core.fsmonitor (also a submodule's); the
+//                        post-index-change hook, whenever status refreshes and
+//                        writes the index; an on-demand fetch of a missing object
+//                        from a promisor remote (remote.*.uploadpack,
+//                        core.sshCommand, an ext:: url, ...); and a filter driver
+//                        (filter.<name>.clean/process in .git/config, chosen in
+//                        .git/info/attributes) for a file whose stat differs from
+//                        the index
+//   log --oneline -5     gpg.program, when log.showSignature is on and a commit
+//                        carries a signature; an on-demand fetch of a missing HEAD
+//                        commit
 //   branch --show-current, rev-parse --short HEAD    nothing
-// Each is closed at its cause. -c outranks every config file and the
-// environment's GIT_CONFIG_COUNT / GIT_CONFIG_PARAMETERS / GIT_CONFIG_GLOBAL, and
-// reaches the submodule's git too. The lazy fetch has no per-key switch (a
-// protocol.<name>.allow pin loses to a more specific one the repo sets), so it is
-// turned off as a whole, by GIT_NO_LAZY_FETCH (in the git 2.55 this was measured
-// on; a git too old to have it ignores the variable and keeps the exposure).
 //
-// NOT closed: a filter driver. filter.<name>.clean/process in .git/config,
-// selected by .git/info/attributes, runs under `status` for a file whose stat
-// differs from the index, and no flag turns attributes off (measured:
-// core.attributesFile, attr.tree and --attr-source do not reach info/attributes).
-// Keeping `changes` means keeping `status`, so this stays open; the cost of
-// closing it is a decision about repo_info's fields, not something to do here.
+// So `git status` is not run at all, and repo_info reports no working-tree state
+// (no count of changed files). Its exposure to the filter driver cannot be closed
+// by a flag -- core.attributesFile, attr.tree and --attr-source do not reach
+// .git/info/attributes, and driver names are the repo's to choose -- so the
+// command that reaches it had to go, not be pinned. A new git call here that reads
+// the index or the working tree (status, diff, ls-files, ...) has to be measured
+// again for exactly this and will have the same problem.
+//
+// What the three commands left do need, each closed at its cause (and each
+// held by a test that goes red without it):
+//   -c log.showSignature=false   no signature check, so no gpg.program
+//   GIT_NO_LAZY_FETCH=1          no on-demand fetch. It has no per-key switch (a
+//                                protocol.<name>.allow pin loses to a more
+//                                specific one the repo sets), so it is turned off
+//                                as a whole. In the git 2.55 this was measured on;
+//                                a git too old to have it ignores the variable and
+//                                keeps the exposure.
+// -c outranks every config file and the environment's GIT_CONFIG_COUNT /
+// GIT_CONFIG_PARAMETERS / GIT_CONFIG_GLOBAL (measured).
+//
+// The other three were what `status` needed. Measured: none of the three commands
+// left runs anything through them, even unpinned. They stay as layers, not as
+// something the tests hold: git versions other than 2.55 were not measured, and a
+// pin that costs nothing is a cheaper thing to keep than to re-derive.
 const GIT_READ_ONLY_ARGS = [
-  '--no-optional-locks',              // a read-only tool must not refresh (write) the project's index: no index.lock contention with the workers, and no post-index-change hook to run
-  '-c', 'core.fsmonitor=false',
-  '-c', 'core.hooksPath=/dev/null',   // belt to --no-optional-locks's braces: no hook is looked up at all
-  '-c', 'log.showSignature=false',
+  '--no-optional-locks',              // layer: a read-only tool writes nothing to the project's .git
+  '-c', 'core.fsmonitor=false',       // layer
+  '-c', 'core.hooksPath=/dev/null',   // layer: no hook is looked up at all
+  '-c', 'log.showSignature=false',    // needed: log
 ];
 
 async function gitRun(cwd, args) {
@@ -680,12 +695,10 @@ async function gitState(cwd) {
   const head = await gitRun(cwd, ['rev-parse', '--short', 'HEAD']);
   if (head == null) return null; // not a repository (or no git at all)
   const log = await gitRun(cwd, ['log', '--oneline', '-5']);
-  const status = await gitRun(cwd, ['status', '--porcelain']);
   return {
     branch: branch || null,
     head,
     log: log ? log.split('\n').filter(Boolean) : [],
-    changes: status ? status.split('\n').filter(Boolean).length : 0,
   };
 }
 
