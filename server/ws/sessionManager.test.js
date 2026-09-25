@@ -480,7 +480,9 @@ test('createSession refuses "<root>/<symlink>/.." when the symlink points outsid
       const res = await sessionManager.createSession({ cwd, cols: 80, rows: 24, ...opts });
       if (res.session) started.push(res.sessionId);
       assert.equal(res.session, null, `${opts.shell ? 'a shell' : 'an agent'} with that cwd must be refused`);
-      assert.match(res.error, /outside the allowed browseRoots/);
+      // createSession's OWN refusal, not buildSandboxSpawn's later "Cannot build a sandbox: ...
+      // outside the allowed browseRoots" (a second layer that says nearly the same words)
+      assert.match(res.error, /^Cannot launch: working directory is outside the allowed browseRoots/);
     }
     // control: the same spelling through a real directory is inside, and is not refused for its cwd
     mkdirSync(join(allowed, 'proj'));
