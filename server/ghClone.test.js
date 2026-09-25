@@ -745,7 +745,9 @@ test('swapping the parent path for a symlink while gh runs does not redirect the
   mkdirSync(outsideRoots);
   const go = join(a.rec, 'go');
   const ghBin = fakeGh(a.rec, ghBody(a.rec, {
-    middle: `touch '${a.rec}/started'\nn=0; while [ ! -f '${go}' ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done\npwd -P > '${a.rec}/cwd-after'`,
+    // The kernel's answer (/proc/<pid>/cwd), not `pwd -P`: dash -- /bin/sh on Debian / Ubuntu, so on the
+    // CI runners -- keeps printing the cwd's old name after the directory was renamed, bash asks again.
+    middle: `touch '${a.rec}/started'\nn=0; while [ ! -f '${go}' ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done\nreadlink /proc/$$/cwd > '${a.rec}/cwd-after'`,
   }));
   const pending = clone(a, { parent: a.parent, url: 'o/r' }, { ghBin });
   await waitFor(() => existsSync(join(a.rec, 'started')));
@@ -953,18 +955,28 @@ function hostileHost() {
   writeFileSync(join(src, 'l'), 'pointer\n');
   git(src, ['add', '-A']);
   git(src, ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'files']);
+  // What `git lfs install --system` leaves in /etc/gitconfig (GitHub's Ubuntu runners have it): a
+  // long-running `process` filter, which git prefers over `smudge`. Only used where a test asks for it.
+  writeFileSync(join(home, 'system.gitconfig'), [
+    '[filter "lfs"]', `\tprocess = ${script('lfs-process.sh', 'LFSPROC')}`, '\trequired = false',
+    '',
+  ].join('\n'));
   writeFileSync(join(home, '.gitconfig'), [
     '[core]', `\thooksPath = ${join(home, 'hooks')}`,
     '[filter "lfs"]', `\tsmudge = ${script('lfs-smudge.sh', 'LFS')}`, '\trequired = true',
     `[url "file://${home}/"]`, '\tinsteadOf = https://github.com/',
     '',
   ].join('\n'));
-  return { home, src, marks, ran: (m) => existsSync(join(marks, m)) };
+  return { home, src, marks, system: join(home, 'system.gitconfig'), ran: (m) => existsSync(join(marks, m)) };
 }
 
-async function realClone(env, url, dst) {
+// The machine's own /etc/gitconfig must not decide these tests (a CI runner with git-lfs installed has
+// filters in it; a developer's may have anything): it is switched off, and a test that wants a system
+// config passes one of its own.
+async function realClone(env, url, dst, { system = null } = {}) {
+  const isolated = { ...env, ...(system ? { GIT_CONFIG_SYSTEM: system } : { GIT_CONFIG_NOSYSTEM: '1' }) };
   try {
-    await execFileP('git', ['clone', '-q', '--', url, dst], { env, encoding: 'utf-8' });
+    await execFileP('git', ['clone', '-q', '--', url, dst], { env: isolated, encoding: 'utf-8' });
     return { ok: true, stderr: '' };
   } catch (err) {
     return { ok: false, stderr: String(err.stderr || err.message) };
@@ -1020,6 +1032,20 @@ test('a host-level LFS smudge filter does not run, and the clone still succeeds 
   const res = await realClone(hardened, `file://${h.src}`, uniq('dst'));
   assert.equal(res.ok, true, res.stderr);
   assert.equal(h.ran('LFS'), false, 'the smudge driver ran');
+});
+
+test('a host whose SYSTEM gitconfig installs the LFS process filter is covered by the pins too (filter.lfs.process= bites)', async () => {
+  const h = hostileHost();
+  const noFilePin = gitConfigEnv(CLONE_GIT_CONFIG.filter(([k]) => k !== 'protocol.file.allow'));
+  const hardened = { ...withoutKeys(buildCloneEnv(hostEnv(h.home)), (k) => isConfigKey(k) || k === 'GIT_ALLOW_PROTOCOL'), ...noFilePin };
+  const control = withoutKeys(hardened, isConfigKey);
+  await realClone(control, `file://${h.src}`, uniq('dst'), { system: h.system });
+  assert.equal(h.ran('LFSPROC'), true, 'control: the system-level LFS process filter must run without the pin, or this test proves nothing');
+  rmSync(join(h.marks, 'LFSPROC'));
+  const res = await realClone(hardened, `file://${h.src}`, uniq('dst'), { system: h.system });
+  assert.equal(res.ok, true, res.stderr);
+  assert.equal(h.ran('LFSPROC'), false, 'the system-level process filter ran despite filter.lfs.process=');
+  assert.equal(h.ran('LFS'), false, 'the user-level smudge driver ran');
 });
 
 test('real git clones into an existing EMPTY directory (the staging-directory shape) under the hardened env', async () => {
