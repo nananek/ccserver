@@ -660,7 +660,10 @@ const gitExec = promisify(execFile);
 //                        carries a signature; an on-demand fetch of a missing HEAD
 //                        commit. Not a command but as bad for a reader: a
 //                        refs/replace entry makes log print the subject of some
-//                        other commit next to the real commit's hash
+//                        other commit next to the real commit's hash, and a
+//                        .git/info/grafts line gives a commit a parent of the
+//                        file's choosing, so any commit in the object store
+//                        shows up in the log with its own subject
 //   branch --show-current, rev-parse --short HEAD    nothing
 //
 // So `git status` is not run at all, and repo_info reports no working-tree state
@@ -678,6 +681,9 @@ const gitExec = promisify(execFile);
 //                                say, not what a replace ref planted in the
 //                                shared .git makes them say (measured: only log
 //                                is affected; rev-parse and branch are not)
+//   GIT_GRAFT_FILE=/dev/null     no .git/info/grafts, which git 2.55 still reads
+//                                (deprecated). GIT_NO_REPLACE_OBJECTS does not
+//                                reach it; this does (both measured)
 //   GIT_NO_LAZY_FETCH=1          no on-demand fetch. It has no per-key switch (a
 //                                protocol.<name>.allow pin loses to a more
 //                                specific one the repo sets), so it is turned off
@@ -705,7 +711,7 @@ async function gitRun(cwd, args) {
     const { stdout } = await gitExec('git', [...GIT_READ_ONLY_ARGS, '-C', cwd, ...args], {
       encoding: 'utf-8',
       timeout: 10000,
-      env: { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_NO_REPLACE_OBJECTS: '1' },
+      env: { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null' },
     });
     return stdout.trim();
   } catch {
