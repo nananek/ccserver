@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { authWsUrl, authFetch } from '../auth.js';
-import { createOsc52Handler } from '../osc52.js';
+import { createOsc52Handler, clipboardWritePreview, CLIPBOARD_ALLOW_DELAY_MS } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
 import { displayPath } from '../displayPath.js';
 import { isElevatedPermissionMode } from '../permissionMode.js';
@@ -312,6 +312,70 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // isolation), so a first-time "are you sure" dialog with a dismiss flag
   // mirrors App.jsx's skip-close-confirm pattern.
   const [showSandboxWarning, setShowSandboxWarning] = useState(false);
+  // Issue #241. Pending OSC 52 clipboard WRITE awaiting the viewer's decision:
+  // { seq, text, preview } or null. Assigning a new one replaces any pending
+  // one, which is also the burst policy -- see the onWrite handler below.
+  const [clipboardPrompt, setClipboardPrompt] = useState(null);
+  // What 許可 was pressed on (pointer or key down): { prompt, armed }.
+  // The click that follows is only a decision about THAT prompt: a later write
+  // replaces the dialog's content in place, so without this a press on A that
+  // is released after B has been swapped in would write B, which the viewer
+  // never saw when they committed to the press.
+  const clipboardPressedRef = useRef(null);
+  // Every write gets a fresh, never-reused seq, so "the dialog was re-armed"
+  // is exactly "a write arrived" (a spread copy of the same prompt keeps its seq).
+  const clipboardSeqRef = useRef(0);
+  // seq of the prompt whose 許可 has been live for CLIPBOARD_ALLOW_DELAY_MS.
+  // Compared, not toggled, so a new prompt is inert in the very render that
+  // shows it -- there is no frame with new content and a still-live button.
+  const [clipboardArmedSeq, setClipboardArmedSeq] = useState(null);
+  const clipboardSeq = clipboardPrompt ? clipboardPrompt.seq : null;
+  const clipboardAllowArmed = clipboardSeq !== null && clipboardArmedSeq === clipboardSeq;
+  // The delay is only spent while the viewer can see this terminal: it is the
+  // active tab (an ancestor is display:none otherwise, and group members /
+  // background tabs stay mounted that way and still receive writes), the
+  // browser tab is visible, and the window has focus. Counted any other way it
+  // runs out unseen, and the first thing a click made just as the viewer comes
+  // back (often the very click that re-focuses the window) lands on a live
+  // button.
+  //
+  // Losing any of the three also forgets a count already served, and coming
+  // back starts it over. The reset has to happen on the way out, while nothing
+  // is on screen, not on the way back in: a reset on return would run after the
+  // frame that shows the dialog.
+  useEffect(() => {
+    if (clipboardSeq === null) return undefined;
+    let timer = null;
+    let focused = document.hasFocus();
+    const restart = () => {
+      clearTimeout(timer);
+      setClipboardArmedSeq(null);
+      if (!visible || document.visibilityState !== 'visible' || !focused) return;
+      timer = setTimeout(() => setClipboardArmedSeq(clipboardSeq), CLIPBOARD_ALLOW_DELAY_MS);
+    };
+    // Focus is tracked from the events themselves, not re-read in restart():
+    // whether document.hasFocus() has already flipped by the time a focus/blur
+    // handler runs is up to the browser; the event's direction is not.
+    const onFocus = () => { focused = true; restart(); };
+    const onBlur = () => { focused = false; restart(); };
+    restart();
+    document.addEventListener('visibilitychange', restart);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', restart);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [clipboardSeq, visible]);
+  const notePress = () => {
+    clipboardPressedRef.current = { prompt: clipboardPrompt, armed: clipboardAllowArmed };
+  };
+  // Sticky refusal for this terminal session (a ref, not state: the osc52
+  // handler below is built once per session inside an effect and must see the
+  // live value without being rebuilt).
+  const clipboardWriteDeniedRef = useRef(false);
   const [dontAskNoSandboxWarning, setDontAskNoSandboxWarning] = useState(false);
   const [skipNoSandboxWarning, setSkipNoSandboxWarning] = useState(
     () => localStorage.getItem(SKIP_NOSANDBOX_AUTOY_WARNING_KEY) === '1'
@@ -517,9 +581,42 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // remembered for the rest of the session so a legitimate workflow that
     // checks the clipboard repeatedly isn't nagged on every query, but an
     // agent can never read it without the user having approved at least once.
+    // Issue #241: the WRITE path used to be unconditional. Any byte an agent
+    // wrote to the pty could replace the viewer's clipboard with no prompt and
+    // no trace -- the OSC sequence is stripped here before xterm ever renders
+    // it, so nothing appears on screen. Confirmed in real browsers: with the
+    // tab focused and a recent user gesture, Chromium and Firefox both perform
+    // the write silently, no prior permission grant needed.
+    //
+    // Gated like the read above, with one deliberate asymmetry: an ALLOW is
+    // NOT remembered, while a DENY is.
+    //
+    // Reading is content-independent -- approving it once means "this session
+    // may see my clipboard", and the decision cannot mean less later. A write
+    // IS its content, so remembering an allow would let an agent take approval
+    // on something harmless and then silently replace the clipboard for the
+    // rest of the session. That is precisely the attack, so allow covers
+    // exactly one write. Refusal is remembered because it costs nothing to
+    // stop asking someone who said no, and it is the escape hatch from a
+    // dialog flood: an agent writing in a loop is answered once, not per
+    // sequence. Both halves fail toward "do not touch the clipboard".
+    //
+    // The nagging this could cause in legitimate use is bounded by when OSC 52
+    // writes actually happen: a TUI emits one because the viewer just pressed
+    // its copy key (vim's yank, opencode's copy). The prompt lands right after
+    // a deliberate keystroke. A write nobody asked for is the case worth
+    // interrupting.
     let osc52ReadDecision = null; // null = not asked yet this session
     const osc52 = createOsc52Handler({
-      onWrite: (text) => writeClipboardText(text),
+      onWrite: (text) => {
+        if (clipboardWriteDeniedRef.current) return;
+        // A burst collapses to the newest payload rather than queueing a
+        // modal per sequence. That is not a shortcut: writes overwrite each
+        // other, so only the last one could ever have survived in the
+        // clipboard anyway -- and it denies an agent a way to multiply
+        // dialogs by splitting one payload across many sequences.
+        setClipboardPrompt({ seq: ++clipboardSeqRef.current, text, preview: clipboardWritePreview(text) });
+      },
       onQuery: () => {
         if (osc52ReadDecision === null) {
           osc52ReadDecision = window.confirm(
@@ -1971,6 +2068,99 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           Send
         </button>
       </div>
+      {clipboardPrompt && (
+        // Issue #241. Deliberately an in-app dialog rather than the
+        // window.confirm() the READ gate uses, and the reason is measured,
+        // not stylistic: a clipboard write needs transient user activation
+        // (~5s since the last real gesture). With window.confirm, the time
+        // the viewer spends reading the dialog is inside that window, so a
+        // slow "yes" lands after activation has expired -- Chromium then
+        // rejects writeText with NotAllowedError AND the execCommand
+        // fallback returns false, i.e. approving would silently do nothing.
+        // Measured on Chromium: accepting at ~0s writes fine, accepting at
+        // 6s fails both paths. Clicking the button below is itself the
+        // gesture, so the write always runs with fresh activation.
+        //
+        // The backdrop dismisses this one write without arming the sticky
+        // refusal: a stray click should not silently turn the gate off for
+        // the session -- only the explicit 拒否 button does that.
+        <div className="resume-overlay" data-testid="osc52-write-prompt" onClick={() => setClipboardPrompt(null)}>
+          <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>クリップボードの書き換えを許可しますか?</h3>
+            <p>
+              このセッションのエージェントが、あなたのクリップボードを書き換えようとしています。
+              許可すると、いま入っている内容は失われます。
+            </p>
+            {/* Agent-controlled text. Flattened to a single line by
+                clipboardWritePreview (see osc52.js) so it cannot forge dialog
+                lines, and rendered as a JSX child so React escapes it. */}
+            <p className="osc52-write-preview" data-testid="osc52-write-preview">
+              {clipboardPrompt.preview.text.trim()
+                ? clipboardPrompt.preview.text
+                : clipboardPrompt.preview.chars === 0
+                  ? '(空 — クリップボードの内容が消去されます)'
+                  // Not empty, but nothing the viewer could read either
+                  // (invisible characters and blanks only): say so, rather
+                  // than showing a box that looks like the empty case.
+                  : `(見える文字がありません — 空白または不可視の文字 ${clipboardPrompt.preview.chars} 文字が書き込まれます)`}
+            </p>
+            {clipboardPrompt.swapped && (
+              <p className="osc52-write-meta" data-testid="osc52-write-swapped">
+                クリックの間に内容が入れ替わったため、書き込みませんでした。
+                いま表示されている内容を確認して、もう一度押してください。
+              </p>
+            )}
+            <p className="osc52-write-meta">
+              {clipboardPrompt.preview.chars} 文字
+              {clipboardPrompt.preview.truncated ? ' (先頭のみ表示)' : ''}
+              {' / この許可はこの 1 回だけです'}
+            </p>
+            <div className="resume-actions">
+              <button
+                className="btn btn-secondary"
+                onClick={() => { clipboardWriteDeniedRef.current = true; setClipboardPrompt(null); }}
+              >
+                拒否 (以後確認しない)
+              </button>
+              <button
+                className="btn btn-primary"
+                data-testid="osc52-write-allow"
+                // aria-disabled rather than disabled: the button keeps focus and
+                // stays announced while inert, and the guard in onClick is ours
+                // (it also has to judge a press that began before the button
+                // went live, which a native disabled button never reports).
+                aria-disabled={!clipboardAllowArmed}
+                onPointerDown={notePress}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') notePress(); }}
+                // Synchronous inside the click handler on purpose: that is
+                // what gives navigator.clipboard.writeText its activation.
+                onClick={() => {
+                  const press = clipboardPressedRef.current;
+                  clipboardPressedRef.current = null;
+                  // The dialog content changed between the press and this
+                  // click: refuse, keep the dialog open on what is shown now,
+                  // and let the viewer decide again. (No recorded press means
+                  // a click with no press phase at all -- e.g. assistive tech
+                  // -- so there is no window in which a swap could sit.)
+                  if (press && press.prompt !== clipboardPrompt) {
+                    setClipboardPrompt((p) => p && { ...p, swapped: true });
+                    return;
+                  }
+                  // Still inside the delay after the dialog appeared or was
+                  // swapped, or the press itself began inside it: not a
+                  // decision. The viewer has to press again.
+                  if (!clipboardAllowArmed || (press && !press.armed)) return;
+                  const { text } = clipboardPrompt;
+                  setClipboardPrompt(null);
+                  writeClipboardText(text);
+                }}
+              >
+                許可
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showSandboxWarning && (
         <div className="resume-overlay" onClick={() => setShowSandboxWarning(false)}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
