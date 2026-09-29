@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { basename } from 'node:path';
-import { getGroup, resolveMemberLaunchCwd } from './groupManager.js';
+import { getGroup, resolveMemberLaunchCwd, resolveMemberInitLaunch } from './groupManager.js';
 import {
   createSession,
   getSession,
@@ -74,6 +74,14 @@ function networkIsolationStateMsg(session) {
 // there), and leaving it reachable lets an operator defuse a prompt that
 // would otherwise fire into a gated host and try to launch a session.
 const SETUP_GATED_MESSAGES = new Set(['init', 'schedule_prompt']);
+
+// The session launcher init calls. A `let` so a test can watch what a browser
+// `init` actually hands to createSession (see setCreateSessionForTests); nothing
+// outside tests ever replaces it.
+let launchSession = createSession;
+export function setCreateSessionForTests(fn) {
+  launchSession = fn || createSession;
+}
 
 export function attachTerminalHandler(chan) {
   let currentSessionId = null;
@@ -165,14 +173,22 @@ export function attachTerminalHandler(chan) {
         const group = groupId ? getGroup(groupId) : null;
         const projectName = group?.cwd ? basename(group.cwd) : undefined;
 
-        const result = await createSession({
+        // A registered group member is always launched sandboxed, with the
+        // sandboxOpts registered for it -- whatever this client sent (see
+        // resolveMemberInitLaunch). Only the fact is logged.
+        const launch = resolveMemberInitLaunch(groupId, groupRole, { sandbox: msg.sandbox, sandboxOpts: msg.sandboxOpts });
+        if (launch.forced) {
+          console.warn(`[terminal] init for group member ${groupRole} of ${groupId} did not ask for a sandbox; launching it sandboxed`);
+        }
+
+        const result = await launchSession({
           cwd: resolvedCwd || msg.cwd || homedir(),
           cols: msg.cols || 80,
           rows: msg.rows || 24,
           claudeSessionId: msg.claudeSessionId || null,
           shell: !!msg.shell,
-          sandbox: !!msg.sandbox,
-          sandboxOpts: msg.sandboxOpts || null,
+          sandbox: launch.sandbox,
+          sandboxOpts: launch.sandboxOpts,
           app: msg.app || null,
           model: typeof msg.model === 'string' ? msg.model : null,
           // Permission mode for commandcode launches ('standard' when

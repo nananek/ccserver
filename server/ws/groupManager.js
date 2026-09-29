@@ -22,7 +22,7 @@ export function setAgentPublishHookForTests(fn) {
 }
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, setMemberCwdResolver, peekSavedSessions, dockerAvailability, activitySnapshot } from './sessionManager.js';
+import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, setMemberCwdResolver, setMemberLaunchResolver, peekSavedSessions, dockerAvailability, activitySnapshot } from './sessionManager.js';
 import { NO_ACTIVITY } from './activity.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
@@ -380,7 +380,12 @@ export function listGroupMembers(groupId) {
       // Resume info: a live-but-exited session carries its extracted
       // conversation id; a restored member carries the saved one.
       claudeSessionId: session?.claudeSessionId ?? saved?.claudeSessionId ?? null,
-      sandbox: session?.sandbox ?? saved?.sandbox ?? false,
+      // A group member is always launched sandboxed (createGroup / addMember /
+      // the orchestrator launch all pass sandbox:true), so when there is neither
+      // a live session nor a saved one the answer is true, not false: this value
+      // is what the browser echoes back in a re-launch (see resolveMemberInitLaunch)
+      // and what the UI's no-sandbox warning is drawn from.
+      sandbox: session?.sandbox ?? saved?.sandbox ?? true,
       sandboxOpts: session?.sandboxOpts ?? saved?.sandboxOpts ?? group.memberPrefs[role]?.sandboxOpts ?? null,
       // true when the member only exists via the restart restore, i.e. its
       // pty is gone and a re-launch (resume) is the only way back.
@@ -442,6 +447,41 @@ export function getRegisteredMemberSandboxOpts(groupId, role) {
   return {
     registered: true,
     sandboxOpts: session?.sandboxOpts ?? saved?.sandboxOpts ?? group.memberPrefs[role]?.sandboxOpts ?? null,
+  };
+}
+
+// What a browser `init` may launch a group member with (terminal.js). The
+// client's `sandbox` and `sandboxOpts` are only a replay of what
+// listGroupMembers told it -- and that answer has to come from the registry, not
+// from the client: a member the registry knows is ALWAYS launched sandboxed, and
+// with exactly the sandboxOpts registered for it (the same session -> saved ->
+// memberPrefs resolution as getRegisteredMemberSandboxOpts), whatever the client
+// sent. Without this a re-launch after a restart -- where the member has no
+// saved session, so the client is echoing a stale or missing value -- could ask
+// for `sandbox: false` and get an agent running on the host, or ask for gpg /
+// sshAgent / gpgVault / tools the member was never granted.
+//
+// Membership is judged here from the registry (a real group, and either the
+// orchestrator or a role that group registered), never from the fact that the
+// client SENT a groupId and groupRole. Anything else -- no group, a role the
+// group never had -- is an ordinary session and keeps the client's values
+// exactly as before (forceSandbox is still applied downstream, in createSession).
+// `forced` is true when a member's request was overridden to sandbox:true, so
+// the caller can say so.
+export function resolveMemberInitLaunch(groupId, role, requested = {}) {
+  const group = typeof groupId === 'string' && typeof role === 'string' ? groups.get(groupId) : null;
+  const member = !!group && (role === 'orchestrator' || group.members.has(role));
+  if (!member) {
+    return { member: false, forced: false, sandbox: !!requested.sandbox, sandboxOpts: requested.sandboxOpts || null };
+  }
+  const registered = getRegisteredMemberSandboxOpts(groupId, role);
+  return {
+    member: true,
+    forced: !requested.sandbox,
+    sandbox: true,
+    // The orchestrator can be re-launched before it is in `members`; its
+    // registered preference is then the group's memberPrefs entry.
+    sandboxOpts: registered.registered ? registered.sandboxOpts : (group.memberPrefs[role]?.sandboxOpts ?? null),
   };
 }
 
@@ -2117,3 +2157,4 @@ setSessionCreateListener(onSessionCreate);
 setMcpSocketResolver(resolveGroupMcpSocket);
 setOrchestratorClaudeMdResolver(generateOrchestratorClaudeMdSrc);
 setMemberCwdResolver(resolveMemberLaunchCwd);
+setMemberLaunchResolver(resolveMemberInitLaunch);
