@@ -39,6 +39,7 @@ import { normalizeBrowseRoots, isContained, isCcserverScratchPath } from '../pat
 import { resolvePath, PATH_IDS } from '../paths.js';
 import { isRegularFile, readRegularFileText } from './regularFile.js';
 import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
+import { normalizeCloneConfig } from '../cloneConfig.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -941,8 +942,14 @@ export function loadSandboxConfig() {
   // GUI shows/saves) via normalizeNetworkSettings so the two structurally
   // cannot drift apart -- see that function's header comment.
   const network = normalizeNetworkSettings(raw.network);
+  // Which hosts the Files screen's Clone may fetch from (#278, cloneConfig.js).
+  // Unlike browseRoots this is not re-read per request: routes/git.js takes
+  // it once, when the routes are registered (#230). A present-but-unusable
+  // block comes back as an empty list plus cloneHostsError, never as the
+  // default.
+  const { hosts: cloneHosts, error: cloneHostsError } = normalizeCloneConfig(raw.clone);
   return {
-    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, forceSandboxReason, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, network,
+    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, forceSandboxReason, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, network, cloneHosts, cloneHostsError,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       // Agent notification bridge (plan-notify-bridge). Parsed by the same
